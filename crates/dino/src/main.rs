@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+mod client;
+
 use std::io;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -13,9 +14,9 @@ use crossterm::terminal;
 use std::sync::{Arc, Mutex};
 
 use dino_core::discover::{self, Inventory};
-use dino_core::{Config, Detected, detect_agents, load_keys, proxy_wiring, user_shell};
-use dino_proxy::{Activity, Proxy, SessionStats, Usage};
-use dino_term::{Pane, SpawnSpec};
+use dino_core::Config;
+use dino_core::ipc::{LauncherInfo, QuotaInfo, Request, Response, SessionInfo};
+use dino_term::Pane;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -29,12 +30,10 @@ const MUTED: Color = Color::DarkGray;
 /// Output within this window counts as "working".
 const ACTIVE_WINDOW: Duration = Duration::from_millis(1500);
 
+/// A session living in dinod, mirrored here by a local emulator.
 struct Session {
-    id: String,
-    name: String,
-    stats: SessionStats,
-    pane: Pane,
-    last_output: Option<Instant>,
+    info: SessionInfo,
+    pane: Arc<Pane>,
     /// Rang the bell while in the background.
     attention: bool,
     /// Finished a turn while in the background; cleared when focused.
@@ -54,15 +53,19 @@ enum Status {
 }
 
 impl Session {
+    fn needs(&self) -> Option<&str> {
+        self.info.activity.as_deref()?.strip_prefix("needs:")
+    }
+
     fn status(&self) -> Status {
-        if self.pane.is_exited() {
+        if self.info.exited || self.pane.is_exited() {
             Status::Exited
-        } else if self.attention || matches!(self.stats.activity, Some(Activity::NeedsPermission(_))) {
+        } else if self.attention || self.needs().is_some() {
             Status::Attention
-        } else if self.stats.in_flight > 0 {
+        } else if self.info.in_flight > 0 {
             Status::Thinking
-        } else if self.stats.activity == Some(Activity::Working)
-            || self.last_output.is_some_and(|t| t.elapsed() < ACTIVE_WINDOW)
+        } else if self.info.activity.as_deref() == Some("working")
+            || self.info.output_ms_ago.is_some_and(|ms| ms < ACTIVE_WINDOW.as_millis() as u64)
         {
             Status::Working
         } else if self.unseen_done {
@@ -72,6 +75,8 @@ impl Session {
         }
     }
 }
+
+type Snapshot = (Vec<SessionInfo>, Vec<QuotaInfo>);
 
 #[derive(PartialEq)]
 enum Mode {
@@ -85,24 +90,19 @@ enum Mode {
     Welcome,
 }
 
-struct Launcher {
-    agent_id: String,
-    /// Session name stem, e.g. "claude", "free".
-    short: String,
-    label: String,
-    program: String,
-}
-
 struct App {
     sessions: Vec<Session>,
     focused: usize,
     mode: Mode,
-    launchers: Vec<Launcher>,
+    launchers: Vec<LauncherInfo>,
     pane_size: (u16, u16),
     quit: bool,
     started: Instant,
-    proxy: Proxy,
-    next_id: u64,
+    /// Latest state from dinod, refreshed by a background poller.
+    snapshot: Arc<Mutex<Option<Snapshot>>>,
+    quotas: Vec<QuotaInfo>,
+    /// Status line for errors talking to dinod.
+    notice: Option<String>,
     config: Config,
     /// Screen row → session index, rebuilt every frame for sidebar clicks.
     sidebar_rows: Vec<(u16, usize)>,
@@ -111,42 +111,61 @@ struct App {
 }
 
 impl App {
-    fn new(detected: Vec<Detected>, proxy: Proxy, free_tier: bool) -> Self {
-        let mut launchers = vec![];
-        for d in detected {
-            let program: String = d.path.to_string_lossy().into();
-            if d.kind.id == "claude" && free_tier {
-                launchers.push(Launcher { agent_id: "claude-free".into(), short: "free".into(), label: "Claude Code · free models".into(), program: program.clone() });
-            }
-            launchers.push(Launcher { agent_id: d.kind.id.into(), short: d.kind.id.into(), label: d.kind.name.into(), program });
+    fn new(launchers: Vec<LauncherInfo>, snapshot: Arc<Mutex<Option<Snapshot>>>) -> Self {
+        Self {
+            sessions: vec![],
+            focused: 0,
+            mode: Mode::Picker { selected: 0 },
+            launchers,
+            pane_size: (80, 24),
+            quit: false,
+            started: Instant::now(),
+            snapshot,
+            quotas: vec![],
+            notice: None,
+            config: Config::load(),
+            sidebar_rows: vec![],
+            inventory: Arc::default(),
+            welcome_opened: Instant::now(),
         }
-        let shell = user_shell();
-        let shell_name = shell.rsplit('/').next().unwrap_or("shell").to_string();
-        launchers.push(Launcher { agent_id: "shell".into(), short: "shell".into(), label: format!("Shell ({shell_name})"), program: shell });
-        Self { sessions: vec![], focused: 0, mode: Mode::Picker { selected: 0 }, launchers, pane_size: (80, 24), quit: false, started: Instant::now(), proxy, next_id: 1, config: Config::load(), sidebar_rows: vec![], inventory: Arc::default(), welcome_opened: Instant::now() }
     }
 
     fn spawn(&mut self, launcher: usize, extra_args: &[String]) {
         let l = &self.launchers[launcher];
-        let id = self.next_id.to_string();
-        self.next_id += 1;
-        let (env, mut args) = proxy_wiring(&l.agent_id, self.config.route, &|provider| self.proxy.base_url(&id, provider));
-        args.extend_from_slice(extra_args);
-        let spec = SpawnSpec {
-            program: l.program.clone(),
-            args,
-            cwd: std::env::current_dir().ok(),
-            env: env.into_iter().collect::<HashMap<_, _>>(),
+        let req = Request::New {
+            launcher: l.short.clone(),
+            args: extra_args.to_vec(),
+            cwd: std::env::current_dir().ok().map(|p| p.display().to_string()),
+            cols: self.pane_size.0,
+            rows: self.pane_size.1,
         };
-        match Pane::spawn(spec, self.pane_size.0, self.pane_size.1) {
-            Ok(pane) => {
-                let base = l.short.clone();
-                let n = self.sessions.iter().filter(|s| s.name.starts_with(&base)).count();
-                let name = if n == 0 { base } else { format!("{base}-{}", n + 1) };
-                self.sessions.push(Session { id, name, stats: SessionStats::default(), pane, last_output: None, attention: false, unseen_done: false });
-                self.focus(self.sessions.len() - 1);
+        match client::request(&req) {
+            Ok(Response::Created { id }) => {
+                let info = SessionInfo { id: id.clone(), name: l.short.clone(), agent_id: l.agent_id.clone(), ..Default::default() };
+                if let Some(i) = self.adopt(info) {
+                    self.focus(i);
+                }
             }
-            Err(e) => eprintln!("spawn failed: {e}"),
+            Ok(Response::Error { message }) => self.notice = Some(message),
+            Ok(_) => {}
+            Err(e) => self.notice = Some(format!("dinod: {e}")),
+        }
+    }
+
+    /// Attach to a session we aren't mirroring yet. Returns its index.
+    fn adopt(&mut self, info: SessionInfo) -> Option<usize> {
+        if let Some(i) = self.sessions.iter().position(|s| s.info.id == info.id) {
+            return Some(i);
+        }
+        match client::attach_pane(&info.id, self.pane_size.0, self.pane_size.1) {
+            Ok(pane) => {
+                self.sessions.push(Session { info, pane, attention: false, unseen_done: false });
+                Some(self.sessions.len() - 1)
+            }
+            Err(e) => {
+                self.notice = Some(format!("attach {}: {e}", info.id));
+                None
+            }
         }
     }
 
@@ -171,7 +190,7 @@ impl App {
     }
 
     fn focused_pane(&self) -> Option<&Pane> {
-        self.sessions.get(self.focused).map(|s| &s.pane)
+        self.sessions.get(self.focused).map(|s| &*s.pane)
     }
 
     /// Jump to the next session that needs the user, falling back to plain cycling.
@@ -184,7 +203,8 @@ impl App {
 
     fn close_focused(&mut self) {
         if self.focused < self.sessions.len() {
-            self.sessions.remove(self.focused);
+            let s = self.sessions.remove(self.focused);
+            let _ = client::request(&Request::Kill { id: s.info.id });
             self.focused = self.focused.min(self.sessions.len().saturating_sub(1));
         }
         if self.sessions.is_empty() {
@@ -192,30 +212,45 @@ impl App {
         }
     }
 
-    /// Drain PTY-side signals. Returns true if anything needs a redraw.
+    /// Merge dinod's latest state and local redraw signals. Returns true if anything changed.
     fn poll_sessions(&mut self) -> bool {
         let mut redraw = false;
-        for (i, s) in self.sessions.iter_mut().enumerate() {
-            let stats = self.proxy.stats.session(&s.id);
-            if (stats.requests, stats.in_flight, stats.usage.output) != (s.stats.requests, s.stats.in_flight, s.stats.usage.output)
-                || stats.activity != s.stats.activity
-            {
-                redraw = true;
+        let latest = self.snapshot.lock().unwrap().take();
+        if let Some((infos, quotas)) = latest {
+            self.quotas = quotas;
+            // Sessions killed elsewhere disappear; new ones (another client, `dino new`) appear.
+            let before = self.sessions.len();
+            let focused_id = self.sessions.get(self.focused).map(|s| s.info.id.clone());
+            self.sessions.retain(|s| infos.iter().any(|i| i.id == s.info.id));
+            for info in infos {
+                let focused = focused_id.as_deref() == Some(&info.id);
+                match self.sessions.iter_mut().find(|s| s.info.id == info.id) {
+                    Some(s) => {
+                        let finished = info.activity.as_deref() == Some("done")
+                            && s.info.activity.as_deref().is_some_and(|a| a == "working" || a.starts_with("needs:"));
+                        if !focused && finished {
+                            s.unseen_done = true;
+                        }
+                        if !focused && info.bells > s.info.bells {
+                            s.attention = true;
+                        }
+                        s.info = info;
+                    }
+                    None => {
+                        self.adopt(info);
+                    }
+                }
             }
-            let finished = stats.activity == Some(Activity::Done)
-                && matches!(s.stats.activity, Some(Activity::Working | Activity::NeedsPermission(_)));
-            if finished && i != self.focused {
-                s.unseen_done = true;
+            if let Some(id) = focused_id {
+                self.focused = self.sessions.iter().position(|s| s.info.id == id).unwrap_or(0);
             }
-            s.stats = stats;
-            if s.pane.shared.dirty.swap(false, Ordering::Relaxed) {
-                s.last_output = Some(Instant::now());
-                redraw = true;
+            if self.sessions.len() != before {
+                self.focused = self.focused.min(self.sessions.len().saturating_sub(1));
             }
-            if s.pane.shared.bell.swap(false, Ordering::Relaxed) && i != self.focused {
-                s.attention = true;
-                redraw = true;
-            }
+            redraw = true;
+        }
+        for s in &self.sessions {
+            redraw |= s.pane.shared.dirty.swap(false, Ordering::Relaxed);
         }
         redraw
     }
@@ -349,7 +384,7 @@ impl App {
         match self.sessions.get(self.focused) {
             Some(s) => {
                 let title = s.pane.title().unwrap_or_default();
-                let mut spans = vec![Span::from(format!(" {} ", s.name)).bold().fg(ACCENT)];
+                let mut spans = vec![Span::from(format!(" {} ", s.info.name)).bold().fg(ACCENT)];
                 if !title.is_empty() {
                     spans.push(Span::from(title).fg(MUTED));
                 }
@@ -365,7 +400,8 @@ impl App {
                 }
             }
             None => {
-                f.render_widget(Paragraph::new(" no sessions").fg(MUTED), header);
+                let text = self.notice.clone().unwrap_or_else(|| " no sessions".into());
+                f.render_widget(Paragraph::new(text).fg(MUTED), header);
             }
         }
 
@@ -401,7 +437,7 @@ impl App {
                 Status::Attention => ("!", "needs you", Color::Yellow),
                 Status::Exited => ("✕", "exited", Color::Red),
             };
-            let name = format!("{:<12}", truncate(&s.name, 12));
+            let name = format!("{:<12}", truncate(&s.info.name, 12));
             let mut line = Line::from(vec![
                 Span::from(format!(" {} ", i + 1)).fg(MUTED),
                 Span::from(dot).fg(color),
@@ -412,21 +448,20 @@ impl App {
                 line = line.bg(Color::Rgb(0x2a, 0x2a, 0x33)).bold();
             }
             lines.push(line);
-            if let Some(Activity::NeedsPermission(what)) = &s.stats.activity {
+            if let Some(what) = s.needs() {
                 lines.push(Line::from(format!("    ⚠ {}", truncate(what, 22))).fg(Color::Yellow));
             }
-            if s.stats.requests > 0 {
-                let model = s.stats.last_model.as_deref().map(short_model).unwrap_or_default();
-                if let Some(tier) = &s.stats.tier {
+            if s.info.requests > 0 {
+                let model = s.info.last_model.as_deref().map(short_model).unwrap_or_default();
+                if let Some(tier) = &s.info.tier {
                     // Free tier: which tier the router picked and which model actually answered.
                     lines.push(Line::from(vec![
                         Span::from(format!("    {tier} → ")).fg(Color::LightCyan),
                         Span::from(truncate(&model, 16)).fg(Color::LightCyan),
                     ]));
                 }
-                let model = if s.stats.tier.is_some() { String::new() } else { model };
-                let u = &s.stats.usage;
-                lines.push(Line::from(format!("    ↑{} ↓{} {model}", tokens(u.total_input()), tokens(u.output))).fg(MUTED));
+                let model = if s.info.tier.is_some() { String::new() } else { model };
+                lines.push(Line::from(format!("    ↑{} ↓{} {model}", tokens(s.info.input_tokens), tokens(s.info.output_tokens))).fg(MUTED));
             }
             let last_row = inner.y + lines.len() as u16;
             self.sidebar_rows.extend((first_row..last_row).map(|y| (y, i)));
@@ -458,9 +493,10 @@ impl App {
         let mut lines = vec![Line::from(" USAGE").fg(MUTED).add_modifier(Modifier::BOLD)];
         let mut any = false;
         for (provider, label) in [("anthropic", "claude"), ("chatgpt", "codex")] {
-            let Some(q) = self.proxy.stats.quota(provider) else { continue };
+            let Some(q) = self.quotas.iter().find(|q| q.provider == provider) else { continue };
             any = true;
-            for (i, (name, w)) in q.windows.iter().filter(|(n, _)| n.ends_with(['h', 'd'])).enumerate() {
+            for (i, w) in q.windows.iter().filter(|w| w.name.ends_with(['h', 'd'])).enumerate() {
+                let name = &w.name;
                 let pct = (w.utilization * 100.0).round() as u16;
                 let color = match pct {
                     0..=59 => ACCENT,
@@ -469,10 +505,11 @@ impl App {
                 };
                 let bar_w = width.saturating_sub(24).clamp(3, 8) as usize;
                 let filled = ((w.utilization.clamp(0.0, 1.0) * bar_w as f32).round() as usize).min(bar_w);
-                let reset = w.resets_in_secs().map(duration).unwrap_or_default();
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let reset = w.resets_at.map(|t| duration(t.saturating_sub(now))).unwrap_or_default();
                 let who = if i == 0 { label } else { "" };
                 lines.push(Line::from(vec![
-                    Span::from(format!(" {who:<6}{name:<4}")).fg(MUTED),
+                    Span::from(format!(" {who:<7}{name:<4}")).fg(MUTED),
                     Span::from("█".repeat(filled)).fg(color),
                     Span::from("░".repeat(bar_w - filled)).fg(Color::Rgb(0x3a, 0x3a, 0x44)),
                     Span::from(format!(" {pct:>3}% ")).fg(color),
@@ -483,18 +520,17 @@ impl App {
         if !any {
             lines.push(Line::from(" no quota data yet").fg(MUTED));
         }
-        let mut total = Usage::default();
+        let (mut total_in, mut total_out) = (0, 0);
         for s in &self.sessions {
-            let u = &s.stats.usage;
-            total.input += u.total_input();
-            total.output += u.output;
+            total_in += s.info.input_tokens;
+            total_out += s.info.output_tokens;
         }
-        let free: u64 = self.sessions.iter().filter(|s| s.stats.tier.is_some()).map(|s| s.stats.usage.total_input() + s.stats.usage.output).sum();
+        let free: u64 = self.sessions.iter().filter(|s| s.info.tier.is_some()).map(|s| s.info.input_tokens + s.info.output_tokens).sum();
         if free > 0 {
             lines.push(Line::from(vec![Span::from(" free  ").fg(MUTED), Span::from(format!("{} tok", tokens(free))), Span::from("  $0.00").fg(ACCENT)]));
         }
-        if total.input + total.output > 0 {
-            lines.push(Line::from(format!(" tokens ↑{} ↓{}", tokens(total.input), tokens(total.output))).fg(MUTED));
+        if total_in + total_out > 0 {
+            lines.push(Line::from(format!(" tokens ↑{} ↓{}", tokens(total_in), tokens(total_out))).fg(MUTED));
         }
         lines
     }
@@ -690,15 +726,64 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     Ok(())
 }
 
+const USAGE: &str = "usage: dino [agent [args...]] | --welcome
+       dino ls | new <agent> [args...] | attach <id> | kill <id> | stop | daemon";
+
 fn main() -> anyhow::Result<()> {
-    let keys = load_keys();
-    let free_tier = keys.contains_key("NVIDIA_API_KEY");
-    let mut app = App::new(detect_agents(), Proxy::start(keys)?, free_tier);
-    // `dino <agent> [agent args...]`, or `dino --welcome` to replay onboarding.
     let mut cli: Vec<String> = std::env::args().skip(1).collect();
+    match cli.first().map(String::as_str) {
+        Some("daemon") => return dino_daemon::run(),
+        Some("attach") => return client::attach_raw(cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?),
+        Some("ls") => return cmd_ls(),
+        Some("new") => {
+            let agent = cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone();
+            let (cols, rows) = terminal::size().unwrap_or((120, 40));
+            let req = Request::New { launcher: agent, args: cli[2..].to_vec(), cwd: std::env::current_dir().ok().map(|p| p.display().to_string()), cols, rows };
+            return print_response(client::request(&req)?);
+        }
+        Some("kill") => return print_response(client::request(&Request::Kill { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),
+        Some("stop") => {
+            if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
+                println!("dinod is not running");
+                return Ok(());
+            }
+            return print_response(client::request(&Request::Shutdown)?);
+        }
+        Some("-h" | "--help" | "help") => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let launchers = match client::request(&Request::Launchers)? {
+        Response::Launchers { launchers } => launchers,
+        other => anyhow::bail!("unexpected reply from dinod: {other:?}"),
+    };
+    let snapshot: Arc<Mutex<Option<Snapshot>>> = Arc::default();
+    let mut app = App::new(launchers, snapshot.clone());
+    let (cols, rows) = terminal::size()?;
+    app.pane_size = (cols.saturating_sub(SIDEBAR_WIDTH), rows.saturating_sub(1));
+
+    // Pick up sessions that kept running while no client was open.
+    if let Response::State { sessions, quotas } = client::request(&Request::State)? {
+        *snapshot.lock().unwrap() = Some((sessions, quotas));
+        app.poll_sessions();
+    }
+    std::thread::spawn(move || {
+        let Ok(mut control) = client::Control::open() else { return };
+        while let Ok(Response::State { sessions, quotas }) = control.request(&Request::State) {
+            *snapshot.lock().unwrap() = Some((sessions, quotas));
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+
     if cli.first().is_some_and(|a| a == "--welcome") {
         cli.remove(0);
         app.config.onboarded = false;
+    }
+    if !app.sessions.is_empty() {
+        app.mode = Mode::Pane;
     }
     if !app.config.onboarded && cli.is_empty() {
         app.open_welcome();
@@ -708,8 +793,6 @@ fn main() -> anyhow::Result<()> {
         let found = app.launchers.iter().position(|l| l.short == arg).or_else(|| app.launchers.iter().position(|l| l.label.to_lowercase().starts_with(&arg)));
         if let Some(i) = found {
             app.mode = Mode::Pane;
-            let (cols, rows) = terminal::size()?;
-            app.pane_size = (cols.saturating_sub(SIDEBAR_WIDTH), rows.saturating_sub(1));
             app.spawn(i, extra);
         }
     }
@@ -730,4 +813,31 @@ fn main() -> anyhow::Result<()> {
     let _ = execute!(stdout, DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     Ok(result?)
+}
+
+fn print_response(resp: Response) -> anyhow::Result<()> {
+    match resp {
+        Response::Created { id } => println!("{id}"),
+        Response::Ok => {}
+        Response::Error { message } => anyhow::bail!(message),
+        other => println!("{other:?}"),
+    }
+    Ok(())
+}
+
+fn cmd_ls() -> anyhow::Result<()> {
+    if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
+        println!("dinod is not running");
+        return Ok(());
+    }
+    let Response::State { sessions, .. } = client::request(&Request::State)? else { anyhow::bail!("unexpected reply") };
+    if sessions.is_empty() {
+        println!("no sessions");
+    }
+    for s in sessions {
+        let state = if s.exited { "exited".to_string() } else { s.activity.unwrap_or_else(|| "idle".into()) };
+        let title = s.title.unwrap_or_default();
+        println!("{:>3}  {:<12} {:<18} ↑{} ↓{}  {title}", s.id, s.name, state, tokens(s.input_tokens), tokens(s.output_tokens));
+    }
+    Ok(())
 }
