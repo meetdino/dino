@@ -61,6 +61,7 @@ const KEYS: &[(&str, &str)] = &[
     ("TOGETHER_API_KEY", "Together"),
     ("FIREWORKS_API_KEY", "Fireworks"),
     ("HF_TOKEN", "Hugging Face"),
+    ("TYPESAFE_API_KEY", "TypeSafe Jev"),
 ];
 
 const LOCAL: &[(&str, &str)] = &[("Ollama", "127.0.0.1:11434"), ("LM Studio", "127.0.0.1:1234"), ("llama.cpp", "127.0.0.1:8080")];

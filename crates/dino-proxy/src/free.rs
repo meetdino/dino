@@ -10,7 +10,7 @@ use anyllm_translate::{new_stream_translator, translate_response};
 use axum::body::Body;
 use axum::http::{Response, StatusCode};
 use bytes::Bytes;
-use dino_router::{Tier, classifier_request, heuristic_tier, new_turn_text, parse_label};
+use dino_router::{JEV_URL, Tier, classifier_request, classifier_state, heuristic_tier, jev_request, parse_jev, parse_label};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 
@@ -136,26 +136,65 @@ pub(crate) async fn handle(st: AppState, session: String, rest: &str, body: Byte
 }
 
 /// Heuristics first; otherwise classify once per user turn and keep that tier for the turn.
+/// Jev (TypeSafe) when a key is available, else a small free LLM, else a safe default.
 async fn choose_tier(st: &AppState, session: &str, raw: &Value, key: &str) -> Tier {
     if let Some(t) = heuristic_tier(raw) {
         return t;
     }
-    let Some(text) = new_turn_text(raw) else {
-        return st.router.turn_tier(session).unwrap_or(Tier::Code);
+    let Some(state) = classifier_state(raw) else {
+        return st.router.turn_tier(session, None).unwrap_or(Tier::Code);
     };
+    // Clients sometimes send the same turn twice; classify once.
+    if let Some(tier) = st.router.turn_tier(session, Some(&state)) {
+        return tier;
+    }
     let started = Instant::now();
-    let call = st.client.post(format!("{NIM_BASE}/chat/completions")).bearer_auth(key).json(&classifier_request(&text)).send();
-    let label = match tokio::time::timeout(Duration::from_secs(6), call).await {
+    let tier = match jev(st, &state).await {
+        Some((tier, confidence)) => {
+            log(format_args!("{session} classify jev -> {tier:?} (confidence {confidence:.2}) in {:?}", started.elapsed()));
+            st.stats.update(session, |s| s.classifier = Some("jev".into()));
+            tier
+        }
+        None => {
+            let tier = llm_classify(st, &state, key).await.unwrap_or(Tier::Code);
+            log(format_args!("{session} classify llm -> {tier:?} in {:?}", started.elapsed()));
+            st.stats.update(session, |s| s.classifier = Some("llm".into()));
+            tier
+        }
+    };
+    st.router.set_turn_tier(session, &state, tier);
+    tier
+}
+
+async fn jev(st: &AppState, state: &str) -> Option<(Tier, f64)> {
+    let key = st.keys.get("TYPESAFE_API_KEY")?;
+    let call = st.client.post(JEV_URL).bearer_auth(key).json(&jev_request(state)).send();
+    match tokio::time::timeout(Duration::from_millis(2500), call).await {
+        Ok(Ok(r)) if r.status().is_success() => parse_jev(&r.json::<Value>().await.ok()?),
+        Ok(Ok(r)) => {
+            log(format_args!("jev -> {}", r.status()));
+            None
+        }
+        Ok(Err(e)) => {
+            log(format_args!("jev -> error {e}"));
+            None
+        }
+        Err(_) => {
+            log(format_args!("jev -> timed out"));
+            None
+        }
+    }
+}
+
+async fn llm_classify(st: &AppState, text: &str, key: &str) -> Option<Tier> {
+    let call = st.client.post(format!("{NIM_BASE}/chat/completions")).bearer_auth(key).json(&classifier_request(text)).send();
+    match tokio::time::timeout(Duration::from_secs(6), call).await {
         Ok(Ok(r)) if r.status().is_success() => r.json::<Value>().await.ok().and_then(|v| {
             let msg = &v["choices"][0]["message"];
             msg["content"].as_str().filter(|s| !s.trim().is_empty()).or(msg["reasoning_content"].as_str()).and_then(parse_label)
         }),
         _ => None,
-    };
-    let tier = label.unwrap_or(Tier::Code);
-    log(format_args!("{session} classify {:?} -> {tier:?} in {:?}", label.map(|t| t.name()), started.elapsed()));
-    st.router.set_turn_tier(session, tier);
-    tier
+    }
 }
 
 fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: String, in_flight: InFlight) -> Response<Body> {
