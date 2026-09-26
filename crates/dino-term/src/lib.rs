@@ -211,6 +211,48 @@ impl Pane {
         }
     }
 
+    /// Forward a click, drag, release or move at pane-local (`col`, `row`) if the app asked for
+    /// mouse reporting. Returns false when the app isn't listening, so the host can use the event.
+    pub fn mouse(&self, ev: crossterm::event::MouseEvent, col: u16, row: u16) -> bool {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind as K};
+        let mode = *self.term.lock().mode();
+        if !mode.intersects(TermMode::MOUSE_MODE) {
+            return false;
+        }
+        let button = |b: MouseButton| match b {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        };
+        // (button code, is release)
+        let (mut code, release) = match ev.kind {
+            K::Down(b) => (button(b), false),
+            K::Up(b) => (button(b), true),
+            K::Drag(b) if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) => (button(b) + 32, false),
+            K::Moved if mode.contains(TermMode::MOUSE_MOTION) => (35, false),
+            _ => return true,
+        };
+        if ev.modifiers.contains(KeyModifiers::SHIFT) {
+            code += 4;
+        }
+        if ev.modifiers.contains(KeyModifiers::ALT) {
+            code += 8;
+        }
+        if ev.modifiers.contains(KeyModifiers::CONTROL) {
+            code += 16;
+        }
+        let (x, y) = (col as u32 + 1, row as u32 + 1);
+        if mode.contains(TermMode::SGR_MOUSE) {
+            self.write(format!("\x1b[<{code};{x};{y}{}", if release { 'm' } else { 'M' }));
+        } else {
+            // Legacy X10 encoding: release has no button, coordinates cap at 223.
+            let code = if release { 3 + (code & !3) } else { code };
+            let enc = |v: u32| (32 + v.min(223)) as u8;
+            self.write(vec![0x1b, b'[', b'M', 32 + code as u8, enc(x), enc(y)]);
+        }
+        true
+    }
+
     /// Draw the visible grid into `area`. Returns where the host cursor should go, if visible.
     pub fn render(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
         let term = self.term.lock();
