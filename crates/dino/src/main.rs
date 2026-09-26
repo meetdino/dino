@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -104,6 +104,8 @@ struct App {
     proxy: Proxy,
     next_id: u64,
     config: Config,
+    /// Screen row → session index, rebuilt every frame for sidebar clicks.
+    sidebar_rows: Vec<(u16, usize)>,
     inventory: Arc<Mutex<Option<Inventory>>>,
     welcome_opened: Instant,
 }
@@ -121,7 +123,7 @@ impl App {
         let shell = user_shell();
         let shell_name = shell.rsplit('/').next().unwrap_or("shell").to_string();
         launchers.push(Launcher { agent_id: "shell".into(), short: "shell".into(), label: format!("Shell ({shell_name})"), program: shell });
-        Self { sessions: vec![], focused: 0, mode: Mode::Picker { selected: 0 }, launchers, pane_size: (80, 24), quit: false, started: Instant::now(), proxy, next_id: 1, config: Config::load(), inventory: Arc::default(), welcome_opened: Instant::now() }
+        Self { sessions: vec![], focused: 0, mode: Mode::Picker { selected: 0 }, launchers, pane_size: (80, 24), quit: false, started: Instant::now(), proxy, next_id: 1, config: Config::load(), sidebar_rows: vec![], inventory: Arc::default(), welcome_opened: Instant::now() }
     }
 
     fn spawn(&mut self, launcher: usize, extra_args: &[String]) {
@@ -289,6 +291,39 @@ impl App {
         }
     }
 
+    fn on_mouse(&mut self, m: MouseEvent) {
+        let in_sidebar = m.column < SIDEBAR_WIDTH;
+        if in_sidebar {
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                if let Some(&(_, i)) = self.sidebar_rows.iter().find(|(y, _)| *y == m.row) {
+                    self.focus(i);
+                    if self.mode == Mode::Command {
+                        self.mode = Mode::Pane;
+                    }
+                }
+            }
+            return;
+        }
+        if self.mode != Mode::Pane {
+            return;
+        }
+        let Some(p) = self.focused_pane() else { return };
+        // Pane-local coordinates; clamp so a drag or release off the edge still reaches the app.
+        let (w, h) = self.pane_size;
+        let col = (m.column - SIDEBAR_WIDTH).min(w.saturating_sub(1));
+        let row = m.row.saturating_sub(1).min(h.saturating_sub(1));
+        let lines = match m.kind {
+            MouseEventKind::ScrollUp => 3,
+            MouseEventKind::ScrollDown => -3,
+            _ => 0,
+        };
+        if lines != 0 {
+            p.scroll(lines, col, row);
+        } else if m.row >= 1 || matches!(m.kind, MouseEventKind::Up(_) | MouseEventKind::Drag(_)) {
+            p.mouse(m, col, row);
+        }
+    }
+
     fn finish_onboarding(&mut self, route: bool) {
         self.config.onboarded = true;
         self.config.route = route;
@@ -344,7 +379,7 @@ impl App {
         }
     }
 
-    fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
+    fn draw_sidebar(&mut self, f: &mut Frame, area: Rect) {
         let block = Block::new().borders(Borders::RIGHT).border_style(Style::new().fg(Color::Rgb(0x33, 0x33, 0x3a)));
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -355,7 +390,9 @@ impl App {
             Line::from(" AGENTS").fg(MUTED).add_modifier(Modifier::BOLD),
         ];
         let blink = self.started.elapsed().as_millis() / 400 % 2 == 0;
+        self.sidebar_rows.clear();
         for (i, s) in self.sessions.iter().enumerate() {
+            let first_row = inner.y + lines.len() as u16;
             let (dot, label, color) = match s.status() {
                 Status::Thinking => (if blink { "◆" } else { "◇" }, "thinking", Color::LightMagenta),
                 Status::Working => (if blink { "●" } else { "◉" }, "working", ACCENT),
@@ -391,6 +428,8 @@ impl App {
                 let u = &s.stats.usage;
                 lines.push(Line::from(format!("    ↑{} ↓{} {model}", tokens(u.total_input()), tokens(u.output))).fg(MUTED));
             }
+            let last_row = inner.y + lines.len() as u16;
+            self.sidebar_rows.extend((first_row..last_row).map(|y| (y, i)));
         }
         if self.sessions.is_empty() {
             lines.push(Line::from("   none yet").fg(MUTED));
@@ -631,18 +670,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                             }
                         }
                     }
-                    Event::Mouse(m) => {
-                        let lines = match m.kind {
-                            MouseEventKind::ScrollUp => 3,
-                            MouseEventKind::ScrollDown => -3,
-                            _ => 0,
-                        };
-                        if lines != 0 && m.column >= SIDEBAR_WIDTH {
-                            if let Some(p) = app.focused_pane() {
-                                p.scroll(lines, m.column - SIDEBAR_WIDTH, m.row.saturating_sub(1));
-                            }
-                        }
-                    }
+                    Event::Mouse(m) => app.on_mouse(m),
                     _ => {}
                 }
                 if !event::poll(Duration::ZERO)? {

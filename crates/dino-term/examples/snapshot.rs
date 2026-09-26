@@ -15,10 +15,31 @@ fn main() -> anyhow::Result<()> {
     let (w, h) = (110, 36);
     let pane = Pane::spawn(spec, w, h)?;
     std::thread::sleep(Duration::from_secs(secs));
-    // DINO_SNAP_KEYS: text to type as key events, "\n" = Enter, "~" = Down arrow.
+    // DINO_SNAP_KEYS: text to type as key events, "\n" = Enter, "~" = Down arrow,
+    // "{click:x,y}" = left click at that cell, "{ctrl:c}" = Ctrl+c.
     if let Ok(keys) = std::env::var("DINO_SNAP_KEYS") {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        for c in keys.chars() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut rest = keys.as_str();
+        while let Some(c) = rest.chars().next() {
+            if let Some(after) = rest.strip_prefix("{click:") {
+                let (spec, tail) = after.split_once('}').unwrap();
+                let (x, y) = spec.split_once(',').unwrap();
+                let (x, y): (u16, u16) = (x.parse()?, y.parse()?);
+                for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+                    pane.mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE }, x, y);
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                rest = tail;
+                continue;
+            }
+            if let Some(after) = rest.strip_prefix("{ctrl:") {
+                let (k, tail) = after.split_once('}').unwrap();
+                pane.send_key(KeyEvent::new(KeyCode::Char(k.chars().next().unwrap()), KeyModifiers::CONTROL));
+                std::thread::sleep(Duration::from_millis(300));
+                rest = tail;
+                continue;
+            }
+            rest = &rest[c.len_utf8()..];
             let code = match c {
                 '\n' => KeyCode::Enter,
                 '~' => KeyCode::Down,
