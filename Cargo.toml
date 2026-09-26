@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+dino-core = { path = "crates/dino-core" }
+dino-term = { path = "crates/dino-term" }
+alacritty_terminal = "0.26"
+terminput = "0.5"
+terminput-crossterm = "0.4"
+ratatui = "0.30"
+crossterm = "0.29"
+anyhow = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

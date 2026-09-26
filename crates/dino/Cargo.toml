@@ -1,0 +1,13 @@
+[package]
+name = "dino"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dino-core.workspace = true
+dino-term.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true
+dino-proxy = { path = "../dino-proxy" }
