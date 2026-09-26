@@ -9,7 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderName, Response, StatusCode};
-use axum::routing::any;
+use axum::routing::{any, post};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -17,6 +17,8 @@ use serde_json::Value;
 pub const PROVIDERS: &[(&str, &str)] = &[
     ("anthropic", "https://api.anthropic.com"),
     ("openai", "https://api.openai.com"),
+    // Codex signed in with ChatGPT.
+    ("chatgpt", "https://chatgpt.com/backend-api"),
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -41,8 +43,19 @@ impl Usage {
     }
 }
 
+/// What the agent itself reported via hooks (Claude Code HTTP hooks POST to `/s/<session>/hook`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Activity {
+    Working,
+    /// Blocked on the user, e.g. a permission prompt for this tool.
+    NeedsPermission(String),
+    /// Finished its turn.
+    Done,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SessionStats {
+    pub activity: Option<Activity>,
     pub requests: u64,
     pub in_flight: u32,
     pub errors: u64,
@@ -110,7 +123,13 @@ impl Proxy {
             let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
             rt.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
-                let app = axum::Router::new().route("/s/{session}/{provider}/{*rest}", any(forward)).with_state(state);
+                let app = axum::Router::new().route("/s/{session}/{provider}/{*rest}", any(forward))
+                    .route("/s/{session}/hook", post(hook))
+                    .fallback(|req: Request| async move {
+                        log(format_args!("unrouted {} {}", req.method(), req.uri()));
+                        StatusCode::NOT_FOUND
+                    })
+                    .with_state(state);
                 let _ = axum::serve(listener, app).await;
             });
         })?;
@@ -167,6 +186,7 @@ async fn forward(
     }
     let guard = is_model_call.then(|| InFlight { stats: st.stats.clone(), session: session.clone() });
 
+    let method = parts.method.clone();
     let mut up = st.client.request(parts.method, &url).body(body);
     for (name, value) in parts.headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
         up = up.header(name, value);
@@ -175,11 +195,13 @@ async fn forward(
         Ok(r) => r,
         Err(e) => {
             st.stats.update(&session, |s| s.errors += 1);
+            log(format_args!("{session} {provider} {method} /{rest} -> upstream error: {e}"));
             return error(StatusCode::BAD_GATEWAY, format!("dino proxy: {e}"));
         }
     };
 
     let status = resp.status();
+    log(format_args!("{session} {provider} {} /{rest} -> {status}", method));
     record_quota(&st.stats, &provider, resp.headers());
     if !status.is_success() && is_model_call {
         st.stats.update(&session, |s| s.errors += 1);
@@ -214,6 +236,44 @@ impl Drop for Tap {
         if let Some(u) = self.meter.seen.take() {
             self.stats.update(&self.session, |s| s.usage.add(&u));
         }
+    }
+}
+
+async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Bytes) -> StatusCode {
+    let Ok(v) = serde_json::from_slice::<Value>(&body) else { return StatusCode::BAD_REQUEST };
+    log(format_args!("{session} hook {v}"));
+    let event = v["hook_event_name"].as_str().unwrap_or_default();
+    let tool = || v["tool_name"].as_str().unwrap_or("tool").to_string();
+    let activity = match event {
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some(Activity::Working),
+        "PermissionRequest" => Some(Activity::NeedsPermission(tool())),
+        "Notification" => match v["notification_type"].as_str() {
+            Some("permission_prompt" | "elicitation_dialog" | "agent_needs_input") => {
+                let msg = v["message"].as_str().unwrap_or("needs input").to_string();
+                Some(Activity::NeedsPermission(msg))
+            }
+            _ => None,
+        },
+        "Stop" | "StopFailure" | "SessionStart" => Some(Activity::Done),
+        _ => None,
+    };
+    if let Some(a) = activity {
+        // A notification about the same prompt shouldn't clobber the more specific tool name.
+        st.stats.update(&session, |s| {
+            if !(event == "Notification" && matches!(s.activity, Some(Activity::NeedsPermission(_)))) {
+                s.activity = Some(a);
+            }
+        });
+    }
+    StatusCode::OK
+}
+
+/// Append a line to `$DINO_PROXY_LOG`, if set. Debugging aid.
+fn log(line: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("DINO_PROXY_LOG") else { return };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
     }
 }
 

@@ -59,13 +59,51 @@ pub fn proxy_wiring(agent_id: &str, base: &dyn Fn(&str) -> String) -> (Vec<(Stri
     let user_set = |var: &str| std::env::var_os(var).is_some();
     match agent_id {
         // Also used for shells, so `claude` started inside one is metered too.
-        "claude" | "shell" if !user_set("ANTHROPIC_BASE_URL") => {
-            (vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))], vec![])
+        "claude" => {
+            let env = if user_set("ANTHROPIC_BASE_URL") { vec![] } else { vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))] };
+            (env, vec!["--settings".into(), claude_hook_settings(&base("hook"))])
         }
-        // Untested: needs a codex install to verify against ChatGPT-login auth.
+        "shell" if !user_set("ANTHROPIC_BASE_URL") => (vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))], vec![]),
+        // A custom provider rather than `openai_base_url`: Codex otherwise tries WebSockets first,
+        // which the proxy doesn't carry. `requires_openai_auth` keeps the user's own login.
         "codex" if !user_set("OPENAI_BASE_URL") => {
-            (vec![], vec!["-c".into(), format!("openai_base_url=\"{}/v1\"", base("openai"))])
+            let base_url = match codex_auth_mode().as_deref() {
+                Some("chatgpt") => format!("{}/codex", base("chatgpt")),
+                _ => format!("{}/v1", base("openai")),
+            };
+            let args = [
+                "model_provider=\"dino\"".to_string(),
+                "model_providers.dino.name=\"dino\"".into(),
+                format!("model_providers.dino.base_url=\"{base_url}\""),
+                "model_providers.dino.wire_api=\"responses\"".into(),
+                "model_providers.dino.requires_openai_auth=true".into(),
+                "model_providers.dino.supports_websockets=false".into(),
+            ];
+            (vec![], args.into_iter().flat_map(|a| ["-c".to_string(), a]).collect())
         }
         _ => (vec![], vec![]),
     }
+}
+
+/// `"chatgpt"` or `"apikey"`, from `~/.codex/auth.json`.
+fn codex_auth_mode() -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let auth = std::fs::read_to_string(Path::new(&home).join(".codex/auth.json")).ok()?;
+    // Avoid a JSON dependency for one field: find `"auth_mode": "<value>"`.
+    let rest = &auth[auth.find("\"auth_mode\"")? + 11..];
+    let start = rest.find('"')? + 1;
+    let len = rest[start..].find('"')?;
+    Some(rest[start..start + len].to_string())
+}
+
+/// Per-session settings layered on top of the user's own: HTTP hooks that report lifecycle events
+/// to dino. Hook entries merge with existing ones, and an unreachable URL never blocks Claude.
+fn claude_hook_settings(url: &str) -> String {
+    const EVENTS: &[&str] = &[
+        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+        "PermissionRequest", "Notification", "Stop", "StopFailure",
+    ];
+    let entry = format!(r#"[{{"hooks":[{{"type":"http","url":"{url}","timeout":5}}]}}]"#);
+    let hooks: Vec<String> = EVENTS.iter().map(|e| format!(r#""{e}":{entry}"#)).collect();
+    format!(r#"{{"hooks":{{{}}}}}"#, hooks.join(","))
 }
