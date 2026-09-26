@@ -13,6 +13,8 @@ pub enum Tier {
     Fast,
     /// Normal agentic coding.
     Code,
+    /// Coupled, multi-file technical work.
+    Complex,
     /// Planning, debugging, architecture.
     Reason,
 }
@@ -22,6 +24,7 @@ impl Tier {
         match self {
             Tier::Fast => "fast",
             Tier::Code => "code",
+            Tier::Complex => "complex",
             Tier::Reason => "reason",
         }
     }
@@ -49,6 +52,7 @@ fn pool(tier: Tier) -> Vec<Model> {
     match tier {
         Tier::Fast => vec![nim("nvidia/nemotron-3-super-120b-a12b"), nim("openai/gpt-oss-20b")],
         Tier::Code => vec![nim("z-ai/glm-5.3"), nim("moonshotai/kimi-k3"), nim("nvidia/nemotron-3-super-120b-a12b")],
+        Tier::Complex => vec![nim("moonshotai/kimi-k3"), nim("z-ai/glm-5.3"), nim("nvidia/nemotron-3-ultra-550b-a55b")],
         Tier::Reason => vec![nim("nvidia/nemotron-3-ultra-550b-a55b"), nim("moonshotai/kimi-k3"), nim("z-ai/glm-5.3")],
     }
 }
@@ -66,8 +70,8 @@ struct Health {
 #[derive(Default)]
 pub struct Router {
     health: Mutex<HashMap<&'static str, Health>>,
-    /// Tier chosen at the start of each session's current turn.
-    sticky: Mutex<HashMap<String, Tier>>,
+    /// Tier chosen for each session's current turn, keyed by the classifier input it came from.
+    sticky: Mutex<HashMap<String, (u64, Tier)>>,
 }
 
 impl Router {
@@ -104,13 +108,26 @@ impl Router {
         h.cool_until = Some(Instant::now() + Duration::from_secs(secs));
     }
 
-    pub fn set_turn_tier(&self, session: &str, tier: Tier) {
-        self.sticky.lock().unwrap().insert(session.to_string(), tier);
+    pub fn set_turn_tier(&self, session: &str, state: &str, tier: Tier) {
+        self.sticky.lock().unwrap().insert(session.to_string(), (hash(state), tier));
     }
 
-    pub fn turn_tier(&self, session: &str) -> Option<Tier> {
-        self.sticky.lock().unwrap().get(session).copied()
+    /// The current turn's tier; with `state`, only if it was decided for that exact input.
+    pub fn turn_tier(&self, session: &str, state: Option<&str>) -> Option<Tier> {
+        let sticky = self.sticky.lock().unwrap();
+        let &(h, tier) = sticky.get(session)?;
+        state.is_none_or(|s| hash(s) == h).then_some(tier)
     }
+}
+
+fn hash(s: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+impl Router {
 }
 
 /// Decide without a model call when the request makes it obvious.
@@ -148,6 +165,77 @@ pub fn new_turn_text(anthropic_req: &Value) -> Option<String> {
     }
 }
 
+impl Tier {
+    /// One step stronger, for when the classifier isn't sure.
+    pub fn up(self) -> Tier {
+        match self {
+            Tier::Fast => Tier::Code,
+            Tier::Code => Tier::Complex,
+            Tier::Complex | Tier::Reason => Tier::Reason,
+        }
+    }
+}
+
+/// What the classifier sees: the current request plus up to 3 earlier user turns, newest last,
+/// capped at 8k chars. Assistant turns are left out (LiteLLM's tested default for Jev).
+pub fn classifier_state(anthropic_req: &Value) -> Option<String> {
+    let current = new_turn_text(anthropic_req)?;
+    let msgs = anthropic_req["messages"].as_array()?;
+    let mut earlier: Vec<String> = msgs
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .filter_map(|m| new_turn_text(&json!({ "messages": [m] })))
+        .collect();
+    earlier.pop(); // that's `current`
+    let start = earlier.len().saturating_sub(3);
+    let mut state = String::new();
+    for (i, t) in earlier[start..].iter().enumerate() {
+        state.push_str(&format!("Earlier request {}:\n{t}\n\n", i + 1));
+    }
+    state.push_str(&format!("Current request:\n{current}"));
+    let chars = state.chars().count();
+    // Keep the end: the current request matters most.
+    Some(if chars > 8000 { state.chars().skip(chars - 8000).collect() } else { state })
+}
+
+pub const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
+/// Pinned so behavior doesn't shift when the `jev-latest` alias moves.
+pub const JEV_MODEL: &str = "jev-1.13.0";
+
+/// TypeSafe Jev "choice" request: picks a tier with probabilities instead of generating text.
+pub fn jev_request(state: &str) -> Value {
+    json!({
+        "model": JEV_MODEL,
+        "state": state,
+        "questions": {
+            "tier": {
+                "type": "choice",
+                "instructions": "A developer is talking to an AI coding agent. Decide how capable a model the agent needs to handle the current request well.",
+                "criteria": {
+                    "simple": "Greetings, lookups, trivial questions, tiny mechanical edits.",
+                    "medium": "Routine programming: implement a small feature, edit a function, write a test, explain code.",
+                    "complex": "Coupled technical work across several files or systems, refactors, non-trivial bugs.",
+                    "reasoning": "Architecture and design decisions, tricky debugging, proofs, trade-offs between conflicting goals."
+                }
+            }
+        }
+    })
+}
+
+/// Tier from a Jev response, bumped up a step when confidence is below 0.5.
+pub fn parse_jev(resp: &Value) -> Option<(Tier, f64)> {
+    let answer = &resp["answers"]["tier"];
+    let tier = match answer["choice"].as_str()? {
+        "simple" => Tier::Fast,
+        "medium" => Tier::Code,
+        "complex" => Tier::Complex,
+        "reasoning" => Tier::Reason,
+        _ => return None,
+    };
+    let confidence = answer["confidence"].as_f64().unwrap_or(1.0);
+    Some((if confidence < 0.5 { tier.up() } else { tier }, confidence))
+}
+
 /// OpenAI chat request asking the classifier for a one-word label.
 pub fn classifier_request(user_text: &str) -> Value {
     let text: String = user_text.chars().take(2000).collect();
@@ -159,6 +247,7 @@ pub fn classifier_request(user_text: &str) -> Value {
             {"role": "system", "content": "You route requests for a coding agent. Reply with exactly one word:\n\
                 fast - greetings, trivial questions, tiny edits\n\
                 code - normal programming work: implement, edit, test, explain code\n\
+                complex - coupled work across several files or systems, refactors, non-trivial bugs\n\
                 reason - hard problems: architecture, planning, tricky debugging, deep analysis"},
             {"role": "user", "content": text}
         ]
@@ -168,9 +257,38 @@ pub fn classifier_request(user_text: &str) -> Value {
 pub fn parse_label(text: &str) -> Option<Tier> {
     let t = text.to_lowercase();
     // Last mention wins, so reasoning-model preambles don't confuse it.
-    [("fast", Tier::Fast), ("code", Tier::Code), ("reason", Tier::Reason)]
+    [("fast", Tier::Fast), ("code", Tier::Code), ("complex", Tier::Complex), ("reason", Tier::Reason)]
         .into_iter()
         .filter_map(|(w, tier)| t.rfind(w).map(|i| (i, tier)))
         .max_by_key(|(i, _)| *i)
         .map(|(_, tier)| tier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jev_response_parsing_and_confidence_bump() {
+        let sure = json!({"answers": {"tier": {"type": "choice", "choice": "medium", "confidence": 0.9, "probabilities": {}}}});
+        assert_eq!(parse_jev(&sure), Some((Tier::Code, 0.9)));
+        let unsure = json!({"answers": {"tier": {"choice": "medium", "confidence": 0.4}}});
+        assert_eq!(parse_jev(&unsure).map(|t| t.0), Some(Tier::Complex));
+        assert_eq!(parse_jev(&json!({"answers": {}})), None);
+    }
+
+    #[test]
+    fn state_skips_tool_results_and_trailing_system() {
+        let req = json!({"messages": [
+            {"role": "user", "content": "first ask"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": [{"type": "tool_result", "content": "x"}]},
+            {"role": "user", "content": [{"type": "text", "text": "<system-reminder>ctx</system-reminder>"}, {"type": "text", "text": "second ask"}]},
+            {"role": "system", "content": "env"}
+        ]});
+        let state = classifier_state(&req).unwrap();
+        assert!(state.contains("Earlier request 1:\nfirst ask"));
+        assert!(state.ends_with("Current request:\nsecond ask"));
+        assert!(!state.contains("ok") && !state.contains("ctx"));
+    }
 }

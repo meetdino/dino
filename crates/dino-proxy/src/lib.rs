@@ -66,6 +66,8 @@ pub struct SessionStats {
     pub last_model: Option<String>,
     /// Router tier for free-tier sessions ("fast", "code", "reason").
     pub tier: Option<String>,
+    /// Which classifier made the last routing decision ("jev" or "llm").
+    pub classifier: Option<String>,
     pub last_request: Option<Instant>,
 }
 
