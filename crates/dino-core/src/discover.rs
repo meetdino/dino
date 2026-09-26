@@ -181,6 +181,7 @@ fn scan_keys() -> Vec<KeyInfo> {
     if let Ok(cwd) = std::env::current_dir() {
         files.push((".env".into(), cwd.join(".env")));
     }
+    files.insert(0, ("dino keys".into(), crate::keys_file()));
     let contents: Vec<(String, String)> =
         files.into_iter().filter_map(|(label, p)| std::fs::read_to_string(p).ok().map(|c| (label, c))).collect();
 

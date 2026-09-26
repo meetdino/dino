@@ -1,6 +1,6 @@
 //! Run the proxy alone and print usage as it happens. `cargo run -p dino-proxy --example serve`
 fn main() -> anyhow::Result<()> {
-    let proxy = dino_proxy::Proxy::start()?;
+    let proxy = dino_proxy::Proxy::start(Default::default())?;
     println!("listening on http://127.0.0.1:{}  (base url: {})", proxy.port, proxy.base_url("test", "<provider>"));
     loop {
         std::thread::sleep(std::time::Duration::from_secs(2));
