@@ -1,0 +1,319 @@
+//! Local pass-through proxy. Agents point their base URL at
+//! `http://127.0.0.1:<port>/s/<session>/<provider>`; we forward to the real API untouched
+//! (auth included) and observe usage, in-flight state and quota headers on the way back.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use axum::body::Body;
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderMap, HeaderName, Response, StatusCode};
+use axum::routing::any;
+use bytes::Bytes;
+use futures_util::StreamExt;
+use serde_json::Value;
+
+pub const PROVIDERS: &[(&str, &str)] = &[
+    ("anthropic", "https://api.anthropic.com"),
+    ("openai", "https://api.openai.com"),
+];
+
+#[derive(Clone, Debug, Default)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl Usage {
+    fn add(&mut self, o: &Usage) {
+        self.input += o.input;
+        self.output += o.output;
+        self.cache_read += o.cache_read;
+        self.cache_write += o.cache_write;
+    }
+
+    /// Everything the model read, cached or not.
+    pub fn total_input(&self) -> u64 {
+        self.input + self.cache_read + self.cache_write
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SessionStats {
+    pub requests: u64,
+    pub in_flight: u32,
+    pub errors: u64,
+    pub usage: Usage,
+    pub last_model: Option<String>,
+    pub last_request: Option<Instant>,
+}
+
+/// One rolling subscription window, e.g. Claude's 5h or 7d.
+#[derive(Clone, Debug)]
+pub struct Window {
+    pub utilization: f32,
+    pub resets_at: Option<u64>,
+    pub status: Option<String>,
+}
+
+impl Window {
+    pub fn resets_in_secs(&self) -> Option<u64> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        self.resets_at.map(|t| t.saturating_sub(now))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Quota {
+    /// Window name ("5h", "7d") → state, as last reported by the provider.
+    pub windows: Vec<(String, Window)>,
+}
+
+#[derive(Default)]
+pub struct Stats {
+    pub sessions: Mutex<HashMap<String, SessionStats>>,
+    pub quotas: Mutex<HashMap<String, Quota>>,
+}
+
+impl Stats {
+    pub fn session(&self, id: &str) -> SessionStats {
+        self.sessions.lock().unwrap().get(id).cloned().unwrap_or_default()
+    }
+
+    pub fn quota(&self, provider: &str) -> Option<Quota> {
+        self.quotas.lock().unwrap().get(provider).cloned()
+    }
+
+    fn update(&self, id: &str, f: impl FnOnce(&mut SessionStats)) {
+        f(self.sessions.lock().unwrap().entry(id.to_string()).or_default());
+    }
+}
+
+pub struct Proxy {
+    pub port: u16,
+    pub stats: Arc<Stats>,
+}
+
+impl Proxy {
+    /// Start on a random localhost port, on its own runtime thread.
+    pub fn start() -> anyhow::Result<Self> {
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        std_listener.set_nonblocking(true)?;
+        let port = std_listener.local_addr()?.port();
+        let stats = Arc::new(Stats::default());
+        let state = AppState { stats: stats.clone(), client: reqwest::Client::builder().build()? };
+
+        std::thread::Builder::new().name("dino-proxy".into()).spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+                let app = axum::Router::new().route("/s/{session}/{provider}/{*rest}", any(forward)).with_state(state);
+                let _ = axum::serve(listener, app).await;
+            });
+        })?;
+        Ok(Self { port, stats })
+    }
+
+    /// Base URL an agent should use for `provider`, attributed to `session`.
+    pub fn base_url(&self, session: &str, provider: &str) -> String {
+        format!("http://127.0.0.1:{}/s/{session}/{provider}", self.port)
+    }
+}
+
+#[derive(Clone)]
+struct AppState {
+    stats: Arc<Stats>,
+    client: reqwest::Client,
+}
+
+/// Headers we must not copy between the two connections.
+fn hop_by_hop(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "host" | "connection" | "keep-alive" | "transfer-encoding" | "upgrade" | "proxy-connection" | "te" | "trailer"
+            | "content-length" | "accept-encoding"
+    )
+}
+
+async fn forward(
+    State(st): State<AppState>,
+    Path((session, provider, rest)): Path<(String, String, String)>,
+    req: Request,
+) -> Response<Body> {
+    let Some(&(_, upstream)) = PROVIDERS.iter().find(|(p, _)| *p == provider) else {
+        return error(StatusCode::NOT_FOUND, format!("unknown provider {provider}"));
+    };
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let url = format!("{upstream}/{rest}{query}");
+    let (parts, body) = req.into_parts();
+    let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
+        return error(StatusCode::BAD_REQUEST, "unreadable body".into());
+    };
+
+    // Only model calls count toward activity; ignore e.g. token counting and telemetry.
+    let is_model_call = rest.ends_with("messages") || rest.ends_with("chat/completions") || rest.ends_with("responses");
+    if is_model_call {
+        st.stats.update(&session, |s| {
+            s.requests += 1;
+            s.in_flight += 1;
+            s.last_request = Some(Instant::now());
+            if let Some(m) = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["model"].as_str().map(String::from)) {
+                s.last_model = Some(m);
+            }
+        });
+    }
+    let guard = is_model_call.then(|| InFlight { stats: st.stats.clone(), session: session.clone() });
+
+    let mut up = st.client.request(parts.method, &url).body(body);
+    for (name, value) in parts.headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
+        up = up.header(name, value);
+    }
+    let resp = match up.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            st.stats.update(&session, |s| s.errors += 1);
+            return error(StatusCode::BAD_GATEWAY, format!("dino proxy: {e}"));
+        }
+    };
+
+    let status = resp.status();
+    record_quota(&st.stats, &provider, resp.headers());
+    if !status.is_success() && is_model_call {
+        st.stats.update(&session, |s| s.errors += 1);
+    }
+
+    let mut builder = Response::builder().status(status.as_u16());
+    for (name, value) in resp.headers().iter().filter(|(n, _)| !hop_by_hop(n)) {
+        builder = builder.header(name, value);
+    }
+
+    // Tee the body: pass every chunk through immediately, scan a copy for usage.
+    let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, _in_flight: guard };
+    let stream = resp.bytes_stream().map(move |chunk| {
+        if let Ok(bytes) = &chunk {
+            tap.meter.feed(bytes);
+        }
+        chunk
+    });
+    builder.body(Body::from_stream(stream)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()))
+}
+
+/// Lives as long as the response body; records usage when the stream ends or is dropped.
+struct Tap {
+    meter: Meter,
+    stats: Arc<Stats>,
+    session: String,
+    _in_flight: Option<InFlight>,
+}
+
+impl Drop for Tap {
+    fn drop(&mut self) {
+        if let Some(u) = self.meter.seen.take() {
+            self.stats.update(&self.session, |s| s.usage.add(&u));
+        }
+    }
+}
+
+struct InFlight {
+    stats: Arc<Stats>,
+    session: String,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.stats.update(&self.session, |s| s.in_flight = s.in_flight.saturating_sub(1));
+    }
+}
+
+fn error(status: StatusCode, msg: String) -> Response<Body> {
+    Response::builder().status(status).body(Body::from(msg)).unwrap()
+}
+
+/// `anthropic-ratelimit-unified-5h-utilization: 0.63` and friends (subscription traffic only).
+fn record_quota(stats: &Stats, provider: &str, headers: &HeaderMap) {
+    const PREFIX: &str = "anthropic-ratelimit-unified-";
+    let mut windows: HashMap<String, Window> = HashMap::new();
+    for (name, value) in headers {
+        let Some(rest) = name.as_str().strip_prefix(PREFIX) else { continue };
+        let Some((window, field)) = rest.split_once('-') else { continue };
+        let Ok(value) = value.to_str() else { continue };
+        let w = windows.entry(window.to_string()).or_insert(Window { utilization: 0.0, resets_at: None, status: None });
+        match field {
+            "utilization" => w.utilization = value.parse().unwrap_or(0.0),
+            "reset" => w.resets_at = value.parse().ok(),
+            "status" => w.status = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    if windows.is_empty() {
+        return;
+    }
+    let mut windows: Vec<_> = windows.into_iter().collect();
+    windows.sort_by_key(|(name, _)| window_hours(name));
+    stats.quotas.lock().unwrap().insert(provider.to_string(), Quota { windows });
+}
+
+fn window_hours(name: &str) -> u64 {
+    let (n, unit) = name.split_at(name.len().saturating_sub(1));
+    let n: u64 = n.parse().unwrap_or(0);
+    if unit == "d" { n * 24 } else { n }
+}
+
+/// Finds token usage in a response body, whether SSE or plain JSON, across API dialects.
+/// Usage counters within one response are cumulative, so we keep the max of each field.
+#[derive(Default)]
+struct Meter {
+    line: Vec<u8>,
+    body: Vec<u8>,
+    sse: Option<bool>,
+    seen: Option<Usage>,
+}
+
+impl Meter {
+    fn feed(&mut self, bytes: &Bytes) {
+        let sse = *self.sse.get_or_insert_with(|| bytes.starts_with(b"event:") || bytes.starts_with(b"data:"));
+        if !sse {
+            self.body.extend_from_slice(bytes);
+            if let Ok(v) = serde_json::from_slice::<Value>(&self.body) {
+                self.observe(&v);
+            }
+            return;
+        }
+        for &b in bytes.iter() {
+            if b == b'\n' {
+                let line = std::mem::take(&mut self.line);
+                if let Some(data) = line.strip_prefix(b"data:") {
+                    if let Ok(v) = serde_json::from_slice::<Value>(data.trim_ascii()) {
+                        self.observe(&v);
+                    }
+                }
+            } else {
+                self.line.push(b);
+            }
+        }
+    }
+
+    fn observe(&mut self, v: &Value) {
+        for u in [&v["usage"], &v["message"]["usage"], &v["response"]["usage"]] {
+            if !u.is_object() {
+                continue;
+            }
+            let get = |keys: &[&str]| keys.iter().filter_map(|k| u[*k].as_u64()).max().unwrap_or(0);
+            let cached_openai = u["prompt_tokens_details"]["cached_tokens"].as_u64().or(u["input_tokens_details"]["cached_tokens"].as_u64()).unwrap_or(0);
+            let next = Usage {
+                input: get(&["input_tokens", "prompt_tokens"]).saturating_sub(cached_openai),
+                output: get(&["output_tokens", "completion_tokens"]),
+                cache_read: get(&["cache_read_input_tokens"]) + cached_openai,
+                cache_write: get(&["cache_creation_input_tokens"]),
+            };
+            let seen = self.seen.get_or_insert_with(Usage::default);
+            seen.input = seen.input.max(next.input);
+            seen.output = seen.output.max(next.output);
+            seen.cache_read = seen.cache_read.max(next.cache_read);
+            seen.cache_write = seen.cache_write.max(next.cache_write);
+        }
+    }
+}
