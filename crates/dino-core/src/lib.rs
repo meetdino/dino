@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod discover;
+
 /// A coding agent (or plain program) dino knows how to launch.
 #[derive(Clone, Debug)]
 pub struct AgentKind {
@@ -55,8 +57,9 @@ fn is_executable(p: &Path) -> bool {
 /// How to route an agent's API traffic through dino's proxy: extra env vars and CLI args.
 /// `base(provider)` yields the proxy base URL for that provider.
 /// Agents we don't know how to wire (or that the user already pointed elsewhere) run untouched.
-pub fn proxy_wiring(agent_id: &str, base: &dyn Fn(&str) -> String) -> (Vec<(String, String)>, Vec<String>) {
-    let user_set = |var: &str| std::env::var_os(var).is_some();
+pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String) -> (Vec<(String, String)>, Vec<String>) {
+    // With routing off, only status hooks are wired; API traffic goes direct.
+    let user_set = |var: &str| !route || std::env::var_os(var).is_some();
     match agent_id {
         // Also used for shells, so `claude` started inside one is metered too.
         "claude" => {
@@ -106,4 +109,34 @@ fn claude_hook_settings(url: &str) -> String {
     let entry = format!(r#"[{{"hooks":[{{"type":"http","url":"{url}","timeout":5}}]}}]"#);
     let hooks: Vec<String> = EVENTS.iter().map(|e| format!(r#""{e}":{entry}"#)).collect();
     format!(r#"{{"hooks":{{{}}}}}"#, hooks.join(","))
+}
+
+/// Persistent user choices, in `~/.config/dino/config` as `key=value` lines.
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// Onboarding finished; skip the welcome scan.
+    pub onboarded: bool,
+    /// Route agent API traffic through the local proxy.
+    pub route: bool,
+}
+
+impl Config {
+    fn path() -> PathBuf {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        home.join(".config/dino/config")
+    }
+
+    pub fn load() -> Self {
+        let text = std::fs::read_to_string(Self::path()).unwrap_or_default();
+        let get = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=').map(str::trim).map(String::from));
+        Self { onboarded: get("onboarded").as_deref() == Some("true"), route: get("route").as_deref() != Some("false") }
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, format!("onboarded={}\nroute={}\n", self.onboarded, self.route))
+    }
 }

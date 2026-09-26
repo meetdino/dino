@@ -201,7 +201,11 @@ async fn forward(
     };
 
     let status = resp.status();
-    log(format_args!("{session} {provider} {} /{rest} -> {status}", method));
+    log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
+    if std::env::var_os("DINO_PROXY_LOG_HEADERS").is_some() {
+        let names: Vec<String> = resp.headers().iter().filter(|(n, _)| (n.as_str().contains("limit") || n.as_str().starts_with("x-codex")) && !n.as_str().ends_with("turn-state")).map(|(n, v)| format!("{n}={}", v.to_str().unwrap_or("?"))).collect();
+        log(format_args!("  headers: {}", names.join(" ")));
+    }
     record_quota(&st.stats, &provider, resp.headers());
     if !status.is_success() && is_model_call {
         st.stats.update(&session, |s| s.errors += 1);
@@ -292,8 +296,13 @@ fn error(status: StatusCode, msg: String) -> Response<Body> {
     Response::builder().status(status).body(Body::from(msg)).unwrap()
 }
 
-/// `anthropic-ratelimit-unified-5h-utilization: 0.63` and friends (subscription traffic only).
+/// Subscription windows from response headers: Claude's `anthropic-ratelimit-unified-5h-utilization`
+/// and friends, or Codex's `x-codex-primary-used-percent` / `-window-minutes` / `-reset-at`.
 fn record_quota(stats: &Stats, provider: &str, headers: &HeaderMap) {
+    if let Some(windows) = codex_windows(headers) {
+        stats.quotas.lock().unwrap().insert(provider.to_string(), Quota { windows });
+        return;
+    }
     const PREFIX: &str = "anthropic-ratelimit-unified-";
     let mut windows: HashMap<String, Window> = HashMap::new();
     for (name, value) in headers {
@@ -314,6 +323,26 @@ fn record_quota(stats: &Stats, provider: &str, headers: &HeaderMap) {
     let mut windows: Vec<_> = windows.into_iter().collect();
     windows.sort_by_key(|(name, _)| window_hours(name));
     stats.quotas.lock().unwrap().insert(provider.to_string(), Quota { windows });
+}
+
+fn codex_windows(headers: &HeaderMap) -> Option<Vec<(String, Window)>> {
+    let get = |k: String| headers.get(k).and_then(|v| v.to_str().ok()).filter(|v| !v.is_empty()).map(String::from);
+    let mut out = vec![];
+    for which in ["primary", "secondary"] {
+        let minutes: u64 = get(format!("x-codex-{which}-window-minutes")).and_then(|m| m.parse().ok()).unwrap_or(0);
+        if minutes == 0 {
+            continue;
+        }
+        let used: f32 = get(format!("x-codex-{which}-used-percent"))?.parse().ok()?;
+        let name = match minutes {
+            m if m % 1440 == 0 => format!("{}d", m / 1440),
+            m if m % 60 == 0 => format!("{}h", m / 60),
+            m => format!("{m}m"),
+        };
+        let resets_at = get(format!("x-codex-{which}-reset-at")).and_then(|t| t.parse().ok());
+        out.push((name, Window { utilization: used / 100.0, resets_at, status: None }));
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 fn window_hours(name: &str) -> u64 {
