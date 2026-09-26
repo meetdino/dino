@@ -66,6 +66,20 @@ pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String) 
             let env = if user_set("ANTHROPIC_BASE_URL") { vec![] } else { vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))] };
             (env, vec!["--settings".into(), claude_hook_settings(&base("hook"))])
         }
+        // Claude Code on the free pool: dino answers as the Anthropic API and routes each request.
+        // The token is a placeholder so Claude Code skips its own login; the proxy holds the real keys.
+        "claude-free" => {
+            let env = [
+                ("ANTHROPIC_BASE_URL", base("free")),
+                ("ANTHROPIC_AUTH_TOKEN", "dino-free".into()),
+                ("ANTHROPIC_MODEL", "auto".into()),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", "auto".into()),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", "auto".into()),
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "auto-fast".into()),
+                ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
+            ];
+            (env.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), vec!["--settings".into(), claude_hook_settings(&base("hook"))])
+        }
         "shell" if !user_set("ANTHROPIC_BASE_URL") => (vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))], vec![]),
         // A custom provider rather than `openai_base_url`: Codex otherwise tries WebSockets first,
         // which the proxy doesn't carry. `requires_openai_auth` keeps the user's own login.
@@ -109,6 +123,32 @@ fn claude_hook_settings(url: &str) -> String {
     let entry = format!(r#"[{{"hooks":[{{"type":"http","url":"{url}","timeout":5}}]}}]"#);
     let hooks: Vec<String> = EVENTS.iter().map(|e| format!(r#""{e}":{entry}"#)).collect();
     format!(r#"{{"hooks":{{{}}}}}"#, hooks.join(","))
+}
+
+fn config_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    home.join(".config/dino")
+}
+
+/// dino's own key store, `~/.config/dino/keys` (`VAR=value` lines, mode 600).
+pub fn keys_file() -> PathBuf {
+    config_dir().join("keys")
+}
+
+/// Provider keys dino can use itself: its key store, overridden by the environment.
+pub fn load_keys() -> std::collections::HashMap<String, String> {
+    let mut keys: std::collections::HashMap<String, String> = std::fs::read_to_string(keys_file())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect();
+    for (k, v) in std::env::vars() {
+        if k.ends_with("_API_KEY") && !v.is_empty() {
+            keys.insert(k, v);
+        }
+    }
+    keys
 }
 
 /// Persistent user choices, in `~/.config/dino/config` as `key=value` lines.

@@ -1,6 +1,9 @@
 //! Local pass-through proxy. Agents point their base URL at
 //! `http://127.0.0.1:<port>/s/<session>/<provider>`; we forward to the real API untouched
 //! (auth included) and observe usage, in-flight state and quota headers on the way back.
+//! The `free` provider is different: dino itself picks a free model and translates (see `free`).
+
+mod free;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -30,7 +33,7 @@ pub struct Usage {
 }
 
 impl Usage {
-    fn add(&mut self, o: &Usage) {
+    pub(crate) fn add(&mut self, o: &Usage) {
         self.input += o.input;
         self.output += o.output;
         self.cache_read += o.cache_read;
@@ -61,6 +64,8 @@ pub struct SessionStats {
     pub errors: u64,
     pub usage: Usage,
     pub last_model: Option<String>,
+    /// Router tier for free-tier sessions ("fast", "code", "reason").
+    pub tier: Option<String>,
     pub last_request: Option<Instant>,
 }
 
@@ -100,7 +105,7 @@ impl Stats {
         self.quotas.lock().unwrap().get(provider).cloned()
     }
 
-    fn update(&self, id: &str, f: impl FnOnce(&mut SessionStats)) {
+    pub(crate) fn update(&self, id: &str, f: impl FnOnce(&mut SessionStats)) {
         f(self.sessions.lock().unwrap().entry(id.to_string()).or_default());
     }
 }
@@ -112,12 +117,18 @@ pub struct Proxy {
 
 impl Proxy {
     /// Start on a random localhost port, on its own runtime thread.
-    pub fn start() -> anyhow::Result<Self> {
+    /// `keys` are provider credentials dino itself uses (e.g. `NVIDIA_API_KEY` for the free tier).
+    pub fn start(keys: HashMap<String, String>) -> anyhow::Result<Self> {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         std_listener.set_nonblocking(true)?;
         let port = std_listener.local_addr()?.port();
         let stats = Arc::new(Stats::default());
-        let state = AppState { stats: stats.clone(), client: reqwest::Client::builder().build()? };
+        let state = AppState {
+            stats: stats.clone(),
+            client: reqwest::Client::builder().build()?,
+            router: Arc::default(),
+            keys: Arc::new(keys),
+        };
 
         std::thread::Builder::new().name("dino-proxy".into()).spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
@@ -143,9 +154,11 @@ impl Proxy {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     stats: Arc<Stats>,
     client: reqwest::Client,
+    router: Arc<dino_router::Router>,
+    keys: Arc<HashMap<String, String>>,
 }
 
 /// Headers we must not copy between the two connections.
@@ -162,6 +175,12 @@ async fn forward(
     Path((session, provider, rest)): Path<(String, String, String)>,
     req: Request,
 ) -> Response<Body> {
+    if provider == "free" {
+        let Ok(body) = axum::body::to_bytes(req.into_body(), usize::MAX).await else {
+            return error(StatusCode::BAD_REQUEST, "unreadable body".into());
+        };
+        return free::handle(st, session, &rest, body).await;
+    }
     let Some(&(_, upstream)) = PROVIDERS.iter().find(|(p, _)| *p == provider) else {
         return error(StatusCode::NOT_FOUND, format!("unknown provider {provider}"));
     };
@@ -273,15 +292,16 @@ async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Byt
 }
 
 /// Append a line to `$DINO_PROXY_LOG`, if set. Debugging aid.
-fn log(line: std::fmt::Arguments<'_>) {
+pub(crate) fn log(line: std::fmt::Arguments<'_>) {
     use std::io::Write;
     let Some(path) = std::env::var_os("DINO_PROXY_LOG") else { return };
+    // One write per line so concurrent requests don't interleave.
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{line}");
+        let _ = f.write_all(format!("{line}\n").as_bytes());
     }
 }
 
-struct InFlight {
+pub(crate) struct InFlight {
     stats: Arc<Stats>,
     session: String,
 }

@@ -13,7 +13,7 @@ use crossterm::terminal;
 use std::sync::{Arc, Mutex};
 
 use dino_core::discover::{self, Inventory};
-use dino_core::{Config, Detected, detect_agents, proxy_wiring, user_shell};
+use dino_core::{Config, Detected, detect_agents, load_keys, proxy_wiring, user_shell};
 use dino_proxy::{Activity, Proxy, SessionStats, Usage};
 use dino_term::{Pane, SpawnSpec};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -87,6 +87,8 @@ enum Mode {
 
 struct Launcher {
     agent_id: String,
+    /// Session name stem, e.g. "claude", "free".
+    short: String,
     label: String,
     program: String,
 }
@@ -107,14 +109,18 @@ struct App {
 }
 
 impl App {
-    fn new(detected: Vec<Detected>, proxy: Proxy) -> Self {
-        let mut launchers: Vec<Launcher> = detected
-            .into_iter()
-            .map(|d| Launcher { agent_id: d.kind.id.into(), label: d.kind.name.into(), program: d.path.to_string_lossy().into() })
-            .collect();
+    fn new(detected: Vec<Detected>, proxy: Proxy, free_tier: bool) -> Self {
+        let mut launchers = vec![];
+        for d in detected {
+            let program: String = d.path.to_string_lossy().into();
+            if d.kind.id == "claude" && free_tier {
+                launchers.push(Launcher { agent_id: "claude-free".into(), short: "free".into(), label: "Claude Code · free models".into(), program: program.clone() });
+            }
+            launchers.push(Launcher { agent_id: d.kind.id.into(), short: d.kind.id.into(), label: d.kind.name.into(), program });
+        }
         let shell = user_shell();
         let shell_name = shell.rsplit('/').next().unwrap_or("shell").to_string();
-        launchers.push(Launcher { agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell });
+        launchers.push(Launcher { agent_id: "shell".into(), short: "shell".into(), label: format!("Shell ({shell_name})"), program: shell });
         Self { sessions: vec![], focused: 0, mode: Mode::Picker { selected: 0 }, launchers, pane_size: (80, 24), quit: false, started: Instant::now(), proxy, next_id: 1, config: Config::load(), inventory: Arc::default(), welcome_opened: Instant::now() }
     }
 
@@ -132,7 +138,7 @@ impl App {
         };
         match Pane::spawn(spec, self.pane_size.0, self.pane_size.1) {
             Ok(pane) => {
-                let base = l.label.split(' ').next().unwrap_or("agent").to_lowercase();
+                let base = l.short.clone();
                 let n = self.sessions.iter().filter(|s| s.name.starts_with(&base)).count();
                 let name = if n == 0 { base } else { format!("{base}-{}", n + 1) };
                 self.sessions.push(Session { id, name, stats: SessionStats::default(), pane, last_output: None, attention: false, unseen_done: false });
@@ -374,6 +380,14 @@ impl App {
             }
             if s.stats.requests > 0 {
                 let model = s.stats.last_model.as_deref().map(short_model).unwrap_or_default();
+                if let Some(tier) = &s.stats.tier {
+                    // Free tier: which tier the router picked and which model actually answered.
+                    lines.push(Line::from(vec![
+                        Span::from(format!("    {tier} → ")).fg(Color::LightCyan),
+                        Span::from(truncate(&model, 16)).fg(Color::LightCyan),
+                    ]));
+                }
+                let model = if s.stats.tier.is_some() { String::new() } else { model };
                 let u = &s.stats.usage;
                 lines.push(Line::from(format!("    ↑{} ↓{} {model}", tokens(u.total_input()), tokens(u.output))).fg(MUTED));
             }
@@ -435,6 +449,10 @@ impl App {
             let u = &s.stats.usage;
             total.input += u.total_input();
             total.output += u.output;
+        }
+        let free: u64 = self.sessions.iter().filter(|s| s.stats.tier.is_some()).map(|s| s.stats.usage.total_input() + s.stats.usage.output).sum();
+        if free > 0 {
+            lines.push(Line::from(vec![Span::from(" free  ").fg(MUTED), Span::from(format!("{} tok", tokens(free))), Span::from("  $0.00").fg(ACCENT)]));
         }
         if total.input + total.output > 0 {
             lines.push(Line::from(format!(" tokens ↑{} ↓{}", tokens(total.input), tokens(total.output))).fg(MUTED));
@@ -645,7 +663,9 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut app = App::new(detect_agents(), Proxy::start()?);
+    let keys = load_keys();
+    let free_tier = keys.contains_key("NVIDIA_API_KEY");
+    let mut app = App::new(detect_agents(), Proxy::start(keys)?, free_tier);
     // `dino <agent> [agent args...]`, or `dino --welcome` to replay onboarding.
     let mut cli: Vec<String> = std::env::args().skip(1).collect();
     if cli.first().is_some_and(|a| a == "--welcome") {
@@ -656,7 +676,9 @@ fn main() -> anyhow::Result<()> {
         app.open_welcome();
     }
     if let Some((arg, extra)) = cli.split_first() {
-        if let Some(i) = app.launchers.iter().position(|l| l.label.to_lowercase().starts_with(&arg.to_lowercase())) {
+        let arg = arg.to_lowercase();
+        let found = app.launchers.iter().position(|l| l.short == arg).or_else(|| app.launchers.iter().position(|l| l.label.to_lowercase().starts_with(&arg)));
+        if let Some(i) = found {
             app.mode = Mode::Pane;
             let (cols, rows) = terminal::size()?;
             app.pane_size = (cols.saturating_sub(SIDEBAR_WIDTH), rows.saturating_sub(1));
