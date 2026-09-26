@@ -11,7 +11,7 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal;
 use dino_core::{Detected, detect_agents, proxy_wiring, user_shell};
-use dino_proxy::{Proxy, SessionStats, Usage};
+use dino_proxy::{Activity, Proxy, SessionStats, Usage};
 use dino_term::{Pane, SpawnSpec};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -31,7 +31,10 @@ struct Session {
     stats: SessionStats,
     pane: Pane,
     last_output: Option<Instant>,
+    /// Rang the bell while in the background.
     attention: bool,
+    /// Finished a turn while in the background; cleared when focused.
+    unseen_done: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -41,6 +44,7 @@ enum Status {
     /// Recent terminal output, e.g. a tool running.
     Working,
     Idle,
+    Done,
     Attention,
     Exited,
 }
@@ -49,12 +53,16 @@ impl Session {
     fn status(&self) -> Status {
         if self.pane.is_exited() {
             Status::Exited
-        } else if self.attention {
+        } else if self.attention || matches!(self.stats.activity, Some(Activity::NeedsPermission(_))) {
             Status::Attention
         } else if self.stats.in_flight > 0 {
             Status::Thinking
-        } else if self.last_output.is_some_and(|t| t.elapsed() < ACTIVE_WINDOW) {
+        } else if self.stats.activity == Some(Activity::Working)
+            || self.last_output.is_some_and(|t| t.elapsed() < ACTIVE_WINDOW)
+        {
             Status::Working
+        } else if self.unseen_done {
+            Status::Done
         } else {
             Status::Idle
         }
@@ -101,11 +109,12 @@ impl App {
         Self { sessions: vec![], focused: 0, mode: Mode::Picker { selected: 0 }, launchers, pane_size: (80, 24), quit: false, started: Instant::now(), proxy, next_id: 1 }
     }
 
-    fn spawn(&mut self, launcher: usize) {
+    fn spawn(&mut self, launcher: usize, extra_args: &[String]) {
         let l = &self.launchers[launcher];
         let id = self.next_id.to_string();
         self.next_id += 1;
-        let (env, args) = proxy_wiring(&l.agent_id, &|provider| self.proxy.base_url(&id, provider));
+        let (env, mut args) = proxy_wiring(&l.agent_id, &|provider| self.proxy.base_url(&id, provider));
+        args.extend_from_slice(extra_args);
         let spec = SpawnSpec {
             program: l.program.clone(),
             args,
@@ -117,7 +126,7 @@ impl App {
                 let base = l.label.split(' ').next().unwrap_or("agent").to_lowercase();
                 let n = self.sessions.iter().filter(|s| s.name.starts_with(&base)).count();
                 let name = if n == 0 { base } else { format!("{base}-{}", n + 1) };
-                self.sessions.push(Session { id, name, stats: SessionStats::default(), pane, last_output: None, attention: false });
+                self.sessions.push(Session { id, name, stats: SessionStats::default(), pane, last_output: None, attention: false, unseen_done: false });
                 self.focus(self.sessions.len() - 1);
             }
             Err(e) => eprintln!("spawn failed: {e}"),
@@ -128,6 +137,7 @@ impl App {
         if i < self.sessions.len() {
             self.focused = i;
             self.sessions[i].attention = false;
+            self.sessions[i].unseen_done = false;
         }
     }
 
@@ -138,10 +148,8 @@ impl App {
     /// Jump to the next session that needs the user, falling back to plain cycling.
     fn next_attention(&mut self) {
         let n = self.sessions.len();
-        let target = (1..=n)
-            .map(|d| (self.focused + d) % n)
-            .find(|&i| self.sessions[i].status() == Status::Attention)
-            .unwrap_or((self.focused + 1) % n.max(1));
+        let find = |want: Status| (1..=n).map(|d| (self.focused + d) % n).find(|&i| self.sessions[i].status() == want);
+        let target = find(Status::Attention).or_else(|| find(Status::Done)).unwrap_or((self.focused + 1) % n.max(1));
         self.focus(target);
     }
 
@@ -160,8 +168,15 @@ impl App {
         let mut redraw = false;
         for (i, s) in self.sessions.iter_mut().enumerate() {
             let stats = self.proxy.stats.session(&s.id);
-            if (stats.requests, stats.in_flight, stats.usage.output) != (s.stats.requests, s.stats.in_flight, s.stats.usage.output) {
+            if (stats.requests, stats.in_flight, stats.usage.output) != (s.stats.requests, s.stats.in_flight, s.stats.usage.output)
+                || stats.activity != s.stats.activity
+            {
                 redraw = true;
+            }
+            let finished = stats.activity == Some(Activity::Done)
+                && matches!(s.stats.activity, Some(Activity::Working | Activity::NeedsPermission(_)));
+            if finished && i != self.focused {
+                s.unseen_done = true;
             }
             s.stats = stats;
             if s.pane.shared.dirty.swap(false, Ordering::Relaxed) {
@@ -216,13 +231,13 @@ impl App {
                     let i = c as usize - '1' as usize;
                     if i < self.launchers.len() {
                         self.mode = Mode::Pane;
-                        self.spawn(i);
+                        self.spawn(i, &[]);
                     }
                 }
                 KeyCode::Enter => {
                     let i = *selected;
                     self.mode = Mode::Pane;
-                    self.spawn(i);
+                    self.spawn(i, &[]);
                 }
                 KeyCode::Esc if !self.sessions.is_empty() => self.mode = Mode::Pane,
                 KeyCode::Char('q') | KeyCode::Esc if self.sessions.is_empty() => self.quit = true,
@@ -287,6 +302,7 @@ impl App {
                 Status::Thinking => (if blink { "◆" } else { "◇" }, "thinking", Color::LightMagenta),
                 Status::Working => (if blink { "●" } else { "◉" }, "working", ACCENT),
                 Status::Idle => ("○", "idle", MUTED),
+                Status::Done => ("✓", "done", Color::LightCyan),
                 Status::Attention => ("!", "needs you", Color::Yellow),
                 Status::Exited => ("✕", "exited", Color::Red),
             };
@@ -301,10 +317,13 @@ impl App {
                 line = line.bg(Color::Rgb(0x2a, 0x2a, 0x33)).bold();
             }
             lines.push(line);
+            if let Some(Activity::NeedsPermission(what)) = &s.stats.activity {
+                lines.push(Line::from(format!("    ⚠ {}", truncate(what, 22))).fg(Color::Yellow));
+            }
             if s.stats.requests > 0 {
                 let model = s.stats.last_model.as_deref().map(short_model).unwrap_or_default();
                 let u = &s.stats.usage;
-                lines.push(Line::from(format!("      ↑{} ↓{}  {model}", tokens(u.total_input()), tokens(u.output))).fg(MUTED));
+                lines.push(Line::from(format!("    ↑{} ↓{} {model}", tokens(u.total_input()), tokens(u.output))).fg(MUTED));
             }
         }
         if self.sessions.is_empty() {
@@ -478,12 +497,14 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let mut app = App::new(detect_agents(), Proxy::start()?);
-    if let Some(arg) = std::env::args().nth(1) {
+    // `dino <agent> [agent args...]`
+    let cli: Vec<String> = std::env::args().skip(1).collect();
+    if let Some((arg, extra)) = cli.split_first() {
         if let Some(i) = app.launchers.iter().position(|l| l.label.to_lowercase().starts_with(&arg.to_lowercase())) {
             app.mode = Mode::Pane;
             let (cols, rows) = terminal::size()?;
             app.pane_size = (cols.saturating_sub(SIDEBAR_WIDTH), rows.saturating_sub(1));
-            app.spawn(i);
+            app.spawn(i, extra);
         }
     }
 
