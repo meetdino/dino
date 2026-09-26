@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 dino-core = { path = "crates/dino-core" }
 dino-term = { path = "crates/dino-term" }
+dino-daemon = { path = "crates/dino-daemon" }
 alacritty_terminal = "0.26"
 terminput = "0.5"
 terminput-crossterm = "0.4"

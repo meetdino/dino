@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod discover;
+pub mod ipc;
 
 /// A coding agent (or plain program) dino knows how to launch.
 #[derive(Clone, Debug)]
@@ -125,7 +126,7 @@ fn claude_hook_settings(url: &str) -> String {
     format!(r#"{{"hooks":{{{}}}}}"#, hooks.join(","))
 }
 
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     home.join(".config/dino")
 }

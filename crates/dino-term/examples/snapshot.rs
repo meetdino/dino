@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
     let program = args.next().unwrap_or("/bin/sh".into());
     let spec = SpawnSpec { program, args: args.collect(), cwd: std::env::current_dir().ok(), env: Default::default() };
     let (w, h) = (110, 36);
-    let pane = Pane::spawn(spec, w, h)?;
+    let pane = Pane::spawn(spec, w, h, |_| {})?;
     std::thread::sleep(Duration::from_secs(secs));
     // DINO_SNAP_KEYS: text to type as key events, "\n" = Enter, "~" = Down arrow,
     // "{click:x,y}" = left click at that cell, "{ctrl:c}" = Ctrl+c.
@@ -51,6 +51,19 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_secs(secs));
     }
 
+    // DINO_SNAP_REPLAY: render a fresh emulator fed only with the replay, to check attach fidelity.
+    let pane = if std::env::var_os("DINO_SNAP_REPLAY").is_some() {
+        struct Null;
+        impl dino_term::Transport for Null {
+            fn write(&self, _: Vec<u8>) {}
+            fn resize(&self, _: u16, _: u16) {}
+        }
+        let copy = Pane::remote(std::sync::Arc::new(Null), w, h);
+        copy.feed(&pane.replay(1000));
+        copy
+    } else {
+        pane
+    };
     let area = Rect::new(0, 0, w, h);
     let mut buf = Buffer::empty(area);
     let cursor = pane.render(area, &mut buf);

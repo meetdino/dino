@@ -1,14 +1,12 @@
 [package]
-name = "dino"
+name = "dino-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 dino-core.workspace = true
 dino-term.workspace = true
-ratatui.workspace = true
-crossterm.workspace = true
-anyhow.workspace = true
-dino-daemon.workspace = true
+dino-proxy = { path = "../dino-proxy" }
 serde_json = "1"
