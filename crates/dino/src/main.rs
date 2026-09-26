@@ -10,7 +10,10 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal;
-use dino_core::{Detected, detect_agents, proxy_wiring, user_shell};
+use std::sync::{Arc, Mutex};
+
+use dino_core::discover::{self, Inventory};
+use dino_core::{Config, Detected, detect_agents, proxy_wiring, user_shell};
 use dino_proxy::{Activity, Proxy, SessionStats, Usage};
 use dino_term::{Pane, SpawnSpec};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -20,7 +23,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 const SIDEBAR_WIDTH: u16 = 28;
-const ACCENT: Color = Color::Rgb(0x7a, 0xd3, 0x8f);
+const ACCENT: Color = Color::Rgb(0x75, 0xb3, 0x40);
+const SPIKE: Color = Color::Rgb(0xfc, 0x4f, 0x26);
 const MUTED: Color = Color::DarkGray;
 /// Output within this window counts as "working".
 const ACTIVE_WINDOW: Duration = Duration::from_millis(1500);
@@ -77,6 +81,8 @@ enum Mode {
     Command,
     /// New-session picker is open.
     Picker { selected: usize },
+    /// Machine scan: agents, logins, keys, local models. Full-screen on first run.
+    Welcome,
 }
 
 struct Launcher {
@@ -95,6 +101,9 @@ struct App {
     started: Instant,
     proxy: Proxy,
     next_id: u64,
+    config: Config,
+    inventory: Arc<Mutex<Option<Inventory>>>,
+    welcome_opened: Instant,
 }
 
 impl App {
@@ -106,14 +115,14 @@ impl App {
         let shell = user_shell();
         let shell_name = shell.rsplit('/').next().unwrap_or("shell").to_string();
         launchers.push(Launcher { agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell });
-        Self { sessions: vec![], focused: 0, mode: Mode::Picker { selected: 0 }, launchers, pane_size: (80, 24), quit: false, started: Instant::now(), proxy, next_id: 1 }
+        Self { sessions: vec![], focused: 0, mode: Mode::Picker { selected: 0 }, launchers, pane_size: (80, 24), quit: false, started: Instant::now(), proxy, next_id: 1, config: Config::load(), inventory: Arc::default(), welcome_opened: Instant::now() }
     }
 
     fn spawn(&mut self, launcher: usize, extra_args: &[String]) {
         let l = &self.launchers[launcher];
         let id = self.next_id.to_string();
         self.next_id += 1;
-        let (env, mut args) = proxy_wiring(&l.agent_id, &|provider| self.proxy.base_url(&id, provider));
+        let (env, mut args) = proxy_wiring(&l.agent_id, self.config.route, &|provider| self.proxy.base_url(&id, provider));
         args.extend_from_slice(extra_args);
         let spec = SpawnSpec {
             program: l.program.clone(),
@@ -131,6 +140,18 @@ impl App {
             }
             Err(e) => eprintln!("spawn failed: {e}"),
         }
+    }
+
+    fn open_welcome(&mut self) {
+        let inv = self.inventory.clone();
+        *inv.lock().unwrap() = None;
+        std::thread::spawn(move || *inv.lock().unwrap() = Some(discover::scan()));
+        self.welcome_opened = Instant::now();
+        self.mode = Mode::Welcome;
+    }
+
+    fn leave_modal(&mut self) {
+        self.mode = if self.sessions.is_empty() { Mode::Picker { selected: 0 } } else { Mode::Pane };
     }
 
     fn focus(&mut self, i: usize) {
@@ -220,7 +241,22 @@ impl App {
                     KeyCode::Char(' ') | KeyCode::Tab => self.next_attention(),
                     KeyCode::Char(c @ '1'..='9') => self.focus(c as usize - '1' as usize),
                     KeyCode::Char('x') => self.close_focused(),
+                    KeyCode::Char('d') => self.open_welcome(),
                     KeyCode::Char('q') => self.quit = true,
+                    _ => {}
+                }
+            }
+            Mode::Welcome => {
+                let first_run = !self.config.onboarded;
+                match key.code {
+                    KeyCode::Char('y' | 'Y') | KeyCode::Enter if first_run => self.finish_onboarding(true),
+                    KeyCode::Char('n' | 'N') if first_run => self.finish_onboarding(false),
+                    KeyCode::Char('r') if !first_run => {
+                        self.config.route = !self.config.route;
+                        let _ = self.config.save();
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.leave_modal(),
                     _ => {}
                 }
             }
@@ -247,7 +283,18 @@ impl App {
         }
     }
 
+    fn finish_onboarding(&mut self, route: bool) {
+        self.config.onboarded = true;
+        self.config.route = route;
+        let _ = self.config.save();
+        self.leave_modal();
+    }
+
     fn draw(&mut self, f: &mut Frame) {
+        if self.mode == Mode::Welcome && !self.config.onboarded {
+            self.draw_welcome(f, f.area());
+            return;
+        }
         let [sidebar, main] =
             Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)]).areas(f.area());
         self.draw_sidebar(f, sidebar);
@@ -281,8 +328,13 @@ impl App {
             }
         }
 
-        if let Mode::Picker { selected } = self.mode {
-            self.draw_picker(f, main, selected);
+        match self.mode {
+            Mode::Picker { selected } => self.draw_picker(f, main, selected),
+            Mode::Welcome => {
+                f.render_widget(Clear, main);
+                self.draw_welcome(f, main);
+            }
+            _ => {}
         }
     }
 
@@ -334,6 +386,7 @@ impl App {
         let hint = match self.mode {
             Mode::Command => vec![
                 Line::from(" n new   x close   q quit").fg(Color::Yellow),
+                Line::from(" d your machine").fg(Color::Yellow),
                 Line::from(" j/k  1-9  space: needs-you").fg(Color::Yellow),
             ],
             _ => vec![Line::from(" ^] command").fg(MUTED)],
@@ -350,27 +403,32 @@ impl App {
 
     fn usage_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = vec![Line::from(" USAGE").fg(MUTED).add_modifier(Modifier::BOLD)];
-        if let Some(q) = self.proxy.stats.quota("anthropic") {
-            for (name, w) in q.windows.iter().filter(|(n, _)| n.ends_with('h') || n.ends_with('d')) {
+        let mut any = false;
+        for (provider, label) in [("anthropic", "claude"), ("chatgpt", "codex")] {
+            let Some(q) = self.proxy.stats.quota(provider) else { continue };
+            any = true;
+            for (i, (name, w)) in q.windows.iter().filter(|(n, _)| n.ends_with(['h', 'd'])).enumerate() {
                 let pct = (w.utilization * 100.0).round() as u16;
                 let color = match pct {
                     0..=59 => ACCENT,
                     60..=84 => Color::Yellow,
                     _ => Color::Red,
                 };
-                let bar_w = width.saturating_sub(20).clamp(4, 10) as usize;
+                let bar_w = width.saturating_sub(24).clamp(3, 8) as usize;
                 let filled = ((w.utilization.clamp(0.0, 1.0) * bar_w as f32).round() as usize).min(bar_w);
                 let reset = w.resets_in_secs().map(duration).unwrap_or_default();
+                let who = if i == 0 { label } else { "" };
                 lines.push(Line::from(vec![
-                    Span::from(format!(" {name:<3}")).fg(MUTED),
+                    Span::from(format!(" {who:<6}{name:<4}")).fg(MUTED),
                     Span::from("█".repeat(filled)).fg(color),
                     Span::from("░".repeat(bar_w - filled)).fg(Color::Rgb(0x3a, 0x3a, 0x44)),
                     Span::from(format!(" {pct:>3}% ")).fg(color),
                     Span::from(reset).fg(MUTED),
                 ]));
             }
-        } else {
-            lines.push(Line::from(" claude  no data yet").fg(MUTED));
+        }
+        if !any {
+            lines.push(Line::from(" no quota data yet").fg(MUTED));
         }
         let mut total = Usage::default();
         for s in &self.sessions {
@@ -382,6 +440,87 @@ impl App {
             lines.push(Line::from(format!(" tokens ↑{} ↓{}", tokens(total.input), tokens(total.output))).fg(MUTED));
         }
         lines
+    }
+
+    fn draw_welcome(&self, f: &mut Frame, area: Rect) {
+        let first_run = !self.config.onboarded;
+        let inv = self.inventory.lock().unwrap().clone();
+        let mut lines: Vec<Line> = vec![
+            Line::from(vec![Span::from("▲▲ ").fg(SPIKE), Span::from("dino").bold().fg(ACCENT)]),
+            Line::from("one place for every agent, account and model on this machine").fg(MUTED),
+            Line::default(),
+        ];
+        let Some(inv) = inv else {
+            let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][(self.started.elapsed().as_millis() / 80 % 10) as usize];
+            lines.push(Line::from(format!("{spin} scanning your machine…")).fg(MUTED));
+            return render_centered(f, area, lines);
+        };
+
+        let section = |t: &str| Line::from(t.to_string()).fg(MUTED).add_modifier(Modifier::BOLD);
+        let ok = || Span::from("✓ ").fg(ACCENT);
+        let no = || Span::from("· ").fg(MUTED);
+
+        lines.push(section("AGENTS"));
+        for a in inv.agents.iter().filter(|a| a.path.is_some()) {
+            let auth = a.auth.clone().unwrap_or_default();
+            let auth_color = if auth.contains("signed out") || auth.contains("not signed") { Color::Yellow } else { Color::Reset };
+            let routed = if a.meterable { Span::from("● metered").fg(ACCENT) } else { Span::from("○ direct").fg(MUTED) };
+            lines.push(Line::from(vec![
+                ok(),
+                Span::from(format!("{:<14}", a.kind.name)).bold(),
+                Span::from(format!("{:<11}", a.version.clone().unwrap_or_default())).fg(MUTED),
+                Span::from(format!("{auth:<16}")).fg(auth_color),
+                routed,
+            ]));
+        }
+        for a in inv.agents.iter().filter(|a| a.path.is_none()).take(4) {
+            lines.push(Line::from(vec![
+                no(),
+                Span::from(format!("{:<14}", a.kind.name)).fg(MUTED),
+                Span::from(a.install).fg(Color::Rgb(0x55, 0x55, 0x60)),
+            ]));
+        }
+
+        lines.push(Line::default());
+        lines.push(section("API KEYS"));
+        if inv.keys.is_empty() {
+            lines.push(Line::from("  none in env, shell rc files or ./.env").fg(MUTED));
+        }
+        for k in &inv.keys {
+            lines.push(Line::from(vec![
+                ok(),
+                Span::from(format!("{:<14}", k.provider)).bold(),
+                Span::from(format!("{:<12}", k.masked)).fg(MUTED),
+                Span::from(k.source.clone()).fg(MUTED),
+            ]));
+        }
+
+        lines.push(Line::default());
+        lines.push(section("LOCAL MODELS"));
+        for l in &inv.local {
+            let (mark, state) = if l.up { (ok(), Span::from("running").fg(ACCENT)) } else { (no(), Span::from("not running").fg(MUTED)) };
+            lines.push(Line::from(vec![mark, Span::from(format!("{:<14}", l.name)), Span::from(format!("{:<17}", l.addr)).fg(MUTED), state]));
+        }
+
+        // Reveal the scan a line at a time; it's the first thing a new user sees.
+        let revealed = 3 + (self.welcome_opened.elapsed().as_millis() / 45) as usize;
+        let all_shown = revealed >= lines.len();
+        lines.truncate(revealed);
+        if all_shown {
+            lines.push(Line::default());
+            if first_run {
+                lines.push(Line::from(vec![
+                    Span::from("Route agents through dino's local proxy?  ").bold(),
+                    Span::from("[Y/n]").fg(ACCENT).bold(),
+                ]));
+                lines.push(Line::from("Metering, quotas and live status. Your logins and keys stay where they are.").fg(MUTED));
+            } else {
+                let state = if self.config.route { Span::from("on").fg(ACCENT).bold() } else { Span::from("off").fg(Color::Yellow).bold() };
+                lines.push(Line::from(vec![Span::from("Routing through proxy: "), state, Span::from("   r toggle · esc close").fg(MUTED)]));
+                lines.push(Line::from("Applies to newly started sessions.").fg(MUTED));
+            }
+        }
+        render_centered(f, area, lines);
     }
 
     fn draw_picker(&self, f: &mut Frame, area: Rect, selected: usize) {
@@ -406,6 +545,15 @@ impl App {
         }
         f.render_widget(Paragraph::new(lines), inner);
     }
+}
+
+/// Left-aligned block, centered as a whole in `area`.
+fn render_centered(f: &mut Frame, area: Rect, lines: Vec<Line>) {
+    let w = (lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16).min(area.width);
+    // Fixed minimum so the block doesn't drift upward while lines are revealed.
+    let h = (lines.len() as u16).max(24).min(area.height);
+    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 3, width: w, height: h };
+    f.render_widget(Paragraph::new(lines), r);
 }
 
 fn is_prefix(key: &KeyEvent) -> bool {
@@ -486,6 +634,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             redraw = true;
         }
         redraw |= app.poll_sessions();
+        redraw |= app.mode == Mode::Welcome;
         // Periodic tick keeps status labels (working → idle) and the spinner fresh.
         if last_tick.elapsed() > Duration::from_millis(400) {
             last_tick = Instant::now();
@@ -497,8 +646,15 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let mut app = App::new(detect_agents(), Proxy::start()?);
-    // `dino <agent> [agent args...]`
-    let cli: Vec<String> = std::env::args().skip(1).collect();
+    // `dino <agent> [agent args...]`, or `dino --welcome` to replay onboarding.
+    let mut cli: Vec<String> = std::env::args().skip(1).collect();
+    if cli.first().is_some_and(|a| a == "--welcome") {
+        cli.remove(0);
+        app.config.onboarded = false;
+    }
+    if !app.config.onboarded && cli.is_empty() {
+        app.open_welcome();
+    }
     if let Some((arg, extra)) = cli.split_first() {
         if let Some(i) = app.launchers.iter().position(|l| l.label.to_lowercase().starts_with(&arg.to_lowercase())) {
             app.mode = Mode::Pane;
