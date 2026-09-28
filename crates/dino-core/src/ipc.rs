@@ -120,6 +120,9 @@ pub struct SessionInfo {
     /// The fan-out group this session belongs to.
     #[serde(default)]
     pub group: Option<String>,
+    /// Why the agent's last model call failed, if it did.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 pub use crate::worktree::DiffStat;

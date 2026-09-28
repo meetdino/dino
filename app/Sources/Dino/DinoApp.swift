@@ -344,6 +344,9 @@ struct SessionRow: View {
                 Label(needs, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(SessionStatus.needsYou.color).lineLimit(1)
             }
+            if let error = session.error {
+                ErrorLine(message: error)
+            }
             if let stat, stat.files > 0 {
                 StatText(stat: stat).font(.caption.monospacedDigit())
             }

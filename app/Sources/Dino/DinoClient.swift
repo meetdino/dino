@@ -17,6 +17,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var tier: String?
     var activity: String?
     var group: String?
+    /// Why the agent's last model call failed.
+    var error: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }

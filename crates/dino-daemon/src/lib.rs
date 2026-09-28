@@ -365,6 +365,7 @@ fn state(d: &Daemon) -> Response {
                     Activity::NeedsPermission(what) => format!("needs:{what}"),
                 }),
                 group: group_of(&s.id),
+                error: st.last_error,
             }
         })
         .collect();
