@@ -59,7 +59,12 @@ final class DinoModel: ObservableObject {
     var elsewhere: [FoundSession] { found.filter { $0.source == "running" } }
 
     /// Where new sessions start.
-    @Published var folder: URL = FileManager.default.homeDirectoryForCurrentUser
+    @Published var folder: URL = FileManager.default.homeDirectoryForCurrentUser {
+        didSet { if folder != oldValue { refreshTree() } }
+    }
+
+    /// Repos and folders the sidebar shows, with their worktrees.
+    @Published var repos: [RepoInfo] = []
 
     /// Rang the bell or finished while in the background; cleared when selected.
     @Published private(set) var attention: Set<String> = []
@@ -83,6 +88,7 @@ final class DinoModel: ObservableObject {
                     self.poll()
                     self.watchElsewhere()
                     self.watchGroups()
+                    self.watchTree()
                 }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
@@ -155,6 +161,8 @@ final class DinoModel: ObservableObject {
                 }
             }
         }
+        // A session in a folder the tree hasn't seen: ask for it now rather than on the next tick.
+        if Set(next.compactMap(\.cwd)) != Set(sessions.compactMap(\.cwd)) { refreshTree() }
         if next != sessions { sessions = next }
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
@@ -164,7 +172,8 @@ final class DinoModel: ObservableObject {
             select(want)
         }
         let groupSelected = selected.map { id in groups.contains { "group:\($0.id)" == id } } ?? false
-        if !groupSelected, selected == nil || !live.contains(selected!) {
+        let folderSelected = selected?.hasPrefix("dir:") ?? false
+        if !groupSelected, !folderSelected, selected == nil || !live.contains(selected!) {
             // Through select(), so the terminal also takes keyboard focus on launch.
             select(next.first?.id)
         }
@@ -184,6 +193,12 @@ final class DinoModel: ObservableObject {
     func select(_ id: String?) {
         selected = id
         guard let id else { return }
+        if id.hasPrefix("dir:") {
+            folder = URL(fileURLWithPath: String(id.dropFirst(4)))
+            return
+        }
+        // New sessions start next to the one you're looking at.
+        if let cwd = sessions.first(where: { $0.id == id })?.cwd { folder = URL(fileURLWithPath: cwd) }
         attention.remove(id)
         unseenDone.remove(id)
         terminals[id]?.requestFocus()
@@ -301,6 +316,24 @@ final class DinoModel: ObservableObject {
     }
 
     private var pendingGroup: String?
+
+    private func watchTree() {
+        Task.detached {
+            while true {
+                await self.refreshTree()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    /// Worktrees come from git, so this runs off the main thread and off the session poll.
+    func refreshTree() {
+        let folders = [folder.path]
+        Task.detached {
+            guard let list = try? DinoConnection(path: DinoEnvironment.socketPath).tree(folders: folders) else { return }
+            await MainActor.run { if list != self.repos { self.repos = list } }
+        }
+    }
 
     /// Start a fan-out in the current folder; throws dinod's reason (not a git repo, …).
     func fanout(prompt: String, launchers: [String]) async throws {

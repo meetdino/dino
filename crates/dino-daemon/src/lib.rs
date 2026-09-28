@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
-use dino_core::{Config, detect_agents, load_keys, proxy_wiring, user_shell};
+use dino_core::{Config, detect_agents, load_keys, proxy_wiring, user_shell, worktree};
 use dino_proxy::{Activity, Proxy};
 use dino_term::{Pane, SpawnSpec};
 
@@ -160,6 +160,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Groups => Response::Groups { groups: groups(d) },
+            Request::Tree { folders } => Response::Tree { repos: tree(d, folders) },
             Request::Diff { session } => match member_diff(d, &session) {
                 Ok((stat, text)) => Response::Diff { stat, text },
                 Err(e) => Response::Error { message: e.to_string() },
@@ -263,8 +264,9 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         (Some(r), _) => r.name.clone(),
         (None, Some(name)) => name,
         (None, None) => {
-            let n = sessions.iter().filter(|s| s.name == l.short || s.name.starts_with(&format!("{}-", l.short))).count();
-            if n == 0 { l.short.clone() } else { format!("{}-{}", l.short, n + 1) }
+            // The first free name: counting would repeat one once an earlier session is gone.
+            let taken = |n: &str| sessions.iter().any(|s| s.name == n);
+            std::iter::once(l.short.clone()).chain((2..).map(|n| format!("{}-{n}", l.short))).find(|n| !taken(n)).unwrap()
         }
     };
     sessions.push(Arc::new(Session {
@@ -366,6 +368,7 @@ fn state(d: &Daemon) -> Response {
                 }),
                 group: group_of(&s.id),
                 error: st.last_error,
+                cwd: real(&s.cwd),
             }
         })
         .collect();
@@ -676,7 +679,6 @@ fn save_groups(groups: &[Group]) {
 }
 
 fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -> anyhow::Result<String> {
-    use dino_core::worktree;
     let prompt = prompt.trim();
     anyhow::ensure!(!prompt.is_empty(), "fan-out needs a prompt");
     let mut picked: Vec<&LauncherInfo> = vec![];
@@ -710,6 +712,44 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
     groups.push(group);
     save_groups(&groups);
     Ok(id)
+}
+
+fn real(p: &Path) -> String {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+}
+
+/// Every repo a session runs in (or a fan-out came from), and each extra folder, once.
+fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
+    let mut dirs: Vec<String> = d.sessions.lock().unwrap().iter().map(|s| real(&s.cwd)).collect();
+    dirs.extend(d.groups.lock().unwrap().iter().map(|g| real(Path::new(&g.repo))));
+    dirs.extend(folders.iter().map(|f| real(Path::new(f))));
+    // Shallowest first, so a folder comes before the folders inside it.
+    dirs.sort_by_key(|d| d.len());
+    dirs.dedup();
+    let inside = |dir: &str, p: &str| dir == p || dir.starts_with(&format!("{p}/"));
+    let mut repos: Vec<ipc::RepoInfo> = Vec::new();
+    let mut plain: Vec<String> = Vec::new();
+    for dir in dirs {
+        if repos.iter().any(|r| r.worktrees.iter().any(|w| inside(&dir, &w.path))) {
+            continue;
+        }
+        match worktree::list(Path::new(&dir)) {
+            Ok(w) if !w.is_empty() => {
+                let path = w[0].path.clone();
+                repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w });
+            }
+            // A plain folder stands for everything under it, except repos, which get their own node.
+            _ if plain.iter().any(|p| inside(&dir, p)) => {}
+            _ => plain.push(dir),
+        }
+    }
+    repos.extend(plain.into_iter().map(|path| ipc::RepoInfo { name: base_name(&path), path, worktrees: Vec::new() }));
+    repos.sort_by_key(|r| r.name.to_lowercase());
+    repos
+}
+
+fn base_name(path: &str) -> String {
+    Path::new(path).file_name().map_or(path.to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 fn groups(d: &Daemon) -> Vec<ipc::GroupInfo> {

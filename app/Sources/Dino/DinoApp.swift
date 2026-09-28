@@ -121,7 +121,7 @@ struct Terminals: View {
     var body: some View {
         ZStack {
             Color(nsColor: .textBackgroundColor).ignoresSafeArea()
-            if model.sessions.isEmpty || model.daemonDown {
+            if model.sessions.isEmpty || model.daemonDown || model.selected?.hasPrefix("dir:") == true {
                 EmptyState()
             }
             // Every session stays mounted; only the selected one draws.
@@ -240,7 +240,7 @@ struct EmptyState: View {
                     .help("One prompt, several agents, each in its own worktree; keep the best (⇧⌘N)")
                 }
             }
-            Button("Start in \(model.folder.path)") { model.chooseFolder() }
+            Button("In \((model.folder.path as NSString).abbreviatingWithTildeInPath) · Choose Folder…") { model.chooseFolder() }
                 .buttonStyle(.link)
                 .font(.callout)
         }
@@ -264,6 +264,15 @@ struct DinoMark: View {
 
 struct Sidebar: View {
     @EnvironmentObject var model: DinoModel
+    /// Tree nodes the user closed, newline-joined (SceneStorage can't hold a Set).
+    @SceneStorage("sidebar.collapsed") private var collapsedIDs = ""
+
+    private var collapsed: Binding<Set<String>> {
+        Binding(
+            get: { Set(collapsedIDs.split(separator: "\n").map(String.init)) },
+            set: { collapsedIDs = $0.sorted().joined(separator: "\n") }
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -277,30 +286,17 @@ struct Sidebar: View {
                     model.select(tag)
                 }
             })) {
-                let ungrouped = model.sessions.filter { $0.group == nil }
-                if !ungrouped.isEmpty {
-                    Section("Agents") {
-                        ForEach(Array(ungrouped.enumerated()), id: \.element.id) { i, s in
-                            SessionRow(session: s, index: i + 1)
-                                .tag(s.id)
-                                .contextMenu {
-                                    Button("Kill Session", role: .destructive) { model.kill(s.id) }
-                                }
-                        }
+                let tree = SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
+                Section("Workspaces") {
+                    ForEach(tree.repos) { node in
+                        RepoRows(node: node, collapsed: collapsed).id(node.shape)
                     }
-                }
-                ForEach(model.groups) { g in
-                    Section {
-                        GroupRow(group: g).tag("group:\(g.id)")
-                        ForEach(g.members) { m in
-                            if let s = model.sessions.first(where: { $0.id == m.session }) {
-                                SessionRow(session: s, index: 0, stat: m.stat)
-                                    .padding(.leading, 12)
-                                    .tag(s.id)
+                    ForEach(tree.unfiled) { s in
+                        SessionRow(session: s, index: 0)
+                            .tag(s.id)
+                            .contextMenu {
+                                Button("Kill Session", role: .destructive) { model.kill(s.id) }
                             }
-                        }
-                    } header: {
-                        Label("Fan-out", systemImage: "arrow.triangle.branch")
                     }
                 }
                 if !model.elsewhere.isEmpty {
