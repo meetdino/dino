@@ -915,6 +915,10 @@ fn cmd_found() -> anyhow::Result<()> {
 
 /// One prompt to several agents, each in its own worktree. Without `--agents`, every agent dino has.
 fn cmd_fan(args: &[String]) -> anyhow::Result<()> {
+    if args.is_empty() || args.first().is_some_and(|a| a.starts_with('-') && a != "--agents") {
+        println!("usage: dino fan [--agents claude,codex,…] <prompt>\n\nOne prompt, several agents, each in its own git worktree of the current repo.");
+        return Ok(());
+    }
     let (agents, prompt) = match args {
         [flag, list, rest @ ..] if flag == "--agents" => (list.split(',').map(String::from).collect(), rest.join(" ")),
         rest => {

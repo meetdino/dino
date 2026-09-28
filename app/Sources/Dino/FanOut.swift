@@ -98,6 +98,21 @@ struct GroupRow: View {
     }
 }
 
+/// An agent's last upstream failure, so a dead agent never looks merely idle.
+struct ErrorLine: View {
+    let message: String
+
+    var body: some View {
+        // Not a Label: sidebar rows tint Label icons with the accent color.
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Image(systemName: "xmark.octagon.fill")
+            Text(message).lineLimit(2)
+        }
+        .font(.caption).foregroundStyle(SessionStatus.exited.color)
+        .help(message)
+    }
+}
+
 struct StatText: View {
     let stat: DiffStat
 
@@ -175,6 +190,9 @@ struct MemberCard: View {
             if let needs = session?.needs {
                 Label(needs, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(SessionStatus.needsYou.color).lineLimit(1)
+            }
+            if let error = session?.error {
+                ErrorLine(message: error)
             }
             HStack {
                 Button("Open") { model.select(member.session) }

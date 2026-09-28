@@ -3,6 +3,7 @@
 //! (auth included) and observe usage, in-flight state and quota headers on the way back.
 //! The `free` provider is different: dino itself picks a free model and translates (see `free`).
 
+mod codex;
 mod free;
 
 use std::collections::HashMap;
@@ -64,6 +65,8 @@ pub struct SessionStats {
     pub errors: u64,
     pub usage: Usage,
     pub last_model: Option<String>,
+    /// Why the last model call failed; cleared by the next one that succeeds.
+    pub last_error: Option<String>,
     /// Router tier for free-tier sessions ("fast", "code", "reason").
     pub tier: Option<String>,
     /// Which classifier made the last routing decision ("jev" or "llm").
@@ -130,6 +133,7 @@ impl Proxy {
             client: reqwest::Client::builder().build()?,
             router: Arc::default(),
             keys: Arc::new(keys),
+            substitutes: Arc::default(),
         };
 
         std::thread::Builder::new().name("dino-proxy".into()).spawn(move || {
@@ -161,6 +165,8 @@ pub(crate) struct AppState {
     client: reqwest::Client,
     router: Arc<dino_router::Router>,
     keys: Arc<HashMap<String, String>>,
+    /// Codex models the backend rejected, and the model that answered instead.
+    substitutes: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// Headers we must not copy between the two connections.
@@ -189,9 +195,17 @@ async fn forward(
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
     let url = format!("{upstream}/{rest}{query}");
     let (parts, body) = req.into_parts();
-    let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
+    let Ok(mut body) = axum::body::to_bytes(body, usize::MAX).await else {
         return error(StatusCode::BAD_REQUEST, "unreadable body".into());
     };
+    let requested = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["model"].as_str().map(String::from));
+    // A Codex model the backend already rejected: go straight to the one that answered instead.
+    if provider == "chatgpt" {
+        let sub = requested.as_ref().and_then(|m| st.substitutes.lock().unwrap().get(m).cloned());
+        if let Some(b) = sub.and_then(|m| codex::with_model(&body, &m)) {
+            body = b;
+        }
+    }
 
     // Only model calls count toward activity; ignore e.g. token counting and telemetry.
     let is_model_call = rest.ends_with("messages") || rest.ends_with("chat/completions") || rest.ends_with("responses");
@@ -208,18 +222,64 @@ async fn forward(
     let guard = is_model_call.then(|| InFlight { stats: st.stats.clone(), session: session.clone() });
 
     let method = parts.method.clone();
-    let mut up = st.client.request(parts.method, &url).body(body);
-    for (name, value) in parts.headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
-        up = up.header(name, value);
-    }
-    let resp = match up.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            st.stats.update(&session, |s| s.errors += 1);
-            log(format_args!("{session} {provider} {method} /{rest} -> upstream error: {e}"));
-            return error(StatusCode::BAD_GATEWAY, format!("dino proxy: {e}"));
+    let send = |body: Bytes| {
+        let mut up = st.client.request(method.clone(), &url).body(body);
+        for (name, value) in parts.headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
+            up = up.header(name, value);
         }
+        up.send()
     };
+    let upstream_error = |e: reqwest::Error| {
+        let msg = format!("dino proxy: {e}");
+        st.stats.update(&session, |s| {
+            s.errors += 1;
+            s.last_error = Some(msg.clone());
+        });
+        log(format_args!("{session} {provider} {method} /{rest} -> upstream error: {e}"));
+        error(StatusCode::BAD_GATEWAY, msg)
+    };
+    let mut resp = match send(body.clone()).await {
+        Ok(r) => r,
+        Err(e) => return upstream_error(e),
+    };
+
+    // A failed model call is a small JSON body: read it to say why, and for Codex maybe retry another model.
+    if is_model_call && !resp.status().is_success() {
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let text = resp.bytes().await.unwrap_or_default();
+        resp = 'retry: {
+            if provider == "chatgpt" && status == StatusCode::NOT_FOUND && codex::model_not_found(&text) {
+                let rejected = requested.unwrap_or_default();
+                for model in codex::fallbacks(&rejected) {
+                    let Some(retry) = codex::with_model(&body, &model) else { continue };
+                    match send(retry).await {
+                        Ok(r) if r.status().is_success() => {
+                            log(format_args!("{session} chatgpt: {rejected} rejected, using {model}"));
+                            st.substitutes.lock().unwrap().insert(rejected, model.clone());
+                            st.stats.update(&session, |s| s.last_model = Some(model));
+                            break 'retry r;
+                        }
+                        Ok(r) => log(format_args!("{session} chatgpt: fallback {model} -> {}", r.status())),
+                        Err(e) => return upstream_error(e),
+                    }
+                }
+            }
+            log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
+            record_quota(&st.stats, &provider, &headers);
+            let msg = format!("{} {}", status.as_u16(), codex::error_message(&text));
+            st.stats.update(&session, |s| {
+                s.errors += 1;
+                s.last_error = Some(msg);
+            });
+            drop(guard);
+            let mut builder = Response::builder().status(status.as_u16());
+            for (name, value) in headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
+                builder = builder.header(name, value);
+            }
+            return builder.body(Body::from(text)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()));
+        };
+    }
 
     let status = resp.status();
     log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
@@ -230,6 +290,8 @@ async fn forward(
     record_quota(&st.stats, &provider, resp.headers());
     if !status.is_success() && is_model_call {
         st.stats.update(&session, |s| s.errors += 1);
+    } else if is_model_call {
+        st.stats.update(&session, |s| s.last_error = None);
     }
 
     let mut builder = Response::builder().status(status.as_u16());
