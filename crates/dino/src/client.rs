@@ -83,7 +83,10 @@ impl Transport for SocketTransport {
 }
 
 fn start_attach(id: &str, cols: u16, rows: u16) -> io::Result<UnixStream> {
-    let mut s = connect()?;
+    attach_on(connect()?, id, cols, rows)
+}
+
+fn attach_on(mut s: UnixStream, id: &str, cols: u16, rows: u16) -> io::Result<UnixStream> {
     ipc::write_json(&mut s, &Request::Attach { id: id.into(), cols, rows })?;
     let (_, payload) = ipc::read_frame(&mut s)?;
     match serde_json::from_slice(&payload).map_err(io::Error::other)? {
@@ -128,10 +131,18 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
     std::thread::spawn(move || {
         let mut stdin = io::stdin();
         let mut buf = [0u8; 8192];
-        while let Ok(n) = stdin.read(&mut buf) {
-            if n == 0 || ipc::write_frame(&mut *w.lock().unwrap(), ipc::DATA, &buf[..n]).is_err() {
+        loop {
+            let n = match stdin.read(&mut buf) {
+                Ok(n) => n,
+                // A signal isn't the end of input; stopping here would leave a pane that ignores keys.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            if n == 0 {
                 break;
             }
+            // A failed write means the socket dropped; the reader below reconnects, so keep going.
+            let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::DATA, &buf[..n]);
         }
     });
     // Poll for size changes rather than wiring up SIGWINCH.
@@ -143,24 +154,41 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
             if let Ok(size) = crossterm::terminal::size() {
                 if size != last {
                     last = size;
-                    if ipc::write_frame(&mut *w.lock().unwrap(), ipc::RESIZE, &ipc::resize_payload(size.0, size.1)).is_err() {
-                        break;
-                    }
+                    let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::RESIZE, &ipc::resize_payload(size.0, size.1));
                 }
             }
         }
     });
 
     let mut stdout = io::stdout();
-    while let Ok((kind, payload)) = ipc::read_frame(&mut reader) {
-        match kind {
-            ipc::DATA => {
-                stdout.write_all(&payload)?;
-                stdout.flush()?;
+    'session: loop {
+        while let Ok((kind, payload)) = ipc::read_frame(&mut reader) {
+            match kind {
+                ipc::DATA => {
+                    stdout.write_all(&payload)?;
+                    stdout.flush()?;
+                }
+                ipc::EXIT => break 'session,
+                _ => {}
             }
-            ipc::EXIT => break,
-            _ => {}
         }
+        // The socket dropped but the session may live on (seen across sleep/wake). Reattach
+        // rather than leave a pane that ignores keys; stop once dinod no longer knows the session.
+        let started = Instant::now();
+        let stream = loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((cols, rows));
+            // Only a running dinod: if it's gone, so is the session, and starting one here would be a surprise.
+            match UnixStream::connect(ipc::socket_path()).and_then(|s| attach_on(s, id, cols, rows)) {
+                Ok(s) => break s,
+                Err(e) if e.kind() == io::ErrorKind::Other || started.elapsed() > Duration::from_secs(5) => break 'session,
+                Err(_) => {}
+            }
+        };
+        reader = stream.try_clone()?;
+        *writer.lock().unwrap() = stream;
+        // The reattach replays the session's scrollback, so start from a clean screen.
+        stdout.write_all(b"\x1b[H\x1b[2J\x1b[3J")?;
     }
     crossterm::terminal::disable_raw_mode()?;
     // Leave the terminal usable: undo modes the app may have left on.
