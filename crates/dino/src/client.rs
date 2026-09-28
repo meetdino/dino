@@ -54,6 +54,11 @@ impl Control {
         connect().map(Control)
     }
 
+    /// Connect only if dinod is already running; never starts it.
+    pub fn open_existing() -> io::Result<Self> {
+        UnixStream::connect(ipc::socket_path()).map(Control)
+    }
+
     pub fn request(&mut self, req: &Request) -> io::Result<Response> {
         ipc::write_json(&mut self.0, req)?;
         let (_, payload) = ipc::read_frame(&mut self.0)?;

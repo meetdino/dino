@@ -70,15 +70,52 @@ final class DinoModel: ObservableObject {
         }
     }
 
+    @Published private(set) var daemonDown = false
+
     private func poll() {
         guard polling, let conn = connection else { return }
         Task.detached {
             let resp = try? conn.request(["type": "state"])
             await MainActor.run {
-                if let resp { self.apply(resp.sessions ?? [], resp.quotas ?? []) }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.poll() }
+                if let resp {
+                    self.apply(resp.sessions ?? [], resp.quotas ?? [])
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.poll() }
+                } else {
+                    self.lostDaemon()
+                }
             }
         }
+    }
+
+    /// dinod stopped: drop dead panes and wait for it to come back (without restarting it ourselves).
+    private func lostDaemon() {
+        connection = nil
+        polling = false
+        daemonDown = true
+        terminals.removeAll()
+        sessions = []
+        reconnect()
+    }
+
+    private func reconnect() {
+        Task.detached {
+            if let conn = try? DinoConnection(path: DinoEnvironment.socketPath) {
+                await MainActor.run {
+                    self.connection = conn
+                    self.daemonDown = false
+                    self.polling = true
+                    self.poll()
+                }
+            } else {
+                try? await Task.sleep(for: .seconds(1))
+                await MainActor.run { self.reconnect() }
+            }
+        }
+    }
+
+    /// The "Start dinod" button.
+    func startDaemon() {
+        Task.detached { try? DinoEnvironment.ensureDaemon() }
     }
 
     private func apply(_ next: [SessionInfo], _ quotas: [QuotaInfo]) {

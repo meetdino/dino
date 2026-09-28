@@ -226,6 +226,12 @@ impl App {
                 let focused = focused_id.as_deref() == Some(&info.id);
                 match self.sessions.iter_mut().find(|s| s.info.id == info.id) {
                     Some(s) => {
+                        // Our stream ended but the session lives (dinod restarted): attach again.
+                        if s.pane.is_exited() && !info.exited {
+                            if let Ok(pane) = client::attach_pane(&info.id, self.pane_size.0, self.pane_size.1) {
+                                s.pane = pane;
+                            }
+                        }
                         let finished = info.activity.as_deref() == Some("done")
                             && s.info.activity.as_deref().is_some_and(|a| a == "working" || a.starts_with("needs:"));
                         if !focused && finished {
@@ -776,11 +782,16 @@ fn main() -> anyhow::Result<()> {
         *snapshot.lock().unwrap() = Some((sessions, quotas));
         app.poll_sessions();
     }
+    // Poll forever; if dinod goes away (`dino stop`, crash), keep retrying without restarting it.
     std::thread::spawn(move || {
-        let Ok(mut control) = client::Control::open() else { return };
-        while let Ok(Response::State { sessions, quotas }) = control.request(&Request::State) {
-            *snapshot.lock().unwrap() = Some((sessions, quotas));
-            std::thread::sleep(Duration::from_millis(250));
+        loop {
+            if let Ok(mut control) = client::Control::open_existing() {
+                while let Ok(Response::State { sessions, quotas }) = control.request(&Request::State) {
+                    *snapshot.lock().unwrap() = Some((sessions, quotas));
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
         }
     });
 
