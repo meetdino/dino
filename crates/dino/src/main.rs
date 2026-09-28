@@ -880,7 +880,7 @@ fn cmd_ls() -> anyhow::Result<()> {
     for s in sessions {
         let state = if s.exited { "exited".to_string() } else { s.activity.unwrap_or_else(|| "idle".into()) };
         let title = s.title.unwrap_or_default();
-        println!("{:>3}  {:<12} {:<18} ↑{} ↓{}  {title}", s.id, s.name, state, tokens(s.input_tokens), tokens(s.output_tokens));
+        println!("{:>3}  {:<16} {:<10} ↑{} ↓{}  {title}", s.id, truncate(&s.name, 16), state, tokens(s.input_tokens), tokens(s.output_tokens));
     }
     Ok(())
 }
