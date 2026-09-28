@@ -43,6 +43,7 @@ struct Daemon {
     proxy: Proxy,
     launchers: Vec<LauncherInfo>,
     sessions: Mutex<Vec<Arc<Session>>>,
+    groups: Mutex<Vec<Group>>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -65,6 +66,7 @@ pub fn run() -> anyhow::Result<()> {
         proxy: Proxy::start(keys)?,
         launchers: launchers(free_tier),
         sessions: Mutex::default(),
+        groups: Mutex::new(load_groups()),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
@@ -120,7 +122,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
         let resp = match req {
             Request::State => state(d),
             Request::Launchers => Response::Launchers { launchers: d.launchers.clone() },
-            Request::New { launcher, args, cwd, cols, rows } => match spawn(d, &launcher, args, cwd, cols, rows, None) {
+            Request::New { launcher, args, cwd, cols, rows } => match spawn(d, Launch { cols, rows, ..Launch::new(&launcher, args, cwd) }) {
                 Ok(id) => {
                     save(d);
                     Response::Created { id }
@@ -128,15 +130,11 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Kill { id } => {
-                let mut sessions = d.sessions.lock().unwrap();
-                match sessions.iter().position(|s| s.id == id) {
-                    Some(i) => {
-                        sessions.remove(i).pane.kill();
-                        drop(sessions);
-                        save(d);
-                        Response::Ok
-                    }
-                    None => Response::Error { message: format!("no session {id}") },
+                if kill(d, &id) {
+                    save(d);
+                    Response::Ok
+                } else {
+                    Response::Error { message: format!("no session {id}") }
                 }
             }
             Request::Attach { id, cols, rows } => {
@@ -154,6 +152,26 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::Fanout { prompt, launchers, cwd } => match fanout(d, &prompt, &launchers, cwd) {
+                Ok(group) => {
+                    save(d);
+                    Response::Created { id: group }
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Groups => Response::Groups { groups: groups(d) },
+            Request::Diff { session } => match member_diff(d, &session) {
+                Ok((stat, text)) => Response::Diff { stat, text },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Keep { session } => match keep(d, &session) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Discard { group } => match close_group(d, &group) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::Shutdown => {
                 // Saved first: `dino stop` pauses sessions, the next dinod resumes them.
                 save(d);
@@ -169,7 +187,28 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
     }
 }
 
-fn spawn(d: &Daemon, launcher: &str, args: Vec<String>, cwd: Option<String>, cols: u16, rows: u16, restore: Option<SavedSession>) -> anyhow::Result<String> {
+/// What to start. `restore` resumes a saved session; `prompt` is sent once, at the start.
+#[derive(Default)]
+struct Launch {
+    launcher: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+    restore: Option<SavedSession>,
+    name: Option<String>,
+    prompt: Option<String>,
+}
+
+impl Launch {
+    fn new(launcher: &str, args: Vec<String>, cwd: Option<String>) -> Self {
+        Self { launcher: launcher.into(), args, cwd, cols: 120, rows: 40, ..Default::default() }
+    }
+}
+
+fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
+    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt } = launch;
+    let launcher = launcher.as_str();
     let l = d.launchers.iter().find(|l| l.short == launcher).ok_or_else(|| anyhow::anyhow!("unknown agent {launcher}"))?;
     let id = match &restore {
         Some(r) => r.id.clone(),
@@ -199,6 +238,8 @@ fn spawn(d: &Daemon, launcher: &str, args: Vec<String>, cwd: Option<String>, col
         _ => {}
     }
     wired_args.extend(args.iter().cloned());
+    // Claude and Codex both take an opening prompt as their last argument.
+    wired_args.extend(prompt);
     let spec = SpawnSpec {
         program: l.program.clone(),
         args: wired_args,
@@ -218,9 +259,10 @@ fn spawn(d: &Daemon, launcher: &str, args: Vec<String>, cwd: Option<String>, col
     })?;
 
     let mut sessions = d.sessions.lock().unwrap();
-    let name = match &restore {
-        Some(r) => r.name.clone(),
-        None => {
+    let name = match (&restore, name) {
+        (Some(r), _) => r.name.clone(),
+        (None, Some(name)) => name,
+        (None, None) => {
             let n = sessions.iter().filter(|s| s.name == l.short || s.name.starts_with(&format!("{}-", l.short))).count();
             if n == 0 { l.short.clone() } else { format!("{}-{}", l.short, n + 1) }
         }
@@ -294,6 +336,8 @@ fn attach(d: &Daemon, s: &Session, mut stream: UnixStream, cols: u16, rows: u16)
 }
 
 fn state(d: &Daemon) -> Response {
+    let groups = d.groups.lock().unwrap().clone();
+    let group_of = |id: &str| groups.iter().find(|g| g.members.iter().any(|m| m.session == id)).map(|g| g.id.clone());
     let sessions = d
         .sessions
         .lock()
@@ -320,6 +364,7 @@ fn state(d: &Daemon) -> Response {
                     Activity::Done => "done".into(),
                     Activity::NeedsPermission(what) => format!("needs:{what}"),
                 }),
+                group: group_of(&s.id),
             }
         })
         .collect();
@@ -391,7 +436,7 @@ fn restore(d: &Daemon, saved: Vec<SavedSession>) {
     let max_id = saved.iter().filter_map(|s| s.id.parse::<u64>().ok()).max().unwrap_or(0);
     d.next_id.fetch_max(max_id + 1, Ordering::Relaxed);
     for s in saved {
-        if let Err(e) = spawn(d, &s.launcher.clone(), s.args.clone(), Some(s.cwd.clone()), 120, 40, Some(s.clone())) {
+        if let Err(e) = spawn(d, Launch { restore: Some(s.clone()), ..Launch::new(&s.launcher, s.args.clone(), Some(s.cwd.clone())) }) {
             eprintln!("restore {} ({}): {e}", s.id, s.name);
         }
     }
@@ -491,7 +536,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
             "claude" => vec!["--teleport".into(), f.session_id.clone()],
             _ => vec!["cloud".into()],
         };
-        return spawn(d, &launcher, args, cwd.or(f.cwd.clone()), 120, 40, None);
+        return spawn(d, Launch::new(&launcher, args, cwd.or(f.cwd.clone())));
     }
 
     let mut tty = None;
@@ -513,7 +558,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         started_at: now_secs(),
         agent_session: Some(f.session_id.clone()),
     };
-    let id = spawn(d, &launcher, restore.args.clone(), Some(restore.cwd.clone()), 120, 40, Some(restore))?;
+    let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {
         // Tell whoever looks at the old tab where the conversation went.
         let note = format!("\r\n\x1b[38;2;117;179;64m▲▲ dino\x1b[0m  \"{}\" continues in dino (session {id}). Open dino, or run: dino attach {id}\r\n", f.title);
@@ -581,4 +626,148 @@ fn session_name(title: &str) -> String {
         name.push_str(&w);
     }
     if name.is_empty() { "session".into() } else { name.chars().take(16).collect() }
+}
+
+fn kill(d: &Daemon, id: &str) -> bool {
+    let mut sessions = d.sessions.lock().unwrap();
+    match sessions.iter().position(|s| s.id == id) {
+        Some(i) => {
+            sessions.remove(i).pane.kill();
+            true
+        }
+        None => false,
+    }
+}
+
+// ---- Fan-out: one prompt, several agents, each in its own worktree; keep the best. ----
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Group {
+    id: String,
+    prompt: String,
+    repo: PathBuf,
+    /// The commit every worktree started from (the user's checkout, uncommitted edits included).
+    base: String,
+    members: Vec<Member>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Member {
+    session: String,
+    launcher: String,
+    branch: String,
+    worktree: PathBuf,
+}
+
+fn groups_path() -> PathBuf {
+    dino_core::config_dir().join("groups.json")
+}
+
+fn load_groups() -> Vec<Group> {
+    std::fs::read(groups_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn save_groups(groups: &[Group]) {
+    let tmp = groups_path().with_extension("json.tmp");
+    if std::fs::write(&tmp, serde_json::to_vec_pretty(groups).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(tmp, groups_path());
+    }
+}
+
+fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -> anyhow::Result<String> {
+    use dino_core::worktree;
+    let prompt = prompt.trim();
+    anyhow::ensure!(!prompt.is_empty(), "fan-out needs a prompt");
+    let mut picked: Vec<&LauncherInfo> = vec![];
+    for short in launchers {
+        let l = d.launchers.iter().find(|l| &l.short == short).ok_or_else(|| anyhow::anyhow!("unknown agent {short}"))?;
+        anyhow::ensure!(l.agent_id != "shell", "a shell can't take a prompt");
+        if !picked.iter().any(|p| p.short == l.short) {
+            picked.push(l);
+        }
+    }
+    anyhow::ensure!(!picked.is_empty(), "pick at least one agent");
+
+    let dir = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    let repo = worktree::repo_root(&dir)?;
+    let base = worktree::snapshot(&repo)?;
+    let id = format!("{}-{}", session_name(prompt), &new_uuid()[..4]);
+    let mut group = Group { id: id.clone(), prompt: prompt.into(), repo: repo.clone(), base: base.clone(), members: vec![] };
+    for l in picked {
+        let branch = format!("dino/{id}/{}", l.short);
+        let wt = worktree::add(&repo, &format!("{id}/{}", l.short), &branch, &base)?;
+        // Same folder inside the worktree as the user was in inside the repo.
+        let cwd = wt.join(dir.strip_prefix(&repo).unwrap_or(std::path::Path::new("")));
+        let session = spawn(d, Launch {
+            name: Some(format!("{}·{}", l.short, &id[id.len() - 4..])),
+            prompt: Some(prompt.into()),
+            ..Launch::new(&l.short, vec![], Some(cwd.display().to_string()))
+        })?;
+        group.members.push(Member { session, launcher: l.short.clone(), branch, worktree: wt });
+    }
+    let mut groups = d.groups.lock().unwrap();
+    groups.push(group);
+    save_groups(&groups);
+    Ok(id)
+}
+
+fn groups(d: &Daemon) -> Vec<ipc::GroupInfo> {
+    let groups = d.groups.lock().unwrap().clone();
+    groups
+        .into_iter()
+        .map(|g| ipc::GroupInfo {
+            members: g
+                .members
+                .iter()
+                .map(|m| ipc::MemberInfo {
+                    session: m.session.clone(),
+                    launcher: m.launcher.clone(),
+                    branch: m.branch.clone(),
+                    worktree: m.worktree.display().to_string(),
+                    stat: dino_core::worktree::stat(&m.worktree, &g.base).ok(),
+                })
+                .collect(),
+            id: g.id,
+            prompt: g.prompt,
+            repo: g.repo.display().to_string(),
+        })
+        .collect()
+}
+
+fn find_member(d: &Daemon, session: &str) -> anyhow::Result<(Group, Member)> {
+    let groups = d.groups.lock().unwrap();
+    groups
+        .iter()
+        .find_map(|g| g.members.iter().find(|m| m.session == session).map(|m| (g.clone(), m.clone())))
+        .ok_or_else(|| anyhow::anyhow!("session {session} isn't part of a fan-out"))
+}
+
+fn member_diff(d: &Daemon, session: &str) -> anyhow::Result<(ipc::DiffStat, String)> {
+    let (g, m) = find_member(d, session)?;
+    Ok((dino_core::worktree::stat(&m.worktree, &g.base)?, dino_core::worktree::diff(&m.worktree, &g.base)?))
+}
+
+/// The winner's changes land in the user's checkout, uncommitted; the whole group closes.
+fn keep(d: &Daemon, session: &str) -> anyhow::Result<()> {
+    let (g, m) = find_member(d, session)?;
+    dino_core::worktree::apply(&m.worktree, &g.base, &g.repo)?;
+    close_group(d, &g.id)
+}
+
+fn close_group(d: &Daemon, id: &str) -> anyhow::Result<()> {
+    let group = {
+        let mut groups = d.groups.lock().unwrap();
+        let i = groups.iter().position(|g| g.id == id).ok_or_else(|| anyhow::anyhow!("no fan-out {id}"))?;
+        let g = groups.remove(i);
+        save_groups(&groups);
+        g
+    };
+    for m in &group.members {
+        kill(d, &m.session);
+    }
+    save(d);
+    for m in &group.members {
+        dino_core::worktree::remove(&group.repo, &m.worktree, &m.branch);
+    }
+    Ok(())
 }

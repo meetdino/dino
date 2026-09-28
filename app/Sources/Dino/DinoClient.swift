@@ -16,6 +16,7 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var last_model: String?
     var tier: String?
     var activity: String?
+    var group: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
@@ -58,6 +59,38 @@ struct FoundSession: Codable, Identifiable, Equatable {
 
     var id: String { "\(source)-\(agent)-\(session_id)-\(pid ?? 0)" }
     var isBusy: Bool { status == "busy" }
+}
+
+struct DiffStat: Codable, Equatable {
+    var files: UInt32
+    var added: UInt32
+    var removed: UInt32
+}
+
+/// A fan-out: one prompt, several agents, each in its own worktree.
+struct GroupInfo: Codable, Identifiable, Equatable {
+    var id: String
+    var prompt: String
+    var repo: String
+    var members: [MemberInfo]
+}
+
+struct MemberInfo: Codable, Identifiable, Equatable {
+    var session: String
+    var launcher: String
+    var branch: String
+    var worktree: String
+    var stat: DiffStat?
+    var id: String { session }
+}
+
+private struct GroupsResponse: Decodable {
+    var groups: [GroupInfo]
+}
+
+private struct DiffResponse: Decodable {
+    var stat: DiffStat
+    var text: String
 }
 
 private struct FoundResponse: Decodable {
@@ -129,6 +162,14 @@ final class DinoConnection: @unchecked Sendable {
 
     func found(cloud: Bool) throws -> [FoundSession] {
         try JSONDecoder().decode(FoundResponse.self, from: send(["type": "found", "cloud": cloud])).sessions
+    }
+
+    func groups() throws -> [GroupInfo] {
+        try JSONDecoder().decode(GroupsResponse.self, from: send(["type": "groups"])).groups
+    }
+
+    func diff(session: String) throws -> String {
+        try JSONDecoder().decode(DiffResponse.self, from: send(["type": "diff", "session": session])).text
     }
 
     /// Continue `session` in dino; returns the new dino session id.
@@ -208,7 +249,9 @@ enum DinoEnvironment {
         return NSString(string: "~/.local/bin/dino").expandingTildeInPath
     }()
 
-    static let socketPath = NSString(string: "~/.config/dino/dinod.sock").expandingTildeInPath
+    /// `$DINO_HOME` points the app at a second, isolated dinod (as it does the CLI).
+    static let home = ProcessInfo.processInfo.environment["DINO_HOME"] ?? NSString(string: "~/.config/dino").expandingTildeInPath
+    static let socketPath = "\(home)/dinod.sock"
 
     /// `dino ping` starts dinod (with the login PATH) if it isn't running.
     static func ensureDaemon() throws {
