@@ -42,9 +42,44 @@ struct LauncherInfo: Codable, Identifiable, Equatable {
     var id: String { short }
 }
 
+/// A session dino didn't start: running in another terminal, recent on disk, or in the cloud.
+struct FoundSession: Codable, Identifiable, Equatable {
+    var source: String
+    var agent: String
+    var session_id: String
+    var title: String
+    var cwd: String?
+    var updated_at: UInt64
+    var pid: UInt32?
+    var status: String?
+    var terminal: String?
+    var args: [String]
+    var url: String?
+
+    var id: String { "\(source)-\(agent)-\(session_id)-\(pid ?? 0)" }
+    var isBusy: Bool { status == "busy" }
+}
+
+private struct FoundResponse: Decodable {
+    var sessions: [FoundSession]
+}
+
 struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
+
+    enum CodingKeys: String, CodingKey { case type, sessions, quotas, launchers, id, message }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = try c.decode(String.self, forKey: .type)
+        // `sessions` means SessionInfo only in a state reply.
+        sessions = type == "state" ? try c.decodeIfPresent([SessionInfo].self, forKey: .sessions) : nil
+        quotas = try c.decodeIfPresent([QuotaInfo].self, forKey: .quotas)
+        launchers = try c.decodeIfPresent([LauncherInfo].self, forKey: .launchers)
+        id = try c.decodeIfPresent(String.self, forKey: .id)
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+    }
     var quotas: [QuotaInfo]?
     var launchers: [LauncherInfo]?
     var id: String?
@@ -89,6 +124,23 @@ final class DinoConnection: @unchecked Sendable {
     deinit { close(fd) }
 
     func request(_ body: [String: Any]) throws -> Response {
+        try JSONDecoder().decode(Response.self, from: send(body))
+    }
+
+    func found(cloud: Bool) throws -> [FoundSession] {
+        try JSONDecoder().decode(FoundResponse.self, from: send(["type": "found", "cloud": cloud])).sessions
+    }
+
+    /// Continue `session` in dino; returns the new dino session id.
+    func adopt(_ session: FoundSession, cwd: String?) throws -> String? {
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(session))
+        var body: [String: Any] = ["type": "adopt", "session": encoded]
+        if let cwd { body["cwd"] = cwd }
+        return try request(body).id
+    }
+
+    /// One request/response exchange; throws dinod's error message as-is.
+    private func send(_ body: [String: Any]) throws -> Data {
         lock.lock()
         defer { lock.unlock() }
         let payload = try JSONSerialization.data(withJSONObject: body)
@@ -99,9 +151,11 @@ final class DinoConnection: @unchecked Sendable {
         try writeAll(frame)
         let head = try readExact(5)
         let n = Int(UInt32(head[1]) << 24 | UInt32(head[2]) << 16 | UInt32(head[3]) << 8 | UInt32(head[4]))
-        let resp = try JSONDecoder().decode(Response.self, from: Data(try readExact(n)))
-        if resp.type == "error" { throw DinoError.daemon(resp.message ?? "error") }
-        return resp
+        let data = Data(try readExact(n))
+        if let err = try? JSONDecoder().decode(Response.self, from: data), err.type == "error" {
+            throw DinoError.daemon(err.message ?? "error")
+        }
+        return data
     }
 
     private func writeAll(_ data: Data) throws {

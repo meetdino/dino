@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod discover;
+pub mod found;
 pub mod ipc;
 
 /// A coding agent (or plain program) dino knows how to launch.

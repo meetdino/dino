@@ -48,7 +48,9 @@ fn main() -> anyhow::Result<()> {
             pane.send_key(KeyEvent::new(code, KeyModifiers::NONE));
             std::thread::sleep(Duration::from_millis(30));
         }
-        std::thread::sleep(Duration::from_secs(secs));
+        // DINO_SNAP_HOLD: seconds to stay alive after typing (default: same as the initial wait).
+        let hold = std::env::var("DINO_SNAP_HOLD").ok().and_then(|h| h.parse().ok()).unwrap_or(secs);
+        std::thread::sleep(Duration::from_secs(hold));
     }
 
     // DINO_SNAP_REPLAY: render a fresh emulator fed only with the replay, to check attach fidelity.

@@ -756,7 +756,8 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
-       dino ls | new <agent> [args...] | attach <id> | kill <id> | ping | stop | daemon";
+       dino ls | new <agent> [args...] | attach <id> | kill <id> | ping | stop | daemon
+       dino found | continue <session-id prefix>";
 
 fn main() -> anyhow::Result<()> {
     let mut cli: Vec<String> = std::env::args().skip(1).collect();
@@ -764,6 +765,8 @@ fn main() -> anyhow::Result<()> {
         Some("daemon") => return dino_daemon::run(),
         Some("attach") => return client::attach_raw(cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?),
         Some("ls") => return cmd_ls(),
+        Some("found") => return cmd_found(),
+        Some("continue") => return cmd_continue(cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino continue <session-id prefix>"))?),
         // Start dinod if needed; used by the app before it attaches surfaces.
         Some("ping") => {
             client::connect()?;
@@ -880,4 +883,31 @@ fn cmd_ls() -> anyhow::Result<()> {
         println!("{:>3}  {:<12} {:<18} ↑{} ↓{}  {title}", s.id, s.name, state, tokens(s.input_tokens), tokens(s.output_tokens));
     }
     Ok(())
+}
+
+/// Agent sessions outside dino that it can continue: running elsewhere, recent, cloud.
+fn cmd_found() -> anyhow::Result<()> {
+    use dino_core::found::Source;
+    // Through dinod, so its own sessions aren't listed as "elsewhere".
+    let Response::Found { sessions } = client::request(&Request::Found { cloud: true })? else { anyhow::bail!("unexpected reply") };
+    for (label, source) in [("RUNNING ELSEWHERE", Source::Running), ("RECENT", Source::Recent), ("CLOUD", Source::Cloud)] {
+        println!("{label}");
+        for f in sessions.iter().filter(|f| f.source == source) {
+            let place = f.terminal.as_deref().map(|t| format!("in {t}")).unwrap_or_default();
+            let status = f.status.as_deref().unwrap_or("");
+            let cwd = f.cwd.as_deref().unwrap_or("").replace(&std::env::var("HOME").unwrap_or_default(), "~");
+            println!("  {:<6} {:<38} {:<22} {:<10} {:<9} {}  {}", f.agent, truncate(&f.title, 38), cwd, place, status, &f.session_id.get(..8).unwrap_or(""), f.args.join(" "));
+        }
+    }
+    Ok(())
+}
+
+/// Continue a session dino didn't start (see `dino found`).
+fn cmd_continue(prefix: &str) -> anyhow::Result<()> {
+    let Response::Found { sessions } = client::request(&Request::Found { cloud: false })? else { anyhow::bail!("unexpected reply") };
+    let session = sessions.into_iter().find(|f| f.session_id.starts_with(prefix)).ok_or_else(|| anyhow::anyhow!("no session matching {prefix}"))?;
+    if session.pid.is_some() {
+        eprintln!("moving \"{}\" into dino (waits for its current turn to finish)…", session.title);
+    }
+    print_response(client::request(&Request::Adopt { session, cwd: None })?)
 }
