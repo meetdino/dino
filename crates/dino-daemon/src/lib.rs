@@ -13,6 +13,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
 use dino_core::{Config, detect_agents, load_keys, proxy_wiring, user_shell};
 use dino_proxy::{Activity, Proxy};
@@ -145,6 +146,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     None => ipc::write_json(&mut stream, &Response::Error { message: format!("no session {id}") }),
                 };
             }
+            Request::Found { cloud } => Response::Found { sessions: discover(d, cloud) },
+            Request::Adopt { session, cwd } => match adopt(d, session, cwd) {
+                Ok(id) => {
+                    save(d);
+                    Response::Created { id }
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::Shutdown => {
                 // Saved first: `dino stop` pauses sessions, the next dinod resumes them.
                 save(d);
@@ -450,4 +459,126 @@ fn first_line(p: &std::path::Path) -> Option<String> {
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+}
+
+// ---- Continue anything: sessions dino didn't start. ----
+
+/// Found sessions minus the ones dino itself is running.
+fn discover(d: &Daemon, cloud: bool) -> Vec<FoundSession> {
+    let ours: Vec<String> = d.sessions.lock().unwrap().iter().filter_map(|s| s.agent_session.lock().unwrap().clone()).collect();
+    let running: Vec<FoundSession> = found::running().into_iter().filter(|f| !ours.contains(&f.session_id)).collect();
+    let mut out = found::recent(25, &running);
+    out.retain(|f| !ours.contains(&f.session_id));
+    out.splice(0..0, running);
+    if cloud {
+        let has = |short: &str| d.launchers.iter().find(|l| l.short == short).map(|l| PathBuf::from(&l.program));
+        out.extend(found::cloud(has("codex").as_deref(), has("claude").is_some()));
+    }
+    out
+}
+
+/// Hand a session over to dino. A running one is left to finish its current turn, stopped, and
+/// resumed here with the same conversation, folder and flags; its old terminal gets a note.
+fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<String> {
+    let launcher = match f.agent.as_str() {
+        "claude" | "codex" => f.agent.clone(),
+        other => anyhow::bail!("don't know how to continue {other} sessions yet"),
+    };
+    if f.source == Source::Cloud {
+        // Claude web sessions teleport into a checkout; Codex cloud tasks open in its cloud browser.
+        let args = match f.agent.as_str() {
+            "claude" if f.session_id.is_empty() => vec!["--teleport".to_string()],
+            "claude" => vec!["--teleport".into(), f.session_id.clone()],
+            _ => vec!["cloud".into()],
+        };
+        return spawn(d, &launcher, args, cwd.or(f.cwd.clone()), 120, 40, None);
+    }
+
+    let mut tty = None;
+    if let (Source::Running, Some(pid)) = (&f.source, f.pid) {
+        if f.agent == "claude" {
+            wait_until_idle(pid, std::time::Duration::from_secs(180))?;
+        }
+        tty = tty_of(pid);
+        stop(pid)?;
+    }
+
+    let id = d.next_id.fetch_add(1, Ordering::Relaxed).to_string();
+    let restore = SavedSession {
+        id: id.clone(),
+        name: session_name(&f.title),
+        launcher: launcher.clone(),
+        args: f.args.clone(),
+        cwd: f.cwd.clone().unwrap_or_else(|| home().display().to_string()),
+        started_at: now_secs(),
+        agent_session: Some(f.session_id.clone()),
+    };
+    let id = spawn(d, &launcher, restore.args.clone(), Some(restore.cwd.clone()), 120, 40, Some(restore))?;
+    if let Some(tty) = tty {
+        // Tell whoever looks at the old tab where the conversation went.
+        let note = format!("\r\n\x1b[38;2;117;179;64m▲▲ dino\x1b[0m  \"{}\" continues in dino (session {id}). Open dino, or run: dino attach {id}\r\n", f.title);
+        let _ = std::fs::OpenOptions::new().write(true).open(&tty).and_then(|mut t| io::Write::write_all(&mut t, note.as_bytes()));
+    }
+    Ok(id)
+}
+
+/// Claude reports `busy`/`idle` in `~/.claude/sessions/<pid>.json`; don't cut a turn in half.
+fn wait_until_idle(pid: u32, max: std::time::Duration) -> anyhow::Result<()> {
+    let path = home().join(format!(".claude/sessions/{pid}.json"));
+    let deadline = Instant::now() + max;
+    loop {
+        let status = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["status"].as_str().map(String::from));
+        match status.as_deref() {
+            Some("busy") if Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(300)),
+            Some("busy") => anyhow::bail!("the session is still working; try again when its turn finishes"),
+            _ => return Ok(()),
+        }
+    }
+}
+
+fn tty_of(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps").args(["-o", "tty=", "-p", &pid.to_string()]).output().ok()?;
+    let tty = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!tty.is_empty() && tty != "??").then(|| format!("/dev/{tty}"))
+}
+
+/// SIGTERM, then SIGKILL if it hasn't exited after a few seconds.
+fn stop(pid: u32) -> anyhow::Result<()> {
+    let alive = || std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| s.success());
+    let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while alive() && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if alive() {
+        let _ = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    if alive() {
+        anyhow::bail!("couldn't stop process {pid}");
+    }
+    Ok(())
+}
+
+/// "Pineapple memory word" → "pineapple-memory"
+fn session_name(title: &str) -> String {
+    let words: Vec<String> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+    let mut name = String::new();
+    for w in words {
+        if !name.is_empty() && name.len() + w.len() + 1 > 16 {
+            break;
+        }
+        if !name.is_empty() {
+            name.push('-');
+        }
+        name.push_str(&w);
+    }
+    if name.is_empty() { "session".into() } else { name.chars().take(16).collect() }
 }

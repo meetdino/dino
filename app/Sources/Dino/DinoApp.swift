@@ -30,6 +30,11 @@ struct DinoApp: App {
                     if let l = model.launchers.first(where: { $0.short == "claude" }) ?? model.launchers.first { model.newSession(l) }
                 }
                 .keyboardShortcut("n")
+                Button("Continue a Session…") {
+                    model.loadFound()
+                    model.showContinue = true
+                }
+                .keyboardShortcut("k")
                 Button("Choose Folder…") { model.chooseFolder() }
                     .keyboardShortcut("o")
                 Divider()
@@ -68,6 +73,8 @@ struct ContentView: View {
         } detail: {
             Terminals()
         }
+        .sheet(isPresented: $model.showContinue) { ContinueSheet() }
+        .overlay { if let f = model.moving { MovingOverlay(session: f) } }
     }
 }
 
@@ -101,6 +108,15 @@ struct Terminals: View {
                         if let t = s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
                     }
                 }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    model.loadFound()
+                    model.showContinue = true
+                } label: {
+                    Label("Continue…", systemImage: "arrow.uturn.forward")
+                }
+                .help("Continue a session from another terminal, your history, or the cloud (⌘K)")
             }
             ToolbarItem(placement: .primaryAction) { NewSessionMenu() }
         }
@@ -153,6 +169,18 @@ struct EmptyState: View {
                     .foregroundStyle(.secondary).font(.callout)
                 Button("Start dinod") { model.startDaemon() }.controlSize(.large)
             }
+            if !model.daemonDown {
+                Button {
+                    model.loadFound()
+                    model.showContinue = true
+                } label: {
+                    Label("Continue a session…", systemImage: "arrow.uturn.forward").frame(width: 240)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .tint(Brand.green)
+                Text("or start a new one").font(.caption).foregroundStyle(.tertiary)
+            }
             VStack(spacing: 8) {
                 ForEach(model.daemonDown ? [] : model.launchers) { l in
                     Button { model.newSession(l) } label: {
@@ -196,6 +224,13 @@ struct Sidebar: View {
                             .contextMenu {
                                 Button("Kill Session", role: .destructive) { model.kill(s.id) }
                             }
+                    }
+                }
+                if !model.elsewhere.isEmpty {
+                    Section("On this Mac") {
+                        ForEach(model.elsewhere) { f in
+                            ElsewhereRow(session: f)
+                        }
                     }
                 }
             }
@@ -352,5 +387,164 @@ func resetText(_ at: UInt64) -> String {
     case ..<3600: return "\(secs / 60)m"
     case ..<86400: return "\(secs / 3600)h\(String(format: "%02d", secs % 3600 / 60))m"
     default: return "\(secs / 86400)d\(secs % 86400 / 3600)h"
+    }
+}
+
+// MARK: - Continue anything
+
+struct AgentBadge: View {
+    let agent: String
+
+    var body: some View {
+        Text(agent == "codex" ? "codex" : "claude")
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(RoundedRectangle(cornerRadius: 3).fill((agent == "codex" ? Color.blue : Brand.spike).opacity(0.18)))
+            .foregroundStyle(agent == "codex" ? Color.blue : Brand.spike)
+    }
+}
+
+/// A session running in another terminal, with a one-click handoff.
+struct ElsewhereRow: View {
+    @EnvironmentObject var model: DinoModel
+    let session: FoundSession
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    AgentBadge(agent: session.agent)
+                    Text(session.title).lineLimit(1)
+                }
+                Text(whereText(session)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            Button { model.adopt(session) } label: { Image(systemName: "arrow.down.right.and.arrow.up.left") }
+                .buttonStyle(.borderless)
+                .help("Move this session into dino")
+        }
+        .padding(.vertical, 2)
+        .contextMenu { Button("Move to dino") { model.adopt(session) } }
+    }
+}
+
+func whereText(_ f: FoundSession) -> String {
+    var parts: [String] = []
+    if let t = f.terminal { parts.append("in \(t)") }
+    if let s = f.status { parts.append(s) }
+    if let cwd = f.cwd { parts.append(shortPath(cwd)) }
+    return parts.joined(separator: " · ")
+}
+
+func shortPath(_ p: String) -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    return p.hasPrefix(home) ? "~" + p.dropFirst(home.count) : p
+}
+
+func ago(_ secs: UInt64) -> String {
+    guard secs > 0 else { return "" }
+    let d = max(0, Int(Date().timeIntervalSince1970) - Int(secs))
+    switch d {
+    case ..<60: return "just now"
+    case ..<3600: return "\(d / 60)m ago"
+    case ..<86400: return "\(d / 3600)h ago"
+    default: return "\(d / 86400)d ago"
+    }
+}
+
+struct ContinueSheet: View {
+    @EnvironmentObject var model: DinoModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private func matches(_ f: FoundSession) -> Bool {
+        query.isEmpty || f.title.localizedCaseInsensitiveContains(query) || (f.cwd ?? "").localizedCaseInsensitiveContains(query)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Continue a session — search titles and folders", text: $query)
+                    .textFieldStyle(.plain).font(.title3)
+            }
+            .padding(14)
+            Divider()
+            List {
+                section("Running elsewhere", "Moves here when its current turn finishes", model.found.filter { $0.source == "running" && matches($0) })
+                section("Recent", nil, model.found.filter { $0.source == "recent" && matches($0) })
+                section("Cloud", model.loadingCloud ? "Checking cloud sessions…" : "Lands in \(shortPath(model.folder.path))", model.found.filter { $0.source == "cloud" && matches($0) })
+            }
+            .listStyle(.inset)
+            Divider()
+            HStack {
+                Text("↵ continue · esc close").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            .padding(10)
+        }
+        .frame(width: 640, height: 520)
+    }
+
+    @ViewBuilder
+    private func section(_ title: String, _ note: String?, _ items: [FoundSession]) -> some View {
+        if !items.isEmpty || (title == "Cloud" && model.loadingCloud) {
+            Section {
+                ForEach(items) { f in
+                    Button { model.adopt(f) } label: { FoundRow(session: f) }
+                        .buttonStyle(.plain)
+                }
+            } header: {
+                HStack {
+                    Text(title)
+                    if let note { Text(note).foregroundStyle(.tertiary).font(.caption) }
+                }
+            }
+        }
+    }
+}
+
+struct FoundRow: View {
+    let session: FoundSession
+
+    var body: some View {
+        HStack(spacing: 10) {
+            AgentBadge(agent: session.agent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.title).lineLimit(1)
+                Text(whereText(session)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            if session.isBusy {
+                Text("working").font(.caption).foregroundStyle(SessionStatus.working.color)
+            }
+            Text(ago(session.updated_at)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+            Image(systemName: "arrow.right.circle").foregroundStyle(Brand.green)
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 3)
+    }
+}
+
+struct MovingOverlay: View {
+    let session: FoundSession
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.35).ignoresSafeArea()
+            VStack(spacing: 12) {
+                ProgressView().controlSize(.large)
+                Text("Moving “\(session.title)” into dino").font(.headline)
+                if session.source == "running" {
+                    Text(session.isBusy
+                        ? "Waiting for its current turn to finish, then it continues here."
+                        : "Closing it in \(session.terminal ?? "the other terminal") and continuing here.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(28)
+            .background(RoundedRectangle(cornerRadius: 14).fill(.regularMaterial))
+        }
     }
 }

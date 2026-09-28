@@ -41,6 +41,15 @@ final class DinoModel: ObservableObject {
     @Published var launchers: [LauncherInfo] = []
     @Published var selected: String?
     @Published var error: String?
+    /// Agent sessions dino didn't start (running elsewhere, recent, cloud).
+    @Published var found: [FoundSession] = []
+    @Published var loadingCloud = false
+    /// A handoff in progress: the session being moved, and whether we're waiting on its turn.
+    @Published var moving: FoundSession?
+    @Published var showContinue = false
+
+    var elsewhere: [FoundSession] { found.filter { $0.source == "running" } }
+
     /// Where new sessions start.
     @Published var folder: URL = FileManager.default.homeDirectoryForCurrentUser
 
@@ -64,6 +73,7 @@ final class DinoModel: ObservableObject {
                     self.launchers = launchers
                     self.polling = true
                     self.poll()
+                    self.watchElsewhere()
                 }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
@@ -140,6 +150,10 @@ final class DinoModel: ObservableObject {
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
         terminals = terminals.filter { live.contains($0.key) }
+        if let want = pendingSelect, live.contains(want) {
+            pendingSelect = nil
+            select(want)
+        }
         if selected == nil || !live.contains(selected!) {
             // Through select(), so the terminal also takes keyboard focus on launch.
             select(next.first?.id)
@@ -202,6 +216,61 @@ final class DinoModel: ObservableObject {
             }
         }
     }
+
+    /// Keep "On this Mac" fresh: sessions running in other terminals come and go.
+    private func watchElsewhere() {
+        Task.detached {
+            while true {
+                if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let list = try? conn.found(cloud: false) {
+                    await MainActor.run {
+                        // Keep cloud entries from the last full load.
+                        let cloud = self.found.filter { $0.source == "cloud" }
+                        if list + cloud != self.found { self.found = list + cloud }
+                    }
+                }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    /// Everything, including cloud (slower); for the Continue sheet.
+    func loadFound() {
+        loadingCloud = true
+        Task.detached {
+            let list = (try? DinoConnection(path: DinoEnvironment.socketPath).found(cloud: true)) ?? []
+            await MainActor.run {
+                self.found = list
+                self.loadingCloud = false
+            }
+        }
+    }
+
+    /// Move a found session into dino. A running one finishes its turn first, then continues here.
+    func adopt(_ f: FoundSession) {
+        moving = f
+        let cwd = folder.path
+        Task.detached {
+            do {
+                // Own connection: a handoff may wait minutes for the turn to end.
+                let conn = try DinoConnection(path: DinoEnvironment.socketPath)
+                let id = try conn.adopt(f, cwd: cwd)
+                await MainActor.run {
+                    self.moving = nil
+                    self.showContinue = false
+                    self.found.removeAll { $0 == f }
+                    // The next poll brings the new session; select it once it's there.
+                    self.pendingSelect = id
+                }
+            } catch {
+                await MainActor.run {
+                    self.moving = nil
+                    self.error = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private var pendingSelect: String?
 
     func chooseFolder() {
         let panel = NSOpenPanel()

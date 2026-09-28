@@ -60,6 +60,11 @@ pub enum Request {
     /// Switch this connection to a live terminal stream for session `id`.
     Attach { id: String, cols: u16, rows: u16 },
     Shutdown,
+    /// Agent sessions outside dino that it can continue. `cloud` also asks providers (slower).
+    Found { cloud: bool },
+    /// Continue a found session in dino: running ones are handed off (waited on until idle,
+    /// stopped, resumed here). `cwd` is where cloud sessions land.
+    Adopt { session: crate::found::FoundSession, cwd: Option<String> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -68,6 +73,7 @@ pub enum Response {
     State { sessions: Vec<SessionInfo>, quotas: Vec<QuotaInfo> },
     Launchers { launchers: Vec<LauncherInfo> },
     Created { id: String },
+    Found { sessions: Vec<crate::found::FoundSession> },
     Ok,
     Error { message: String },
 }
