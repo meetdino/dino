@@ -74,6 +74,19 @@ struct ContentView: View {
             Terminals()
         }
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
+        .alert(
+            "Move “\(model.confirmMove?.title ?? "")” into dino?",
+            isPresented: Binding(get: { model.confirmMove != nil }, set: { if !$0 { model.confirmMove = nil } }),
+            presenting: model.confirmMove
+        ) { f in
+            Button("Move to dino") { model.adopt(f) }
+                .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) {}
+        } message: { f in
+            Text(f.isBusy
+                ? "It's working right now. dino waits for the current turn to finish, closes it in \(f.terminal ?? "the other terminal") and continues the conversation here."
+                : "dino closes it in \(f.terminal ?? "the other terminal") and continues the same conversation here, with its history.")
+        }
         .overlay { if let f = model.moving { MovingOverlay(session: f) } }
     }
 }
@@ -216,7 +229,16 @@ struct Sidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            List(selection: Binding(get: { model.selected }, set: { model.select($0) })) {
+            List(selection: Binding(get: { model.selected }, set: { tag in
+                // Rows outside "Agents" carry a `move:` tag: ask before handing that session over.
+                // Anything else that isn't a session (or deselecting) leaves the selection alone.
+                guard let tag else { return }
+                if tag.hasPrefix("move:") {
+                    model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
+                } else {
+                    model.select(tag)
+                }
+            })) {
                 Section("Agents") {
                     ForEach(Array(model.sessions.enumerated()), id: \.element.id) { i, s in
                         SessionRow(session: s, index: i + 1)
@@ -229,7 +251,7 @@ struct Sidebar: View {
                 if !model.elsewhere.isEmpty {
                     Section("On this Mac") {
                         ForEach(model.elsewhere) { f in
-                            ElsewhereRow(session: f)
+                            ElsewhereRow(session: f).tag("move:\(f.id)")
                         }
                     }
                 }
@@ -419,12 +441,12 @@ struct ElsewhereRow: View {
                 Text(whereText(session)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            Button { model.adopt(session) } label: { Image(systemName: "arrow.down.right.and.arrow.up.left") }
-                .buttonStyle(.borderless)
-                .help("Move this session into dino")
+            Image(systemName: "arrow.right.circle").foregroundStyle(Brand.green)
+                .help("Click to move this session into dino")
         }
         .padding(.vertical, 2)
-        .contextMenu { Button("Move to dino") { model.adopt(session) } }
+        .contentShape(Rectangle())
+        .contextMenu { Button("Move to dino…") { model.confirmMove = session } }
     }
 }
 
@@ -492,7 +514,14 @@ struct ContinueSheet: View {
         if !items.isEmpty || (title == "Cloud" && model.loadingCloud) {
             Section {
                 ForEach(items) { f in
-                    Button { model.adopt(f) } label: { FoundRow(session: f) }
+                    Button {
+                        if f.source == "running" {
+                            model.showContinue = false
+                            model.confirmMove = f
+                        } else {
+                            model.adopt(f)
+                        }
+                    } label: { FoundRow(session: f) }
                         .buttonStyle(.plain)
                 }
             } header: {
