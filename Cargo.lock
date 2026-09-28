@@ -558,6 +558,7 @@ dependencies = [
  "dino-core",
  "dino-proxy",
  "dino-term",
+ "serde",
  "serde_json",
 ]
 

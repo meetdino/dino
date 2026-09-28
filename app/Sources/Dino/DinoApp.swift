@@ -75,13 +75,16 @@ struct Terminals: View {
     var body: some View {
         ZStack {
             Color(nsColor: .textBackgroundColor).ignoresSafeArea()
-            if model.sessions.isEmpty {
+            if model.sessions.isEmpty || model.daemonDown {
                 EmptyState()
             }
             // Every session stays mounted; only the selected one draws.
             ForEach(model.sessions) { s in
                 let visible = s.id == model.selected
-                TerminalPane(state: model.terminal(for: s.id), visible: visible)
+                let state = model.terminal(for: s.id)
+                TerminalPane(state: state, visible: visible)
+                    // A new state (after reconnecting) must mean a new surface.
+                    .id(ObjectIdentifier(state))
                     .opacity(visible ? 1 : 0)
                     .allowsHitTesting(visible)
             }
@@ -141,8 +144,13 @@ struct EmptyState: View {
             if let error = model.error {
                 Text(error).foregroundStyle(SessionStatus.exited.color).font(.callout)
             }
+            if model.daemonDown {
+                Text("dinod isn't running. Your sessions are saved and resume when it starts.")
+                    .foregroundStyle(.secondary).font(.callout)
+                Button("Start dinod") { model.startDaemon() }.controlSize(.large)
+            }
             VStack(spacing: 8) {
-                ForEach(model.launchers) { l in
+                ForEach(model.daemonDown ? [] : model.launchers) { l in
                     Button { model.newSession(l) } label: {
                         Text(l.label).frame(width: 240)
                     }
