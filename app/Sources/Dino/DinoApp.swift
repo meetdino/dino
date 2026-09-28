@@ -6,6 +6,7 @@ import SwiftUI
 struct DinoApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @StateObject private var model = DinoModel()
+    @AppStorage(QuitChoice.key) private var quitChoice = ""
 
     var body: some Scene {
         WindowGroup("dino") {
@@ -13,6 +14,7 @@ struct DinoApp: App {
                 .environmentObject(model)
                 .frame(minWidth: 820, minHeight: 480)
                 .onAppear {
+                    delegate.model = model
                     Notifier.onOpenSession = { model.select($0) }
                     Notifier.setUp()
                     model.start()
@@ -20,6 +22,11 @@ struct DinoApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(after: .appSettings) {
+                Button("Ask Before Quitting") { quitChoice = "" }
+                    .disabled(quitChoice.isEmpty)
+                    .help("Show the keep-running question again when you quit")
+            }
             CommandMenu("Session") {
                 Menu("New Session") {
                     ForEach(model.launchers) { l in
@@ -55,6 +62,7 @@ struct DinoApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_: Notification) {
         // Run as a regular app with a Dock icon and menu bar even when launched from a binary.
@@ -63,6 +71,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { true }
+
+    weak var model: DinoModel?
+
+    /// Agents run in dinod, not in the app, so quitting leaves them running unless you say otherwise.
+    func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
+        guard let model, !model.daemonDown, !model.sessions.isEmpty, !QuitChoice.systemIsGoingDown else {
+            return .terminateNow
+        }
+        let choice = QuitChoice(rawValue: UserDefaults.standard.string(forKey: QuitChoice.key) ?? "") ?? ask(model)
+        switch choice {
+        case .keep: return .terminateNow
+        case .stop:
+            model.stopDaemon()
+            return .terminateNow
+        case .cancel: return .terminateCancel
+        }
+    }
+
+    private func ask(_ model: DinoModel) -> QuitChoice {
+        let count = model.sessions.count
+        let working = model.sessions.filter { [.thinking, .working, .needsYou].contains(model.status(of: $0)) }.count
+        let alert = NSAlert()
+        alert.messageText = count == 1 ? "Keep your agent running?" : "Keep your \(count) agents running?"
+        alert.informativeText = (working > 0 ? "\(working) \(working == 1 ? "is" : "are") working right now. " : "")
+            + "They carry on in the background while dino is closed; open dino to pick up where you left off."
+            + " Stopping pauses them, and they resume the next time dino starts."
+        alert.addButton(withTitle: "Keep Running")
+        alert.addButton(withTitle: count == 1 ? "Stop It" : "Stop All")
+        alert.addButton(withTitle: "Cancel")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't ask again"
+        let choice: QuitChoice = switch alert.runModal() {
+        case .alertFirstButtonReturn: .keep
+        case .alertSecondButtonReturn: .stop
+        default: .cancel
+        }
+        // Remember the button, not just "don't ask": the next quit does the same thing.
+        if choice != .cancel, alert.suppressionButton?.state == .on {
+            UserDefaults.standard.set(choice.rawValue, forKey: QuitChoice.key)
+        }
+        return choice
+    }
+}
+
+enum QuitChoice: String {
+    case keep, stop, cancel
+    static let key = "quitChoice"
+
+    /// Logout, restart and shutdown quit apps too; never hold those up with a question.
+    static var systemIsGoingDown: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              let reason = event.attributeDescriptor(forKeyword: kAEQuitReason)?.enumCodeValue
+        else { return false }
+        return [kAEShutDown, kAERestart, kAEReallyLogOut].map { OSType($0) }.contains(reason)
+    }
 }
 
 struct ContentView: View {
