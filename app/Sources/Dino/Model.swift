@@ -47,6 +47,8 @@ final class DinoModel: ObservableObject {
     /// A handoff in progress: the session being moved, and whether we're waiting on its turn.
     @Published var moving: FoundSession?
     @Published var showContinue = false
+    /// A handoff waiting for the user's confirmation.
+    @Published var confirmMove: FoundSession?
 
     var elsewhere: [FoundSession] { found.filter { $0.source == "running" } }
 
