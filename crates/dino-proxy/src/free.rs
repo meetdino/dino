@@ -76,6 +76,7 @@ pub(crate) async fn handle(st: AppState, session: String, rest: &str, body: Byte
     // Try candidates until one starts answering; failures before the first byte are invisible to the agent.
     for model in st.router.candidates(tier) {
         oai["model"] = json!(model.id);
+        set_identity(&mut oai, &model);
         let started = Instant::now();
         let sent = st
             .client
@@ -250,6 +251,22 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
         .header("cache-control", "no-cache")
         .body(Body::from_stream(events))
         .unwrap()
+}
+
+/// Claude Code's system prompt tells the model it is Claude; say which model actually answers,
+/// so "what model are you?" gets an honest reply.
+fn set_identity(oai: &mut Value, model: &dino_router::Model) {
+    const MARK: &str = "[dino] ";
+    let note = format!(
+        "{MARK}Identity: you are {} ({}), served by NVIDIA NIM through dino's free tier. You are not Claude; if asked what model you are, say so plainly.",
+        model.short(),
+        model.id
+    );
+    let Some(msgs) = oai["messages"].as_array_mut() else { return };
+    // Replace the note from a previous attempt (fallback to another model) instead of stacking them.
+    msgs.retain(|m| !(m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.starts_with(MARK))));
+    let at = msgs.iter().take_while(|m| m["role"] == "system").count();
+    msgs.insert(at, json!({ "role": "system", "content": note }));
 }
 
 fn record_usage(st: &AppState, session: &str, u: &anyllm_translate::anthropic::Usage) {
