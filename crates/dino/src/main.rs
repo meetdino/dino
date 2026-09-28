@@ -727,7 +727,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
-       dino ls | new <agent> [args...] | attach <id> | kill <id> | stop | daemon";
+       dino ls | new <agent> [args...] | attach <id> | kill <id> | ping | stop | daemon";
 
 fn main() -> anyhow::Result<()> {
     let mut cli: Vec<String> = std::env::args().skip(1).collect();
@@ -735,6 +735,12 @@ fn main() -> anyhow::Result<()> {
         Some("daemon") => return dino_daemon::run(),
         Some("attach") => return client::attach_raw(cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?),
         Some("ls") => return cmd_ls(),
+        // Start dinod if needed; used by the app before it attaches surfaces.
+        Some("ping") => {
+            client::connect()?;
+            println!("{}", dino_core::ipc::socket_path().display());
+            return Ok(());
+        }
         Some("new") => {
             let agent = cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone();
             let (cols, rows) = terminal::size().unwrap_or((120, 40));
