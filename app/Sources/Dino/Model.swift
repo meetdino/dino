@@ -140,7 +140,10 @@ final class DinoModel: ObservableObject {
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
         terminals = terminals.filter { live.contains($0.key) }
-        if selected == nil || !live.contains(selected!) { selected = next.first?.id }
+        if selected == nil || !live.contains(selected!) {
+            // Through select(), so the terminal also takes keyboard focus on launch.
+            select(next.first?.id)
+        }
         let waiting = next.filter { status(of: $0) == .needsYou }.count
         NSApp.dockTile.badgeLabel = waiting > 0 ? "\(waiting)" : nil
     }
