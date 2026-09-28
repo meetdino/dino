@@ -47,6 +47,27 @@ pub fn repo_root(dir: &Path) -> anyhow::Result<PathBuf> {
         .map_err(|_| anyhow::anyhow!("{} isn't in a git repository", dir.display()))
 }
 
+/// A checkout of a repo: its folder and branch (None when detached).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: String,
+    pub branch: Option<String>,
+}
+
+/// Every worktree of the repo containing `dir`, the main checkout first.
+pub fn list(dir: &Path) -> anyhow::Result<Vec<Worktree>> {
+    let out = git(dir, &["worktree", "list", "--porcelain"])?;
+    Ok(out
+        .split("\n\n")
+        .filter(|b| !b.lines().any(|l| l == "bare" || l.starts_with("prunable")))
+        .filter_map(|b| {
+            let path = b.lines().next()?.strip_prefix("worktree ")?.to_string();
+            let branch = b.lines().find_map(|l| l.strip_prefix("branch refs/heads/")).map(String::from);
+            Some(Worktree { path, branch })
+        })
+        .collect())
+}
+
 /// A commit of the checkout as it is now, uncommitted edits included, without touching it:
 /// agents start from what the user sees, not from the last commit.
 pub fn snapshot(repo: &Path) -> anyhow::Result<String> {
@@ -149,6 +170,12 @@ mod tests {
         let wt = add(repo, "g/claude", "dino/g/claude", &base).unwrap();
         assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "one\ntwo\n");
         assert!(git(repo, &["status", "--porcelain"]).unwrap().lines().all(|l| !l.contains(".dino")));
+        let all = list(&wt).unwrap();
+        let real = |p: &Path| p.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert_eq!(all, vec![
+            Worktree { path: real(repo), branch: Some("main".into()) },
+            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()) },
+        ]);
 
         std::fs::write(wt.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         std::fs::write(wt.join("new.txt"), "hi\n").unwrap();

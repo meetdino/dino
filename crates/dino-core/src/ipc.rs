@@ -68,6 +68,8 @@ pub enum Request {
     /// One prompt to several agents, each in its own git worktree of the repo at `cwd`.
     Fanout { prompt: String, launchers: Vec<String>, cwd: Option<String> },
     Groups,
+    /// Repos (with their worktrees) and folders where sessions run, plus `folders` the app shows.
+    Tree { folders: Vec<String> },
     /// A fan-out member's changes as a patch.
     Diff { session: String },
     /// Apply this member's changes to the user's checkout and close its group.
@@ -84,6 +86,7 @@ pub enum Response {
     Created { id: String },
     Found { sessions: Vec<crate::found::FoundSession> },
     Groups { groups: Vec<GroupInfo> },
+    Tree { repos: Vec<RepoInfo> },
     Diff { stat: DiffStat, text: String },
     Ok,
     Error { message: String },
@@ -123,6 +126,20 @@ pub struct SessionInfo {
     /// Why the agent's last model call failed, if it did.
     #[serde(default)]
     pub error: Option<String>,
+    /// Where the agent runs, symlinks resolved so it matches git's worktree paths.
+    #[serde(default)]
+    pub cwd: String,
+}
+
+pub use crate::worktree::Worktree;
+
+/// A git repo, or a plain folder (no worktrees) where sessions run.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RepoInfo {
+    /// The main checkout, or the folder.
+    pub path: String,
+    pub name: String,
+    pub worktrees: Vec<Worktree>,
 }
 
 pub use crate::worktree::DiffStat;

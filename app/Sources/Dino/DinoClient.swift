@@ -19,6 +19,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var group: String?
     /// Why the agent's last model call failed.
     var error: String?
+    /// Where it runs, symlinks resolved; nil from an older dinod.
+    var cwd: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
@@ -183,7 +185,7 @@ final class DinoConnection: @unchecked Sendable {
     }
 
     /// One request/response exchange; throws dinod's error message as-is.
-    private func send(_ body: [String: Any]) throws -> Data {
+    func send(_ body: [String: Any]) throws -> Data {
         lock.lock()
         defer { lock.unlock() }
         let payload = try JSONSerialization.data(withJSONObject: body)
