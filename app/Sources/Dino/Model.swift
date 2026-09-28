@@ -144,6 +144,11 @@ final class DinoModel: ObservableObject {
         Task.detached { try? DinoEnvironment.ensureDaemon() }
     }
 
+    /// Saves and stops every session; the next dinod resumes them. Blocks: used while quitting.
+    func stopDaemon() {
+        _ = try? DinoConnection(path: DinoEnvironment.socketPath).request(["type": "shutdown"])
+    }
+
     private func apply(_ next: [SessionInfo], _ quotas: [QuotaInfo]) {
         let appActive = NSApp.isActive
         for s in next {
