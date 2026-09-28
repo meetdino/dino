@@ -757,7 +757,8 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
        dino ls | new <agent> [args...] | attach <id> | kill <id> | ping | stop | daemon
-       dino found | continue <session-id prefix>";
+       dino found | continue <session-id prefix>
+       dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>";
 
 fn main() -> anyhow::Result<()> {
     let mut cli: Vec<String> = std::env::args().skip(1).collect();
@@ -766,6 +767,16 @@ fn main() -> anyhow::Result<()> {
         Some("attach") => return client::attach_raw(cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?),
         Some("ls") => return cmd_ls(),
         Some("found") => return cmd_found(),
+        Some("fan") => return cmd_fan(&cli[1..]),
+        Some("groups") => return cmd_groups(),
+        Some("diff") => {
+            let session = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino diff <session id>"))?.clone();
+            let Response::Diff { text, .. } = client::request(&Request::Diff { session })? else { anyhow::bail!("unexpected reply") };
+            print!("{text}");
+            return Ok(());
+        }
+        Some("keep") => return print_response(client::request(&Request::Keep { session: cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino keep <session id>"))?.clone() })?),
+        Some("discard") => return print_response(client::request(&Request::Discard { group: cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino discard <group>"))?.clone() })?),
         Some("continue") => return cmd_continue(cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino continue <session-id prefix>"))?),
         // Start dinod if needed; used by the app before it attaches surfaces.
         Some("ping") => {
@@ -897,6 +908,34 @@ fn cmd_found() -> anyhow::Result<()> {
             let status = f.status.as_deref().unwrap_or("");
             let cwd = f.cwd.as_deref().unwrap_or("").replace(&std::env::var("HOME").unwrap_or_default(), "~");
             println!("  {:<6} {:<38} {:<22} {:<10} {:<9} {}  {}", f.agent, truncate(&f.title, 38), cwd, place, status, &f.session_id.get(..8).unwrap_or(""), f.args.join(" "));
+        }
+    }
+    Ok(())
+}
+
+/// One prompt to several agents, each in its own worktree. Without `--agents`, every agent dino has.
+fn cmd_fan(args: &[String]) -> anyhow::Result<()> {
+    let (agents, prompt) = match args {
+        [flag, list, rest @ ..] if flag == "--agents" => (list.split(',').map(String::from).collect(), rest.join(" ")),
+        rest => {
+            let Response::Launchers { launchers } = client::request(&Request::Launchers)? else { anyhow::bail!("unexpected reply") };
+            (launchers.into_iter().filter(|l| l.agent_id != "shell").map(|l| l.short).collect::<Vec<_>>(), rest.join(" "))
+        }
+    };
+    let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
+    print_response(client::request(&Request::Fanout { prompt, launchers: agents, cwd })?)
+}
+
+fn cmd_groups() -> anyhow::Result<()> {
+    let Response::Groups { groups } = client::request(&Request::Groups)? else { anyhow::bail!("unexpected reply") };
+    if groups.is_empty() {
+        println!("no fan-outs");
+    }
+    for g in groups {
+        println!("{}  \"{}\"  in {}", g.id, truncate(&g.prompt, 60), g.repo);
+        for m in g.members {
+            let stat = m.stat.map_or("worktree missing".into(), |s| format!("{} files +{} -{}", s.files, s.added, s.removed));
+            println!("  {:>3}  {:<8} {stat}", m.session, m.launcher);
         }
     }
     Ok(())

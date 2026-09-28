@@ -50,6 +50,12 @@ final class DinoModel: ObservableObject {
     /// A handoff waiting for the user's confirmation.
     @Published var confirmMove: FoundSession?
 
+    /// Fan-outs, with each member's diff size.
+    @Published var groups: [GroupInfo] = []
+    @Published var showFanout = false
+    /// A member whose changes the user is about to keep.
+    @Published var confirmKeep: MemberInfo?
+
     var elsewhere: [FoundSession] { found.filter { $0.source == "running" } }
 
     /// Where new sessions start.
@@ -76,6 +82,7 @@ final class DinoModel: ObservableObject {
                     self.polling = true
                     self.poll()
                     self.watchElsewhere()
+                    self.watchGroups()
                 }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
@@ -156,7 +163,8 @@ final class DinoModel: ObservableObject {
             pendingSelect = nil
             select(want)
         }
-        if selected == nil || !live.contains(selected!) {
+        let groupSelected = selected.map { id in groups.contains { "group:\($0.id)" == id } } ?? false
+        if !groupSelected, selected == nil || !live.contains(selected!) {
             // Through select(), so the terminal also takes keyboard focus on launch.
             select(next.first?.id)
         }
@@ -196,7 +204,7 @@ final class DinoModel: ObservableObject {
         let t = TerminalViewState()
         t.configuration = TerminalSurfaceOptions(
             backend: .exec,
-            envVars: ["PATH": DinoEnvironment.loginPath],
+            envVars: ["PATH": DinoEnvironment.loginPath, "DINO_HOME": DinoEnvironment.home],
             command: "\(DinoEnvironment.dinoBinary) attach \(id)",
             waitAfterCommand: false
         )
@@ -273,6 +281,65 @@ final class DinoModel: ObservableObject {
     }
 
     private var pendingSelect: String?
+
+    /// Diff sizes need git, so these refresh slower than session state.
+    private func watchGroups() {
+        Task.detached {
+            while true {
+                if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let list = try? conn.groups() {
+                    await MainActor.run {
+                        if list != self.groups { self.groups = list }
+                        if let want = self.pendingGroup, list.contains(where: { $0.id == want }) {
+                            self.pendingGroup = nil
+                            self.select("group:\(want)")
+                        }
+                    }
+                }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    private var pendingGroup: String?
+
+    /// Start a fan-out in the current folder; throws dinod's reason (not a git repo, …).
+    func fanout(prompt: String, launchers: [String]) async throws {
+        let cwd = folder.path
+        let id = try await Task.detached {
+            try DinoConnection(path: DinoEnvironment.socketPath)
+                .request(["type": "fanout", "prompt": prompt, "launchers": launchers, "cwd": cwd]).id
+        }.value
+        showFanout = false
+        pendingGroup = id
+    }
+
+    func diff(_ session: String) async -> String {
+        await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).diff(session: session)) ?? "" }.value
+    }
+
+    /// Apply this member's changes to the checkout and close its fan-out.
+    func keep(_ m: MemberInfo) {
+        groupAction(["type": "keep", "session": m.session])
+    }
+
+    func discard(_ g: GroupInfo) {
+        groupAction(["type": "discard", "group": g.id])
+    }
+
+    private func groupAction(_ body: [String: Any]) {
+        Task.detached {
+            do {
+                _ = try DinoConnection(path: DinoEnvironment.socketPath).request(body)
+                let list = try DinoConnection(path: DinoEnvironment.socketPath).groups()
+                await MainActor.run {
+                    self.groups = list
+                    self.selected = nil
+                }
+            } catch {
+                await MainActor.run { self.error = error.localizedDescription }
+            }
+        }
+    }
 
     func chooseFolder() {
         let panel = NSOpenPanel()

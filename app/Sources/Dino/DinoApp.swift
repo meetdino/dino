@@ -30,6 +30,8 @@ struct DinoApp: App {
                     if let l = model.launchers.first(where: { $0.short == "claude" }) ?? model.launchers.first { model.newSession(l) }
                 }
                 .keyboardShortcut("n")
+                Button("Fan Out…") { model.showFanout = true }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Continue a Session…") {
                     model.loadFound()
                     model.showContinue = true
@@ -74,6 +76,26 @@ struct ContentView: View {
             Terminals()
         }
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
+        .sheet(isPresented: $model.showFanout) { FanoutSheet() }
+        .alert(
+            "Keep \(model.confirmKeep?.launcher ?? "")'s changes?",
+            isPresented: Binding(get: { model.confirmKeep != nil }, set: { if !$0 { model.confirmKeep = nil } }),
+            presenting: model.confirmKeep
+        ) { m in
+            Button("Keep") { model.keep(m) }
+                .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("They're applied to your checkout, uncommitted, for you to review. The other agents stop and every worktree of this fan-out is removed.")
+        }
+        .alert(
+            "Something went wrong",
+            isPresented: Binding(get: { model.error != nil && !model.sessions.isEmpty }, set: { if !$0 { model.error = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.error ?? "")
+        }
         .alert(
             "Move “\(model.confirmMove?.title ?? "")” into dino?",
             isPresented: Binding(get: { model.confirmMove != nil }, set: { if !$0 { model.confirmMove = nil } }),
@@ -112,6 +134,9 @@ struct Terminals: View {
                     .opacity(visible ? 1 : 0)
                     .allowsHitTesting(visible)
             }
+            if let g = model.groups.first(where: { "group:\($0.id)" == model.selected }) {
+                CompareView(group: g)
+            }
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -130,6 +155,12 @@ struct Terminals: View {
                     Label("Continue…", systemImage: "arrow.uturn.forward")
                 }
                 .help("Continue a session from another terminal, your history, or the cloud (⌘K)")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { model.showFanout = true } label: {
+                    Label("Fan Out…", systemImage: "arrow.triangle.branch")
+                }
+                .help("One prompt to several agents, each in its own worktree (⇧⌘N)")
             }
             ToolbarItem(placement: .primaryAction) { NewSessionMenu() }
         }
@@ -201,6 +232,13 @@ struct EmptyState: View {
                     }
                     .controlSize(.large)
                 }
+                if !model.daemonDown {
+                    Button { model.showFanout = true } label: {
+                        Label("Fan Out…", systemImage: "arrow.triangle.branch").frame(width: 240)
+                    }
+                    .controlSize(.large)
+                    .help("One prompt, several agents, each in its own worktree; keep the best (⇧⌘N)")
+                }
             }
             Button("Start in \(model.folder.path)") { model.chooseFolder() }
                 .buttonStyle(.link)
@@ -239,13 +277,30 @@ struct Sidebar: View {
                     model.select(tag)
                 }
             })) {
-                Section("Agents") {
-                    ForEach(Array(model.sessions.enumerated()), id: \.element.id) { i, s in
-                        SessionRow(session: s, index: i + 1)
-                            .tag(s.id)
-                            .contextMenu {
-                                Button("Kill Session", role: .destructive) { model.kill(s.id) }
+                let ungrouped = model.sessions.filter { $0.group == nil }
+                if !ungrouped.isEmpty {
+                    Section("Agents") {
+                        ForEach(Array(ungrouped.enumerated()), id: \.element.id) { i, s in
+                            SessionRow(session: s, index: i + 1)
+                                .tag(s.id)
+                                .contextMenu {
+                                    Button("Kill Session", role: .destructive) { model.kill(s.id) }
+                                }
+                        }
+                    }
+                }
+                ForEach(model.groups) { g in
+                    Section {
+                        GroupRow(group: g).tag("group:\(g.id)")
+                        ForEach(g.members) { m in
+                            if let s = model.sessions.first(where: { $0.id == m.session }) {
+                                SessionRow(session: s, index: 0, stat: m.stat)
+                                    .padding(.leading, 12)
+                                    .tag(s.id)
                             }
+                        }
+                    } header: {
+                        Label("Fan-out", systemImage: "arrow.triangle.branch")
                     }
                 }
                 if !model.elsewhere.isEmpty {
@@ -274,6 +329,7 @@ struct SessionRow: View {
     @EnvironmentObject var model: DinoModel
     let session: SessionInfo
     let index: Int
+    var stat: DiffStat?
 
     var body: some View {
         let status = model.status(of: session)
@@ -287,6 +343,9 @@ struct SessionRow: View {
             if let needs = session.needs {
                 Label(needs, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(SessionStatus.needsYou.color).lineLimit(1)
+            }
+            if let stat, stat.files > 0 {
+                StatText(stat: stat).font(.caption.monospacedDigit())
             }
             if session.requests > 0 {
                 HStack(spacing: 6) {

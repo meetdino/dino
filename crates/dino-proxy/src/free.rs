@@ -214,6 +214,7 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
             }
         };
         match item {
+            Some(Ok(_)) if done => {}
             Some(Ok(bytes)) => {
                 for &b in bytes.iter() {
                     if b != b'\n' {
@@ -228,10 +229,26 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
                     }
                     if let Ok(chunk) = serde_json::from_slice::<ChatCompletionChunk>(data) {
                         emit(translator.process_chunk(&chunk));
+                    } else if let Some(err) = serde_json::from_slice::<Value>(data).ok().filter(|v| v.get("error").is_some()) {
+                        // Upstream failed mid-answer and said so in the stream.
+                        let msg = err["error"]["message"].as_str().unwrap_or("upstream error").to_string();
+                        log(format_args!("{session} free stream error: {msg}"));
+                        out.push_str(&stream_error(&msg));
+                        done = true;
+                        guard.take();
+                        break;
                     }
                 }
             }
-            Some(Err(e)) => log(format_args!("{session} free stream error: {e}")),
+            // Ending with a plain stop would look like a complete answer (or a malformed one);
+            // an Anthropic error event lets Claude Code say so and retry.
+            Some(Err(e)) if !done => {
+                log(format_args!("{session} free stream error: {e}"));
+                out.push_str(&stream_error(&e.to_string()));
+                done = true;
+                guard.take();
+            }
+            Some(Err(_)) => {}
             None if !done => {
                 done = true;
                 emit(translator.finish());
@@ -251,6 +268,11 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
         .header("cache-control", "no-cache")
         .body(Body::from_stream(events))
         .unwrap()
+}
+
+fn stream_error(message: &str) -> String {
+    let v = serde_json::json!({"type": "error", "error": {"type": "overloaded_error", "message": format!("free tier: {message}")}});
+    format!("event: error\ndata: {v}\n\n")
 }
 
 /// Claude Code's system prompt tells the model it is Claude; say which model actually answers,

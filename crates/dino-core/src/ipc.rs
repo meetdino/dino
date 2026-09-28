@@ -65,6 +65,15 @@ pub enum Request {
     /// Continue a found session in dino: running ones are handed off (waited on until idle,
     /// stopped, resumed here). `cwd` is where cloud sessions land.
     Adopt { session: crate::found::FoundSession, cwd: Option<String> },
+    /// One prompt to several agents, each in its own git worktree of the repo at `cwd`.
+    Fanout { prompt: String, launchers: Vec<String>, cwd: Option<String> },
+    Groups,
+    /// A fan-out member's changes as a patch.
+    Diff { session: String },
+    /// Apply this member's changes to the user's checkout and close its group.
+    Keep { session: String },
+    /// Close a fan-out group: stop its agents, remove their worktrees and branches.
+    Discard { group: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -74,6 +83,8 @@ pub enum Response {
     Launchers { launchers: Vec<LauncherInfo> },
     Created { id: String },
     Found { sessions: Vec<crate::found::FoundSession> },
+    Groups { groups: Vec<GroupInfo> },
+    Diff { stat: DiffStat, text: String },
     Ok,
     Error { message: String },
 }
@@ -106,6 +117,29 @@ pub struct SessionInfo {
     pub tier: Option<String>,
     /// "working", "done", or "needs:<what>".
     pub activity: Option<String>,
+    /// The fan-out group this session belongs to.
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+pub use crate::worktree::DiffStat;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GroupInfo {
+    pub id: String,
+    pub prompt: String,
+    pub repo: String,
+    pub members: Vec<MemberInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MemberInfo {
+    pub session: String,
+    pub launcher: String,
+    pub branch: String,
+    pub worktree: String,
+    /// None when the worktree can't be read (removed by hand).
+    pub stat: Option<DiffStat>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
