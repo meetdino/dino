@@ -12,7 +12,11 @@ struct DinoApp: App {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 820, minHeight: 480)
-                .onAppear { model.start() }
+                .onAppear {
+                    Notifier.onOpenSession = { model.select($0) }
+                    Notifier.setUp()
+                    model.start()
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

@@ -1,6 +1,7 @@
 import AppKit
 import GhosttyTerminal
 import SwiftUI
+import UserNotifications
 
 enum SessionStatus {
     case thinking, working, idle, done, needsYou, exited
@@ -119,11 +120,21 @@ final class DinoModel: ObservableObject {
     }
 
     private func apply(_ next: [SessionInfo], _ quotas: [QuotaInfo]) {
+        let appActive = NSApp.isActive
         for s in next {
-            guard let prev = sessions.first(where: { $0.id == s.id }), s.id != selected else { continue }
-            if s.bells > prev.bells { attention.insert(s.id) }
-            let wasBusy = prev.activity == "working" || prev.needs != nil
-            if s.activity == "done", wasBusy { unseenDone.insert(s.id) }
+            guard let prev = sessions.first(where: { $0.id == s.id }) else { continue }
+            let looking = appActive && s.id == selected
+            if !looking {
+                if s.bells > prev.bells { attention.insert(s.id) }
+                let wasBusy = prev.activity == "working" || prev.needs != nil
+                if s.activity == "done", wasBusy {
+                    unseenDone.insert(s.id)
+                    Notifier.post(session: s, title: "\(s.name) finished", body: s.title ?? "Ready for your review")
+                }
+                if let needs = s.needs, prev.needs == nil {
+                    Notifier.post(session: s, title: "\(s.name) needs you", body: needs)
+                }
+            }
         }
         if next != sessions { sessions = next }
         if quotas != self.quotas { self.quotas = quotas }

@@ -236,6 +236,14 @@ impl App {
                             && s.info.activity.as_deref().is_some_and(|a| a == "working" || a.starts_with("needs:"));
                         if !focused && finished {
                             s.unseen_done = true;
+                            notify(&format!("{} finished", info.name), info.title.as_deref().unwrap_or("Ready for your review"));
+                        }
+                        let now_needs = info.activity.as_deref().and_then(|a| a.strip_prefix("needs:"));
+                        let was_needing = s.info.activity.as_deref().is_some_and(|a| a.starts_with("needs:"));
+                        if !focused && !was_needing {
+                            if let Some(what) = now_needs {
+                                notify(&format!("{} needs you", info.name), what);
+                            }
                         }
                         if !focused && info.bells > s.info.bells {
                             s.attention = true;
@@ -653,6 +661,21 @@ fn render_centered(f: &mut Frame, area: Rect, lines: Vec<Line>) {
     let h = (lines.len() as u16).max(24).min(area.height);
     let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 3, width: w, height: h };
     f.render_widget(Paragraph::new(lines), r);
+}
+
+/// Ask the host terminal for a desktop notification: OSC 777 (Ghostty, WezTerm, Warp, VTE) or
+/// OSC 9 (iTerm2 and most others). Terminals that support neither ignore it.
+fn notify(title: &str, body: &str) {
+    use std::io::Write;
+    let clean = |s: &str| s.replace(['\x07', '\x1b', ';'], " ");
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_default().to_lowercase();
+    let seq = if ["ghostty", "wezterm", "warpterminal"].iter().any(|p| program.contains(p)) {
+        format!("\x1b]777;notify;{};{}\x07", clean(title), clean(body))
+    } else {
+        format!("\x1b]9;{}: {}\x07", clean(title), clean(body))
+    };
+    let mut out = io::stdout();
+    let _ = out.write_all(seq.as_bytes()).and_then(|_| out.flush());
 }
 
 fn is_prefix(key: &KeyEvent) -> bool {
