@@ -356,9 +356,185 @@ fn codex_cloud_tasks(codex: &Path) -> Vec<Value> {
     vec![]
 }
 
+/// Every process as (pid, parent, command path).
+fn process_table() -> Vec<(u32, u32, String)> {
+    let text = run("ps", &["-A", "-o", "pid=,ppid=,comm="]).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
+            Some((pid, ppid, it.collect::<Vec<_>>().join(" ")))
+        })
+        .collect()
+}
+
+/// `root` and everything under it, parents before children.
+fn subtree(table: &[(u32, u32, String)], root: u32) -> Vec<u32> {
+    let mut out = vec![root];
+    let mut i = 0;
+    while i < out.len() && out.len() < 64 {
+        let parent = out[i];
+        out.extend(table.iter().filter(|(pid, ppid, _)| *ppid == parent && *pid != parent).map(|(pid, ..)| *pid));
+        i += 1;
+    }
+    out
+}
+
+/// Which agent CLI a process is, from its command and arguments. Claude is found by its session
+/// file instead: its native binary is named after its version.
+fn agent_of(comm: &str, args: &[String]) -> Option<&'static str> {
+    let base = |s: &str| s.rsplit('/').next().unwrap_or(s).to_string();
+    let name = base(comm);
+    if name == "codex" || name.starts_with("codex-") {
+        return Some("codex");
+    }
+    if name == "gemini" || (name == "node" && args.first().is_some_and(|a| base(a) == "gemini" || a.contains("gemini-cli"))) {
+        return Some("gemini");
+    }
+    None
+}
+
+/// The live `~/.claude/sessions/<pid>.json` of an interactive Claude, if `pid` is one.
+fn claude_live(pid: u32) -> Option<Value> {
+    let text = std::fs::read_to_string(home().join(format!(".claude/sessions/{pid}.json"))).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    (v["pid"].as_u64() == Some(pid as u64) && v["kind"].as_str().is_none_or(|k| k == "interactive")).then_some(v)
+}
+
+/// A Claude transcript's title from its last `max` bytes: the latest `ai-title`, else the last
+/// prompt. Cheap on long conversations, where the title is rewritten as they go.
+fn tail_title(path: &Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut buf = vec![];
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let (mut title, mut prompt) = (None, None);
+    for line in text.lines() {
+        if line.contains("\"type\":\"ai-title\"") {
+            title = serde_json::from_str::<Value>(line).ok().and_then(|v| v["aiTitle"].as_str().map(String::from)).or(title);
+        } else if line.contains("\"type\":\"last-prompt\"") {
+            prompt = serde_json::from_str::<Value>(line).ok().and_then(|v| v["lastPrompt"].as_str().map(String::from)).or(prompt);
+        }
+    }
+    title.or(prompt.map(|p| p.chars().take(60).collect()))
+}
+
+fn claude_transcript(session_id: &str) -> Option<PathBuf> {
+    std::fs::read_dir(home().join(".claude/projects"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|d| d.path().join(format!("{session_id}.jsonl")))
+        .find(|p| p.exists())
+}
+
+/// An agent someone started by hand inside a dino shell: `fg` is the shell's foreground process
+/// group. Its session id is empty until the agent has written one (Gemini never names it).
+pub fn inside(fg: u32) -> Option<FoundSession> {
+    let table = process_table();
+    let found = |agent: &str, pid: u32| FoundSession {
+        source: Source::Running,
+        agent: agent.into(),
+        session_id: String::new(),
+        title: String::new(),
+        cwd: None,
+        updated_at: 0,
+        pid: Some(pid),
+        status: None,
+        terminal: Some("dino".into()),
+        args: vec![],
+        url: None,
+    };
+    for pid in subtree(&table, fg) {
+        if let Some(v) = claude_live(pid) {
+            let mut s = found("claude", pid);
+            s.session_id = v["sessionId"].as_str().unwrap_or_default().into();
+            s.title = claude_transcript(&s.session_id)
+                .and_then(|p| tail_title(&p, 512 * 1024))
+                .or_else(|| v["name"].as_str().map(String::from))
+                .unwrap_or_else(|| "Claude Code".into());
+            s.cwd = v["cwd"].as_str().map(String::from);
+            s.updated_at = v["updatedAt"].as_u64().map_or(0, |ms| ms / 1000);
+            s.status = v["status"].as_str().map(String::from);
+            s.args = portable_flags("claude", &args_of(pid));
+            return Some(s);
+        }
+        let comm = table.iter().find(|(p, ..)| *p == pid).map(|(.., c)| c.as_str()).unwrap_or_default();
+        // Arguments cost a `ps` each, so only for the processes that may need them.
+        let args = if comm.ends_with("node") || agent_of(comm, &[]).is_some() { args_of(pid) } else { vec![] };
+        match agent_of(comm, &args) {
+            Some("codex") => {
+                let mut s = found("codex", pid);
+                s.title = "Codex".into();
+                let files = run("lsof", &["-p", &pid.to_string(), "-Fn"]).unwrap_or_default();
+                let names: Vec<&str> = files.lines().filter_map(|l| l.strip_prefix('n')).collect();
+                if let Some(rollout) = names.iter().find(|f| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) {
+                    s.session_id = rollout_id(Path::new(rollout)).unwrap_or_default();
+                    s.updated_at = mtime(Path::new(rollout));
+                    if let Some((.., n, _)) = codex_names().into_iter().find(|(id, ..)| *id == s.session_id) {
+                        s.title = n;
+                    }
+                }
+                s.cwd = run("lsof", &["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+                    .and_then(|t| t.lines().find_map(|l| l.strip_prefix('n').map(String::from)));
+                s.args = portable_flags("codex", &args);
+                return Some(s);
+            }
+            Some(agent) => {
+                let mut s = found(agent, pid);
+                s.title = "Gemini CLI".into();
+                return Some(s);
+            }
+            None => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtree_walks_children_in_order() {
+        let t: Vec<(u32, u32, String)> = vec![(10, 1, "zsh".into()), (11, 10, "node".into()), (12, 11, "codex".into()), (13, 1, "other".into()), (14, 12, "rg".into())];
+        assert_eq!(subtree(&t, 11), [11, 12, 14]);
+        assert_eq!(subtree(&t, 13), [13]);
+    }
+
+    #[test]
+    fn recognizes_agent_processes() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(agent_of("/opt/homebrew/bin/codex", &[]), Some("codex"));
+        assert_eq!(agent_of("/x/vendor/codex-aarch64-apple-darwin", &[]), Some("codex"));
+        assert_eq!(agent_of("node", &a(&["/opt/homebrew/bin/gemini", "-m", "x"])), Some("gemini"));
+        assert_eq!(agent_of("node", &a(&["/x/node_modules/@google/gemini-cli/dist/index.js"])), Some("gemini"));
+        assert_eq!(agent_of("node", &a(&["server.js", "gemini"])), None);
+        assert_eq!(agent_of("/bin/zsh", &[]), None);
+        assert_eq!(agent_of("vim", &a(&["codex.md"])), None);
+    }
+
+    #[test]
+    fn tail_title_prefers_latest_ai_title() {
+        let dir = std::env::temp_dir().join(format!("dino-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.jsonl");
+        let filler = format!("{{\"type\":\"user\",\"x\":\"{}\"}}\n", "a".repeat(2000));
+        let body = format!(
+            "{{\"type\":\"ai-title\",\"aiTitle\":\"Old\"}}\n{filler}{{\"type\":\"last-prompt\",\"lastPrompt\":\"fix the build\"}}\n{{\"type\":\"ai-title\",\"aiTitle\":\"New title\"}}\n{filler}"
+        );
+        std::fs::write(&p, &body).unwrap();
+        assert_eq!(tail_title(&p, 1 << 20).as_deref(), Some("New title"));
+        // Only the tail is read: the titles are out of reach, and a cut first line is skipped.
+        assert_eq!(tail_title(&p, 1500), None);
+        std::fs::write(&p, "{\"type\":\"last-prompt\",\"lastPrompt\":\"fix the build\"}\n").unwrap();
+        assert_eq!(tail_title(&p, 1 << 20).as_deref(), Some("fix the build"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn keeps_permission_and_model_flags_drops_session_flags() {

@@ -286,6 +286,11 @@ final class DinoModel: ObservableObject {
     func status(of s: SessionInfo) -> SessionStatus {
         if s.exited { return .exited }
         if attention.contains(s.id) || s.needs != nil { return .needsYou }
+        // An agent run by hand in a shell says whether it's busy; its shell has no hooks.
+        if let f = s.inside, let st = f.status {
+            if st == "busy" { return s.in_flight > 0 ? .thinking : .working }
+            return unseenDone.contains(s.id) ? .done : .idle
+        }
         // Agents with hooks (Claude) say when a turn starts and ends. Between turns, their side
         // calls and their redraws when you focus or resize the pane aren't work.
         if let a = s.activity, a != "working" { return unseenDone.contains(s.id) ? .done : .idle }
@@ -437,6 +442,25 @@ final class DinoModel: ObservableObject {
     }
 
     var pendingSelect: String?
+
+    /// Continue the agent started by hand in shell `s` as a dino session, in the same row.
+    func takeOver(_ s: SessionInfo) {
+        guard let f = s.inside else { return }
+        moving = f
+        let id = s.id
+        Task.detached {
+            do {
+                // Own connection: it waits for the agent's turn to end.
+                try DinoConnection(path: DinoEnvironment.socketPath).takeOver(session: id)
+                await MainActor.run { self.moving = nil }
+            } catch {
+                await MainActor.run {
+                    self.moving = nil
+                    self.error = error.localizedDescription
+                }
+            }
+        }
+    }
 
     /// Diff sizes need git, so these refresh slower than session state. Launchers too: keys and
     /// policies change which agents can start.
