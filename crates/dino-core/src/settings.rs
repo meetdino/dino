@@ -4,10 +4,12 @@
 //! Split for a later sync: `routing` travels with the user, `machine` stays on this Mac.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
+use crate::controls::Controls;
 use crate::{config_dir, keys_file};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -16,6 +18,17 @@ pub struct Settings {
     pub routing: Routing,
     pub policies: Policies,
     pub machine: Machine,
+    /// Mode, model and effort new sessions start with, by agent id ("claude", "codex").
+    pub agents: BTreeMap<String, Controls>,
+    /// Per repository, by the path of its main checkout; also applies in its worktrees.
+    pub repos: BTreeMap<String, Repo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct Repo {
+    /// Set in the environment of every session started in the repo.
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -45,11 +58,13 @@ pub struct Policies {
     pub session_token_budget: u64,
     /// When a session's PR merges and its dino worktree has nothing left to lose, stop the session and remove the worktree.
     pub close_merged: bool,
+    /// Offer the permission mode that never asks. Off, it's hidden and refused.
+    pub allow_bypass: bool,
 }
 
 impl Default for Policies {
     fn default() -> Self {
-        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0, close_merged: false }
+        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0, close_merged: false, allow_bypass: false }
     }
 }
 
@@ -82,16 +97,29 @@ impl Settings {
                     routing: Routing { proxy: get("route").as_deref() != Some("false") },
                     policies: Policies::default(),
                     machine: Machine { onboarded: get("onboarded").as_deref() == Some("true") },
+                    ..Self::default()
                 }
             }
         }
     }
 
+    /// What `agent_id` starts with where a new session leaves a control open.
+    pub fn agent_defaults(&self, agent_id: &str) -> Controls {
+        self.agents.get(agent_id).cloned().unwrap_or_default()
+    }
+
     pub fn save(&self) -> anyhow::Result<()> {
+        for k in self.repos.values().flat_map(|r| r.env.keys()) {
+            let valid = !k.is_empty() && !k.starts_with(|c: char| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            anyhow::ensure!(valid, "{k:?} isn't a valid environment variable name");
+        }
         std::fs::create_dir_all(config_dir())?;
         // Write then rename, so a reader never sees half a file.
         let tmp = Self::path().with_extension("toml.tmp");
-        std::fs::write(&tmp, toml::to_string(self)?)?;
+        // Private: repo environments can hold secrets.
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        f.write_all(toml::to_string(self)?.as_bytes())?;
+        drop(f);
         std::fs::rename(tmp, Self::path())?;
         Ok(())
     }
@@ -192,6 +220,19 @@ mod tests {
         s3.policies = Policies { default_agent: Some("codex".into()), session_token_budget: 5, ..p };
         s3.save().unwrap();
         assert_eq!(Settings::load(), s3);
+        assert!(!Settings::default().policies.allow_bypass, "bypass hidden by default");
+
+        let mut s4 = Settings::default();
+        s4.agents.insert("claude".into(), Controls { model: Some("haiku".into()), ..Controls::default() });
+        s4.repos.insert("/src/app".into(), Repo { env: [("API_TOKEN".to_string(), "t0k=en".to_string())].into() });
+        s4.save().unwrap();
+        let back = Settings::load();
+        assert_eq!(back, s4);
+        assert_eq!(back.agent_defaults("claude").model.as_deref(), Some("haiku"));
+        assert!(back.agent_defaults("codex").is_empty());
+        assert_eq!(std::fs::metadata(Settings::path()).unwrap().permissions().mode() & 0o777, 0o600, "may hold secrets");
+        s4.repos.insert("/x".into(), Repo { env: [("BAD NAME".to_string(), "v".to_string())].into() });
+        assert!(s4.save().is_err());
 
         set_key("DINO_TEST_A_KEY", Some(" abc ")).unwrap();
         set_key("DINO_TEST_B_KEY", Some("def")).unwrap();

@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::controls::{Controls, Knobs};
+
 pub const JSON: u8 = 0;
 pub const DATA: u8 = 1;
 pub const RESIZE: u8 = 2;
@@ -67,8 +69,15 @@ pub enum Request {
         rows: u16,
         #[serde(default)]
         worktree: bool,
+        /// Mode, model and effort; what's left open comes from Settings → Agents.
+        #[serde(default)]
+        controls: Controls,
     },
     Kill { id: String },
+    /// Change a session's mode, model or effort. The agent restarts, resuming its conversation;
+    /// mid-turn, that waits until the turn is over. Each field replaces the session's, so `None`
+    /// goes back to the agent's own default.
+    SetControls { id: String, controls: Controls },
     /// Switch this connection to a live terminal stream for session `id`.
     Attach { id: String, cols: u16, rows: u16 },
     Shutdown,
@@ -149,6 +158,9 @@ pub struct LauncherInfo {
     pub agent_id: String,
     pub label: String,
     pub program: String,
+    /// The mode, model and effort it offers.
+    #[serde(default)]
+    pub knobs: Knobs,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -185,6 +197,18 @@ pub struct SessionInfo {
     /// What dino does about the PR by itself.
     #[serde(default)]
     pub auto: AutoPr,
+    /// The mode, model and effort it runs with.
+    #[serde(default)]
+    pub controls: Controls,
+    /// Asked for mid-turn; applied (by a restart) once the turn is over.
+    #[serde(default)]
+    pub pending: Option<Controls>,
+    /// Tokens the last model call read (cached ones included): how full the context window is.
+    #[serde(default)]
+    pub context_tokens: u64,
+    /// The size of that model's context window, when dino knows it.
+    #[serde(default)]
+    pub context_limit: Option<u64>,
 }
 
 /// What dino does about a session's PR by itself. Kept with the session, so it survives dinod restarts.
