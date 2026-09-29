@@ -170,6 +170,17 @@ pub struct Proxy {
     pub stats: Arc<Stats>,
     keys: Arc<RwLock<HashMap<String, String>>>,
     budget: Arc<AtomicU64>,
+    /// Hooks only, for sessions on other machines (see `remote_hook_url`).
+    pub remote_port: u16,
+    /// A remote session's token → its session id.
+    remote: Arc<RwLock<HashMap<String, String>>>,
+}
+
+/// The hook-only listener's state: which tokens stand for which sessions.
+#[derive(Clone)]
+struct RemoteState {
+    app: AppState,
+    tokens: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl Proxy {
@@ -179,6 +190,10 @@ impl Proxy {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         std_listener.set_nonblocking(true)?;
         let port = std_listener.local_addr()?.port();
+        let remote_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        remote_listener.set_nonblocking(true)?;
+        let remote_port = remote_listener.local_addr()?.port();
+        let remote: Arc<RwLock<HashMap<String, String>>> = Arc::default();
         let stats = Arc::new(Stats::default());
         let keys = Arc::new(RwLock::new(keys));
         let budget = Arc::new(AtomicU64::new(0));
@@ -191,9 +206,17 @@ impl Proxy {
             substitutes: Arc::default(),
         };
 
+        let remote_tokens = remote.clone();
         std::thread::Builder::new().name("dino-proxy".into()).spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
             rt.block_on(async move {
+                // What an ssh tunnel reaches: hooks, by a token only that session knows. The
+                // remote port is open to everyone on that machine, so no API routes and no ids.
+                let remote_app = axum::Router::new()
+                    .route("/r/{token}/hook", post(remote_hook))
+                    .with_state(RemoteState { app: state.clone(), tokens: remote_tokens });
+                let remote_listener = tokio::net::TcpListener::from_std(remote_listener).unwrap();
+                tokio::spawn(async move { axum::serve(remote_listener, remote_app).await });
                 let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
                 let app = axum::Router::new().route("/s/{session}/{provider}/{*rest}", any(forward))
                     .route("/s/{session}/hook", post(hook))
@@ -205,7 +228,7 @@ impl Proxy {
                 let _ = axum::serve(listener, app).await;
             });
         })?;
-        Ok(Self { port, stats, keys, budget })
+        Ok(Self { port, stats, keys, budget, remote_port, remote })
     }
 
     /// Use these keys from the next request on.
@@ -216,6 +239,21 @@ impl Proxy {
     /// Most tokens one session may use before its model calls are refused; 0 means no limit.
     pub fn set_budget(&self, tokens: u64) {
         self.budget.store(tokens, Ordering::Relaxed);
+    }
+
+    /// The hook URL for a session on another machine, as that machine sees it: `remote_port` there
+    /// is forwarded to `self.remote_port` here. `token` stands for the session; pick an
+    /// unguessable one. Replaces the session's earlier token.
+    pub fn remote_hook_url(&self, session: &str, token: &str, remote_port: u16) -> String {
+        let mut tokens = self.remote.write().unwrap();
+        tokens.retain(|_, s| s != session);
+        tokens.insert(token.to_string(), session.to_string());
+        format!("http://127.0.0.1:{remote_port}/r/{token}/hook")
+    }
+
+    /// Stop taking hooks for a remote session.
+    pub fn forget_remote(&self, session: &str) {
+        self.remote.write().unwrap().retain(|_, s| s != session);
     }
 
     /// Base URL an agent should use for `provider`, attributed to `session`.
@@ -410,6 +448,11 @@ impl Drop for Tap {
             }
         });
     }
+}
+
+async fn remote_hook(State(rs): State<RemoteState>, Path(token): Path<String>, body: Bytes) -> StatusCode {
+    let Some(session) = rs.tokens.read().unwrap().get(&token).cloned() else { return StatusCode::NOT_FOUND };
+    hook(State(rs.app), Path(session), body).await
 }
 
 async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Bytes) -> StatusCode {

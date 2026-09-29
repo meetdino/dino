@@ -144,6 +144,7 @@ impl App {
             rows: self.pane_size.1,
             worktree: false,
             controls: Default::default(),
+            host: None,
         };
         match client::request(&req) {
             Ok(Response::Created { id }) => {
@@ -798,7 +799,7 @@ fn main() -> anyhow::Result<()> {
             let agent = rest.first().ok_or_else(|| anyhow::anyhow!(USAGE))?.clone();
             let (cols, rows) = terminal::size().unwrap_or((120, 40));
             let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
-            let req = Request::New { launcher: agent, args: rest[1..].to_vec(), cwd, cols, rows, worktree, controls: Default::default() };
+            let req = Request::New { launcher: agent, args: rest[1..].to_vec(), cwd, cols, rows, worktree, controls: Default::default(), host: None };
             return print_response(client::request(&req)?);
         }
         Some("kill") => return print_response(client::request(&Request::Kill { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),

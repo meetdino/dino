@@ -23,6 +23,16 @@ pub struct Settings {
     pub agents: BTreeMap<String, Controls>,
     /// Per repository, by the path of its main checkout; also applies in its worktrees.
     pub repos: BTreeMap<String, Repo>,
+    /// Machines to run sessions on over SSH, by the host as `ssh` takes it (an alias from
+    /// `~/.ssh/config`, or `user@host`).
+    pub ssh: BTreeMap<String, SshHost>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct SshHost {
+    /// Where sessions start when no folder is given: a path on that machine, `~` for its home.
+    pub folder: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]

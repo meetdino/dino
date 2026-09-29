@@ -46,11 +46,14 @@ extension DinoModel {
     func splitWithShell(vertical: Bool) {
         guard let s = selectedSession else { return }
         let cwd = s.cwd ?? folder.path
+        // A shell beside a session on an SSH host runs on that host too.
+        var request: [String: Any] = ["type": "new", "launcher": "shell", "args": [String](), "cwd": cwd, "cols": 120, "rows": 40]
+        if let host = s.host { request["host"] = host }
         Task {
             do {
                 guard let conn = connection else { return }
                 let resp = try await Task.detached {
-                    try conn.request(["type": "new", "launcher": "shell", "args": [], "cwd": cwd, "cols": 120, "rows": 40])
+                    try conn.request(request)
                 }.value
                 guard let id = resp.id else { return }
                 awaited.insert(id)
