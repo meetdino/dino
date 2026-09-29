@@ -45,7 +45,11 @@ final class DinoModel: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     @Published var quotas: [QuotaInfo] = []
     @Published var launchers: [LauncherInfo] = []
-    @Published var selected: String?
+    @Published var selected: String? {
+        // Remembered per dinod, so reopening the app comes back to the same session.
+        didSet { if let id = selected, !id.contains(":") { UserDefaults.standard.set(id, forKey: Self.lastSelectedKey) } }
+    }
+    static let lastSelectedKey = "selected.\(DinoEnvironment.home)"
     @Published var error: String?
     /// Agent sessions dino didn't start (running elsewhere, recent, cloud).
     @Published var found: [FoundSession] = []
@@ -284,8 +288,11 @@ final class DinoModel: ObservableObject {
         let folderSelected = selected?.hasPrefix("dir:") ?? false
         let subagentSelected = selected?.hasPrefix("agent:") ?? false
         if !groupSelected, !folderSelected, !subagentSelected, selected == nil || !live.contains(selected!) {
+            // The one selected when the app last quit, else the one that last did something.
             // Through select(), so the terminal also takes keyboard focus on launch.
-            select(next.first?.id)
+            let last = UserDefaults.standard.string(forKey: Self.lastSelectedKey).flatMap { live.contains($0) ? $0 : nil }
+            let recent = next.filter { !$0.exited }.min { ($0.output_ms_ago ?? .max) < ($1.output_ms_ago ?? .max) }
+            select(last ?? recent?.id ?? next.first?.id)
         }
         let waiting = next.filter { status(of: $0) == .needsYou }.count
         NSApp.dockTile.badgeLabel = waiting > 0 ? "\(waiting)" : nil

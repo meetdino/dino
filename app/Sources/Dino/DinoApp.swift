@@ -413,7 +413,12 @@ struct TerminalPane: View {
 
     var body: some View {
         TerminalSurfaceView(context: state)
-            .onAppear { state.isSurfaceVisible = visible }
+            .onAppear {
+                state.isSurfaceVisible = visible
+                // A new session, or the app opening, selects it before its pane exists: the
+                // request waits until the pane is in the window.
+                if focused { state.requestFocus() }
+            }
             .onChange(of: visible) { _, v in state.isSurfaceVisible = v }
             .onChange(of: focused) { _, f in if f { state.requestFocus() } }
             // Clicking into the other half of a split selects that session.
