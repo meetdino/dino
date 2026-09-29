@@ -274,7 +274,8 @@ final class DinoModel: ObservableObject {
         }
         let groupSelected = selected.map { id in groups.contains { "group:\($0.id)" == id } } ?? false
         let folderSelected = selected?.hasPrefix("dir:") ?? false
-        if !groupSelected, !folderSelected, selected == nil || !live.contains(selected!) {
+        let subagentSelected = selected?.hasPrefix("agent:") ?? false
+        if !groupSelected, !folderSelected, !subagentSelected, selected == nil || !live.contains(selected!) {
             // Through select(), so the terminal also takes keyboard focus on launch.
             select(next.first?.id)
         }
