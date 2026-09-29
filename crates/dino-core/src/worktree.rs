@@ -393,6 +393,22 @@ pub fn restore(repo: &Path, dir: &Path, branch: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `name` as a branch and folder name: lowercase ASCII letters and digits, runs of anything else
+/// as one `-`, at most 40 characters. None when nothing usable is left.
+pub fn slug(name: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.truncate(40);
+    let out = out.trim_end_matches('-');
+    (!out.is_empty()).then(|| out.to_string())
+}
+
 /// A worktree for one session, off the HEAD of `checkout` (a repo's main checkout or one of its
 /// worktrees), with the checkout's uncommitted edits carried over uncommitted: the new branch holds
 /// only what the agent commits. Returns the worktree and the commit its changes count from.
@@ -653,6 +669,14 @@ pub fn remove(repo: &Path, dir: &Path, branch: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slugs_are_branch_safe() {
+        assert_eq!(slug("Nightly deps: bump & test!").as_deref(), Some("nightly-deps-bump-test"));
+        assert_eq!(slug("  Übersicht  ").as_deref(), Some("bersicht"));
+        assert_eq!(slug("…"), None);
+        assert_eq!(slug(&"abcd ".repeat(20)).map(|s| s.len()), Some(39));
+    }
 
     #[test]
     fn changes_leave_the_index_alone() {

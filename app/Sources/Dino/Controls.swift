@@ -55,9 +55,11 @@ enum ControlKind: String, Identifiable {
         case .model:
             // The agent's aliases, then models its sessions have answered with, then one typed by hand.
             var names = k.models
-            for m in seen + [current].compactMap({ $0 }) where !names.contains(where: { same(m, $0) }) {
+            for m in seen where !names.contains(where: { same(m, $0) }) {
                 names.append(m)
             }
+            // The chosen one needs its own entry even when it's an alias's full name, or the picker shows nothing.
+            if let current, !names.contains(current) { names.append(current) }
             return names.map { ($0, shortModel($0), nil) }
         case .effort:
             return k.efforts.map { ($0, $0.capitalized, nil) }
@@ -88,6 +90,8 @@ struct ControlFields: View {
     /// What Default means here (Settings → Agents), when it says more than "the agent's own".
     var defaults = Controls()
     var seen: [String] = []
+    /// Settings → Agents: the key path under which the organization can lock each control.
+    var lockPath: String?
     @State private var typing = false
     @State private var typed = ""
 
@@ -119,12 +123,20 @@ struct ControlFields: View {
         }
     }
 
+    @ViewBuilder private func field(_ kind: ControlKind) -> some View {
+        if let lockPath {
+            picker(kind).orgLocked("\(lockPath).\(kind.rawValue)")
+        } else {
+            picker(kind)
+        }
+    }
+
     var body: some View {
         if ControlKind.mode.offered(by: knobs) {
-            picker(.mode)
+            field(.mode)
         }
         if ControlKind.model.offered(by: knobs) {
-            picker(.model)
+            field(.model)
             if typing {
                 TextField("Model name", text: $typed, prompt: Text("e.g. claude-opus-5-5"))
                     .font(.body.monospaced())
@@ -136,7 +148,7 @@ struct ControlFields: View {
             }
         }
         if ControlKind.effort.offered(by: knobs) {
-            picker(.effort)
+            field(.effort)
         }
     }
 }

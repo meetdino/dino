@@ -261,12 +261,16 @@ struct SplitMenuItems: View {
 struct CloseCommand: View {
     @EnvironmentObject var model: DinoModel
 
+    /// ⌘W closes what has focus: the split pane you're typing in, else the side pane, else the
+    /// selected split pane, else the window.
     var body: some View {
-        Button(model.sidePane.map { $0 == .preview ? "Close Preview" : $0 == .tasks ? "Close Tasks" : "Close File" } ?? (model.shownSplit == nil ? "Close Window" : "Close Pane")) {
-            if model.sidePane != nil {
-                model.closeSidePane()
-            } else if model.shownSplit != nil, let id = model.selected {
+        let split = model.shownSplit
+        let pane = split != nil && (model.sidePane == nil || split?.contains(model.focusedTerminal) == true)
+        Button(pane ? "Close Pane" : model.sidePane.map { $0 == .preview ? "Close Preview" : $0 == .tasks ? "Close Tasks" : "Close File" } ?? "Close Window") {
+            if pane, let id = model.selected {
                 model.closePane(id)
+            } else if model.sidePane != nil {
+                model.closeSidePane()
             } else {
                 NSApp.keyWindow?.performClose(nil)
             }

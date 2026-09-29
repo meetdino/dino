@@ -410,6 +410,11 @@ struct TerminalPane: View {
             .onChange(of: focused) { _, f in if f { state.requestFocus() } }
             // Clicking into the other half of a split selects that session.
             .onChange(of: state.isFocused) { _, f in
+                if f {
+                    model.focusedTerminal = id
+                } else if model.focusedTerminal == id {
+                    model.focusedTerminal = nil
+                }
                 if f, visible, !focused, model.shownSplit?.contains(id) == true { model.select(id) }
             }
     }
@@ -567,7 +572,7 @@ struct Sidebar: View {
                         }
                         if model.scheduled.isEmpty {
                             Button { model.newTask() } label: {
-                                Label("Run a prompt on a schedule…", systemImage: "clock.badge.plus")
+                                Label("Run a prompt on a schedule…", systemImage: "clock")
                             }
                             .buttonStyle(.plain)
                             .font(.callout)
