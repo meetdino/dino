@@ -32,14 +32,15 @@ struct DinoApp: App {
             }
             CommandMenu("Session") {
                 Menu("New Session") {
+                    // dinod lists the default agent first: ⌘N starts it.
                     ForEach(model.launchers) { l in
-                        Button(l.label) { model.newSession(l) }
+                        if l == model.launchers.first {
+                            Button(l.label) { model.newSession(l) }.keyboardShortcut("n")
+                        } else {
+                            Button(l.label) { model.newSession(l) }
+                        }
                     }
                 }
-                Button("New Claude Code Session") {
-                    if let l = model.launchers.first(where: { $0.short == "claude" }) ?? model.launchers.first { model.newSession(l) }
-                }
-                .keyboardShortcut("n")
                 Button("Fan Out…") { model.showFanout = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Continue a Session…") {

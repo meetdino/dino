@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
 use dino_core::settings::{self, Settings};
-use dino_core::{detect_agents, load_keys, proxy_wiring, user_shell, worktree};
+use dino_core::{detect_agents, load_keys, proxy_wiring, trust, user_shell, worktree};
 use dino_proxy::{Activity, Proxy};
 use dino_term::{Pane, SpawnSpec};
 
@@ -44,6 +44,25 @@ impl Daemon {
     fn launcher(&self, short: &str) -> Option<LauncherInfo> {
         self.launchers.read().unwrap().iter().find(|l| l.short == short).cloned()
     }
+
+    /// A launcher to start something new with: known, and allowed by the policies.
+    fn allowed_launcher(&self, short: &str) -> anyhow::Result<LauncherInfo> {
+        let l = self.launcher(short).ok_or_else(|| anyhow::anyhow!("unknown agent {short}"))?;
+        anyhow::ensure!(Settings::load().policies.allows(short), "{} isn't allowed by your policies (Settings → Policies)", l.label);
+        Ok(l)
+    }
+
+    /// The launchers to offer: the allowed ones, the default (Claude Code unless set) first.
+    fn offered(&self) -> Vec<LauncherInfo> {
+        let p = Settings::load().policies;
+        let mut out: Vec<LauncherInfo> = self.launchers.read().unwrap().iter().filter(|l| p.allows(&l.short)).cloned().collect();
+        let default = p.default_agent.unwrap_or_else(|| "claude".into());
+        if let Some(i) = out.iter().position(|l| l.short == default) {
+            let l = out.remove(i);
+            out.insert(0, l);
+        }
+        out
+    }
 }
 
 struct Daemon {
@@ -70,8 +89,10 @@ pub fn run() -> anyhow::Result<()> {
 
     let keys = load_keys();
     let free_tier = keys.contains_key("NVIDIA_API_KEY");
+    let proxy = Proxy::start(keys)?;
+    proxy.set_budget(Settings::load().policies.session_token_budget);
     let daemon = Arc::new(Daemon {
-        proxy: Proxy::start(keys)?,
+        proxy,
         launchers: RwLock::new(launchers(free_tier)),
         sessions: Mutex::default(),
         groups: Mutex::new(load_groups()),
@@ -129,10 +150,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
         };
         let resp = match req {
             Request::State => state(d),
-            Request::Launchers => Response::Launchers { launchers: d.launchers.read().unwrap().clone() },
+            Request::Launchers => Response::Launchers { launchers: d.offered() },
+            Request::AllLaunchers => Response::Launchers { launchers: d.launchers.read().unwrap().clone() },
             Request::Settings => Response::Settings { settings: Settings::load() },
             Request::SetSettings { settings } => match settings.save() {
-                Ok(()) => Response::Ok,
+                Ok(()) => {
+                    d.proxy.set_budget(settings.policies.session_token_budget);
+                    Response::Ok
+                }
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Keys => Response::Keys { keys: settings::key_status() },
@@ -233,7 +258,11 @@ impl Launch {
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let Launch { launcher, args, cwd, cols, rows, restore, name, prompt } = launch;
     let launcher = launcher.as_str();
-    let l = d.launcher(launcher).ok_or_else(|| anyhow::anyhow!("unknown agent {launcher}"))?;
+    // Sessions already running come back even if the policies changed since; new ones must be allowed.
+    let l = match restore {
+        Some(_) => d.launcher(launcher).ok_or_else(|| anyhow::anyhow!("unknown agent {launcher}"))?,
+        None => d.allowed_launcher(launcher)?,
+    };
     let id = match &restore {
         Some(r) => r.id.clone(),
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
@@ -706,7 +735,7 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
     anyhow::ensure!(!prompt.is_empty(), "fan-out needs a prompt");
     let mut picked: Vec<LauncherInfo> = vec![];
     for short in launchers {
-        let l = d.launcher(short).ok_or_else(|| anyhow::anyhow!("unknown agent {short}"))?;
+        let l = d.allowed_launcher(short)?;
         anyhow::ensure!(l.agent_id != "shell", "a shell can't take a prompt");
         if !picked.iter().any(|p| p.short == l.short) {
             picked.push(l);
@@ -717,6 +746,9 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
     let dir = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
     let repo = worktree::repo_root(&dir)?;
     let base = worktree::snapshot(&repo)?;
+    let policies = Settings::load().policies;
+    // Where in the repo Claude was trusted, if it was: the same folder in each worktree is too.
+    let claude_trusted = if policies.worktree_trust { trust::claude_trusted_in(&dir, &repo) } else { None };
     let id = format!("{}-{}", session_name(prompt), &new_uuid()[..4]);
     let mut group = Group { id: id.clone(), prompt: prompt.into(), repo: repo.clone(), base: base.clone(), members: vec![] };
     for l in picked {
@@ -724,6 +756,11 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
         let wt = worktree::add(&repo, &format!("{id}/{}", l.short), &branch, &base)?;
         // Same folder inside the worktree as the user was in inside the repo.
         let cwd = wt.join(dir.strip_prefix(&repo).unwrap_or(std::path::Path::new("")));
+        if let Some(rel) = claude_trusted.as_ref().filter(|_| l.agent_id.starts_with("claude")) {
+            if let Err(e) = trust::claude_trust(&trust::join(&wt, rel)) {
+                eprintln!("dinod: couldn't trust {} for Claude: {e}", wt.display());
+            }
+        }
         let session = spawn(d, Launch {
             name: Some(format!("{}·{}", l.short, &id[id.len() - 4..])),
             prompt: Some(prompt.into()),
@@ -832,6 +869,7 @@ fn close_group(d: &Daemon, id: &str) -> anyhow::Result<()> {
     save(d);
     for m in &group.members {
         dino_core::worktree::remove(&group.repo, &m.worktree, &m.branch);
+        let _ = trust::claude_forget(&m.worktree);
     }
     Ok(())
 }

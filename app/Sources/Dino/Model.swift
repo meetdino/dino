@@ -302,12 +302,15 @@ final class DinoModel: ObservableObject {
 
     private var pendingSelect: String?
 
-    /// Diff sizes need git, so these refresh slower than session state.
+    /// Diff sizes need git, so these refresh slower than session state. Launchers too: keys and
+    /// policies change which agents can start.
     private func watchGroups() {
         Task.detached {
             while true {
                 if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let list = try? conn.groups() {
+                    let launchers = try? conn.request(["type": "launchers"]).launchers
                     await MainActor.run {
+                        if let launchers, launchers != self.launchers { self.launchers = launchers }
                         if list != self.groups { self.groups = list }
                         if let want = self.pendingGroup, list.contains(where: { $0.id == want }) {
                             self.pendingGroup = nil

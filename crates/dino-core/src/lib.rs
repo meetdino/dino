@@ -6,6 +6,7 @@ pub mod discover;
 pub mod found;
 pub mod ipc;
 pub mod settings;
+pub mod trust;
 pub mod worktree;
 
 /// A coding agent (or plain program) dino knows how to launch.
@@ -63,7 +64,9 @@ fn is_executable(p: &Path) -> bool {
 /// Agents we don't know how to wire (or that the user already pointed elsewhere) run untouched.
 pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String) -> (Vec<(String, String)>, Vec<String>) {
     // With routing off, only status hooks are wired; API traffic goes direct.
-    let user_set = |var: &str| !route || std::env::var_os(var).is_some();
+    // A dino proxy URL in our own environment was inherited from a dino pane (dinod started from
+    // one), not set by the user: it points at another session, or another dinod.
+    let user_set = |var: &str| !route || std::env::var(var).is_ok_and(|v| !(v.starts_with("http://127.0.0.1:") && v.contains("/s/")));
     match agent_id {
         // Also used for shells, so `claude` started inside one is metered too.
         "claude" => {

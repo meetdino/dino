@@ -54,7 +54,10 @@ pub fn parse_resize(p: &[u8]) -> Option<(u16, u16)> {
 pub enum Request {
     /// Sessions, their live stats, and provider quotas.
     State,
+    /// What can be started now: allowed by the policies, the default first.
     Launchers,
+    /// Every launcher, allowed or not (for choosing policies).
+    AllLaunchers,
     New { launcher: String, args: Vec<String>, cwd: Option<String>, cols: u16, rows: u16 },
     Kill { id: String },
     /// Switch this connection to a live terminal stream for session `id`.

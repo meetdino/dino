@@ -7,6 +7,7 @@ mod codex;
 mod free;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -119,6 +120,7 @@ pub struct Proxy {
     pub port: u16,
     pub stats: Arc<Stats>,
     keys: Arc<RwLock<HashMap<String, String>>>,
+    budget: Arc<AtomicU64>,
 }
 
 impl Proxy {
@@ -130,11 +132,13 @@ impl Proxy {
         let port = std_listener.local_addr()?.port();
         let stats = Arc::new(Stats::default());
         let keys = Arc::new(RwLock::new(keys));
+        let budget = Arc::new(AtomicU64::new(0));
         let state = AppState {
             stats: stats.clone(),
             client: reqwest::Client::builder().build()?,
             router: Arc::default(),
             keys: keys.clone(),
+            budget: budget.clone(),
             substitutes: Arc::default(),
         };
 
@@ -152,12 +156,17 @@ impl Proxy {
                 let _ = axum::serve(listener, app).await;
             });
         })?;
-        Ok(Self { port, stats, keys })
+        Ok(Self { port, stats, keys, budget })
     }
 
     /// Use these keys from the next request on.
     pub fn set_keys(&self, keys: HashMap<String, String>) {
         *self.keys.write().unwrap() = keys;
+    }
+
+    /// Most tokens one session may use before its model calls are refused; 0 means no limit.
+    pub fn set_budget(&self, tokens: u64) {
+        self.budget.store(tokens, Ordering::Relaxed);
     }
 
     /// Base URL an agent should use for `provider`, attributed to `session`.
@@ -172,6 +181,8 @@ pub(crate) struct AppState {
     client: reqwest::Client,
     router: Arc<dino_router::Router>,
     keys: Arc<RwLock<HashMap<String, String>>>,
+    /// The session token budget; 0 means none.
+    budget: Arc<AtomicU64>,
     /// Codex models the backend rejected, and the model that answered instead.
     substitutes: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -190,6 +201,11 @@ async fn forward(
     Path((session, provider, rest)): Path<(String, String, String)>,
     req: Request,
 ) -> Response<Body> {
+    // Only model calls count toward activity; ignore e.g. token counting and telemetry.
+    let is_model_call = rest.ends_with("messages") || rest.ends_with("chat/completions") || rest.ends_with("responses");
+    if is_model_call && let Some(resp) = over_budget(&st, &session, &provider) {
+        return resp;
+    }
     if provider == "free" {
         let Ok(body) = axum::body::to_bytes(req.into_body(), usize::MAX).await else {
             return error(StatusCode::BAD_REQUEST, "unreadable body".into());
@@ -214,8 +230,6 @@ async fn forward(
         }
     }
 
-    // Only model calls count toward activity; ignore e.g. token counting and telemetry.
-    let is_model_call = rest.ends_with("messages") || rest.ends_with("chat/completions") || rest.ends_with("responses");
     if is_model_call {
         st.stats.update(&session, |s| {
             s.requests += 1;
@@ -381,6 +395,29 @@ impl Drop for InFlight {
     fn drop(&mut self) {
         self.stats.update(&self.session, |s| s.in_flight = s.in_flight.saturating_sub(1));
     }
+}
+
+/// The session used up its token budget: refuse the call in the shape its agent shows as an error.
+fn over_budget(st: &AppState, session: &str, provider: &str) -> Option<Response<Body>> {
+    let budget = st.budget.load(Ordering::Relaxed);
+    let used = st.stats.session(session).usage;
+    let used = used.total_input() + used.output;
+    if budget == 0 || used < budget {
+        return None;
+    }
+    let msg = format!("dino: this session used {used} tokens, over its budget of {budget}. Start a new session, or raise the budget in Settings → Policies.");
+    st.stats.update(session, |s| {
+        s.errors += 1;
+        s.last_error = Some(msg.clone());
+    });
+    log(format_args!("{session} {provider} refused: over budget ({used} of {budget})"));
+    // Claude Code retries 429s and 5xx; a 400 is shown to the user as is.
+    let body = if matches!(provider, "anthropic" | "free") {
+        serde_json::json!({"type": "error", "error": {"type": "invalid_request_error", "message": msg}})
+    } else {
+        serde_json::json!({"error": {"type": "invalid_request_error", "code": "dino_budget", "message": msg}})
+    };
+    Some(Response::builder().status(StatusCode::BAD_REQUEST).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap())
 }
 
 fn error(status: StatusCode, msg: String) -> Response<Body> {
