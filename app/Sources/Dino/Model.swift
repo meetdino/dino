@@ -387,7 +387,7 @@ final class DinoModel: ObservableObject {
     private func watchTree() {
         Task.detached {
             while true {
-                await self.refreshTree()
+                await MainActor.run { self.refreshTree() }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
@@ -549,6 +549,21 @@ final class DinoModel: ObservableObject {
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
             }
+        }
+    }
+
+    /// Remove finished worktrees, and their branches where git sees them merged. Never forced:
+    /// dinod refuses one with uncommitted work.
+    func cleanWorktrees(_ paths: [String]) {
+        Task.detached {
+            for path in paths {
+                do {
+                    _ = try DinoConnection(path: DinoEnvironment.socketPath).request(["type": "clean_worktree", "path": path])
+                } catch {
+                    await MainActor.run { self.error = error.localizedDescription }
+                }
+            }
+            await MainActor.run { self.refreshTree() }
         }
     }
 

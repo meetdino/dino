@@ -73,6 +73,21 @@ pub struct SessionStats {
     /// Which classifier made the last routing decision ("jev" or "llm").
     pub classifier: Option<String>,
     pub last_request: Option<Instant>,
+    /// Subagents the agent started, as its hooks reported them (Claude's Agent tool).
+    pub subagents: Vec<Subagent>,
+    /// Agent tool calls not answered yet: (tool_use_id, description, subagent_type).
+    pending_agents: Vec<(String, Option<String>, Option<String>)>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Subagent {
+    pub id: String,
+    pub agent_type: Option<String>,
+    /// The task it was given.
+    pub description: Option<String>,
+    /// Where it runs: its own worktree when started with `isolation: "worktree"`.
+    pub cwd: Option<String>,
+    pub running: bool,
 }
 
 /// One rolling subscription window, e.g. Claude's 5h or 7d.
@@ -372,7 +387,12 @@ async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Byt
     log(format_args!("{session} hook {v}"));
     let event = v["hook_event_name"].as_str().unwrap_or_default();
     let tool = || v["tool_name"].as_str().unwrap_or("tool").to_string();
+    record_subagent(&st.stats, &session, event, &v);
+    // A subagent's own tool calls: the parent's turn may be over (background agents), and the
+    // subagent's model calls show as the session thinking anyway.
+    let from_subagent = v["agent_id"].is_string();
     let activity = match event {
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" if from_subagent => None,
         // An interrupted tool, when the agent reports one (Claude often sends nothing; see `end_turn`).
         "PostToolUseFailure" if v["is_interrupt"].as_bool() == Some(true) => Some(Activity::Done),
         "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some(Activity::Working),
@@ -398,6 +418,57 @@ async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Byt
         });
     }
     StatusCode::OK
+}
+
+/// Keep track of the subagents a session starts: PostToolUse of the Agent tool names the task and
+/// the agent's id, SubagentStart says where it runs, SubagentStop when it's finished. A foreground
+/// agent's PostToolUse only comes when it's done, so until then its task is guessed from the
+/// oldest unanswered Agent call of its type.
+fn record_subagent(stats: &Stats, session: &str, event: &str, v: &Value) {
+    let text = |x: &Value| x.as_str().filter(|s| !s.is_empty()).map(String::from);
+    let agent_tool = matches!(v["tool_name"].as_str(), Some("Agent" | "Task")) && v["agent_id"].is_null();
+    if event == "PreToolUse" && agent_tool {
+        let call = (text(&v["tool_use_id"]).unwrap_or_default(), text(&v["tool_input"]["description"]), text(&v["tool_input"]["subagent_type"]));
+        stats.update(session, |s| s.pending_agents.push(call));
+        return;
+    }
+    let (id, known) = match event {
+        "PostToolUse" | "PostToolUseFailure" if agent_tool => {
+            let call = text(&v["tool_use_id"]).unwrap_or_default();
+            stats.update(session, |s| s.pending_agents.retain(|p| p.0 != call));
+            (text(&v["tool_response"]["agentId"]), true)
+        }
+        // Claude also stops internal helpers it never started through the Agent tool: no type.
+        "SubagentStart" | "SubagentStop" => (text(&v["agent_id"]), text(&v["agent_type"]).is_some()),
+        _ => return,
+    };
+    let Some(id) = id else { return };
+    stats.update(session, |s| {
+        let i = match s.subagents.iter().position(|a| a.id == id) {
+            Some(i) => i,
+            None if known => {
+                s.subagents.push(Subagent { id: id.clone(), ..Default::default() });
+                s.subagents.len() - 1
+            }
+            None => return,
+        };
+        let a = &mut s.subagents[i];
+        match event {
+            "PostToolUse" => a.description = text(&v["tool_input"]["description"]).or(a.description.take()),
+            "SubagentStart" => {
+                a.running = true;
+                a.cwd = text(&v["cwd"]);
+                a.agent_type = text(&v["agent_type"]);
+                if a.description.is_none() {
+                    let ty = a.agent_type.clone();
+                    if let Some(p) = s.pending_agents.iter().position(|p| p.2.is_none() || p.2 == ty) {
+                        s.subagents[i].description = s.pending_agents.remove(p).1;
+                    }
+                }
+            }
+            _ => a.running = false,
+        }
+    });
 }
 
 /// Append a line to `$DINO_PROXY_LOG`, if set. Debugging aid.
@@ -566,5 +637,53 @@ impl Meter {
             seen.cache_read = seen.cache_read.max(next.cache_read);
             seen.cache_write = seen.cache_write.max(next.cache_write);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The hooks as Claude sends them: one agent in the background, one in the foreground.
+    #[test]
+    fn subagents_from_hooks() {
+        let stats = Stats::default();
+        let wt = "/r/.claude/worktrees/agent-";
+        let feed = |event: &str, v: Value| record_subagent(&stats, "s1", event, &v);
+        let call = |id: &str, desc: &str| {
+            json!({"tool_name": "Agent", "tool_use_id": id,
+                "tool_input": {"description": desc, "subagent_type": "general-purpose", "isolation": "worktree"}})
+        };
+        feed("PreToolUse", call("t1", "Count python files"));
+        feed("PreToolUse", call("t2", "Read the README"));
+        // Background: launched, then started.
+        let mut launched = call("t2", "Read the README");
+        launched["tool_response"] = json!({"isAsync": true, "status": "async_launched", "agentId": "bbb"});
+        feed("PostToolUse", launched);
+        feed("SubagentStart", json!({"agent_id": "bbb", "agent_type": "general-purpose", "cwd": format!("{wt}bbb")}));
+        // Foreground: started first, its PostToolUse only once it's done.
+        feed("SubagentStart", json!({"agent_id": "aaa", "agent_type": "general-purpose", "cwd": format!("{wt}aaa")}));
+        // Its own tool calls say whose they are and change nothing here.
+        feed("PreToolUse", json!({"tool_name": "Bash", "agent_id": "aaa", "agent_type": "general-purpose"}));
+        // A helper Claude runs by itself.
+        feed("SubagentStop", json!({"agent_id": "zzz", "agent_type": ""}));
+
+        let s = stats.session("s1");
+        let got: Vec<_> =
+            s.subagents.iter().map(|a| (a.id.as_str(), a.description.as_deref(), a.cwd.clone(), a.running)).collect();
+        assert_eq!(got, vec![
+            ("bbb", Some("Read the README"), Some(format!("{wt}bbb")), true),
+            ("aaa", Some("Count python files"), Some(format!("{wt}aaa")), true),
+        ]);
+        assert!(s.pending_agents.is_empty());
+
+        feed("SubagentStop", json!({"agent_id": "aaa", "agent_type": "general-purpose"}));
+        let mut done = call("t1", "Count python files");
+        done["tool_response"] = json!({"status": "completed", "agentId": "aaa"});
+        feed("PostToolUse", done);
+        let s = stats.session("s1");
+        assert_eq!(s.subagents.iter().map(|a| a.running).collect::<Vec<_>>(), vec![true, false]);
+        assert_eq!(s.subagents[1].description.as_deref(), Some("Count python files"));
     }
 }
