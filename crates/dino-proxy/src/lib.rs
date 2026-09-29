@@ -67,8 +67,14 @@ pub struct SessionStats {
     pub errors: u64,
     pub usage: Usage,
     pub last_model: Option<String>,
-    /// Why the last model call failed; cleared by the next one that succeeds.
+    /// Why the session's last turn failed, as shown. Without hooks: the last model call's failure,
+    /// cleared by the next one that succeeds. With hooks the agent says whether its turn failed,
+    /// so a side call (a title, a summary) failing doesn't mark a turn that went fine.
     pub last_error: Option<String>,
+    /// The last model call's failure, whether or not it's shown.
+    pub call_error: Option<String>,
+    /// The agent reports its turns through hooks (Claude).
+    pub hooked: bool,
     /// Router tier for free-tier sessions ("fast", "code", "reason").
     pub tier: Option<String>,
     /// Which classifier made the last routing decision ("jev" or "llm").
@@ -88,6 +94,28 @@ pub struct SessionStats {
 }
 
 impl SessionStats {
+    /// A model call failed: shown right away unless the agent reports its turns itself.
+    fn call_failed(&mut self, msg: String) {
+        if !self.hooked {
+            self.last_error = Some(msg.clone());
+        }
+        self.call_error = Some(msg);
+    }
+
+    /// The agent says how its turn went: only a failed turn shows an error.
+    fn turn_hook(&mut self, event: &str, v: &Value) {
+        self.hooked = true;
+        match event {
+            "UserPromptSubmit" | "Stop" => self.last_error = None,
+            // What the failed call said; the hook's own words when dino didn't see it.
+            "StopFailure" => {
+                let said = v["error_details"].as_str().or(v["error"].as_str()).map(String::from);
+                self.last_error = self.call_error.clone().or(said).or_else(|| Some("The turn failed".into()));
+            }
+            _ => {}
+        }
+    }
+
     /// The conversation's context use: the biggest per-model one, since side calls are small.
     pub fn context(&self) -> Option<(&str, u64)> {
         self.context.iter().max_by_key(|(_, n)| **n).map(|(m, n)| (m.as_str(), *n))
@@ -341,7 +369,7 @@ async fn forward(
         let msg = format!("dino proxy: {e}");
         st.stats.update(&session, |s| {
             s.errors += 1;
-            s.last_error = Some(msg.clone());
+            s.call_failed(msg.clone());
         });
         log(format_args!("{session} {provider} {method} /{rest} -> upstream error: {e}"));
         error(StatusCode::BAD_GATEWAY, msg)
@@ -378,7 +406,7 @@ async fn forward(
             let msg = format!("{} {}", status.as_u16(), codex::error_message(&text));
             st.stats.update(&session, |s| {
                 s.errors += 1;
-                s.last_error = Some(msg);
+                s.call_failed(msg);
             });
             drop(guard);
             let mut builder = Response::builder().status(status.as_u16());
@@ -399,7 +427,12 @@ async fn forward(
     if !status.is_success() && is_model_call {
         st.stats.update(&session, |s| s.errors += 1);
     } else if is_model_call {
-        st.stats.update(&session, |s| s.last_error = None);
+        st.stats.update(&session, |s| {
+            s.call_error = None;
+            if !s.hooked {
+                s.last_error = None;
+            }
+        });
     }
 
     let mut builder = Response::builder().status(status.as_u16());
@@ -483,6 +516,9 @@ async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Byt
         "Stop" | "StopFailure" | "SessionStart" => Some(Activity::Done),
         _ => None,
     };
+    if !from_subagent {
+        st.stats.update(&session, |s| s.turn_hook(event, &v));
+    }
     if let Some(a) = activity {
         // A notification about the same prompt shouldn't clobber the more specific tool name.
         st.stats.update(&session, |s| {
@@ -587,7 +623,9 @@ fn over_budget(st: &AppState, session: &str, provider: &str) -> Option<Response<
     let msg = format!("dino: this session used {used} tokens, over its budget of {budget}. Start a new session, or raise the budget in Settings → Policies.");
     st.stats.update(session, |s| {
         s.errors += 1;
+        // dino's own refusal: shown whether or not the agent reports its turns.
         s.last_error = Some(msg.clone());
+        s.call_error = Some(msg.clone());
     });
     log(format_args!("{session} {provider} refused: over budget ({used} of {budget})"));
     // Claude Code retries 429s and 5xx; a 400 is shown to the user as is.
@@ -733,6 +771,29 @@ impl Meter {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn hooks_decide_whether_a_turn_failed() {
+        // No hooks: a failed call shows until one succeeds.
+        let mut s = SessionStats::default();
+        s.call_failed("503 busy".into());
+        assert_eq!(s.last_error.as_deref(), Some("503 busy"));
+
+        // Hooks: a side call failing after a good turn shows nothing.
+        let mut s = SessionStats::default();
+        s.turn_hook("UserPromptSubmit", &json!({}));
+        s.turn_hook("Stop", &json!({}));
+        s.call_failed("503 Grammar compilation is temporarily unavailable.".into());
+        assert_eq!(s.last_error, None);
+
+        // A failed turn shows what the call said.
+        s.turn_hook("UserPromptSubmit", &json!({}));
+        s.call_failed("529 overloaded".into());
+        s.turn_hook("StopFailure", &json!({"error": "server_error"}));
+        assert_eq!(s.last_error.as_deref(), Some("529 overloaded"));
+        s.turn_hook("UserPromptSubmit", &json!({}));
+        assert_eq!(s.last_error, None);
+    }
 
     #[test]
     fn context_from_the_last_call_per_model() {
