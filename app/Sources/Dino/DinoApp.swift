@@ -68,16 +68,31 @@ struct DinoApp: App {
                 Divider()
                 Button("Jump to Session Needing You") { model.jumpToAttention() }
                     .keyboardShortcut("j")
+                Button("Next Session") { model.cycle(by: 1) }
+                    .keyboardShortcut(.tab, modifiers: .control)
+                    .disabled(model.sessions.count < 2)
+                Button("Previous Session") { model.cycle(by: -1) }
+                    .keyboardShortcut(.tab, modifiers: [.control, .shift])
+                    .disabled(model.sessions.count < 2)
                 Button(model.showReview ? "Hide Changes" : "Review Changes") { model.showReview.toggle() }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
                 ForEach(Array(model.sessions.prefix(9).enumerated()), id: \.element.id) { i, s in
-                    Button("\(i + 1)  \(s.name)") { model.select(s.id) }
+                    Button("\(i + 1)  \(s.display)") { model.select(s.id) }
                         .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
                 }
                 Divider()
+                Button("Rename…") { if let id = model.selectedSession?.id { model.renaming = Renaming(id: id, place: .toolbar) } }
+                    .disabled(model.selectedSession == nil)
+                Button("Archive") { if let id = model.selectedSession?.id { model.archive(id) } }
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
+                    .disabled(model.selectedSession == nil)
                 Button("Kill Session") { if let id = model.selected { model.kill(id) } }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
                     .disabled(model.selected == nil)
+            }
+            CommandGroup(replacing: .help) {
+                Button("Keyboard Shortcuts") { model.showShortcuts = true }
+                    .keyboardShortcut("/")
             }
         }
         Window("Settings", id: SettingsView.windowID) {
@@ -172,6 +187,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
+        .sheet(isPresented: $model.showShortcuts) { ShortcutSheet() }
         .sheet(item: $model.editingTask) { ScheduleSheet(task: $0) }
         .alert(
             "Delete “\(model.deletingTask?.name ?? "")”?",
@@ -295,8 +311,8 @@ struct Terminals: View {
             ToolbarItem(placement: .principal) {
                 if let s = model.sessions.first(where: { $0.id == model.selected }) {
                     HStack(spacing: 8) {
-                        Text(s.name).font(.system(.body, design: .monospaced).weight(.semibold)).foregroundStyle(Brand.green)
-                        if let t = s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
+                        SessionName(session: s, place: .toolbar, font: .system(.body, design: .monospaced).weight(.semibold), color: Brand.green)
+                        if s.label == nil, let t = s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
                     }
                 }
             }
@@ -331,6 +347,7 @@ struct Terminals: View {
                 .disabled(!model.sessions.contains { $0.id == model.selected })
             }
             ToolbarItem(placement: .primaryAction) { PRToolbarButton() }
+            ToolbarItem(placement: .primaryAction) { OpenInMenu() }
         }
     }
 }
@@ -457,7 +474,8 @@ struct Sidebar: View {
     /// Changes whenever the sidebar gains, loses or restructures rows.
     private var rowsKey: String {
         let tree = SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
-        return ([filter.rawValue] + tree.repos.map(\.shape) + model.sessions.map(\.id) + model.elsewhere.map(\.id) + model.scheduled.map(\.id))
+        return ([filter.rawValue] + tree.repos.map(\.shape) + model.sessions.map(\.id) + model.elsewhere.map(\.id) + model.scheduled.map(\.id)
+            + model.archived.map(\.id))
             .joined(separator: "\n")
     }
 
@@ -525,6 +543,7 @@ struct Sidebar: View {
                         }
                     }
                 }
+                if filter == .all { ArchivedSection() }
             }
             .listStyle(.sidebar)
             // macOS List diffs rows into an NSOutlineView and sometimes leaves stale rows drawn
@@ -556,7 +575,7 @@ struct SessionRow: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
                 StatusDot(status: status)
-                Text(session.name).font(.system(.body, design: .monospaced).weight(.medium))
+                SessionName(session: session, place: .sidebar, font: .system(.body, design: .monospaced).weight(.medium))
                 if let task = session.scheduled {
                     Image(systemName: "clock")
                         .font(.caption).foregroundStyle(.tertiary)
