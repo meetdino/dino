@@ -1910,7 +1910,9 @@ fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let l = d.allowed_launcher(&launch.launcher)?;
     let dir = work_dir(launch.cwd.as_deref());
     let checkout = worktree::repo_root(&dir)?;
-    let name = format!("{}-{}", l.short, &new_uuid()[..4]);
+    // A scheduled run's branch says which task made it; anything else is named after the agent.
+    let base = launch.scheduled.as_deref().and_then(worktree::slug).unwrap_or_else(|| l.short.clone());
+    let name = format!("{base}-{}", &new_uuid()[..4]);
     let branch = format!("{}{name}", Settings::load().worktrees.prefix());
     let (wt, base) = worktree::start(&checkout, &name, &branch)?;
     let repo = worktree::list(&wt)?.into_iter().next().map_or_else(|| checkout.clone(), |w| PathBuf::from(w.path));

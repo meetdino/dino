@@ -45,7 +45,7 @@ struct WorktreesPane: View {
                 }
                 .orgLocked("worktrees.branch_prefix")
             } footer: {
-                Footnote("A relative location is inside each repo, and dino keeps it out of git status. An absolute one gets a folder per repo. Both apply to worktrees dino makes from now on: sessions, fan-outs and scheduled tasks. Branches are named like \(prefixShown)claude-3f2a.")
+                Footnote("A relative location is inside each repo, and dino keeps it out of git status. An absolute one gets a folder per repo. Both apply to worktrees dino makes from now on: sessions, fan-outs and scheduled tasks. Branches are named like \(prefixShown)claude-3f2a, or after the task for a scheduled run.")
             }
             Section {
                 if let stored {
