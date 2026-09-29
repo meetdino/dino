@@ -1,1 +1,6 @@
 target/
+.claude/
+.dino/
+error.log
+.build/
+site/
