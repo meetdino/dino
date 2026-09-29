@@ -6,6 +6,7 @@ pub mod discover;
 pub mod found;
 pub mod ipc;
 pub mod pr;
+pub mod review;
 pub mod settings;
 pub mod trust;
 pub mod worktree;

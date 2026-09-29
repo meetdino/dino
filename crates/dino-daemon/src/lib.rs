@@ -2,7 +2,7 @@
 //! `dino attach` inside a Ghostty surface, the future app) talk to it over a Unix socket; agents
 //! keep running when every client goes away.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
 use dino_core::settings::{self, Settings};
 use dino_core::{detect_agents, load_keys, pr, proxy_wiring, trust, user_shell, worktree};
-use dino_proxy::{Activity, Proxy};
+use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
 /// Scrollback lines replayed to a newly attached client.
@@ -43,6 +43,7 @@ struct Session {
     /// The user's last keystroke, resize or attach.
     poked: Arc<Mutex<Option<Instant>>>,
     attached: AtomicUsize,
+    auto: Mutex<AutoState>,
 }
 
 impl Daemon {
@@ -79,6 +80,10 @@ struct Daemon {
     worktrees: Mutex<Vec<SessionWorktree>>,
     /// Session id → the PR from its branch, as of the last poll.
     prs: Mutex<HashMap<String, ipc::PrInfo>>,
+    /// One PR poll at a time, so an automatic step is never taken twice.
+    pr_poll: Mutex<()>,
+    /// Sessions whose PR merged, to close once they have nothing to lose; since when.
+    closing: Mutex<HashMap<String, Instant>>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -106,6 +111,8 @@ pub fn run() -> anyhow::Result<()> {
         groups: Mutex::new(load_groups()),
         worktrees: Mutex::new(load_worktrees()),
         prs: Mutex::default(),
+        pr_poll: Mutex::default(),
+        closing: Mutex::default(),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
@@ -236,6 +243,15 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Changes { id } => changes(d, &id).unwrap_or_else(|e| Response::Error { message: e.to_string() }),
+            // Each connection has its own thread, so a review blocks only the one asking.
+            Request::Review { id } => match review(d, &id) {
+                Ok(findings) => Response::Review { findings },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ReviewCancel { id } => {
+                dino_core::review::cancel(&id);
+                Response::Ok
+            }
             Request::SendInput { id, text, submit } => {
                 let session = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
                 match session {
@@ -272,19 +288,45 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::PrMerge { id } => {
-                let merged = pr_session(d, &id).and_then(|s| {
+                let result = pr_session(d, &id).and_then(|s| {
                     let branch = pr::branch(&s.cwd).ok_or_else(|| anyhow::anyhow!("Not on a branch"))?;
                     pr::merge(&s.cwd, &branch)
                 });
-                match merged {
+                match result {
                     Ok(pr) => {
-                        d.prs.lock().unwrap().insert(id, pr.clone());
+                        merged(d, &id, &pr);
                         refresh_prs_soon(d);
                         Response::Pr { pr }
                     }
                     Err(e) => Response::Error { message: e.to_string() },
                 }
             }
+            Request::PrAuto { id, fix, merge } => match pr_session(d, &id) {
+                Ok(s) => {
+                    {
+                        let mut a = s.auto.lock().unwrap();
+                        if let Some(on) = fix {
+                            // Turned on again: three more tries.
+                            if on && !a.pr.fix {
+                                a.pr.fixes = 0;
+                            }
+                            a.pr.fix = on;
+                        }
+                        if let Some(on) = merge {
+                            if on && !a.pr.merge {
+                                a.merge_failed = None;
+                            }
+                            a.pr.merge = on;
+                        }
+                        a.pr.note = None;
+                    }
+                    save(d);
+                    // Act on the PR as it is now, not in half a minute.
+                    refresh_prs_soon(d);
+                    Response::Ok
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::Keep { session } => match keep(d, &session) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
@@ -419,6 +461,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         last_write,
         poked,
         attached: AtomicUsize::new(0),
+        auto: Mutex::new(restore.as_ref().map(|r| r.auto.clone()).unwrap_or_default()),
     }));
     Ok(id)
 }
@@ -493,6 +536,26 @@ fn attach(d: &Daemon, s: &Session, mut stream: UnixStream, cols: u16, rows: u16)
     Ok(())
 }
 
+/// The session's usage and activity.
+fn stats(d: &Daemon, s: &Session) -> SessionStats {
+    let st = d.proxy.stats.session(&s.id);
+    // Mid-turn, Claude's spinner redraws many times a second, focused or not, even
+    // while a tool runs. Gone quiet with no model call out: the turn was interrupted.
+    let quiet = s.last_write.lock().unwrap().is_none_or(|t| t.elapsed() > TURN_OVER_QUIET);
+    if st.activity == Some(Activity::Working) && st.in_flight == 0 && quiet {
+        d.proxy.stats.end_turn(&s.id);
+        return d.proxy.stats.session(&s.id);
+    }
+    st
+}
+
+/// Between turns: not working, not waiting on the user, and quiet.
+fn idle(d: &Daemon, s: &Session) -> bool {
+    let st = stats(d, s);
+    let quiet = s.last_output.lock().unwrap().is_none_or(|t| t.elapsed() > TURN_OVER_QUIET);
+    !s.pane.is_exited() && st.in_flight == 0 && !matches!(st.activity, Some(Activity::Working | Activity::NeedsPermission(_))) && quiet
+}
+
 fn state(d: &Daemon) -> Response {
     let groups = d.groups.lock().unwrap().clone();
     let prs = d.prs.lock().unwrap().clone();
@@ -503,14 +566,7 @@ fn state(d: &Daemon) -> Response {
         .unwrap()
         .iter()
         .map(|s| {
-            let mut st = d.proxy.stats.session(&s.id);
-            // Mid-turn, Claude's spinner redraws many times a second, focused or not, even
-            // while a tool runs. Gone quiet with no model call out: the turn was interrupted.
-            let quiet = s.last_write.lock().unwrap().is_none_or(|t| t.elapsed() > TURN_OVER_QUIET);
-            if st.activity == Some(Activity::Working) && st.in_flight == 0 && quiet {
-                d.proxy.stats.end_turn(&s.id);
-                st = d.proxy.stats.session(&s.id);
-            }
+            let st = stats(d, s);
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -534,6 +590,7 @@ fn state(d: &Daemon) -> Response {
                 error: st.last_error,
                 cwd: real(&s.cwd),
                 pr: prs.get(&s.id).cloned(),
+                auto: s.auto.lock().unwrap().pr.clone(),
             }
         })
         .collect();
@@ -560,6 +617,8 @@ struct SavedSession {
     cwd: String,
     started_at: u64,
     agent_session: Option<String>,
+    #[serde(default)]
+    auto: AutoState,
 }
 
 fn saved_path() -> PathBuf {
@@ -592,6 +651,7 @@ fn save(d: &Daemon) {
                 cwd: s.cwd.display().to_string(),
                 started_at: s.started_at,
                 agent_session: agent_session.clone(),
+                auto: s.auto.lock().unwrap().clone(),
             }
         })
         .collect();
@@ -726,6 +786,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         cwd: f.cwd.clone().unwrap_or_else(|| home().display().to_string()),
         started_at: now_secs(),
         agent_session: Some(f.session_id.clone()),
+        auto: AutoState::default(),
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {
@@ -964,20 +1025,34 @@ fn member_diff(d: &Daemon, session: &str) -> anyhow::Result<(ipc::DiffStat, Stri
 /// What `id` changed: a fan-out member since its fan-out began (edits it committed included),
 /// any other session since the last commit of the checkout it runs in.
 fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
+    Ok(match changes_base(d, id)? {
+        Ok((dir, base, label)) => Response::Changes { root: real(&dir), files: worktree::changes(&dir, &base)?, base: label, note: None },
+        Err((cwd, note)) => Response::Changes { root: real(&cwd), base: String::new(), files: vec![], note: Some(note) },
+    })
+}
+
+/// Where `id`'s changes are and what they're compared with: (checkout, base, base in words).
+/// Not in a repo: its cwd and why.
+fn changes_base(d: &Daemon, id: &str) -> anyhow::Result<Result<(PathBuf, String, String), (PathBuf, String)>> {
     let cwd = d.sessions.lock().unwrap().iter().find(|s| s.id == id).map(|s| s.cwd.clone());
     let cwd = cwd.ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-    let (dir, base, label) = match (find_member(d, id), session_worktree(d, &cwd)) {
-        (Ok((g, m)), _) => (m.worktree, g.base, "where the fan-out started".to_string()),
-        (Err(_), Some(w)) => (w.path, w.base, "where the worktree started".to_string()),
+    Ok(match (find_member(d, id), session_worktree(d, &cwd)) {
+        (Ok((g, m)), _) => Ok((m.worktree, g.base, "where the fan-out started".to_string())),
+        (Err(_), Some(w)) => Ok((w.path, w.base, "where the worktree started".to_string())),
         (Err(_), None) => match worktree::repo_root(&cwd) {
             Ok(root) => {
                 let head = worktree::head(&root);
-                (root, head, "the last commit".to_string())
+                Ok((root, head, "the last commit".to_string()))
             }
-            Err(e) => return Ok(Response::Changes { root: real(&cwd), base: String::new(), files: vec![], note: Some(e.to_string()) }),
+            Err(e) => Err((cwd, e.to_string())),
         },
-    };
-    Ok(Response::Changes { root: real(&dir), files: worktree::changes(&dir, &base)?, base: label, note: None })
+    })
+}
+
+/// Claude's review of what `changes` shows for `id`.
+fn review(d: &Daemon, id: &str) -> anyhow::Result<Vec<dino_core::review::Finding>> {
+    let (dir, base, _) = changes_base(d, id)?.map_err(|(_, note)| anyhow::anyhow!(note))?;
+    dino_core::review::run(id, &dir, &base)
 }
 
 /// The worktree dino made that `dir` is in: its commits count as changes too.
@@ -998,30 +1073,162 @@ fn pr_fix(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let branch = pr::branch(&s.cwd).ok_or_else(|| anyhow::anyhow!("Not on a branch"))?;
     let msg = pr::fix_message(&s.cwd, &branch)?;
     send_input(&s, &msg, true);
+    // Asked by hand: no automatic fix for the same push.
+    if let Some(pr) = d.prs.lock().unwrap().get(id) {
+        s.auto.lock().unwrap().fixed = Some((pr.number, pr.head.clone()));
+    }
     Ok(())
 }
 
-/// Look up the PR from each live session's branch. Sessions on the same branch share one lookup;
-/// on the default branch, detached, or without gh there's none. Failures just mean no PR.
+/// A session's PR automation: the flags the user sets, and what it has done.
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+struct AutoState {
+    pr: ipc::AutoPr,
+    /// The PR and head commit a fix was last asked for: one per push.
+    fixed: Option<(u32, String)>,
+    /// The head commit a merge last failed on: tried again after the next push.
+    merge_failed: Option<String>,
+}
+
+/// How long a merged PR's session stays before it's closed (when the setting says so): long
+/// enough to see it merged.
+const CLOSE_AFTER_MERGE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long after the user last typed in a session an automatic fix waits.
+const LEAVE_THE_USER: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Look up the PR from each live session's branch, and take the automatic steps that are due.
+/// Sessions on the same branch share one lookup; on the default branch, detached, or without gh
+/// there's none. Failures just mean no PR.
 fn refresh_prs(d: &Daemon) {
+    let _one = d.pr_poll.lock().unwrap();
     if dino_core::which("gh").is_none() {
         d.prs.lock().unwrap().clear();
         return;
     }
-    let live: Vec<(String, PathBuf)> = d.sessions.lock().unwrap().iter().filter(|s| !s.pane.is_exited()).map(|s| (s.id.clone(), s.cwd.clone())).collect();
+    let live: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| !s.pane.is_exited()).cloned().collect();
     let mut looked_up: HashMap<(PathBuf, String), Option<ipc::PrInfo>> = HashMap::new();
     let mut found = HashMap::new();
-    for (id, cwd) in live {
-        let Ok(root) = worktree::repo_root(&cwd) else { continue };
+    let mut with_pr = vec![];
+    for s in live {
+        let Ok(root) = worktree::repo_root(&s.cwd) else { continue };
         let Some(branch) = pr::branch(&root) else { continue };
         let pr = looked_up
             .entry((root.clone(), branch.clone()))
             .or_insert_with(|| (branch != pr::default_branch(&root)).then(|| pr::view(&root, &branch).ok()).flatten());
         if let Some(pr) = pr {
-            found.insert(id, pr.clone());
+            found.insert(s.id.clone(), pr.clone());
+            with_pr.push((s, root, branch, pr.clone()));
         }
     }
-    *d.prs.lock().unwrap() = found;
+    let old = std::mem::replace(&mut *d.prs.lock().unwrap(), found);
+    // One automatic step per PR, however many sessions share its branch.
+    let mut acted = HashSet::new();
+    for (s, root, branch, pr) in with_pr {
+        if pr.state == "merged" && old.get(&s.id).is_some_and(|was| was.number == pr.number && was.is_open()) {
+            merged(d, &s.id, &pr);
+        }
+        if !acted.contains(&pr.url) && auto_pr(d, &s, &root, &branch, &pr) {
+            acted.insert(pr.url.clone());
+        }
+    }
+    close_merged(d);
+}
+
+/// Take the session's automatic PR step, if one is due. True when it took one.
+fn auto_pr(d: &Daemon, s: &Session, root: &Path, branch: &str, pr: &ipc::PrInfo) -> bool {
+    let a = s.auto.lock().unwrap().clone();
+    if a.pr.merge && pr.mergeable() && a.merge_failed.as_deref() != Some(pr.head.as_str()) {
+        let result = pr::merge(root, branch);
+        let mut a = s.auto.lock().unwrap();
+        match result {
+            Ok(now) => {
+                a.pr.note = None;
+                drop(a);
+                merged(d, &s.id, &now);
+            }
+            Err(e) => {
+                a.pr.note = Some(format!("Couldn't merge: {e}"));
+                a.merge_failed = Some(pr.head.clone());
+            }
+        }
+        return true;
+    }
+    // A shell has no one to read the logs.
+    let this_push = Some((pr.number, pr.head.clone()));
+    if !a.pr.fix || !pr.failing() || s.agent_id == "shell" || a.fixed == this_push {
+        return false;
+    }
+    let fixes = match &a.fixed {
+        Some((n, _)) if *n != pr.number => 0,
+        _ => a.pr.fixes,
+    };
+    if fixes >= ipc::MAX_AUTO_FIXES {
+        s.auto.lock().unwrap().pr.note = Some(format!("Stopped after {fixes} fixes: checks still fail"));
+        return false;
+    }
+    // Not mid-turn, not while it waits on you, not while you type: the next poll will do.
+    let typing = s.poked.lock().unwrap().is_some_and(|t| t.elapsed() < LEAVE_THE_USER);
+    if typing || !idle(d, s) {
+        return false;
+    }
+    let msg = pr::fix_message(root, branch);
+    if let Ok(msg) = &msg {
+        send_input(s, msg, true);
+    }
+    let mut a = s.auto.lock().unwrap();
+    a.fixed = this_push;
+    match msg {
+        Ok(_) => {
+            a.pr.fixes = fixes + 1;
+            a.pr.note = None;
+        }
+        Err(e) => a.pr.note = Some(format!("Couldn't ask for a fix: {e}")),
+    }
+    true
+}
+
+/// The session's PR is merged: when the setting says so, the session closes once it's safe.
+fn merged(d: &Daemon, id: &str, pr: &ipc::PrInfo) {
+    d.prs.lock().unwrap().insert(id.to_string(), pr.clone());
+    if pr.state == "merged" && Settings::load().policies.close_merged {
+        d.closing.lock().unwrap().entry(id.to_string()).or_insert_with(Instant::now);
+    }
+}
+
+/// Close sessions whose PR merged a little while ago, with the worktree dino made for them.
+/// Waits for their turn to end; never removes a worktree with work in it.
+fn close_merged(d: &Daemon) {
+    if !Settings::load().policies.close_merged {
+        d.closing.lock().unwrap().clear();
+        return;
+    }
+    let due: Vec<String> = d.closing.lock().unwrap().iter().filter(|(_, t)| t.elapsed() >= CLOSE_AFTER_MERGE).map(|(id, _)| id.clone()).collect();
+    for id in due {
+        let still_merged = d.prs.lock().unwrap().get(&id).map(|pr| pr.state == "merged");
+        let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id && !s.pane.is_exited()).cloned();
+        let w = s.as_ref().and_then(|s| session_worktree(d, &s.cwd));
+        let (Some(s), Some(w), Some(true)) = (s, w, still_merged) else {
+            // Gone, not in a worktree, or reopened. A failed lookup (None) just waits.
+            if still_merged.is_some() {
+                d.closing.lock().unwrap().remove(&id);
+            }
+            continue;
+        };
+        let target = real(&w.path);
+        if !sessions_in(d, &target).iter().all(|o| o.pane.is_exited() || idle(d, o)) {
+            continue;
+        }
+        d.closing.lock().unwrap().remove(&id);
+        if !pr::nothing_to_lose(&w.path) {
+            s.auto.lock().unwrap().pr.note = Some("Kept open after the merge: its worktree has work that isn't pushed".into());
+            continue;
+        }
+        if let Err(e) = remove_worktree(d, &target, false) {
+            s.auto.lock().unwrap().pr.note = Some(format!("Couldn't close after the merge: {e}"));
+        }
+    }
 }
 
 /// After a PR action, off the request: other sessions on the same branch see it without waiting for the poll.
@@ -1144,6 +1351,15 @@ fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     }
 }
 
+/// The sessions running in `dir` (a resolved path) or a folder inside it.
+fn sessions_in(d: &Daemon, dir: &str) -> Vec<Arc<Session>> {
+    let inside = |s: &Session| {
+        let cwd = real(&s.cwd);
+        cwd == dir || cwd.starts_with(&format!("{dir}/"))
+    };
+    d.sessions.lock().unwrap().iter().filter(|s| inside(s)).cloned().collect()
+}
+
 fn remove_worktree(d: &Daemon, path: &str, apply: bool) -> anyhow::Result<()> {
     let target = real(Path::new(path));
     let w = d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == target).cloned();
@@ -1151,19 +1367,8 @@ fn remove_worktree(d: &Daemon, path: &str, apply: bool) -> anyhow::Result<()> {
     if apply {
         worktree::apply(&w.path, &w.base, &w.checkout)?;
     }
-    let inside: Vec<String> = d
-        .sessions
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|s| {
-            let cwd = real(&s.cwd);
-            cwd == target || cwd.starts_with(&format!("{target}/"))
-        })
-        .map(|s| s.id.clone())
-        .collect();
-    for id in &inside {
-        kill(d, id);
+    for s in sessions_in(d, &target) {
+        kill(d, &s.id);
     }
     save(d);
     worktree::remove(&w.repo, &w.path, &w.branch);

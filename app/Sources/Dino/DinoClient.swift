@@ -23,6 +23,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var cwd: String?
     /// The pull request for its branch, whoever opened it.
     var pr: PrInfo?
+    /// What dino does about the PR by itself; nil from an older dinod.
+    var auto: AutoPr?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
@@ -42,8 +44,25 @@ struct PrInfo: Codable, Equatable {
     /// "approved", "changes_requested" or "review_required".
     var review: String?
 
+    /// The head commit.
+    var head: String?
+
     var isOpen: Bool { state == "open" }
     var canMerge: Bool { isOpen && !draft && checks.failed == 0 && checks.pending == 0 }
+}
+
+/// Automatic steps on a session's PR (see `AutoPr` in crates/dino-core/src/ipc.rs).
+struct AutoPr: Codable, Equatable {
+    /// Ask the agent to fix failing checks, up to three times.
+    var fix: Bool
+    /// Squash-merge once checks pass.
+    var merge: Bool
+    /// Fixes asked for so far.
+    var fixes: UInt32
+    /// Why the last automatic step failed.
+    var note: String?
+
+    var any: Bool { fix || merge }
 }
 
 /// CI checks on a PR; all zero when the repo has none.
@@ -166,6 +185,19 @@ struct DiffLine: Codable, Equatable {
     var text: String
 }
 
+/// An issue Claude's review found; `line` is in the new version of `file`.
+struct Finding: Codable, Equatable {
+    var file: String
+    var line: UInt32
+    /// "high", "medium" or "low".
+    var severity: String
+    var message: String
+}
+
+private struct ReviewResponse: Decodable {
+    var findings: [Finding]
+}
+
 private struct GroupsResponse: Decodable {
     var groups: [GroupInfo]
 }
@@ -258,6 +290,15 @@ final class DinoConnection: @unchecked Sendable {
         try JSONDecoder().decode(Changes.self, from: send(["type": "changes", "id": session]))
     }
 
+    /// Claude's review of the session's changes. Blocks for as long as the review takes.
+    func review(session: String) throws -> [Finding] {
+        try JSONDecoder().decode(ReviewResponse.self, from: send(["type": "review", "id": session])).findings
+    }
+
+    func cancelReview(session: String) throws {
+        _ = try send(["type": "review_cancel", "id": session])
+    }
+
     /// Type `text` into a session as a paste; `submit` presses Return after it.
     func sendInput(session: String, text: String, submit: Bool) throws {
         _ = try send(["type": "send_input", "id": session, "text": text, "submit": submit])
@@ -281,6 +322,14 @@ final class DinoConnection: @unchecked Sendable {
 
     func prMerge(session: String) throws -> PrInfo {
         try JSONDecoder().decode(PrResponse.self, from: send(["type": "pr_merge", "id": session])).pr
+    }
+
+    /// Turn automatic fixing or merging on or off; nil leaves it as it is.
+    func prAuto(session: String, fix: Bool? = nil, merge: Bool? = nil) throws {
+        var body: [String: Any] = ["type": "pr_auto", "id": session]
+        if let fix { body["fix"] = fix }
+        if let merge { body["merge"] = merge }
+        _ = try send(body)
     }
 
     /// Continue `session` in dino; returns the new dino session id.
