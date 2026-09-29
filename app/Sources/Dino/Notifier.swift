@@ -16,14 +16,19 @@ enum Notifier {
     }
 
     @MainActor static func post(session: SessionInfo, title: String, body: String) {
+        // One notification per session; a newer event replaces the older one.
+        post(key: "session-\(session.id)", title: title, body: body, session: session.id)
+    }
+
+    /// `key` names what the notification is about; a newer one with the same key replaces it.
+    @MainActor static func post(key: String, title: String, body: String, session: String? = nil) {
         if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
-        content.userInfo = ["session": session.id]
-        // One notification per session; a newer event replaces the older one.
-        let request = UNNotificationRequest(identifier: "session-\(session.id)", content: content, trigger: nil)
+        if let session { content.userInfo = ["session": session] }
+        let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
         center.add(request) { error in
             if let error { NSLog("dino notification failed: \(error)") }
         }

@@ -25,6 +25,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var pr: PrInfo?
     /// What dino does about the PR by itself; nil from an older dinod.
     var auto: AutoPr?
+    /// The scheduled task that started it.
+    var scheduled: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
