@@ -7,7 +7,7 @@ mod codex;
 mod free;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
@@ -118,6 +118,7 @@ impl Stats {
 pub struct Proxy {
     pub port: u16,
     pub stats: Arc<Stats>,
+    keys: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl Proxy {
@@ -128,11 +129,12 @@ impl Proxy {
         std_listener.set_nonblocking(true)?;
         let port = std_listener.local_addr()?.port();
         let stats = Arc::new(Stats::default());
+        let keys = Arc::new(RwLock::new(keys));
         let state = AppState {
             stats: stats.clone(),
             client: reqwest::Client::builder().build()?,
             router: Arc::default(),
-            keys: Arc::new(keys),
+            keys: keys.clone(),
             substitutes: Arc::default(),
         };
 
@@ -150,7 +152,12 @@ impl Proxy {
                 let _ = axum::serve(listener, app).await;
             });
         })?;
-        Ok(Self { port, stats })
+        Ok(Self { port, stats, keys })
+    }
+
+    /// Use these keys from the next request on.
+    pub fn set_keys(&self, keys: HashMap<String, String>) {
+        *self.keys.write().unwrap() = keys;
     }
 
     /// Base URL an agent should use for `provider`, attributed to `session`.
@@ -164,7 +171,7 @@ pub(crate) struct AppState {
     stats: Arc<Stats>,
     client: reqwest::Client,
     router: Arc<dino_router::Router>,
-    keys: Arc<HashMap<String, String>>,
+    keys: Arc<RwLock<HashMap<String, String>>>,
     /// Codex models the backend rejected, and the model that answered instead.
     substitutes: Arc<Mutex<HashMap<String, String>>>,
 }

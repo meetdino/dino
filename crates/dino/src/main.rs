@@ -14,7 +14,7 @@ use crossterm::terminal;
 use std::sync::{Arc, Mutex};
 
 use dino_core::discover::{self, Inventory};
-use dino_core::Config;
+use dino_core::settings::Settings;
 use dino_core::ipc::{LauncherInfo, QuotaInfo, Request, Response, SessionInfo};
 use dino_term::Pane;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -103,7 +103,7 @@ struct App {
     quotas: Vec<QuotaInfo>,
     /// Status line for errors talking to dinod.
     notice: Option<String>,
-    config: Config,
+    config: Settings,
     /// Screen row → session index, rebuilt every frame for sidebar clicks.
     sidebar_rows: Vec<(u16, usize)>,
     inventory: Arc<Mutex<Option<Inventory>>>,
@@ -123,7 +123,7 @@ impl App {
             snapshot,
             quotas: vec![],
             notice: None,
-            config: Config::load(),
+            config: Settings::load(),
             sidebar_rows: vec![],
             inventory: Arc::default(),
             welcome_opened: Instant::now(),
@@ -304,12 +304,12 @@ impl App {
                 }
             }
             Mode::Welcome => {
-                let first_run = !self.config.onboarded;
+                let first_run = !self.config.machine.onboarded;
                 match key.code {
                     KeyCode::Char('y' | 'Y') | KeyCode::Enter if first_run => self.finish_onboarding(true),
                     KeyCode::Char('n' | 'N') if first_run => self.finish_onboarding(false),
                     KeyCode::Char('r') if !first_run => {
-                        self.config.route = !self.config.route;
+                        self.config.routing.proxy = !self.config.routing.proxy;
                         let _ = self.config.save();
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
@@ -374,14 +374,14 @@ impl App {
     }
 
     fn finish_onboarding(&mut self, route: bool) {
-        self.config.onboarded = true;
-        self.config.route = route;
+        self.config.machine.onboarded = true;
+        self.config.routing.proxy = route;
         let _ = self.config.save();
         self.leave_modal();
     }
 
     fn draw(&mut self, f: &mut Frame) {
-        if self.mode == Mode::Welcome && !self.config.onboarded {
+        if self.mode == Mode::Welcome && !self.config.machine.onboarded {
             self.draw_welcome(f, f.area());
             return;
         }
@@ -550,7 +550,7 @@ impl App {
     }
 
     fn draw_welcome(&self, f: &mut Frame, area: Rect) {
-        let first_run = !self.config.onboarded;
+        let first_run = !self.config.machine.onboarded;
         let inv = self.inventory.lock().unwrap().clone();
         let mut lines: Vec<Line> = vec![
             Line::from(vec![Span::from("▲▲ ").fg(SPIKE), Span::from("dino").bold().fg(ACCENT)]),
@@ -622,7 +622,7 @@ impl App {
                 ]));
                 lines.push(Line::from("Metering, quotas and live status. Your logins and keys stay where they are.").fg(MUTED));
             } else {
-                let state = if self.config.route { Span::from("on").fg(ACCENT).bold() } else { Span::from("off").fg(Color::Yellow).bold() };
+                let state = if self.config.routing.proxy { Span::from("on").fg(ACCENT).bold() } else { Span::from("off").fg(Color::Yellow).bold() };
                 lines.push(Line::from(vec![Span::from("Routing through proxy: "), state, Span::from("   r toggle · esc close").fg(MUTED)]));
                 lines.push(Line::from("Applies to newly started sessions.").fg(MUTED));
             }
@@ -834,12 +834,12 @@ fn main() -> anyhow::Result<()> {
 
     if cli.first().is_some_and(|a| a == "--welcome") {
         cli.remove(0);
-        app.config.onboarded = false;
+        app.config.machine.onboarded = false;
     }
     if !app.sessions.is_empty() {
         app.mode = Mode::Pane;
     }
-    if !app.config.onboarded && cli.is_empty() {
+    if !app.config.machine.onboarded && cli.is_empty() {
         app.open_welcome();
     }
     if let Some((arg, extra)) = cli.split_first() {

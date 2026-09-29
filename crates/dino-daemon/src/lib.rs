@@ -8,14 +8,15 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
-use dino_core::{Config, detect_agents, load_keys, proxy_wiring, user_shell, worktree};
+use dino_core::settings::{self, Settings};
+use dino_core::{detect_agents, load_keys, proxy_wiring, user_shell, worktree};
 use dino_proxy::{Activity, Proxy};
 use dino_term::{Pane, SpawnSpec};
 
@@ -39,9 +40,16 @@ struct Session {
     attached: AtomicUsize,
 }
 
+impl Daemon {
+    fn launcher(&self, short: &str) -> Option<LauncherInfo> {
+        self.launchers.read().unwrap().iter().find(|l| l.short == short).cloned()
+    }
+}
+
 struct Daemon {
     proxy: Proxy,
-    launchers: Vec<LauncherInfo>,
+    /// Rebuilt when keys change: the free tier needs one.
+    launchers: RwLock<Vec<LauncherInfo>>,
     sessions: Mutex<Vec<Arc<Session>>>,
     groups: Mutex<Vec<Group>>,
     next_id: AtomicU64,
@@ -64,7 +72,7 @@ pub fn run() -> anyhow::Result<()> {
     let free_tier = keys.contains_key("NVIDIA_API_KEY");
     let daemon = Arc::new(Daemon {
         proxy: Proxy::start(keys)?,
-        launchers: launchers(free_tier),
+        launchers: RwLock::new(launchers(free_tier)),
         sessions: Mutex::default(),
         groups: Mutex::new(load_groups()),
         next_id: AtomicU64::new(1),
@@ -121,7 +129,22 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
         };
         let resp = match req {
             Request::State => state(d),
-            Request::Launchers => Response::Launchers { launchers: d.launchers.clone() },
+            Request::Launchers => Response::Launchers { launchers: d.launchers.read().unwrap().clone() },
+            Request::Settings => Response::Settings { settings: Settings::load() },
+            Request::SetSettings { settings } => match settings.save() {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Keys => Response::Keys { keys: settings::key_status() },
+            Request::SetKey { name, value } => match settings::set_key(&name, value.as_deref()) {
+                Ok(()) => {
+                    let keys = load_keys();
+                    *d.launchers.write().unwrap() = launchers(keys.contains_key("NVIDIA_API_KEY"));
+                    d.proxy.set_keys(keys);
+                    Response::Ok
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::New { launcher, args, cwd, cols, rows } => match spawn(d, Launch { cols, rows, ..Launch::new(&launcher, args, cwd) }) {
                 Ok(id) => {
                     save(d);
@@ -210,13 +233,13 @@ impl Launch {
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let Launch { launcher, args, cwd, cols, rows, restore, name, prompt } = launch;
     let launcher = launcher.as_str();
-    let l = d.launchers.iter().find(|l| l.short == launcher).ok_or_else(|| anyhow::anyhow!("unknown agent {launcher}"))?;
+    let l = d.launcher(launcher).ok_or_else(|| anyhow::anyhow!("unknown agent {launcher}"))?;
     let id = match &restore {
         Some(r) => r.id.clone(),
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
     };
     let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-    let (env, mut wired_args) = proxy_wiring(&l.agent_id, Config::load().route, &|provider| d.proxy.base_url(&id, provider));
+    let (env, mut wired_args) = proxy_wiring(&l.agent_id, Settings::load().routing.proxy, &|provider| d.proxy.base_url(&id, provider));
 
     // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
     let mut agent_session = restore.as_ref().and_then(|r| r.agent_session.clone());
@@ -520,7 +543,7 @@ fn discover(d: &Daemon, cloud: bool) -> Vec<FoundSession> {
     out.retain(|f| !ours.contains(&f.session_id));
     out.splice(0..0, running);
     if cloud {
-        let has = |short: &str| d.launchers.iter().find(|l| l.short == short).map(|l| PathBuf::from(&l.program));
+        let has = |short: &str| d.launcher(short).map(|l| PathBuf::from(&l.program));
         out.extend(found::cloud(has("codex").as_deref(), has("claude").is_some()));
     }
     out
@@ -681,9 +704,9 @@ fn save_groups(groups: &[Group]) {
 fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -> anyhow::Result<String> {
     let prompt = prompt.trim();
     anyhow::ensure!(!prompt.is_empty(), "fan-out needs a prompt");
-    let mut picked: Vec<&LauncherInfo> = vec![];
+    let mut picked: Vec<LauncherInfo> = vec![];
     for short in launchers {
-        let l = d.launchers.iter().find(|l| &l.short == short).ok_or_else(|| anyhow::anyhow!("unknown agent {short}"))?;
+        let l = d.launcher(short).ok_or_else(|| anyhow::anyhow!("unknown agent {short}"))?;
         anyhow::ensure!(l.agent_id != "shell", "a shell can't take a prompt");
         if !picked.iter().any(|p| p.short == l.short) {
             picked.push(l);
