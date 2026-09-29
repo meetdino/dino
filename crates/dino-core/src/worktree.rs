@@ -413,7 +413,8 @@ fn add_bare(repo: &Path, name: &str, branch: &str, base: &str) -> anyhow::Result
 }
 
 /// Make `dir` again as a worktree of `repo` on `branch`, for a session coming back from the
-/// archive: the branch as it was, or, if it's gone, a new one off the repo's HEAD.
+/// archive: the branch as it was; if it's gone (git deletes a pushed one as merged), from what
+/// was pushed; else a new one off the repo's HEAD.
 pub fn restore(repo: &Path, dir: &Path, branch: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!dir.exists(), "{} is in the way", dir.display());
     if let Some(inner) = inner_dir(repo, dir) {
@@ -424,8 +425,14 @@ pub fn restore(repo: &Path, dir: &Path, branch: &str) -> anyhow::Result<()> {
     let exists = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
     // A worktree removed by hand leaves an entry that blocks the path.
     let _ = git(repo, &["worktree", "prune"]);
+    let pushed = || {
+        let remotes = git(repo, &["remote"]).unwrap_or_default();
+        remotes.lines().map(|r| format!("refs/remotes/{}/{branch}", r.trim())).find(|r| git(repo, &["rev-parse", "--verify", "--quiet", r]).is_ok())
+    };
     if exists {
         git(repo, &["worktree", "add", "--quiet", &path, branch])?;
+    } else if let Some(remote) = pushed() {
+        git(repo, &["worktree", "add", "--quiet", "--track", "-b", branch, &path, &remote])?;
     } else {
         git(repo, &["worktree", "add", "--quiet", "-b", branch, &path, "HEAD"])?;
     }
@@ -994,6 +1001,16 @@ mod tests {
         restore(&repo, &wt, "dino/claude-ab12").unwrap();
         assert!(wt.join("b.txt").is_file(), "back on its branch, commits and all");
         assert!(restore(&repo, &wt, "dino/claude-ab12").is_err(), "not over something in the way");
+
+        // Pushed, then the branch deleted (git sees it merged into its upstream): back from the remote.
+        let origin = tmp.join("origin.git");
+        git(&tmp, &["init", "-q", "--bare", &origin.to_string_lossy()]).unwrap();
+        git(&repo, &["remote", "add", "origin", &origin.to_string_lossy()]).unwrap();
+        git(&wt, &["push", "-qu", "origin", "HEAD"]).unwrap();
+        clean(&wt).unwrap();
+        assert!(git(&repo, &["rev-parse", "--verify", "--quiet", "refs/heads/dino/claude-ab12"]).is_err(), "pushed counts as merged");
+        restore(&repo, &wt, "dino/claude-ab12").unwrap();
+        assert!(wt.join("b.txt").is_file(), "back from what was pushed");
         remove(&repo, &wt, "dino/claude-ab12");
         let _ = std::fs::remove_dir_all(&tmp);
     }

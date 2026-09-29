@@ -21,10 +21,17 @@ struct WorktreesPane: View {
     @State private var stored: [StoredWorktree]?
     @State private var removing: Set<String> = []
     @State private var error: String?
-    @State private var confirmAll = false
+    @State private var confirmFree = false
+    @State private var freeing = false
+    @State private var freed: String?
 
     private var current: DinoSettings.Worktrees? { store.settings?.worktrees }
-    private var merged: [StoredWorktree] { (stored ?? []).filter { $0.state == "merged" && $0.removable && !removing.contains($0.path) } }
+    private var reclaimable: [StoredWorktree] { (stored ?? []).filter { $0.reclaimable == true && !removing.contains($0.path) } }
+    private var reclaimableSize: String? {
+        let sizes = reclaimable.compactMap(\.size)
+        guard !sizes.isEmpty else { return nil }
+        return ByteCountFormatter.string(fromByteCount: Int64(sizes.reduce(0, +)), countStyle: .file)
+    }
 
     var body: some View {
         Form {
@@ -61,12 +68,19 @@ struct WorktreesPane: View {
                     Text("Storage")
                     if let total { Text(total).foregroundStyle(.secondary).monospacedDigit() }
                     Spacer()
-                    Button("Remove All Merged…") { confirmAll = true }
-                        .disabled(merged.isEmpty)
-                        .help("Remove every worktree whose work is merged, has no uncommitted changes, and has no session running in it")
+                    if freeing {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button(reclaimableSize.map { "Free Up \($0)…" } ?? "Free Up Space…") { confirmFree = true }
+                            .disabled(reclaimable.isEmpty)
+                            .help("Remove every worktree nothing would be lost from: no session running in it, no uncommitted changes, and its commits merged or pushed")
+                    }
                 }
             } footer: {
-                Footnote("Only worktrees dino made. dino never removes one with uncommitted changes. An archived session whose worktree is removed gets it back from its branch when you unarchive it.")
+                VStack(alignment: .leading, spacing: 4) {
+                    if let freed { Text(freed).font(.callout).foregroundStyle(.secondary) }
+                    Footnote("Only worktrees dino made. dino never removes one with uncommitted changes, and keeps each branch that isn't merged. A session that ended or was archived gets its worktree back from its branch when you start it again.")
+                }
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
@@ -91,10 +105,10 @@ struct WorktreesPane: View {
                 try? await Task.sleep(for: .seconds(2))
             }
         }
-        .confirmationDialog("Remove \(merged.count) merged worktree\(merged.count == 1 ? "" : "s")?", isPresented: $confirmAll) {
-            Button("Remove \(merged.count)", role: .destructive) { remove(merged) }
+        .confirmationDialog("Remove \(reclaimable.count) worktree\(reclaimable.count == 1 ? "" : "s")?", isPresented: $confirmFree) {
+            Button("Remove \(reclaimable.count)", role: .destructive) { freeUpSpace() }
         } message: {
-            Text("Their work is merged, so nothing is lost. Branches git sees as merged go too.")
+            Text("Nothing runs in them, and their work is merged or pushed, so nothing is lost. Sessions that ended in them are archived. Branches git sees as merged go too.")
         }
     }
 
@@ -141,6 +155,7 @@ struct WorktreesPane: View {
     private func removeHelp(_ w: StoredWorktree) -> String {
         if w.fanout { return "It belongs to a fan-out: keep or discard the fan-out instead" }
         if let s = w.session { return "\(s) is running in it" }
+        if w.session_state == "ended" { return "Remove it; the session that ended in it is archived, and gets it back from \(w.branch) when you start it again" }
         if w.dirty { return "It has uncommitted changes, so dino won't remove it" }
         return w.archived
             ? "Remove it; its archived session gets it back from \(w.branch) when you unarchive it"
@@ -167,6 +182,30 @@ struct WorktreesPane: View {
             }
             removing.subtract(paths)
             error = failed.isEmpty ? nil : failed.joined(separator: "\n")
+        }
+    }
+
+    private func freeUpSpace() {
+        freeing = true
+        error = nil
+        freed = nil
+        Task {
+            let result = await Task.detached { () -> Result<Freed, Error> in
+                Result { try DinoConnection(path: DinoEnvironment.socketPath).freeUpSpace() }
+            }.value
+            if let list = try? await Task.detached(operation: { try DinoConnection(path: DinoEnvironment.socketPath).storage() }).value {
+                stored = list
+            }
+            freeing = false
+            switch result {
+            case .success(let f):
+                let n = f.removed.count
+                freed = n == 0
+                    ? "Nothing to remove: every worktree left has work in it or a session running."
+                    : "Removed \(n) worktree\(n == 1 ? "" : "s"), freeing \(ByteCountFormatter.string(fromByteCount: Int64(f.bytes), countStyle: .file))."
+            case .failure(let e):
+                error = e.localizedDescription
+            }
         }
     }
 
@@ -217,7 +256,12 @@ private struct StateChip: View {
             if worktree.dirty, worktree.state != "in_progress" { chip("uncommitted", SessionStatus.needsYou.color) }
             if worktree.archived { chip("archived", .secondary) }
             if worktree.fanout { chip("fan-out", .blue) }
-            if worktree.session != nil { chip("in use", Brand.green) }
+            switch worktree.session_state {
+            case "working": chip("working", Brand.green)
+            case "idle": chip("idle", Brand.green)
+            case "ended": chip("ended", .secondary)
+            default: if worktree.session != nil { chip("in use", Brand.green) }
+            }
         }
     }
 

@@ -32,6 +32,11 @@ impl PrInfo {
         self.state == "open"
     }
 
+    /// Merged, or closed without merging.
+    pub fn is_done(&self) -> bool {
+        self.state == "merged" || self.state == "closed"
+    }
+
     /// Checks have finished, and some failed.
     pub fn failing(&self) -> bool {
         self.is_open() && self.checks.pending == 0 && self.checks.failed > 0
