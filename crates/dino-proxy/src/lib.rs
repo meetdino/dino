@@ -77,6 +77,8 @@ pub struct SessionStats {
     /// Per model, what its last call read (cached tokens included): how full its context is.
     /// Per model because agents make small side calls (titles, summaries) on other models.
     pub context: HashMap<String, u64>,
+    /// The context window as the agent itself reports it (Claude's statusline), which beats `context`.
+    pub reported_context: Option<ReportedContext>,
     /// Subagents the agent started, as its hooks reported them (Claude's Agent tool).
     pub subagents: Vec<Subagent>,
     /// Agent tool calls not answered yet: (tool_use_id, description, subagent_type).
@@ -91,6 +93,30 @@ impl SessionStats {
     /// The conversation's context use: the biggest per-model one, since side calls are small.
     pub fn context(&self) -> Option<(&str, u64)> {
         self.context.iter().max_by_key(|(_, n)| **n).map(|(m, n)| (m.as_str(), *n))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReportedContext {
+    /// Tokens in the window; `None` until the next answer after starting or `/compact`.
+    pub used: Option<u64>,
+    pub window: u64,
+}
+
+impl ReportedContext {
+    /// From the JSON Claude Code gives its statusline command: `context_window.context_window_size`,
+    /// and what the last call read (`current_usage`) or, failing that, `used_percentage`. Both are
+    /// null before the first answer and right after `/compact` (Claude Code 2.1.284): the window is empty.
+    pub fn from_statusline(v: &Value) -> Option<Self> {
+        let cw = &v["context_window"];
+        let window = cw["context_window_size"].as_u64().filter(|w| *w > 0)?;
+        let usage = &cw["current_usage"];
+        let used = if usage.is_object() {
+            Some(["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].iter().filter_map(|k| usage[*k].as_u64()).sum())
+        } else {
+            cw["used_percentage"].as_f64().map(|p| (p.clamp(0.0, 100.0) * window as f64 / 100.0).round() as u64)
+        };
+        Some(Self { used, window })
     }
 }
 
@@ -153,7 +179,10 @@ impl Stats {
 
     /// Forget context use, e.g. when the agent restarts on another model.
     pub fn reset_context(&self, id: &str) {
-        self.update(id, |s| s.context.clear());
+        self.update(id, |s| {
+            s.context.clear();
+            s.reported_context = None;
+        });
     }
 
     pub fn quota(&self, provider: &str) -> Option<Quota> {
@@ -457,6 +486,14 @@ async fn remote_hook(State(rs): State<RemoteState>, Path(token): Path<String>, b
 
 async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Bytes) -> StatusCode {
     let Ok(v) = serde_json::from_slice::<Value>(&body) else { return StatusCode::BAD_REQUEST };
+    // Not a hook: `dino statusline` passing on what Claude Code gave the statusline, every few
+    // seconds (too often to log).
+    if v["hook_event_name"].is_null() && v["context_window"].is_object() {
+        if let Some(c) = ReportedContext::from_statusline(&v) {
+            st.stats.update(&session, |s| s.reported_context = Some(c));
+        }
+        return StatusCode::OK;
+    }
     log(format_args!("{session} hook {v}"));
     let event = v["hook_event_name"].as_str().unwrap_or_default();
     let tool = || v["tool_name"].as_str().unwrap_or("tool").to_string();
@@ -753,6 +790,21 @@ mod tests {
         assert_eq!(s.usage.total_input(), 110_338);
         stats.reset_context("1");
         assert_eq!(stats.session("1").context(), None);
+    }
+
+    /// As Claude Code 2.1 sends it: before the first answer (and after `/compact`), after one.
+    #[test]
+    fn context_from_the_statusline() {
+        let before = json!({"model":{"id":"claude-opus-5-5[1m]"},"context_window":{"total_input_tokens":0,"context_window_size":1_000_000,"current_usage":null,"used_percentage":null,"remaining_percentage":null}});
+        assert_eq!(ReportedContext::from_statusline(&before), Some(ReportedContext { used: None, window: 1_000_000 }));
+        let after = json!({"context_window":{"context_window_size":200_000,"current_usage":{"input_tokens":12,"output_tokens":40,"cache_creation_input_tokens":3_000,"cache_read_input_tokens":20_000},"used_percentage":12}});
+        assert_eq!(ReportedContext::from_statusline(&after), Some(ReportedContext { used: Some(23_012), window: 200_000 }));
+        let compacted = json!({"context_window":{"context_window_size":200_000,"current_usage":null,"used_percentage":0}});
+        assert_eq!(ReportedContext::from_statusline(&compacted), Some(ReportedContext { used: Some(0), window: 200_000 }));
+        let pct = json!({"context_window":{"context_window_size":200_000,"used_percentage":25.5}});
+        assert_eq!(ReportedContext::from_statusline(&pct).unwrap().used, Some(51_000));
+        assert_eq!(ReportedContext::from_statusline(&json!({"context_window":{"context_window_size":0}})), None);
+        assert_eq!(ReportedContext::from_statusline(&json!({"hook_event_name":"Stop"})), None);
     }
 
     /// The hooks as Claude sends them: one agent in the background, one in the foreground.
