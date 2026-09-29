@@ -648,6 +648,12 @@ private struct ReposPane: View {
 
     var body: some View {
         Form {
+            Section {
+            } header: {
+                Text("Environment")
+            } footer: {
+                Footnote("Set for every session dino starts in the repo or one of its worktrees, from the next start or restart. Values are kept in settings.toml, readable only by you.")
+            }
             ForEach(shown, id: \.self) { path in
                 let env = repos[path]?.env ?? [:]
                 Section {
@@ -692,10 +698,6 @@ private struct ReposPane: View {
                     }
                 }
                 .fixedSize()
-            } header: {
-                Text("Environment")
-            } footer: {
-                Footnote("Set for every session dino starts in the repo or one of its worktrees, from the next start or restart. Values are kept in settings.toml, readable only by you.")
             }
         }
         .formStyle(.grouped)

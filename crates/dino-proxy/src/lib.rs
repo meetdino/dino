@@ -387,7 +387,9 @@ impl Drop for Tap {
         self.stats.update(&self.session, |s| {
             if let Some(u) = self.meter.seen.take() {
                 s.usage.add(&u);
-                if let Some(model) = self.meter.model.take().or_else(|| s.last_model.clone()) {
+                // Probes (Claude checks its quota with a one-word call) say nothing about the conversation.
+                let probe = u.total_input() < 100;
+                if let Some(model) = self.meter.model.take().or_else(|| s.last_model.clone()).filter(|_| !probe) {
                     s.context.insert(model, u.total_input());
                 }
             }
@@ -681,9 +683,10 @@ mod tests {
         call(start("claude-opus-5-5", 10, 50_000));
         call(start("claude-haiku-4-5", 300, 0));
         call(start("claude-opus-5-5", 20, 60_000));
+        call(start("claude-opus-5-5", 8, 0));
         let s = stats.session("1");
-        assert_eq!(s.context(), Some(("claude-opus-5-5", 60_020)), "the conversation, not the side call");
-        assert_eq!(s.usage.total_input(), 110_330);
+        assert_eq!(s.context(), Some(("claude-opus-5-5", 60_020)), "the conversation, not the side call or the probe");
+        assert_eq!(s.usage.total_input(), 110_338);
         stats.reset_context("1");
         assert_eq!(stats.session("1").context(), None);
     }
