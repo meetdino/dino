@@ -114,6 +114,8 @@ enum SessionTree {
     /// Worktrees a session's subagents made go under that session; merged ones and ones nobody
     /// here made fold away.
     static func build(repos: [RepoInfo], sessions: [SessionInfo], groups: [GroupInfo]) -> (repos: [RepoNode], unfiled: [SessionInfo]) {
+        // Pinned ones first wherever they land, the rest in dinod's order.
+        let sessions = sessions.filter { $0.pinned == true } + sessions.filter { $0.pinned != true }
         let inGroup = Set(groups.flatMap { $0.members.map(\.session) })
         let groupWorktrees = Set(groups.flatMap { $0.members.map(\.worktree) })
         var nodes = repos.map { r in
@@ -244,7 +246,7 @@ struct FilterBar: View {
     var body: some View {
         HStack(spacing: 4) {
             ForEach(SessionFilter.allCases.filter { $0 != .archived }) { f in
-                let count = model.sessions.filter { f.passes(model.status(of: $0)) }.count
+                let count = model.sessions.filter { f.passes(model.status(of: $0)) && model.sidebarShows($0) }.count
                 let on = f == filter
                 Button { filter = f } label: {
                     HStack(spacing: 3) {
@@ -287,6 +289,162 @@ struct ArchiveToggle: View {
         }
         .buttonStyle(.plain)
         .help(on ? "Back to every session" : SessionFilter.archived.help)
+    }
+}
+
+// MARK: - Searching and narrowing
+
+/// One project or host the sidebar can be narrowed to.
+enum SidebarScope: Hashable {
+    case repo(String)
+    case host(String)
+    case thisMac
+}
+
+extension DinoModel {
+    /// A search or a scope hides some sessions.
+    var sidebarNarrowed: Bool { !sidebarQuery.trimmingCharacters(in: .whitespaces).isEmpty || sidebarScope != nil }
+
+    /// In the sidebar's scope, and its name, title, branch, folder or agent has the search in it.
+    func sidebarShows(_ s: SessionInfo) -> Bool {
+        let cwd = s.cwd ?? ""
+        switch sidebarScope {
+        case nil: break
+        case .thisMac: if s.host != nil { return false }
+        case .host(let h): if s.host != h { return false }
+        case .repo(let path):
+            guard s.host == nil, let r = repos.first(where: { $0.path == path }) else { return false }
+            if !SessionTree.contains(r.path, cwd), !r.worktrees.contains(where: { SessionTree.contains($0.path, cwd) }) { return false }
+        }
+        let q = sidebarQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return true }
+        let branch = s.host == nil
+            ? repos.flatMap(\.worktrees).filter { SessionTree.contains($0.path, cwd) }.max { $0.path.count < $1.path.count }?.branch
+            : nil
+        return [s.display, s.name, s.title ?? "", branch ?? "", cwd, s.agent_id, launchers.first { $0.agent_id == s.agent_id }?.label ?? "", s.host ?? "", s.inside?.title ?? ""]
+            .contains { $0.localizedCaseInsensitiveContains(q) }
+    }
+
+    /// Esc in the search: show everything again and go back to typing in the session.
+    func endFinding() {
+        sidebarQuery = ""
+        findingSessions = false
+        if let id = selected { terminals[id]?.requestFocus() }
+    }
+}
+
+/// ⇧⌘F: narrows the sidebar as you type; Return opens the first match, Esc clears.
+struct SessionSearchField: View {
+    @EnvironmentObject var model: DinoModel
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Find sessions", text: $model.sidebarQuery)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .onSubmit {
+                    // Open the first match and put the search away, like Spotlight.
+                    guard let first = model.sidebarOrder.first(where: { id in model.sessions.first { $0.id == id }.map(model.sidebarShows) ?? false })
+                    else { return }
+                    model.sidebarQuery = ""
+                    model.findingSessions = false
+                    model.select(first)
+                }
+                .onExitCommand { model.endFinding() }
+            if !model.sidebarQuery.isEmpty {
+                Button { model.sidebarQuery = "" } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.tertiary)
+                    .help("Clear")
+            }
+        }
+        .font(.callout)
+        .padding(.horizontal, 6).padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+        .onAppear { focused = model.findingSessions }
+        .onChange(of: model.findingSessions) { _, on in if on { focused = true } }
+        .onChange(of: focused) { _, f in
+            // Clicking away from an empty search puts it away.
+            if !f, model.sidebarQuery.isEmpty { model.findingSessions = false }
+        }
+    }
+}
+
+/// Narrow the sidebar to one project, this Mac, or one SSH host.
+struct ScopeMenu: View {
+    @EnvironmentObject var model: DinoModel
+
+    var body: some View {
+        let hosts = Set(model.sessions.compactMap(\.host)).sorted()
+        let on = model.sidebarScope != nil
+        Menu {
+            Picker("Show", selection: $model.sidebarScope) {
+                Text("Everywhere").tag(SidebarScope?.none)
+                if !hosts.isEmpty {
+                    Text("This Mac").tag(SidebarScope?.some(.thisMac))
+                }
+            }
+            .pickerStyle(.inline)
+            if !model.repos.isEmpty {
+                Picker("Project", selection: $model.sidebarScope) {
+                    ForEach(model.repos) { r in
+                        Text(r.name).tag(SidebarScope?.some(.repo(r.path)))
+                    }
+                }
+                .pickerStyle(.inline)
+            }
+            if !hosts.isEmpty {
+                Picker("Host", selection: $model.sidebarScope) {
+                    ForEach(hosts, id: \.self) { h in
+                        Text(h).tag(SidebarScope?.some(.host(h)))
+                    }
+                }
+                .pickerStyle(.inline)
+            }
+        } label: {
+            Image(systemName: on ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(model.sidebarScopeName.map { "Showing \($0)" } ?? "Show one project or host")
+    }
+}
+
+/// What the sidebar is narrowed to, with a way back to everything.
+struct ScopeChip: View {
+    @EnvironmentObject var model: DinoModel
+
+    var body: some View {
+        if let name = model.sidebarScopeName {
+            Button { model.sidebarScope = nil } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "line.3.horizontal.decrease")
+                    Text(name).lineLimit(1)
+                    Image(systemName: "xmark").foregroundStyle(.secondary)
+                }
+                .font(.caption)
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Capsule().fill(Color.primary.opacity(0.1)))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Show every session again")
+        }
+    }
+}
+
+extension DinoModel {
+    var sidebarScopeName: String? {
+        switch sidebarScope {
+        case nil: nil
+        case .thisMac: "This Mac"
+        case .host(let h): h
+        case .repo(let p): repos.first { $0.path == p }?.name ?? URL(fileURLWithPath: p).lastPathComponent
+        }
     }
 }
 

@@ -121,6 +121,13 @@ final class DinoModel: ObservableObject {
     /// Repos and folders the sidebar shows, with their worktrees.
     @Published var repos: [RepoInfo] = []
 
+    /// The sidebar's search (⇧⌘F) and the one project or host it's narrowed to; not kept
+    /// across launches, so the app never opens with sessions hidden.
+    @Published var sidebarQuery = ""
+    @Published var sidebarScope: SidebarScope?
+    /// The search field is up; set to put the cursor in it.
+    @Published var findingSessions = false
+
     /// Rang the bell or finished while in the background; cleared when selected.
     @Published private(set) var attention: Set<String> = []
     @Published private(set) var unseenDone: Set<String> = []
@@ -331,6 +338,11 @@ final class DinoModel: ObservableObject {
         terminals[id]?.requestFocus()
     }
 
+    /// Back to finished-and-not-looked-at, under Needs you, until it's selected again.
+    func markUnread(_ id: String) {
+        unseenDone.insert(id)
+    }
+
     /// Next session that needs the user, then one that finished unseen.
     func jumpToAttention() {
         let order = sessions.map(\.id)
@@ -347,8 +359,8 @@ final class DinoModel: ObservableObject {
         ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t"]
             + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
             .map { "super+\($0)" }
-            // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives.
-            + ["ctrl+tab", "ctrl+shift+tab", "super+slash", "super+shift+a"])
+            // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F finds sessions.
+            + ["ctrl+tab", "ctrl+shift+tab", "super+slash", "super+shift+a", "super+shift+f"])
             .map { "keybind = \($0)=unbind" }.joined(separator: "\n")
     ))
 

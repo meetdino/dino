@@ -53,6 +53,7 @@ pub(crate) fn serve(d: &Arc<Daemon>, req: Request) -> Response {
     };
     match req {
         Request::Rename { id, name } => done(rename(d, &id, &name)),
+        Request::Pin { id, pinned } => done(pin(d, &id, pinned)),
         Request::Archive { id } => done(archive(d, &id)),
         Request::Archived => Response::Archived { sessions: list(d) },
         Request::Unarchive { id } => match unarchive(d, &id) {
@@ -74,6 +75,13 @@ fn rename(d: &Daemon, id: &str, name: &str) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
     let name: String = name.trim().chars().filter(|c| !c.is_control()).take(80).collect();
     *s.label.lock().unwrap() = (!name.is_empty()).then_some(name);
+    save(d);
+    Ok(())
+}
+
+fn pin(d: &Daemon, id: &str, pinned: bool) -> anyhow::Result<()> {
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    s.pinned.store(pinned, Ordering::Relaxed);
     save(d);
     Ok(())
 }
@@ -102,6 +110,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         id: s.id.clone(),
         name: s.name.clone(),
         label: s.label.lock().unwrap().clone(),
+        pinned: s.pinned.load(Ordering::Relaxed),
         launcher: s.launcher.clone(),
         args: s.args.clone(),
         cwd: s.cwd.display().to_string(),

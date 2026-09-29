@@ -64,6 +64,8 @@ struct Session {
     messaged_by: Mutex<Option<String>>,
     /// The name the user gave it, shown over the agent's title.
     label: Mutex<Option<String>>,
+    /// Kept at the top of its group, and never archived by dino on its own.
+    pinned: AtomicBool,
     /// The SSH host it runs on; `cwd` is then a path there, and nothing local applies to it.
     host: Option<String>,
     /// Codex's rollout, where it reports its context window.
@@ -561,6 +563,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 (_, Err(e)) => Response::Error { message: format!("Couldn't clean up {path}: {e}") },
             },
             req @ (Request::Rename { .. }
+            | Request::Pin { .. }
             | Request::Archive { .. }
             | Request::Archived
             | Request::Unarchive { .. }
@@ -728,6 +731,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         started_by: restore.as_ref().map_or(started_by, |r| r.started_by.clone()),
         messaged_by: Mutex::new(restore.as_ref().and_then(|r| r.messaged_by.clone())),
         label: Mutex::new(restore.as_ref().and_then(|r| r.label.clone())),
+        pinned: AtomicBool::new(restore.as_ref().is_some_and(|r| r.pinned)),
         host,
         rollout: Mutex::default(),
         inside: Mutex::default(),
@@ -1120,6 +1124,7 @@ fn state(d: &Daemon) -> Response {
                 started_by: s.started_by.clone(),
                 messaged_by: s.messaged_by.lock().unwrap().clone(),
                 label,
+                pinned: s.pinned.load(Ordering::Relaxed),
                 tasks,
                 inside: s.inside.lock().unwrap().found.clone(),
             }
@@ -1159,6 +1164,8 @@ struct SavedSession {
     #[serde(default)]
     messaged_by: Option<String>,
     label: Option<String>,
+    #[serde(default)]
+    pinned: bool,
     #[serde(default)]
     host: Option<String>,
     /// Its program exited on its own: it comes back ended, its last screen up, until resumed.
@@ -1238,6 +1245,7 @@ fn snapshot(s: &Session, claimed: &[String]) -> SavedSession {
         started_by: s.started_by.clone(),
         messaged_by: s.messaged_by.lock().unwrap().clone(),
         label: s.label.lock().unwrap().clone(),
+        pinned: s.pinned.load(Ordering::Relaxed),
         host: s.host.clone(),
         ended: s.pane.is_exited(),
         exit_code: s.pane.exit_code(),
@@ -1450,6 +1458,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         started_by: None,
         messaged_by: None,
         label: None,
+        pinned: false,
         host: None,
         ended: false,
         exit_code: None,
@@ -1519,6 +1528,7 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
         started_by: s.started_by.clone(),
         messaged_by: s.messaged_by.lock().unwrap().clone(),
         label: s.label.lock().unwrap().clone(),
+        pinned: s.pinned.load(Ordering::Relaxed),
         host: None,
         ended: false,
         exit_code: None,
@@ -2222,6 +2232,10 @@ fn archive_done_prs(d: &Daemon) {
             continue;
         }
         d.closing.lock().unwrap().remove(&id);
+        // Pinned sessions stay until the user archives them.
+        if sessions_in(d, &target).iter().any(|o| o.pinned.load(Ordering::Relaxed)) {
+            continue;
+        }
         let merged = state == "merged";
         if merged && !pr::nothing_to_lose(&w.path) {
             s.auto.lock().unwrap().pr.note = Some("Kept open after the merge: its worktree has work that isn't pushed".into());
