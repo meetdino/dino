@@ -282,7 +282,8 @@ pub struct SessionInfo {
     pub output_tokens: u64,
     pub last_model: Option<String>,
     pub tier: Option<String>,
-    /// "working", "done", or "needs:<what>".
+    /// "working", "done", "needs:<what>", or "waiting:<what>" when the turn ended on background
+    /// work that still runs ("waiting:1 agent, 2 commands").
     pub activity: Option<String>,
     /// The fan-out group this session belongs to.
     #[serde(default)]

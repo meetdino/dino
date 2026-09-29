@@ -13,7 +13,7 @@ use dino_core::ipc::LauncherInfo;
 use dino_core::settings::Settings;
 use dino_core::{trust, worktree};
 
-use crate::{Daemon, Launch, idle, new_uuid, now_secs, save, send_input, spawn, spawn_in_worktree, work_dir};
+use crate::{Daemon, Launch, finished, new_uuid, now_secs, save, send_input, spawn, spawn_in_worktree, work_dir};
 
 /// Later than this after its time, a run counts as a catch-up.
 const LATE: u64 = 120;
@@ -184,11 +184,12 @@ fn record(d: &Daemon, id: &str, run: ScheduledRun, due: Option<u64>) {
     store(&tasks);
 }
 
-/// The task's last run, by session name, while it's still working or waiting on the user.
+/// The task's last run, by session name, while it's still working, waiting on the user, or
+/// waiting on work its turn left running.
 fn still_going(d: &Daemon, t: &ScheduledTask) -> Option<String> {
     let id = t.history.iter().rev().find_map(|r| r.session.clone())?;
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned()?;
-    (!s.pane.is_exited() && !idle(d, &s)).then(|| s.name.clone())
+    (!s.pane.is_exited() && !finished(d, &s)).then(|| s.name.clone())
 }
 
 /// Start a run: a new session named after the task. Claude isn't started where it would first ask

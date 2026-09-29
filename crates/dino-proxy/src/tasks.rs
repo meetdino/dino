@@ -132,6 +132,8 @@ pub(crate) fn record(stats: &Stats, session: &str, event: &str, v: &Value) {
         }
         // `/clear` starts a new conversation with a new task list.
         ("SessionStart", _) if v["source"].as_str() == Some("clear") => stats.update(session, |s| s.todos.clear()),
+        // A new agent process: what the last one left running ended with it.
+        ("SessionStart", _) if matches!(v["source"].as_str(), Some("startup" | "resume")) => stats.update(session, |s| s.waiting_on.clear()),
         ("Stop", _) => {
             let Some(listed) = v["background_tasks"].as_array() else { return };
             stats.update(session, |s| reconcile(s, listed));
@@ -154,6 +156,7 @@ fn started(stats: &Stats, session: &str, mut b: Background) {
 /// or not a hook said so (an interrupted subagent sends no `SubagentStop`).
 fn reconcile(s: &mut crate::SessionStats, listed: &[Value]) {
     let running = |id: &str| listed.iter().any(|t| t["id"].as_str() == Some(id) && t["status"].as_str().is_none_or(|st| st == "running"));
+    s.waiting_on = listed.iter().filter_map(|l| l["id"].as_str()).filter(|id| running(id)).map(String::from).collect();
     let t = now();
     for b in s.background.iter_mut().filter(|b| b.running && !running(&b.id)) {
         b.running = false;
@@ -179,7 +182,8 @@ fn reconcile(s: &mut crate::SessionStats, listed: &[Value]) {
             }
         } else if !s.background.iter().any(|b| b.id == id) {
             let kind = if l["type"].as_str().is_some_and(|t| t.contains("monitor")) { "monitor" } else { "shell" };
-            s.background.push(Background { id: id.into(), kind: kind.into(), description, running: true, ..Default::default() });
+            let command = l["command"].as_str().map(String::from);
+            s.background.push(Background { id: id.into(), kind: kind.into(), description, command, running: true, ..Default::default() });
         }
     }
     trim(&mut s.subagents, |a| a.running);
@@ -262,5 +266,38 @@ mod tests {
 
         feed("Stop", json!({"background_tasks": []}));
         assert!(stats.session("s").background.iter().all(|b| !b.running));
+    }
+
+    #[test]
+    fn a_turn_that_ends_on_background_work_waits_for_it() {
+        let stats = Stats::default();
+        let feed = |event: &str, v: Value| record(&stats, "s", event, &v);
+        feed("PostToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "sleep 25", "run_in_background": true},
+            "tool_response": {"backgroundTaskId": "b1"}}));
+        feed("PostToolUse", json!({"tool_name": "Monitor", "tool_input": {"command": "tail -f x"}, "tool_response": {"taskId": "m1"}}));
+        // A foreground subagent cut short by Esc: no SubagentStop, and no Stop listed it.
+        stats.update("s", |s| s.subagents.push(Subagent { id: "a0".into(), running: true, ..Default::default() }));
+        assert_eq!(stats.session("s").waiting(), (0, 0));
+
+        // A subagent's own background command is listed as the session's.
+        feed("Stop", json!({"background_tasks": [
+            {"id": "b1", "type": "shell", "status": "running", "command": "sleep 25"},
+            {"id": "m1", "type": "monitor", "status": "running"},
+            {"id": "a1", "type": "subagent", "status": "running", "description": "nap", "agent_type": "general-purpose"},
+            {"id": "b2", "type": "shell", "status": "running", "description": "Its own sleep", "command": "sleep 9"},
+        ]}));
+        let s = stats.session("s");
+        assert_eq!(s.waiting(), (1, 2));
+        assert_eq!(s.background.iter().find(|b| b.id == "b2").and_then(|b| b.command.as_deref()), Some("sleep 9"));
+
+        stats.update("s", |s| s.subagents.iter_mut().for_each(|a| a.running = false));
+        assert_eq!(stats.session("s").waiting(), (0, 2));
+        feed("Stop", json!({"background_tasks": [{"id": "m1", "type": "monitor", "status": "running"}]}));
+        assert_eq!(stats.session("s").waiting(), (0, 0));
+
+        feed("Stop", json!({"background_tasks": [{"id": "b3", "type": "shell", "status": "running"}]}));
+        assert_eq!(stats.session("s").waiting(), (0, 1));
+        feed("SessionStart", json!({"source": "resume"}));
+        assert_eq!(stats.session("s").waiting(), (0, 0));
     }
 }
