@@ -116,6 +116,8 @@ pub enum Request {
     Review { id: String },
     /// Stop the session's running review; its `Review` request answers with an error.
     ReviewCancel { id: String },
+    /// Turn the session's PR automation on or off; a missing flag stays as it is.
+    PrAuto { id: String, fix: Option<bool>, merge: Option<bool> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -180,7 +182,26 @@ pub struct SessionInfo {
     /// The PR from the session's branch, as of the last poll.
     #[serde(default)]
     pub pr: Option<PrInfo>,
+    /// What dino does about the PR by itself.
+    #[serde(default)]
+    pub auto: AutoPr,
 }
+
+/// What dino does about a session's PR by itself. Kept with the session, so it survives dinod restarts.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct AutoPr {
+    /// When checks fail, ask the agent to fix them: once per pushed commit, at most `MAX_AUTO_FIXES` times.
+    pub fix: bool,
+    /// When checks pass, squash-merge.
+    pub merge: bool,
+    /// Fixes asked for so far; turning `fix` on again starts over.
+    pub fixes: u32,
+    /// Why the last automatic step failed.
+    pub note: Option<String>,
+}
+
+pub const MAX_AUTO_FIXES: u32 = 3;
 
 pub use crate::pr::{Checks, PrDraft, PrInfo};
 pub use crate::worktree::Worktree;

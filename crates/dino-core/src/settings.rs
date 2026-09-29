@@ -43,11 +43,13 @@ pub struct Policies {
     pub worktree_trust: bool,
     /// Most tokens (input, cache and output) one routed session may use; 0 means no limit.
     pub session_token_budget: u64,
+    /// When a session's PR merges and its dino worktree has nothing left to lose, stop the session and remove the worktree.
+    pub close_merged: bool,
 }
 
 impl Default for Policies {
     fn default() -> Self {
-        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0 }
+        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0, close_merged: false }
     }
 }
 
@@ -183,6 +185,7 @@ mod tests {
         std::fs::write(Settings::path(), "[routing]\nproxy = false\n").unwrap();
         assert_eq!(Settings::load(), Settings { routing: Routing { proxy: false }, ..Settings::default() }, "missing tables default");
         assert!(Settings::load().policies.worktree_trust, "trust on by default");
+        assert!(!Settings::load().policies.close_merged, "closing merged sessions off by default");
         let p = Policies { allowed_agents: vec!["codex".into()], ..Policies::default() };
         assert!(p.allows("codex") && p.allows("shell") && !p.allows("claude"));
         let mut s3 = Settings::default();

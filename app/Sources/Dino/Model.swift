@@ -196,6 +196,18 @@ final class DinoModel: ObservableObject {
                     Notifier.post(session: s, title: "PR #\(pr.number) checks passed", body: pr.title)
                 }
             }
+            // What dino did about the PR by itself.
+            if let auto = s.auto, let pr = s.pr {
+                if auto.fixes > (prev.auto?.fixes ?? 0) {
+                    Notifier.post(session: s, title: "Asked \(s.name) to fix PR #\(pr.number)", body: pr.checks.failing.joined(separator: ", "))
+                }
+                if auto.merge, pr.state == "merged", prev.pr?.number == pr.number, prev.pr?.isOpen == true {
+                    Notifier.post(session: s, title: "PR #\(pr.number) merged", body: "Auto-merged once its checks passed: \(pr.title)")
+                }
+                if let note = auto.note, prev.auto?.note != note {
+                    Notifier.post(session: s, title: "PR #\(pr.number) needs you", body: note)
+                }
+            }
         }
         // A session in a folder the tree hasn't seen: ask for it now rather than on the next tick.
         if Set(next.compactMap(\.cwd)) != Set(sessions.compactMap(\.cwd)) { refreshTree() }
@@ -481,6 +493,11 @@ final class DinoModel: ObservableObject {
     func mergePR(_ session: String) async throws {
         let pr = try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).prMerge(session: session) }.value
         acted[session] = pr
+    }
+
+    /// Turn automatic fixing or merging of the session's PR on or off; the next poll shows it.
+    func setAutoPR(_ session: String, fix: Bool? = nil, merge: Bool? = nil) async throws {
+        try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).prAuto(session: session, fix: fix, merge: merge) }.value
     }
 
     /// The agent gets the failing checks and their logs as a prompt; you watch it work.
