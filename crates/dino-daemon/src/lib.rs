@@ -146,7 +146,7 @@ struct Daemon {
     prs: Mutex<HashMap<String, ipc::PrInfo>>,
     /// One PR poll at a time, so an automatic step is never taken twice.
     pr_poll: Mutex<()>,
-    /// Sessions whose PR merged, to close once they have nothing to lose; since when.
+    /// Sessions whose PR merged or closed, to archive once their turn is over; since when.
     closing: Mutex<HashMap<String, Instant>>,
     /// Dev servers started for previews, each tied to a session.
     previews: Mutex<Vec<Arc<preview::Server>>>,
@@ -159,6 +159,8 @@ struct Daemon {
     archived: Mutex<Vec<lifecycle::Archived>>,
     /// Worktree path → its size on disk and when it was measured.
     sizes: Mutex<HashMap<String, (Instant, u64)>>,
+    /// Worktree path → every commit in it is pushed, measured with its size (git is too slow per poll).
+    pushed: Mutex<HashMap<String, bool>>,
     /// A thread is measuring sizes.
     measuring: AtomicBool,
     next_id: AtomicU64,
@@ -248,6 +250,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         schedule: schedule::Scheduler::load(),
         archived: Mutex::new(lifecycle::load_archived()),
         sizes: Mutex::default(),
+        pushed: Mutex::default(),
         measuring: AtomicBool::new(false),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
@@ -484,7 +487,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 });
                 match result {
                     Ok(pr) => {
-                        merged(d, &id, &pr);
+                        pr_done(d, &id, &pr);
                         refresh_prs_soon(d);
                         Response::Pr { pr }
                     }
@@ -563,7 +566,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             | Request::Unarchive { .. }
             | Request::DeleteArchived { .. }
             | Request::Storage
-            | Request::RemoveStored { .. }) => lifecycle::serve(d, req),
+            | Request::RemoveStored { .. }
+            | Request::FreeUpSpace) => lifecycle::serve(d, req),
             Request::Shutdown => {
                 // Saved first: `dino stop` pauses sessions, the next dinod resumes them.
                 save(d);
@@ -2081,8 +2085,8 @@ struct AutoState {
     merge_failed: Option<String>,
 }
 
-/// How long a merged PR's session stays before it's closed (when the setting says so): long
-/// enough to see it merged.
+/// How long a merged or closed PR's session stays before it's archived (when the setting says
+/// so): long enough to see it happen.
 const CLOSE_AFTER_MERGE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// How long after the user last typed in a session an automatic fix waits.
@@ -2116,14 +2120,14 @@ fn refresh_prs(d: &Daemon) {
     // One automatic step per PR, however many sessions share its branch.
     let mut acted = HashSet::new();
     for (s, root, branch, pr) in with_pr {
-        if pr.state == "merged" && old.get(&s.id).is_some_and(|was| was.number == pr.number && was.is_open()) {
-            merged(d, &s.id, &pr);
+        if pr.is_done() && old.get(&s.id).is_some_and(|was| was.number == pr.number && was.is_open()) {
+            pr_done(d, &s.id, &pr);
         }
         if !acted.contains(&pr.url) && auto_pr(d, &s, &root, &branch, &pr) {
             acted.insert(pr.url.clone());
         }
     }
-    close_merged(d);
+    archive_done_prs(d);
 }
 
 /// Take the session's automatic PR step, if one is due. True when it took one.
@@ -2136,7 +2140,7 @@ fn auto_pr(d: &Daemon, s: &Session, root: &Path, branch: &str, pr: &ipc::PrInfo)
             Ok(now) => {
                 a.pr.note = None;
                 drop(a);
-                merged(d, &s.id, &now);
+                pr_done(d, &s.id, &now);
             }
             Err(e) => {
                 a.pr.note = Some(format!("Couldn't merge: {e}"));
@@ -2179,29 +2183,36 @@ fn auto_pr(d: &Daemon, s: &Session, root: &Path, branch: &str, pr: &ipc::PrInfo)
     true
 }
 
-/// The session's PR is merged: when the setting says so, the session closes once it's safe.
-fn merged(d: &Daemon, id: &str, pr: &ipc::PrInfo) {
+/// The session's PR merged or closed: when the setting says so, the session is archived once its
+/// turn is over.
+fn pr_done(d: &Daemon, id: &str, pr: &ipc::PrInfo) {
     d.prs.lock().unwrap().insert(id.to_string(), pr.clone());
-    if pr.state == "merged" && Settings::load().policies.close_merged {
+    if pr.is_done() && Settings::load().policies.close_merged {
         d.closing.lock().unwrap().entry(id.to_string()).or_insert_with(Instant::now);
     }
 }
 
-/// Close sessions whose PR merged a little while ago, with the worktree dino made for them.
-/// Waits for their turn to end; never removes a worktree with work in it.
-fn close_merged(d: &Daemon) {
+/// Archive sessions whose PR merged or closed a little while ago. After a merge, the worktree dino
+/// made goes too when nothing in it would be lost; after a close without merging it stays, since
+/// the work never landed. Waits for their turn to end.
+fn archive_done_prs(d: &Daemon) {
     if !Settings::load().policies.close_merged {
         d.closing.lock().unwrap().clear();
         return;
     }
     let due: Vec<String> = d.closing.lock().unwrap().iter().filter(|(_, t)| t.elapsed() >= CLOSE_AFTER_MERGE).map(|(id, _)| id.clone()).collect();
     for id in due {
-        let still_merged = d.prs.lock().unwrap().get(&id).map(|pr| pr.state == "merged");
+        let state = d.prs.lock().unwrap().get(&id).map(|pr| pr.state.clone());
         let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id && !s.pane.is_exited()).cloned();
         let w = s.as_ref().and_then(|s| session_worktree(d, &s.cwd));
-        let (Some(s), Some(w), Some(true)) = (s, w, still_merged) else {
-            // Gone, not in a worktree, or reopened. A failed lookup (None) just waits.
-            if still_merged.is_some() {
+        let (Some(s), Some(w)) = (s, w) else {
+            // Gone, or not in a worktree.
+            d.closing.lock().unwrap().remove(&id);
+            continue;
+        };
+        let Some(state) = state.clone().filter(|st| st == "merged" || st == "closed") else {
+            // Reopened. A failed lookup (no PR at all) just waits.
+            if state.is_some() {
                 d.closing.lock().unwrap().remove(&id);
             }
             continue;
@@ -2211,12 +2222,13 @@ fn close_merged(d: &Daemon) {
             continue;
         }
         d.closing.lock().unwrap().remove(&id);
-        if !pr::nothing_to_lose(&w.path) {
+        let merged = state == "merged";
+        if merged && !pr::nothing_to_lose(&w.path) {
             s.auto.lock().unwrap().pr.note = Some("Kept open after the merge: its worktree has work that isn't pushed".into());
             continue;
         }
-        if let Err(e) = lifecycle::archive_merged(d, &target) {
-            s.auto.lock().unwrap().pr.note = Some(format!("Couldn't archive after the merge: {e}"));
+        if let Err(e) = lifecycle::archive_pr_done(d, &target, merged) {
+            s.auto.lock().unwrap().pr.note = Some(format!("Couldn't archive after the PR {state}: {e}"));
         }
     }
 }

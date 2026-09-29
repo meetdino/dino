@@ -67,8 +67,9 @@ pub struct Policies {
     pub worktree_trust: bool,
     /// Most tokens (input, cache and output) one routed session may use; 0 means no limit.
     pub session_token_budget: u64,
-    /// When a session's PR merges and its dino worktree has nothing left to lose, archive the session
-    /// (its worktree goes, and comes back from the branch if it's started again).
+    /// When a session's PR merges or closes, archive the session once its turn is over. After a
+    /// merge its dino worktree goes too when nothing would be lost (and comes back from the branch
+    /// if it's started again); after a close the worktree stays.
     pub close_merged: bool,
     /// Offer the permission mode that never asks (on unless turned off). Off, it's hidden and refused.
     pub allow_bypass: bool,

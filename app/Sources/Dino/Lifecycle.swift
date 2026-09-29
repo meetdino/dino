@@ -32,8 +32,12 @@ struct StoredWorktree: Codable, Identifiable, Equatable {
     var size: UInt64?
     /// The live session running in it.
     var session: String?
+    /// "working", "idle", or "ended" (removing the worktree archives it); nil with no session there.
+    var session_state: String?
     var archived: Bool
     var fanout: Bool
+    /// Free Up Space would remove it: nothing running in it, and its work merged or pushed.
+    var reclaimable: Bool?
     var id: String { path }
 
     /// Nothing in it would be lost, and nothing is using it.
@@ -42,6 +46,8 @@ struct StoredWorktree: Codable, Identifiable, Equatable {
 
 private struct ArchivedResponse: Decodable { var sessions: [ArchivedInfo] }
 private struct StorageResponse: Decodable { var worktrees: [StoredWorktree] }
+/// What Free Up Space removed.
+struct Freed: Decodable { var removed: [String]; var bytes: UInt64 }
 
 extension DinoConnection {
     /// An empty name goes back to the agent's own title.
@@ -68,6 +74,11 @@ extension DinoConnection {
 
     func storage() throws -> [StoredWorktree] {
         try JSONDecoder().decode(StorageResponse.self, from: send(["type": "storage"])).worktrees
+    }
+
+    /// Remove every worktree nothing would be lost from; dinod checks each again with git first.
+    func freeUpSpace() throws -> Freed {
+        try JSONDecoder().decode(Freed.self, from: send(["type": "free_up_space"]))
     }
 
     /// Never forced: dinod refuses one with uncommitted work or a session in it.
