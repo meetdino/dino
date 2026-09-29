@@ -112,6 +112,10 @@ pub enum Request {
     PrFix { id: String },
     /// Squash-merge the session's PR.
     PrMerge { id: String },
+    /// Have Claude review the session's changes (what `Changes` shows) for bugs. Takes minutes.
+    Review { id: String },
+    /// Stop the session's running review; its `Review` request answers with an error.
+    ReviewCancel { id: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -131,6 +135,7 @@ pub enum Response {
     Keys { keys: Vec<crate::settings::KeyInfo> },
     PrDraft { draft: PrDraft },
     Pr { pr: PrInfo },
+    Review { findings: Vec<crate::review::Finding> },
     Ok,
     Error { message: String },
 }

@@ -166,6 +166,19 @@ struct DiffLine: Codable, Equatable {
     var text: String
 }
 
+/// An issue Claude's review found; `line` is in the new version of `file`.
+struct Finding: Codable, Equatable {
+    var file: String
+    var line: UInt32
+    /// "high", "medium" or "low".
+    var severity: String
+    var message: String
+}
+
+private struct ReviewResponse: Decodable {
+    var findings: [Finding]
+}
+
 private struct GroupsResponse: Decodable {
     var groups: [GroupInfo]
 }
@@ -256,6 +269,15 @@ final class DinoConnection: @unchecked Sendable {
 
     func changes(session: String) throws -> Changes {
         try JSONDecoder().decode(Changes.self, from: send(["type": "changes", "id": session]))
+    }
+
+    /// Claude's review of the session's changes. Blocks for as long as the review takes.
+    func review(session: String) throws -> [Finding] {
+        try JSONDecoder().decode(ReviewResponse.self, from: send(["type": "review", "id": session])).findings
+    }
+
+    func cancelReview(session: String) throws {
+        _ = try send(["type": "review_cancel", "id": session])
     }
 
     /// Type `text` into a session as a paste; `submit` presses Return after it.
