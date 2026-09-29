@@ -25,6 +25,10 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var pr: PrInfo?
     /// What dino does about the PR by itself; nil from an older dinod.
     var auto: AutoPr?
+    /// Dev servers started for its preview; nil from an older dinod.
+    var previews: [PreviewInfo]?
+    /// The last local web address it printed, to offer a preview of.
+    var local_url: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
@@ -194,6 +198,38 @@ struct Finding: Codable, Equatable {
     var message: String
 }
 
+/// A dev server from the session folder's launch.json (see crates/dino-core/src/preview.rs).
+struct PreviewConfig: Codable, Equatable, Identifiable {
+    var name: String
+    var argv: [String]
+    var cwd: String
+    var port: UInt16?
+    var url: String?
+    /// The launch file it came from, relative to the session's folder.
+    var source: String
+    var id: String { name }
+}
+
+/// A dev server dinod started for a session's preview.
+struct PreviewInfo: Codable, Equatable, Identifiable {
+    var name: String
+    var running: Bool
+    /// The page to load, once its port is known.
+    var url: String?
+    /// How it ended, if it has.
+    var exit: String?
+    var id: String { name }
+}
+
+private struct PreviewConfigsResponse: Decodable {
+    var configs: [PreviewConfig]
+    var error: String?
+}
+
+private struct PreviewLogResponse: Decodable {
+    var text: String
+}
+
 private struct ReviewResponse: Decodable {
     var findings: [Finding]
 }
@@ -330,6 +366,24 @@ final class DinoConnection: @unchecked Sendable {
         if let fix { body["fix"] = fix }
         if let merge { body["merge"] = merge }
         _ = try send(body)
+    }
+
+    /// The dev servers the session's folder configures, or why its launch file can't be read.
+    func previewConfigs(session: String) throws -> ([PreviewConfig], String?) {
+        let r = try JSONDecoder().decode(PreviewConfigsResponse.self, from: send(["type": "preview_configs", "id": session]))
+        return (r.configs, r.error)
+    }
+
+    func previewStart(session: String, name: String) throws {
+        _ = try send(["type": "preview_start", "id": session, "name": name])
+    }
+
+    func previewStop(session: String, name: String) throws {
+        _ = try send(["type": "preview_stop", "id": session, "name": name])
+    }
+
+    func previewLog(session: String, name: String) throws -> String {
+        try JSONDecoder().decode(PreviewLogResponse.self, from: send(["type": "preview_log", "id": session, "name": name])).text
     }
 
     /// Continue `session` in dino; returns the new dino session id.

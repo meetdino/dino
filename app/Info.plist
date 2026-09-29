@@ -13,5 +13,11 @@
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
+    <!-- The preview pane loads dev servers over plain http: localhost, LAN addresses, tunnels. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key><true/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
+    </dict>
 </dict>
 </plist>
