@@ -22,6 +22,7 @@ use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
 mod lifecycle;
+mod peers;
 mod preview;
 mod schedule;
 
@@ -57,6 +58,10 @@ struct Session {
     pending: Mutex<Option<Controls>>,
     /// The scheduled task that started it, by name.
     scheduled: Option<String>,
+    /// The session whose agent started it, by id.
+    started_by: Option<String>,
+    /// The session whose agent last messaged it, by id.
+    messaged_by: Mutex<Option<String>>,
     /// The name the user gave it, shown over the agent's title.
     label: Mutex<Option<String>>,
 }
@@ -332,6 +337,23 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(findings) => Response::Review { findings },
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::Start { launcher, cwd, prompt, worktree, by } => match peers::start(d, &launcher, cwd, prompt, worktree, by) {
+                Ok(id) => Response::Created { id },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ReadSession { id, lines } => match peers::read(d, &id, lines) {
+                Ok(text) => Response::Text { text },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Message { id, text, by } => peers::ipc_result(peers::message(d, &id, &text, by)),
+            Request::Ask { id, question } => match peers::ask(d, &id, &question) {
+                Ok(text) => Response::Text { text },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::AskCancel { id } => {
+                dino_core::review::cancel(&peers::ask_key(&id));
+                Response::Ok
+            }
             Request::ReviewCancel { id } => {
                 dino_core::review::cancel(&id);
                 Response::Ok
@@ -491,6 +513,8 @@ struct Launch {
     controls: Controls,
     /// The scheduled task starting it, by name.
     scheduled: Option<String>,
+    /// The session whose agent is starting it, by id.
+    started_by: Option<String>,
 }
 
 impl Launch {
@@ -500,7 +524,7 @@ impl Launch {
 }
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls, scheduled } = launch;
+    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls, scheduled, started_by } = launch;
     let launcher = launcher.as_str();
     // Sessions already running come back even if the policies changed since; new ones must be allowed.
     let l = match restore {
@@ -529,6 +553,11 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     // The repo's environment first: dino's own wiring must win, or metering and hooks break.
     let mut env: HashMap<String, String> = repo_env(&settings, &cwd).into_iter().collect();
     env.extend(wiring_env);
+    // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
+    env.insert("DINO_SESSION".into(), id.clone());
+    if l.agent_id.starts_with("claude") && settings.policies.session_tools {
+        peers::wire_claude(&id, &mut wired_args);
+    }
 
     // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
     let mut agent_session = restore.as_ref().and_then(|r| r.agent_session.clone());
@@ -616,6 +645,8 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         controls,
         pending: Mutex::default(),
         scheduled: restore.as_ref().map_or(scheduled, |r| r.scheduled.clone()),
+        started_by: restore.as_ref().map_or(started_by, |r| r.started_by.clone()),
+        messaged_by: Mutex::new(restore.as_ref().and_then(|r| r.messaged_by.clone())),
         label: Mutex::new(restore.as_ref().and_then(|r| r.label.clone())),
     }));
     Ok(id)
@@ -799,6 +830,8 @@ fn state(d: &Daemon) -> Response {
                 context_tokens,
                 context_limit,
                 scheduled: s.scheduled.clone(),
+                started_by: s.started_by.clone(),
+                messaged_by: s.messaged_by.lock().unwrap().clone(),
                 label,
             }
         })
@@ -833,6 +866,9 @@ struct SavedSession {
     #[serde(default)]
     scheduled: Option<String>,
     #[serde(default)]
+    started_by: Option<String>,
+    #[serde(default)]
+    messaged_by: Option<String>,
     label: Option<String>,
 }
 
@@ -874,6 +910,8 @@ fn snapshot(s: &Session, claimed: &[String]) -> SavedSession {
         auto: s.auto.lock().unwrap().clone(),
         controls: s.controls.clone(),
         scheduled: s.scheduled.clone(),
+        started_by: s.started_by.clone(),
+        messaged_by: s.messaged_by.lock().unwrap().clone(),
         label: s.label.lock().unwrap().clone(),
     }
 }
@@ -1060,6 +1098,8 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         // It keeps whatever the conversation ran with.
         controls: Controls::default(),
         scheduled: None,
+        started_by: None,
+        messaged_by: None,
         label: None,
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;

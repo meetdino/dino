@@ -162,6 +162,19 @@ pub enum Request {
     ScheduleRun { id: String },
     /// Check for due tasks now, as if the time were `now` (seconds since the epoch) when given.
     ScheduleTick { now: Option<u64> },
+    /// Start a session for another agent (`dino mcp`): `prompt` is its first message, `by` the
+    /// session asking, when there is one. With `worktree`, in a new git worktree of the repo at `cwd`.
+    Start { launcher: String, cwd: Option<String>, prompt: Option<String>, #[serde(default)] worktree: bool, by: Option<String> },
+    /// What a session has been doing, as text: its conversation's last turns when dino can read
+    /// them, and the screen now. `lines` bounds the screen part.
+    ReadSession { id: String, lines: Option<u32> },
+    /// Type `text` into session `id` and submit it, only while it's between turns: refused while
+    /// it works or waits on a permission. `by` is the session sending it.
+    Message { id: String, text: String, by: Option<String> },
+    /// Answer a question about session `id` (side chat); Claude reads it without disturbing it.
+    /// Takes up to minutes; `AskCancel` stops it.
+    Ask { id: String, question: String },
+    AskCancel { id: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -193,6 +206,7 @@ pub enum Response {
     PreviewConfigs { configs: Vec<crate::preview::PreviewConfig>, error: Option<String> },
     PreviewLog { text: String },
     Schedule { tasks: Vec<crate::schedule::ScheduledTask> },
+    Text { text: String },
     Ok,
     Error { message: String },
 }
@@ -264,6 +278,12 @@ pub struct SessionInfo {
     /// The scheduled task that started it, by name.
     #[serde(default)]
     pub scheduled: Option<String>,
+    /// The session whose agent started it (through `dino mcp`), by id.
+    #[serde(default)]
+    pub started_by: Option<String>,
+    /// The session whose agent last messaged it, by id.
+    #[serde(default)]
+    pub messaged_by: Option<String>,
     /// The name the user gave it (`Rename`); `title` already shows it over the agent's.
     #[serde(default)]
     pub label: Option<String>,

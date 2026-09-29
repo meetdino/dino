@@ -62,11 +62,13 @@ pub struct Policies {
     pub close_merged: bool,
     /// Offer the permission mode that never asks. Off, it's hidden and refused.
     pub allow_bypass: bool,
+    /// Give Claude sessions dino's tools (`dino mcp`) to list, read, message and start other sessions.
+    pub session_tools: bool,
 }
 
 impl Default for Policies {
     fn default() -> Self {
-        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0, close_merged: false, allow_bypass: false }
+        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0, close_merged: false, allow_bypass: false, session_tools: true }
     }
 }
 
@@ -393,6 +395,7 @@ mod tests {
         s3.save().unwrap();
         assert_eq!(Settings::load(), s3);
         assert!(!Settings::default().policies.allow_bypass, "bypass hidden by default");
+        assert!(Settings::default().policies.session_tools, "session tools on by default");
 
         let mut s4 = Settings::default();
         s4.agents.insert("claude".into(), Controls { model: Some("haiku".into()), ..Controls::default() });

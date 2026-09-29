@@ -101,6 +101,8 @@ pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
         auto: s.auto.lock().unwrap().clone(),
         controls: s.controls.clone(),
         scheduled: s.scheduled.clone(),
+        started_by: s.started_by.clone(),
+        messaged_by: s.messaged_by.lock().unwrap().clone(),
     };
     let w = session_worktree(d, &s.cwd);
     kill(d, id);

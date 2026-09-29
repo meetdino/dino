@@ -85,6 +85,9 @@ struct DinoApp: App {
                     .keyboardShortcut("d", modifiers: [.command, .shift])
                 Button(model.sidePane == .preview ? "Hide Preview" : "Show Preview") { model.togglePreview() }
                     .keyboardShortcut("p", modifiers: [.command, .option])
+                Button("Ask About This Session…") { model.askingAbout = model.selectedSession }
+                    .keyboardShortcut(";", modifiers: [.command, .shift])
+                    .disabled(model.selectedSession == nil)
                 Divider()
                 ControlMenuItems().environmentObject(model)
                 Divider()
@@ -205,6 +208,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
         .sheet(isPresented: $model.showNewSession) { NewSessionSheet() }
         .sheet(isPresented: $model.showShortcuts) { ShortcutSheet() }
+        .sheet(item: $model.askingAbout) { AskSheet(session: $0) }
         .sheet(item: $model.editingTask) { ScheduleSheet(task: $0) }
         .alert(
             "Delete “\(model.deletingTask?.name ?? "")”?",
@@ -629,6 +633,7 @@ struct SessionRow: View {
             if let error = session.error {
                 ErrorLine(message: error)
             }
+            PeerChips(session: session)
             if let stat, stat.files > 0 {
                 StatText(stat: stat).font(.caption.monospacedDigit())
             }
