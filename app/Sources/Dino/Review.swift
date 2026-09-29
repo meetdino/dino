@@ -155,12 +155,12 @@ struct ReviewPanel: View {
                 ErrorLine(message: message)
             case .done(found: 0):
                 Image(systemName: "checkmark.seal.fill").foregroundStyle(Brand.green)
-                Text("No issues found").font(.callout)
-                Text("· Claude reviewed these changes").font(.caption).foregroundStyle(.secondary)
+                Text("No issues found").font(.callout).fixedSize()
+                Text("· Claude reviewed these changes").font(.caption).foregroundStyle(.secondary).lineLimit(1)
             case let .done(found: n):
                 ReviewBadge()
-                Text("Claude found \(n) issue\(n == 1 ? "" : "s")").font(.callout)
-                Text("· dismiss what you disagree with, send the rest").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text("Claude found \(n) issue\(n == 1 ? "" : "s")").font(.callout).fixedSize()
+                Text("· dismiss the ones you disagree with").font(.caption).foregroundStyle(.secondary).lineLimit(1)
             case .running:
                 EmptyView()
             }
