@@ -53,6 +53,10 @@ final class DinoModel: ObservableObject {
     /// Fan-outs, with each member's diff size.
     @Published var groups: [GroupInfo] = []
     @Published var showFanout = false
+    /// The New Session sheet: agent, place, mode, model and effort.
+    @Published var showNewSession = false
+    /// The toolbar's mode, model or effort picker that's open (⇧⌘M, ⇧⌘I, ⇧⌘E).
+    @Published var controlPicker: ControlKind?
     /// A member whose changes the user is about to keep.
     @Published var confirmKeep: MemberInfo?
     /// A session worktree the user is about to close, and whether its changes come along.
@@ -320,12 +324,16 @@ final class DinoModel: ObservableObject {
     }
 
     /// `worktree`: in a new worktree and branch of the repo, so its edits stay off your checkout.
-    func newSession(_ launcher: LauncherInfo, worktree: Bool = false) {
+    /// `controls`: mode, model and effort; what's left open comes from Settings → Agents.
+    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls()) {
         guard let conn = connection else { return }
         let cwd = folder.path
         Task.detached {
             do {
-                let resp = try conn.request(["type": "new", "launcher": launcher.short, "args": [], "cwd": cwd, "cols": 120, "rows": 40, "worktree": worktree])
+                let resp = try conn.request([
+                    "type": "new", "launcher": launcher.short, "args": [], "cwd": cwd, "cols": 120, "rows": 40,
+                    "worktree": worktree, "controls": controls.json,
+                ])
                 await MainActor.run {
                     if let id = resp.id { self.select(id) }
                 }
@@ -527,6 +535,22 @@ final class DinoModel: ObservableObject {
     }
 
     /// Turn automatic fixing or merging of the session's PR on or off; the next poll shows it.
+    /// The agent restarts with them, resuming its conversation; mid-turn, once the turn is over.
+    func setControls(_ session: String, _ controls: Controls) {
+        Task.detached {
+            do {
+                try DinoConnection(path: DinoEnvironment.socketPath).setControls(session: session, controls: controls)
+            } catch {
+                await MainActor.run { self.error = "\(error)" }
+            }
+        }
+    }
+
+    /// Models this Mac's sessions of `agent` have answered with, for the model menus.
+    func seenModels(_ agent: String) -> [String] {
+        Array(Set(sessions.filter { $0.agent_id == agent }.compactMap(\.last_model))).sorted()
+    }
+
     func setAutoPR(_ session: String, fix: Bool? = nil, merge: Bool? = nil) async throws {
         try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).prAuto(session: session, fix: fix, merge: merge) }.value
     }

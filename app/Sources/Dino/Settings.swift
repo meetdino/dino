@@ -12,6 +12,8 @@ struct DinoSettings: Codable, Equatable {
         var session_token_budget: UInt64
         /// Close a session and its worktree after its PR merges; nil from an older dinod.
         var close_merged: Bool?
+        /// Offer the mode that never asks; nil from an older dinod.
+        var allow_bypass: Bool?
 
         func allows(_ short: String) -> Bool {
             short == "shell" || allowed_agents.isEmpty || allowed_agents.contains(short)
@@ -22,9 +24,14 @@ struct DinoSettings: Codable, Equatable {
         /// Keep the Mac from idle-sleeping while tasks are scheduled; nil from an older dinod.
         var keep_awake: Bool?
     }
+    struct Repo: Codable, Equatable { var env: [String: String] }
     var routing: Routing
     var policies: Policies
     var machine: Machine
+    /// What new sessions start with, by agent id; nil from an older dinod.
+    var agents: [String: Controls]?
+    /// By the repo's main checkout.
+    var repos: [String: Repo]?
 }
 
 /// A provider key's name and where it comes from; dinod never sends values.
@@ -87,7 +94,11 @@ final class SettingsStore: ObservableObject {
         change(&next)
         settings = next
         let saved = next
-        run { c in try c.setSettings(saved) } done: { _ in }
+        // What agents offer follows the policies (bypass mode), so ask again.
+        run { c in
+            try c.setSettings(saved)
+            return try c.allLaunchers()
+        } done: { self.agents = $0 }
     }
 
     func setKey(_ name: String, value: String?) {
@@ -118,14 +129,16 @@ final class SettingsStore: ObservableObject {
 
 /// Settings' sections, in sidebar order.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case account, general, policies, routing, keys
+    case account, general, agents, policies, repos, routing, keys
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .account: "Dino Account"
         case .general: "General"
+        case .agents: "Agents"
         case .policies: "Policies"
+        case .repos: "Repositories"
         case .routing: "Routing"
         case .keys: "Keys"
         }
@@ -135,7 +148,9 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .account: "person.crop.circle.fill"
         case .general: "gearshape.fill"
+        case .agents: "cpu.fill"
         case .policies: "checkmark.shield.fill"
+        case .repos: "folder.fill"
         case .routing: "arrow.triangle.branch"
         case .keys: "key.fill"
         }
@@ -145,7 +160,9 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .account: .blue
         case .general: .gray
+        case .agents: .purple
         case .policies: .indigo
+        case .repos: .teal
         case .routing: .green
         case .keys: .orange
         }
@@ -184,7 +201,9 @@ struct SettingsView: View {
                 switch pane {
                 case .account: AccountPane()
                 case .general: GeneralPane()
+                case .agents: AgentsPane()
                 case .policies: PoliciesPane()
+                case .repos: ReposPane()
                 case .routing: RoutingPane()
                 case .keys: KeysPane()
                 }
@@ -394,6 +413,28 @@ private struct PoliciesPane: View {
                 Footnote("When a session's PR merges, dino stops the session once its agent is idle and removes the worktree dino made for it, with its branch. A worktree with changes or commits that aren't pushed is kept. Sessions outside a dino worktree stay open.")
             }
             Section {
+                Toggle("Allow bypass permissions mode", isOn: Binding(
+                    get: { policies?.allow_bypass ?? false },
+                    set: { on in
+                        store.update {
+                            $0.policies.allow_bypass = on
+                            // Defaults that bypass go back to the agent's own mode.
+                            if !on, let agents = $0.agents {
+                                $0.agents = agents.mapValues { c in
+                                    var c = c
+                                    if c.mode == "bypass" { c.mode = nil }
+                                    return c
+                                }
+                            }
+                        }
+                    }
+                ))
+            } header: {
+                Text("Permissions")
+            } footer: {
+                Footnote("Bypass lets an agent edit files and run any command without asking. Off, dino hides it and won't start or switch a session into it. Sessions already in it keep running.")
+            }
+            Section {
                 Picker("Tokens per session", selection: Binding(
                     get: { policies?.session_token_budget ?? 0 },
                     set: { n in store.update { $0.policies.session_token_budget = n } }
@@ -541,5 +582,210 @@ private struct KeysPane: View {
         store.setKey(key.name, value: value)
         draft = ""
         editing = nil
+    }
+}
+
+/// What each agent's new sessions start with. "Default" leaves it to the agent's own settings.
+private struct AgentsPane: View {
+    @EnvironmentObject var store: SettingsStore
+
+    /// One per agent that has controls; the free tier is its own, since it picks models itself.
+    private var agents: [LauncherInfo] {
+        var seen = Set<String>()
+        return store.agents.filter { ($0.knobs?.any ?? false) && seen.insert($0.agent_id).inserted }
+    }
+
+    private func controls(_ agent: String) -> Binding<Controls> {
+        Binding(
+            get: { store.settings?.agents?[agent] ?? Controls() },
+            set: { c in store.update { $0.agents = ($0.agents ?? [:]).merging([agent: c]) { $1 }.filter { $0.value != Controls() } } }
+        )
+    }
+
+    var body: some View {
+        Form {
+            if agents.isEmpty {
+                Section {
+                    Text("No agent dino can start has a mode, model or effort to choose.").foregroundStyle(.secondary)
+                }
+            }
+            ForEach(agents) { l in
+                Section {
+                    ControlFields(knobs: l.knobs!, controls: controls(l.agent_id))
+                } header: {
+                    Text(l.label)
+                }
+            }
+            Section {} footer: {
+                Footnote("New sessions start with these unless you choose otherwise in New Session…. Default is whatever the agent's own settings say. Change a running session from its toolbar: ⇧⌘M mode, ⇧⌘I model, ⇧⌘E effort.")
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+    }
+}
+
+/// Environment variables for every session in a repo, its worktrees included.
+private struct ReposPane: View {
+    @EnvironmentObject var store: SettingsStore
+    /// Repos dino has sessions in, to add without a file dialog.
+    @State private var known: [RepoInfo] = []
+    /// A repo added here but with no variable yet (an empty one isn't saved).
+    @State private var adding: String?
+
+    private var repos: [String: DinoSettings.Repo] { store.settings?.repos ?? [:] }
+    private var shown: [String] { Array(Set(repos.keys).union(adding.map { [$0] } ?? [])).sorted() }
+
+    private func setEnv(_ repo: String, _ change: @escaping (inout [String: String]) -> Void) {
+        store.update {
+            var all = $0.repos ?? [:]
+            var env = all[repo]?.env ?? [:]
+            change(&env)
+            all[repo] = env.isEmpty ? nil : DinoSettings.Repo(env: env)
+            $0.repos = all
+        }
+    }
+
+    var body: some View {
+        Form {
+            Section {
+            } header: {
+                Text("Environment")
+            } footer: {
+                Footnote("Set for every session dino starts in the repo or one of its worktrees, from the next start or restart. Values are kept in settings.toml, readable only by you.")
+            }
+            ForEach(shown, id: \.self) { path in
+                let env = repos[path]?.env ?? [:]
+                Section {
+                    ForEach(env.keys.sorted(), id: \.self) { key in
+                        EnvRow(key: key, value: env[key] ?? "") { value in
+                            setEnv(path) { $0[key] = value }
+                        } remove: {
+                            setEnv(path) { $0[key] = nil }
+                        }
+                    }
+                    NewEnvRow(taken: Set(env.keys)) { key, value in
+                        setEnv(path) { $0[key] = value }
+                        if adding == path { adding = nil }
+                    }
+                } header: {
+                    HStack {
+                        Text((path as NSString).lastPathComponent)
+                        Text((path as NSString).abbreviatingWithTildeInPath).foregroundStyle(.secondary).fontWeight(.regular)
+                        Spacer()
+                        Button("Remove") {
+                            setEnv(path) { $0 = [:] }
+                            if adding == path { adding = nil }
+                        }
+                        .buttonStyle(.link)
+                        .font(.callout)
+                        .help("Remove this repo's variables")
+                    }
+                }
+            }
+            Section {
+                Menu("Add Repository") {
+                    ForEach(known.filter { !shown.contains($0.path) }) { r in
+                        Button(r.name) { adding = r.path }
+                    }
+                    if known.contains(where: { !shown.contains($0.path) }) { Divider() }
+                    Button("Choose Folder…") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true
+                        panel.canChooseFiles = false
+                        panel.prompt = "Add"
+                        if panel.runModal() == .OK, let url = panel.url { adding = url.path }
+                    }
+                }
+                .fixedSize()
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+        .task {
+            known = await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).tree(folders: [])) ?? [] }.value
+                .filter { !$0.worktrees.isEmpty }
+        }
+    }
+}
+
+/// A variable: its value hidden until you ask, editable in place.
+private struct EnvRow: View {
+    let key: String
+    let value: String
+    let save: (String) -> Void
+    let remove: () -> Void
+    @State private var shown = false
+    @State private var draft: String?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(key).font(.body.monospaced()).lineLimit(1)
+            Spacer()
+            if let d = draft {
+                TextField("Value", text: Binding(get: { d }, set: { draft = $0 }))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.body.monospaced())
+                    .frame(maxWidth: 260)
+                    .onSubmit(commit)
+                Button("Cancel") { draft = nil }
+                Button("Save", action: commit)
+            } else {
+                Text(shown ? value : String(repeating: "•", count: min(max(value.count, 6), 16)))
+                    .font(.body.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Button { shown.toggle() } label: { Image(systemName: shown ? "eye.slash" : "eye") }
+                    .buttonStyle(.borderless)
+                    .help(shown ? "Hide the value" : "Show the value")
+                Button("Edit") { draft = value }
+                Button(action: remove) { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless)
+                    .help("Remove \(key)")
+            }
+        }
+    }
+
+    private func commit() {
+        if let d = draft { save(d) }
+        draft = nil
+    }
+}
+
+private struct NewEnvRow: View {
+    let taken: Set<String>
+    let add: (String, String) -> Void
+    @State private var key = ""
+    @State private var value = ""
+
+    private var name: String { key.trimmingCharacters(in: .whitespaces) }
+    /// What dinod accepts: letters, digits and _, not starting with a digit.
+    private var valid: Bool {
+        guard let first = name.unicodeScalars.first, !("0"..."9").contains(first) else { return false }
+        return name.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "_") }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField("NAME", text: $key)
+                .textFieldStyle(.roundedBorder)
+                .font(.body.monospaced())
+                .frame(width: 180)
+            SecureField("Value", text: $value)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(commit)
+            Button("Add", action: commit)
+                .disabled(!valid)
+                .help(taken.contains(name) ? "Replaces the value of \(name)" : "Letters, digits and _, not starting with a digit")
+        }
+    }
+
+    private func commit() {
+        guard valid else { return }
+        add(name, value)
+        key = ""
+        value = ""
     }
 }
