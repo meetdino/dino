@@ -62,6 +62,12 @@ final class DinoModel: ObservableObject {
     @Published var showReview = false
     @Published var comments: [String: [ReviewComment]] = [:]
 
+    /// The Create PR sheet, and the popover about the selected session's PR.
+    @Published var showCreatePR = false
+    @Published var showPR = false
+    /// PRs dino just opened or merged, until dinod's poller reports them.
+    @Published private var acted: [String: PrInfo] = [:]
+
     var elsewhere: [FoundSession] { found.filter { $0.source == "running" } }
 
     /// Where new sessions start.
@@ -176,6 +182,14 @@ final class DinoModel: ObservableObject {
                 }
                 if let needs = s.needs, prev.needs == nil {
                     Notifier.post(session: s, title: "\(s.name) needs you", body: needs)
+                }
+            }
+            // CI runs for minutes: say when it's done, even about the session in front of you.
+            if let pr = s.pr, let was = prev.pr, pr.number == was.number, was.checks.pending > 0, pr.checks.pending == 0 {
+                if pr.checks.failed > 0 {
+                    Notifier.post(session: s, title: "PR #\(pr.number): \(pr.checks.failing.first ?? "a check") failed", body: pr.title)
+                } else {
+                    Notifier.post(session: s, title: "PR #\(pr.number) checks passed", body: pr.title)
                 }
             }
         }
@@ -397,6 +411,40 @@ final class DinoModel: ObservableObject {
             try DinoConnection(path: DinoEnvironment.socketPath).sendInput(session: session, text: text, submit: true)
         }.value
         comments[session] = nil
+        select(session)
+    }
+
+    /// The session's PR: dinod's view, or what dino just did if dinod hasn't caught up.
+    func pr(of s: SessionInfo) -> PrInfo? {
+        s.pr ?? acted[s.id]
+    }
+
+    /// The worktree dino made that the session runs in, if any: closable once its PR lands.
+    func dinoWorktree(of s: SessionInfo) -> Worktree? {
+        guard let cwd = s.cwd else { return nil }
+        return repos.flatMap(\.worktrees).filter { $0.dino && SessionTree.contains($0.path, cwd) }.max { $0.path.count < $1.path.count }
+    }
+
+    func prDraft(_ session: String) async throws -> PrDraft {
+        try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).prDraft(session: session) }.value
+    }
+
+    func createPR(_ session: String, title: String, body: String, base: String, draft: Bool) async throws {
+        let pr = try await Task.detached {
+            try DinoConnection(path: DinoEnvironment.socketPath).prCreate(session: session, title: title, body: body, base: base, draft: draft)
+        }.value
+        acted[session] = pr
+    }
+
+    func mergePR(_ session: String) async throws {
+        let pr = try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).prMerge(session: session) }.value
+        acted[session] = pr
+    }
+
+    /// The agent gets the failing checks and their logs as a prompt; you watch it work.
+    func fixPR(_ session: String) async throws {
+        try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).prFix(session: session) }.value
+        showPR = false
         select(session)
     }
 
