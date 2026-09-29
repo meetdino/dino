@@ -354,8 +354,10 @@ final class DinoModel: ObservableObject {
             command: "\(DinoEnvironment.dinoBinary) attach \(id)",
             waitAfterCommand: false
         )
-        // ⌘-clicked paths and local URLs open in dino's side pane.
-        t.makePlatformView = { [weak self] in LinkTerminalView { self?.openLink($0, from: id) } }
+        // ⌘-clicked paths and local URLs open in dino's side pane; dropped files paste as paths.
+        t.makePlatformView = { [weak self] in
+            LinkTerminalView(local: { self?.sessions.first { $0.id == id }?.host == nil }) { self?.openLink($0, from: id) }
+        }
         terminals[id] = t
         return t
     }

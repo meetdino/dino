@@ -3,15 +3,53 @@ import GhosttyTerminal
 
 /// A session's terminal whose ⌘-clicked links open in dino: files in the file pane, local web
 /// pages in the preview. Any agent works: Ghostty finds the links (paths, URLs, OSC 8).
+/// Files and images dropped on it are pasted as paths (see `TerminalDrop`).
 final class LinkTerminalView: TerminalView {
     private let onOpen: (String) -> Void
+    /// Whether the session runs on this Mac: a dropped path means nothing on an SSH host.
+    private let local: () -> Bool
     /// What Ghostty calls: the state's callbacks plus link clicks. The view holds it; Ghostty's
     /// reference is weak.
     private var forwarder: LinkForwarder?
+    private let highlight = DropHighlight()
 
-    init(onOpen: @escaping (String) -> Void) {
+    init(local: @escaping () -> Bool, onOpen: @escaping (String) -> Void) {
+        self.local = local
         self.onOpen = onOpen
         super.init(frame: .zero)
+        highlight.frame = bounds
+        addSubview(highlight)
+        registerForDraggedTypes(TerminalDrop.types)
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard local(), TerminalDrop.accepts(sender.draggingPasteboard) else { return [] }
+        highlight.isHidden = false
+        return .copy
+    }
+
+    override func draggingUpdated(_: any NSDraggingInfo) -> NSDragOperation {
+        highlight.isHidden ? [] : .copy
+    }
+
+    override func draggingExited(_: (any NSDraggingInfo)?) {
+        highlight.isHidden = true
+    }
+
+    override func draggingEnded(_: any NSDraggingInfo) {
+        highlight.isHidden = true
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        highlight.isHidden = true
+        guard local() else { return false }
+        TerminalDrop.text(from: sender.draggingPasteboard) { [weak self] text in
+            guard let self else { return }
+            paste(text: text)
+            // A drop usually starts a prompt: typing carries on where it landed.
+            acquireProgrammaticFocus()
+        }
+        return true
     }
 
     @available(*, unavailable)
