@@ -118,6 +118,15 @@ pub enum Request {
     ReviewCancel { id: String },
     /// Turn the session's PR automation on or off; a missing flag stays as it is.
     PrAuto { id: String, fix: Option<bool>, merge: Option<bool> },
+    /// Scheduled tasks, with their history and next run.
+    ScheduleList,
+    /// Add a task (no `id`) or replace one; pausing and resuming is a put with `enabled` changed.
+    SchedulePut { task: crate::schedule::ScheduledTask },
+    ScheduleDelete { id: String },
+    /// Run a task now, whatever its schedule; answers with the session it started.
+    ScheduleRun { id: String },
+    /// Check for due tasks now, as if the time were `now` (seconds since the epoch) when given.
+    ScheduleTick { now: Option<u64> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -138,6 +147,7 @@ pub enum Response {
     PrDraft { draft: PrDraft },
     Pr { pr: PrInfo },
     Review { findings: Vec<crate::review::Finding> },
+    Schedule { tasks: Vec<crate::schedule::ScheduledTask> },
     Ok,
     Error { message: String },
 }
@@ -185,6 +195,9 @@ pub struct SessionInfo {
     /// What dino does about the PR by itself.
     #[serde(default)]
     pub auto: AutoPr,
+    /// The scheduled task that started it, by name.
+    #[serde(default)]
+    pub scheduled: Option<String>,
 }
 
 /// What dino does about a session's PR by itself. Kept with the session, so it survives dinod restarts.
