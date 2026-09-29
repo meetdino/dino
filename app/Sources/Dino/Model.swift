@@ -94,6 +94,8 @@ final class DinoModel: ObservableObject {
     /// The Create PR sheet, and the popover about the selected session's PR.
     @Published var showCreatePR = false
     @Published var showPR = false
+    /// The session the side chat is asking about.
+    @Published var askingAbout: SessionInfo?
     /// PRs dino just opened or merged, until dinod's poller reports them.
     @Published private var acted: [String: PrInfo] = [:]
 
