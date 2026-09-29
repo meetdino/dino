@@ -775,6 +775,8 @@ fn main() -> anyhow::Result<()> {
         Some("attach") => return client::attach_raw(cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?),
         Some("ls") => return cmd_ls(),
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
+        // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
+        Some("statusline") => std::process::exit(dino_core::statusline::run(cli.get(1).map(String::as_str))),
         Some("found") => return cmd_found(),
         Some("fan") => return cmd_fan(&cli[1..]),
         Some("groups") => return cmd_groups(),

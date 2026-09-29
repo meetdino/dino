@@ -149,27 +149,6 @@ pub fn args(agent_id: &str, c: &Controls) -> Vec<String> {
     out
 }
 
-/// How many tokens `model`'s context window holds, for the models we know; `None` otherwise.
-/// Names vary by provider and date suffix, so this matches on the family.
-pub fn context_limit(model: &str) -> Option<u64> {
-    let m = model.to_ascii_lowercase();
-    // Claude Code asks for the 1M window with a `[1m]` suffix on the model name.
-    if m.starts_with("claude") || ["fable", "opus", "sonnet", "haiku"].iter().any(|a| m.starts_with(a)) {
-        return Some(if m.contains("[1m]") { 1_000_000 } else { 200_000 });
-    }
-    const TABLE: &[(&str, u64)] = &[
-        ("gpt-5", 400_000),
-        ("gpt-4.1", 1_047_576),
-        ("gpt-4o", 128_000),
-        ("o3", 200_000),
-        ("o4-mini", 200_000),
-        ("codex-mini", 200_000),
-        ("gemini-3", 1_048_576),
-        ("gemini-2.5", 1_048_576),
-    ];
-    TABLE.iter().find(|(prefix, _)| m.starts_with(prefix)).map(|(_, n)| *n)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,14 +200,5 @@ mod tests {
         let d = c(Some("edits"), Some("opus"), None);
         assert_eq!(c(None, Some("haiku"), Some("low")).or(&d), c(Some("edits"), Some("haiku"), Some("low")));
         assert!(Controls::default().is_empty());
-    }
-
-    #[test]
-    fn context_limits() {
-        assert_eq!(context_limit("claude-haiku-4-5-20251001"), Some(200_000));
-        assert_eq!(context_limit("claude-opus-5-5[1m]"), Some(1_000_000));
-        assert_eq!(context_limit("gpt-5.5-codex"), Some(400_000));
-        assert_eq!(context_limit("auto"), None);
-        assert_eq!(context_limit("kimi-k2"), None);
     }
 }

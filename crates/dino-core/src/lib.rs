@@ -14,6 +14,7 @@ pub mod review;
 pub mod schedule;
 pub mod settings;
 pub mod ssh;
+pub mod statusline;
 pub mod transcript;
 pub mod trust;
 pub mod worktree;
@@ -69,9 +70,10 @@ fn is_executable(p: &Path) -> bool {
 }
 
 /// How to route an agent's API traffic through dino's proxy: extra env vars and CLI args.
-/// `base(provider)` yields the proxy base URL for that provider.
+/// `base(provider)` yields the proxy base URL for that provider; `status_line` is a Claude
+/// `statusLine` setting to add (see `statusline::wrapper`).
 /// Agents we don't know how to wire (or that the user already pointed elsewhere) run untouched.
-pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String) -> (Vec<(String, String)>, Vec<String>) {
+pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String, status_line: Option<String>) -> (Vec<(String, String)>, Vec<String>) {
     // With routing off, only status hooks are wired; API traffic goes direct.
     // A dino proxy URL in our own environment was inherited from a dino pane (dinod started from
     // one), not set by the user: it points at another session, or another dinod.
@@ -80,7 +82,7 @@ pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String) 
         // Also used for shells, so `claude` started inside one is metered too.
         "claude" => {
             let env = if user_set("ANTHROPIC_BASE_URL") { vec![] } else { vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))] };
-            (env, vec!["--settings".into(), claude_hook_settings(&base("hook"))])
+            (env, vec!["--settings".into(), claude_hook_settings(&base("hook"), status_line)])
         }
         // Claude Code on the free pool: dino answers as the Anthropic API and routes each request.
         // The token is a placeholder so Claude Code skips its own login; the proxy holds the real keys.
@@ -94,7 +96,7 @@ pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String) 
                 ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "auto-fast".into()),
                 ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
             ];
-            (env.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), vec!["--settings".into(), claude_hook_settings(&base("hook"))])
+            (env.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), vec!["--settings".into(), claude_hook_settings(&base("hook"), status_line)])
         }
         "shell" if !user_set("ANTHROPIC_BASE_URL") => (vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))], vec![]),
         // A custom provider rather than `openai_base_url`: Codex otherwise tries WebSockets first,
@@ -130,15 +132,17 @@ fn codex_auth_mode() -> Option<String> {
 }
 
 /// Per-session settings layered on top of the user's own: HTTP hooks that report lifecycle events
-/// to dino. Hook entries merge with existing ones, and an unreachable URL never blocks Claude.
-pub fn claude_hook_settings(url: &str) -> String {
+/// to dino, and optionally a `statusLine` (JSON). Hook entries merge with existing ones, and an
+/// unreachable URL never blocks Claude.
+pub fn claude_hook_settings(url: &str, status_line: Option<String>) -> String {
     const EVENTS: &[&str] = &[
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
         "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop",
     ];
     let entry = format!(r#"[{{"hooks":[{{"type":"http","url":"{url}","timeout":5}}]}}]"#);
     let hooks: Vec<String> = EVENTS.iter().map(|e| format!(r#""{e}":{entry}"#)).collect();
-    format!(r#"{{"hooks":{{{}}}}}"#, hooks.join(","))
+    let status_line = status_line.map(|s| format!(r#","statusLine":{s}"#)).unwrap_or_default();
+    format!(r#"{{"hooks":{{{}}}{status_line}}}"#, hooks.join(","))
 }
 
 /// `~/.config/dino`, or `$DINO_HOME` (a second, isolated dino: tests, development).

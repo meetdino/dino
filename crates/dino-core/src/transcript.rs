@@ -21,14 +21,53 @@ pub fn claude_tail(uuid: &str, budget: usize) -> Option<String> {
 }
 
 fn read_tail(p: &Path) -> Option<String> {
+    read_last(p, READ_TAIL)
+}
+
+/// The whole lines in the last `bytes` of `p`.
+fn read_last(p: &Path, bytes: u64) -> Option<String> {
     let mut f = std::fs::File::open(p).ok()?;
     let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(READ_TAIL))).ok()?;
-    let mut bytes = Vec::new();
-    f.read_to_end(&mut bytes).ok()?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    f.seek(SeekFrom::Start(len.saturating_sub(bytes))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
     // Started mid-file: the first line is a fragment.
-    Some(if len > READ_TAIL { text.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_string()) } else { text })
+    Some(if len > bytes { text.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_string()) } else { text })
+}
+
+/// Codex's rollout for conversation `id`: `~/.codex/sessions/Y/M/D/rollout-<time>-<id>.jsonl`.
+pub fn codex_path(id: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let suffix = format!("-{id}.jsonl");
+    let mut stack = vec![home.join(".codex/sessions")];
+    while let Some(dir) = stack.pop() {
+        for p in std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()) {
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix)) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// How full Codex's context window is, as its rollout last said: (tokens in it, its size).
+pub fn codex_context(rollout: &Path) -> Option<(u64, u64)> {
+    // A turn writes other events after its token count, but not this many bytes of them.
+    codex_context_in(&read_last(rollout, 256 << 10)?)
+}
+
+/// From the last `token_count` event: `info.model_context_window`, and the tokens of the last
+/// call (`last_token_usage.total_tokens`, what Codex itself counts against the window).
+fn codex_context_in(jsonl: &str) -> Option<(u64, u64)> {
+    jsonl.lines().rev().filter(|l| l.contains("\"token_count\"")).find_map(|line| {
+        let v = serde_json::from_str::<Value>(line).ok()?;
+        let info = &v["payload"]["info"];
+        let window = info["model_context_window"].as_u64().filter(|w| *w > 0)?;
+        Some((info["last_token_usage"]["total_tokens"].as_u64().unwrap_or(0), window))
+    })
 }
 
 /// Transcript JSONL as "User: …" / "Claude: …" lines, tool calls in brackets, newest last,
@@ -112,5 +151,24 @@ mod tests {
         // Over budget, the newest entries stay.
         assert_eq!(render(&jsonl, 20), "Claude: Fixed.");
         assert!(render(&jsonl, 5).starts_with('…'));
+    }
+
+    #[test]
+    fn codex_context_from_the_last_token_count() {
+        let count = |total: u64, window: &str| {
+            format!(r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"total_tokens":99999}},"last_token_usage":{{"input_tokens":16188,"cached_input_tokens":3328,"output_tokens":39,"total_tokens":{total}}},"model_context_window":{window}}},"rate_limits":{{}}}}}}"#)
+        };
+        let jsonl = [
+            r#"{"type":"session_meta","payload":{"id":"x"}}"#.to_string(),
+            count(16227, "258400"),
+            count(40000, "258400"),
+            // Before a model answers, Codex reports a count without info.
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{}}}"#.into(),
+            r#"{"type":"response_item","payload":{"type":"message"}}"#.into(),
+        ]
+        .join("\n");
+        assert_eq!(codex_context_in(&jsonl), Some((40000, 258400)));
+        assert_eq!(codex_context_in(&count(5, "null")), None, "no window, no guess");
+        assert_eq!(codex_context_in(r#"{"type":"session_meta"}"#), None);
     }
 }
