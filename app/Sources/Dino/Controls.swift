@@ -154,8 +154,13 @@ struct ControlFields: View {
 }
 
 extension SessionInfo {
-    /// What it runs with, or will once its turn is over.
-    var shownControls: Controls { pending ?? controls ?? Controls() }
+    /// What the session runs with: what's about to apply, else the mode the agent says it's in.
+    var shownControls: Controls {
+        if let pending { return pending }
+        var c = controls ?? Controls()
+        c.mode = agent_mode ?? c.mode
+        return c
+    }
 
     /// Tokens in the context window and the window's size; nil until dino knows both.
     var contextUse: (used: UInt64, limit: UInt64)? {
@@ -175,9 +180,10 @@ extension DinoModel {
         launchers.first { $0.agent_id == s.agent_id }?.knobs
     }
 
-    /// Mid-turn, a change waits until the turn is over.
+    /// Mid-turn, or with subagents or background commands running, a change waits: restarting
+    /// the agent would end them.
     func busy(_ s: SessionInfo) -> Bool {
-        [.thinking, .working].contains(status(of: s))
+        [.thinking, .working].contains(status(of: s)) || (s.tasks?.running ?? 0) > 0
     }
 }
 
@@ -244,7 +250,7 @@ struct SessionControlsBar: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .padding(.horizontal, 3)
-                    .help("Applies after this turn: the agent restarts with it, keeping its conversation")
+                    .help("Applies once the agent is idle and its subagents and background commands are done: it restarts with it, keeping its conversation")
             }
             if let ctx = session.contextUse {
                 ContextRing(used: ctx.used, limit: ctx.limit).padding(.horizontal, 5)
@@ -317,7 +323,7 @@ struct ControlPopover: View {
             }
             Divider().padding(.vertical, 6)
             Text(model.busy(session)
-                ? "Applies after this turn. The agent restarts with it and keeps its conversation."
+                ? "Applies once the agent is idle and its subagents and background commands are done. It restarts with it and keeps its conversation."
                 : "The agent restarts with it and keeps its conversation.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

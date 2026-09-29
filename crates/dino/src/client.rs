@@ -118,6 +118,38 @@ pub fn attach_pane(id: &str, cols: u16, rows: u16) -> io::Result<Arc<Pane>> {
     Ok(pane)
 }
 
+/// Whether terminal output draws any text: more than escape sequences, titles and blank lines.
+fn visible(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            0x1b => {
+                i += 1;
+                match bytes.get(i) {
+                    // CSI: parameters up to a final byte.
+                    Some(b'[') => {
+                        i += 1;
+                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                    }
+                    // OSC, DCS, APC…: up to BEL or ST.
+                    Some(b']' | b'P' | b'_' | b'^') => {
+                        while i < bytes.len() && bytes[i] != 0x07 && !(bytes[i] == b'\\' && bytes[i - 1] == 0x1b) {
+                            i += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            b if b.is_ascii_whitespace() || b.is_ascii_control() => {}
+            _ => return true,
+        }
+        i += 1;
+    }
+    false
+}
+
 /// `dino attach <id>`: relay between this terminal and the session. Exits when the session ends.
 /// Meant to run inside a real terminal surface (Ghostty), which does all the rendering.
 pub fn attach_raw(id: &str) -> anyhow::Result<()> {
@@ -161,11 +193,25 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
     });
 
     let mut stdout = io::stdout();
+    // After a reattach: what's arrived so far, held back (with the old screen left up) until the
+    // agent has drawn something, so a restart doesn't blank the pane while it starts.
+    let mut held: Option<(Vec<u8>, Instant)> = None;
     'session: loop {
         while let Ok((kind, payload)) = ipc::read_frame(&mut reader) {
             match kind {
                 ipc::DATA => {
-                    stdout.write_all(&payload)?;
+                    if let Some((buf, since)) = &mut held {
+                        buf.extend_from_slice(&payload);
+                        if !visible(buf) && since.elapsed() < Duration::from_secs(3) {
+                            continue;
+                        }
+                        // The reattach replays the session's scrollback, so start from a clean screen.
+                        stdout.write_all(b"\x1b[H\x1b[2J\x1b[3J")?;
+                        stdout.write_all(buf)?;
+                        held = None;
+                    } else {
+                        stdout.write_all(&payload)?;
+                    }
                     stdout.flush()?;
                 }
                 ipc::EXIT => break 'session,
@@ -176,7 +222,7 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
         // rather than leave a pane that ignores keys; stop once dinod no longer knows the session.
         let started = Instant::now();
         let stream = loop {
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(100));
             let (cols, rows) = crossterm::terminal::size().unwrap_or((cols, rows));
             // Only a running dinod: if it's gone, so is the session, and starting one here would be a surprise.
             match UnixStream::connect(ipc::socket_path()).and_then(|s| attach_on(s, id, cols, rows)) {
@@ -187,11 +233,22 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
         };
         reader = stream.try_clone()?;
         *writer.lock().unwrap() = stream;
-        // The reattach replays the session's scrollback, so start from a clean screen.
-        stdout.write_all(b"\x1b[H\x1b[2J\x1b[3J")?;
+        held = Some((Vec::new(), Instant::now()));
     }
     crossterm::terminal::disable_raw_mode()?;
     // Leave the terminal usable: undo modes the app may have left on.
     stdout.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[<u\x1b[0m\r\n")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::visible;
+
+    #[test]
+    fn only_drawn_text_is_visible() {
+        assert!(!visible(b"\r\n\r\n\x1b[?2026h\x1b[H\x1b[2J\x1b[>4m\x1b]0;\xe2\x9c\xb3 Pelican\x07\x1b]2;x\x1b\\\x1b7\x1b8"));
+        assert!(visible(b"\x1b[1m\xe2\x96\x90\xe2\x96\x9b Claude Code"));
+        assert!(visible(b"\x1b[31m$ "));
+    }
 }

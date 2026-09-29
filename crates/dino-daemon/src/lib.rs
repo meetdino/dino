@@ -555,9 +555,13 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         None => d.allowed_launcher(launcher)?,
     };
     let settings = Settings::load();
+    // Control flags typed into the args count as the session's controls, and give way to one
+    // chosen later: a session started with --dangerously-skip-permissions is in bypass.
+    let in_args = controls::from_args(&l.agent_id, &args);
     let controls = match &restore {
-        Some(r) => r.controls.clone(),
+        Some(r) => r.controls.or(&in_args),
         None => {
+            let controls = controls.or(&in_args);
             check_bypass(&controls, &settings)?;
             // A default saved while bypass was allowed falls back to the agent's own mode.
             let mut defaults = settings.agent_defaults(&l.agent_id);
@@ -567,6 +571,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
             controls.or(&defaults)
         }
     };
+    let args = controls::without(&l.agent_id, &args, &controls);
     let id = match &restore {
         Some(r) => r.id.clone(),
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
@@ -770,18 +775,21 @@ fn repo_env(settings: &Settings, dir: &Path) -> Vec<(String, String)> {
     settings.repos.iter().filter(|(k, r)| !r.env.is_empty() && repo(k)).flat_map(|(_, r)| r.env.clone()).collect()
 }
 
-/// Change session `id`'s controls: now if it's between turns, else once its turn is over.
+/// Change session `id`'s controls: now if nothing of its own is running, else once it's done.
 fn set_controls(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
     let settings = Settings::load();
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
     if s.controls.mode != controls.mode {
         check_bypass(&controls, &settings)?;
     }
-    if controls == s.controls {
+    // Switched in the agent itself (Claude's Shift+Tab): choosing the mode dino has on file still restarts it into that mode.
+    let agent_mode = d.proxy.stats.session(id).agent_mode.as_deref().and_then(controls::claude_mode);
+    let switched = controls.mode.is_some() && agent_mode.is_some() && agent_mode != controls.mode;
+    if controls == s.controls && !switched {
         *s.pending.lock().unwrap() = None;
         return Ok(());
     }
-    if s.pane.is_exited() || idle(d, &s) {
+    if restartable(d, &s) {
         *s.pending.lock().unwrap() = None;
         restart(d, id, controls)
     } else {
@@ -916,6 +924,16 @@ fn codex_context(s: &Session, claimed: &[String]) -> Option<(u64, u64)> {
 }
 
 /// Between turns: not working, not waiting on the user, and quiet.
+/// Whether a restart would cut nothing short: between turns, with no subagent or background
+/// command of its own still running, since those end with the agent.
+fn restartable(d: &Daemon, s: &Session) -> bool {
+    if s.pane.is_exited() {
+        return true;
+    }
+    let st = d.proxy.stats.session(&s.id);
+    idle(d, s) && !st.subagents.iter().any(|a| a.running) && !st.background.iter().any(|b| b.running)
+}
+
 fn idle(d: &Daemon, s: &Session) -> bool {
     let st = stats(d, s);
     let quiet = s.last_output.lock().unwrap().is_none_or(|t| t.elapsed() > TURN_OVER_QUIET);
@@ -965,6 +983,7 @@ fn state(d: &Daemon) -> Response {
                 local_url: s.local_url.lock().unwrap().clone(),
                 controls: s.controls.clone(),
                 pending: s.pending.lock().unwrap().clone(),
+                agent_mode: st.agent_mode.as_deref().and_then(controls::claude_mode),
                 context_tokens,
                 context_limit,
                 scheduled: s.scheduled.clone(),
@@ -1072,6 +1091,7 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
     // Dropping the subscribers ends each client's stream without the exit the dying agent would send.
     s.subscribers.lock().unwrap().clear();
     s.pane.kill();
+    d.proxy.stats.restarted(id);
     if saved.controls.model != controls.model {
         d.proxy.stats.reset_context(id);
     }
@@ -1101,7 +1121,7 @@ fn apply_pending(d: &Daemon) {
         .unwrap()
         .clone()
         .iter()
-        .filter(|s| s.pending.lock().unwrap().is_some() && (s.pane.is_exited() || idle(d, s)))
+        .filter(|s| s.pending.lock().unwrap().is_some() && restartable(d, s))
         .filter_map(|s| s.pending.lock().unwrap().take().map(|c| (s.id.clone(), c)))
         .collect();
     for (id, controls) in ready {

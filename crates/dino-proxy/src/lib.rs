@@ -75,6 +75,8 @@ pub struct SessionStats {
     pub call_error: Option<String>,
     /// The agent reports its turns through hooks (Claude).
     pub hooked: bool,
+    /// The permission mode the agent last said it's in, in its own words (Claude's hooks).
+    pub agent_mode: Option<String>,
     /// Router tier for free-tier sessions ("fast", "code", "reason").
     pub tier: Option<String>,
     /// Which classifier made the last routing decision ("jev" or "llm").
@@ -107,6 +109,9 @@ impl SessionStats {
     /// The agent says how its turn went: only a failed turn shows an error.
     fn turn_hook(&mut self, event: &str, v: &Value) {
         self.hooked = true;
+        if let Some(m) = v["permission_mode"].as_str() {
+            self.agent_mode = Some(m.into());
+        }
         match event {
             "UserPromptSubmit" | "Stop" => self.last_error = None,
             // What the failed call said; the hook's own words when dino didn't see it.
@@ -206,6 +211,11 @@ impl Stats {
     }
 
     /// Forget context use, e.g. when the agent restarts on another model.
+    /// The agent is starting over: what it said about itself no longer holds.
+    pub fn restarted(&self, id: &str) {
+        self.update(id, |s| s.agent_mode = None);
+    }
+
     pub fn reset_context(&self, id: &str) {
         self.update(id, |s| {
             s.context.clear();
@@ -818,7 +828,8 @@ mod tests {
 
         // Hooks: a side call failing after a good turn shows nothing.
         let mut s = SessionStats::default();
-        s.turn_hook("UserPromptSubmit", &json!({}));
+        s.turn_hook("UserPromptSubmit", &json!({"permission_mode": "plan"}));
+        assert_eq!(s.agent_mode.as_deref(), Some("plan"));
         s.turn_hook("Stop", &json!({}));
         s.call_failed("503 Grammar compilation is temporarily unavailable.".into());
         assert_eq!(s.last_error, None);
