@@ -7,6 +7,7 @@ struct DinoApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @StateObject private var model = DinoModel()
     @AppStorage(QuitChoice.key) private var quitChoice = ""
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         WindowGroup("dino") {
@@ -22,7 +23,9 @@ struct DinoApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
-            CommandGroup(after: .appSettings) {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { openWindow(id: SettingsView.windowID) }
+                    .keyboardShortcut(",")
                 Button("Ask Before Quitting") { quitChoice = "" }
                     .disabled(quitChoice.isEmpty)
                     .help("Show the keep-running question again when you quit")
@@ -59,9 +62,11 @@ struct DinoApp: App {
                     .disabled(model.selected == nil)
             }
         }
-        Settings {
+        Window("Settings", id: SettingsView.windowID) {
             SettingsView()
         }
+        .windowResizability(.contentSize)
+        .windowToolbarStyle(.unified)
     }
 }
 
