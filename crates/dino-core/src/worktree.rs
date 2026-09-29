@@ -83,8 +83,152 @@ pub fn worktrees_dir(repo: &Path) -> PathBuf {
     repo.join(".dino/worktrees")
 }
 
-/// A new worktree at `worktrees_dir(repo)/<name>` on a new `branch` from `base`.
+/// A new worktree at `worktrees_dir(repo)/<name>` on a new `branch` from `base`, with the
+/// `.worktreeinclude` files of `repo` copied in.
 pub fn add(repo: &Path, name: &str, branch: &str, base: &str) -> anyhow::Result<PathBuf> {
+    let dir = add_bare(repo, name, branch, base)?;
+    copy_included(repo, &dir);
+    Ok(dir)
+}
+
+/// Past these, the rest of the `.worktreeinclude` files are left out (say a pattern caught
+/// `node_modules`): a worktree should take seconds to make.
+const INCLUDE_MAX_FILES: usize = 10_000;
+const INCLUDE_MAX_BYTES: u64 = 512 << 20;
+
+/// Copy the files `.worktreeinclude` (gitignore syntax, at the top of `from`) names into worktree
+/// `to`, as Claude Code does: only files that are also gitignored, since tracked ones are already
+/// there. For `.env` and the like. A file that can't be copied is logged and skipped.
+/// Returns the paths copied, relative to the top.
+pub fn copy_included(from: &Path, to: &Path) -> Vec<String> {
+    let include = from.join(".worktreeinclude");
+    if !include.is_file() {
+        return vec![];
+    }
+    use std::collections::HashSet;
+    // Untracked files matching `exclude`; with `dirs`, a folder matched whole is one `dir/` entry.
+    let untracked = |exclude: &str, dirs: bool| -> HashSet<String> {
+        let mut args = vec!["ls-files", "-z", "--others", "--ignored", exclude];
+        if dirs {
+            args.push("--directory");
+        }
+        match git(from, &args) {
+            Ok(out) => out.split('\0').filter(|p| !p.is_empty()).map(String::from).collect(),
+            Err(e) => {
+                eprintln!("dinod: .worktreeinclude in {}: {e}", from.display());
+                HashSet::new()
+            }
+        }
+    };
+    let ignored = untracked("--exclude-standard", false);
+    // Folders ignored whole: git lists a folder whose files are all ignored as one entry too.
+    let collapsed: Vec<String> = untracked("--exclude-standard", true).into_iter().filter(|p| p.ends_with('/')).collect();
+    let ignored_dirs: Vec<String> = if collapsed.is_empty() {
+        vec![]
+    } else {
+        let input = collapsed.iter().map(|d| d.trim_end_matches('/')).collect::<Vec<_>>().join("\0");
+        git_in(from, &["check-ignore", "--no-index", "--stdin", "-z"], Some(input.as_bytes()))
+            .unwrap_or_default()
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(|p| format!("{p}/"))
+            .collect()
+    };
+    let patterns: Vec<String> = std::fs::read_to_string(&include)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
+        .collect();
+    // In a folder ignored whole (node_modules, target), a pattern for any depth (`**/x`, or `x`
+    // with no slash) takes a file only when it matches the folder itself or its first name is
+    // one of the folder's; `vendor/**/config.json` and the like go anywhere. As Claude Code does.
+    let mut per_pattern: std::collections::HashMap<&str, HashSet<String>> = Default::default();
+    let mut reaches = |dir: &str, rel: &str| -> bool {
+        patterns.iter().any(|p| {
+            if !per_pattern.entry(p).or_insert_with(|| untracked(&format!("--exclude={p}"), false)).contains(rel) {
+                return false;
+            }
+            let body = p.trim_end_matches('/');
+            let any_depth = body.strip_prefix("**/").or_else(|| (!body.contains('/')).then_some(body));
+            let Some(rest) = any_depth else { return true };
+            let first = rest.split('/').next().unwrap_or("");
+            dir.trim_end_matches('/').split('/').any(|name| glob(first.as_bytes(), name.as_bytes()))
+        })
+    };
+    let (Ok(src_top), Ok(dst_top)) = (from.canonicalize(), to.canonicalize()) else { return vec![] };
+    let (mut copied, mut bytes) = (vec![], 0u64);
+    let mut wanted: Vec<String> = untracked(&format!("--exclude-from={}", include.display()), false).into_iter().collect();
+    wanted.sort();
+    for rel in wanted {
+        if !ignored.contains(&rel) || rel.starts_with(".dino/") {
+            continue;
+        }
+        if ignored_dirs.iter().find(|d| rel.starts_with(d.as_str())).is_some_and(|dir| !reaches(dir, &rel)) {
+            continue;
+        }
+        if copied.len() >= INCLUDE_MAX_FILES || bytes > INCLUDE_MAX_BYTES {
+            eprintln!("dinod: .worktreeinclude in {}: stopped after {} files ({} MB)", from.display(), copied.len(), bytes >> 20);
+            break;
+        }
+        match copy_one(&src_top, &dst_top, &rel) {
+            Ok(n) => {
+                bytes += n;
+                copied.push(rel);
+            }
+            Err(e) => eprintln!("dinod: .worktreeinclude: couldn't copy {rel}: {e}"),
+        }
+    }
+    copied
+}
+
+/// Whether one path name matches one gitignore glob name: `*`, `?`, `[a-z]`, `[!x]`, `\` escapes.
+fn glob(p: &[u8], s: &[u8]) -> bool {
+    match (p.first(), s.first()) {
+        (None, _) => s.is_empty(),
+        (Some(b'*'), _) => glob(&p[1..], s) || (!s.is_empty() && glob(p, &s[1..])),
+        (_, None) => false,
+        (Some(b'?'), _) => glob(&p[1..], &s[1..]),
+        (Some(b'['), Some(&c)) => {
+            let Some(end) = p.iter().skip(2).position(|&b| b == b']').map(|i| i + 2) else { return p[0] == c && glob(&p[1..], &s[1..]) };
+            let (negate, set) = match p[1] {
+                b'!' | b'^' => (true, &p[2..end]),
+                _ => (false, &p[1..end]),
+            };
+            let mut hit = false;
+            let mut i = 0;
+            while i < set.len() {
+                if i + 2 < set.len() && set[i + 1] == b'-' {
+                    hit |= (set[i]..=set[i + 2]).contains(&c);
+                    i += 3;
+                } else {
+                    hit |= set[i] == c;
+                    i += 1;
+                }
+            }
+            hit != negate && glob(&p[end + 1..], &s[1..])
+        }
+        (Some(b'\\'), Some(&c)) if p.len() > 1 => p[1] == c && glob(&p[2..], &s[1..]),
+        (Some(&a), Some(&c)) => a == c && glob(&p[1..], &s[1..]),
+    }
+}
+
+fn copy_one(src_top: &Path, dst_top: &Path, rel: &str) -> anyhow::Result<u64> {
+    anyhow::ensure!(!rel.split('/').any(|c| c == ".." || c.is_empty()), "odd path");
+    let (src, dst) = (src_top.join(rel), dst_top.join(rel));
+    // A symlink, or a file in a symlinked folder, is copied only when it leads somewhere inside
+    // the checkout, and then as the file it leads to.
+    anyhow::ensure!(src.canonicalize()?.starts_with(src_top), "it leads outside the checkout");
+    anyhow::ensure!(std::fs::metadata(&src)?.is_file(), "not a file");
+    anyhow::ensure!(std::fs::symlink_metadata(&dst).is_err(), "it's already in the worktree");
+    let parent = dst.parent().unwrap();
+    std::fs::create_dir_all(parent)?;
+    anyhow::ensure!(parent.canonicalize()?.starts_with(dst_top), "its folder leads outside the worktree");
+    // Keeps the permissions: scripts stay executable, secrets stay private.
+    Ok(std::fs::copy(&src, &dst)?)
+}
+
+fn add_bare(repo: &Path, name: &str, branch: &str, base: &str) -> anyhow::Result<PathBuf> {
     exclude_dino_dir(repo)?;
     let dir = worktrees_dir(repo).join(name);
     std::fs::create_dir_all(dir.parent().unwrap())?;
@@ -100,7 +244,7 @@ pub fn start(checkout: &Path, name: &str, branch: &str) -> anyhow::Result<(PathB
     let head = git(checkout, &["rev-parse", "HEAD"])?.trim().to_string();
     // Worktrees all live in the main checkout, even when this one is a worktree itself.
     let main = list(checkout)?.into_iter().next().map_or_else(|| checkout.to_path_buf(), |w| PathBuf::from(w.path));
-    let dir = add(&main, name, branch, &head)?;
+    let dir = add_bare(&main, name, branch, &head)?;
     if base != head {
         let patch = git(checkout, &["diff", "--binary", &head, &base])?;
         if let Err(e) = git_in(&dir, &["apply", "--whitespace=nowarn", "-"], Some(patch.as_bytes())) {
@@ -108,6 +252,7 @@ pub fn start(checkout: &Path, name: &str, branch: &str) -> anyhow::Result<(PathB
             return Err(e);
         }
     }
+    copy_included(checkout, &dir);
     Ok((dir, base))
 }
 
@@ -327,6 +472,80 @@ mod tests {
         let new = by("sub/new file.txt");
         assert_eq!((new.status.as_str(), new.added), ("added", 1));
         assert_eq!(git(repo, &["status", "--porcelain"]).unwrap(), status, "the user's index is untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn worktreeinclude_copies_ignored_files_it_names() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("dino-wtinc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(repo.join("config")).unwrap();
+        std::fs::create_dir_all(repo.join("app/sub")).unwrap();
+        std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
+        let repo = repo.as_path();
+        git(repo, &["init", "-q", "-b", "main"]).unwrap();
+        let w = |p: &str, s: &str| std::fs::write(repo.join(p), s).unwrap();
+        std::fs::create_dir_all(repo.join("vendor/a")).unwrap();
+        std::fs::create_dir_all(repo.join("cache")).unwrap();
+        std::fs::create_dir_all(repo.join("py/.venv/bin")).unwrap();
+        w(".gitignore", ".env\n.env.*\n*.log\nconfig/secrets.json\nnode_modules/\nlocal.json\nlink.env\nout.env\nvendor/\ncache/\n.venv/\n");
+        w(".worktreeinclude", "# the secrets\n.env\n.env.local\nconfig/secrets.json\n**/local.json\ntracked.txt\nuntracked.txt\nlink.env\nout.env\nvendor/**/config.json\n**/.ven[v]\n");
+        w("tracked.txt", "tracked\n");
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).unwrap();
+        w(".env", "KEY=1\n");
+        std::fs::set_permissions(repo.join(".env"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        w(".env.local", "LOCAL=1\n");
+        w(".env.test", "not listed\n");
+        w("debug.log", "not listed\n");
+        w("config/secrets.json", "{}\n");
+        w("app/sub/local.json", "{\"nested\":1}\n");
+        w("node_modules/pkg/local.json", "in an ignored folder the pattern doesn't name\n");
+        w("node_modules/pkg/index.js", "\n");
+        w("cache/local.json", "all this ignored folder holds\n");
+        w("py/.venv/bin/activate", "venv\n");
+        w("vendor/a/config.json", "vendored\n");
+        w("vendor/a/other.json", "\n");
+        w("untracked.txt", "listed, but not ignored: it's the user's new file, not a secret\n");
+        w("tracked.txt", "edited\n");
+        std::fs::write(tmp.join("outside"), "SECRET\n").unwrap();
+        std::os::unix::fs::symlink(repo.join(".env.local"), repo.join("link.env")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("outside"), repo.join("out.env")).unwrap();
+
+        let (wt, _) = start(repo, "claude-ab12", "dino/claude-ab12").unwrap();
+        let read = |p: &str| std::fs::read_to_string(wt.join(p)).ok();
+        assert_eq!(read(".env").as_deref(), Some("KEY=1\n"));
+        assert_eq!(std::fs::metadata(wt.join(".env")).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(read(".env.local").as_deref(), Some("LOCAL=1\n"));
+        assert_eq!(read("config/secrets.json").as_deref(), Some("{}\n"));
+        assert_eq!(read("app/sub/local.json").as_deref(), Some("{\"nested\":1}\n"));
+        assert_eq!(read("link.env").as_deref(), Some("LOCAL=1\n"), "a link inside the checkout comes as its file");
+        assert!(!std::fs::symlink_metadata(wt.join("link.env")).unwrap().file_type().is_symlink());
+        assert_eq!(read("out.env"), None, "a link out of the checkout stays behind");
+        assert_eq!(read("node_modules/pkg/local.json"), None, "a **/ pattern doesn't reach into an ignored folder");
+        assert_eq!(read("cache/local.json"), None);
+        assert_eq!(read("vendor/a/config.json").as_deref(), Some("vendored\n"), "a pattern naming the folder reaches in");
+        assert_eq!(read("vendor/a/other.json"), None);
+        assert_eq!(read("py/.venv/bin/activate").as_deref(), Some("venv\n"), "a pattern matching the folder takes it whole");
+        for (p, s, ok) in [("*.js", "a.js", true), ("*.js", "a.jsx", false), ("[!a]b", "cb", true), ("[!a]b", "ab", false), ("[a-c]?", "bz", true), ("\\*", "*", true), ("\\*", "x", false)] {
+            assert_eq!(glob(p.as_bytes(), s.as_bytes()), ok, "{p} {s}");
+        }
+        assert_eq!(read(".env.test"), None);
+        assert_eq!(read("debug.log"), None);
+        assert_eq!(read("untracked.txt"), None);
+        assert_eq!(read("tracked.txt").as_deref(), Some("edited\n"), "tracked files come from git, edits and all");
+        assert_eq!(git(&wt, &["status", "--porcelain"]).unwrap(), " M tracked.txt\n", "copied files stay ignored");
+
+        // Fan-out worktrees get them too; no .worktreeinclude, nothing copied.
+        let base = snapshot(repo).unwrap();
+        let fan = add(repo, "g/codex", "dino/g/codex", &base).unwrap();
+        assert!(fan.join(".env").exists());
+        std::fs::remove_file(repo.join(".worktreeinclude")).unwrap();
+        assert!(copy_included(repo, &fan).is_empty());
+        remove(repo, &fan, "dino/g/codex");
+        remove(repo, &wt, "dino/claude-ab12");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
