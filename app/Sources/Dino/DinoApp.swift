@@ -126,6 +126,13 @@ struct DinoApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_: Notification) {
+        // Opening the app shows the sessions, even if it quit while looking at the archive.
+        if UserDefaults.standard.string(forKey: "sidebar.filter") == SessionFilter.archived.rawValue {
+            UserDefaults.standard.set(SessionFilter.all.rawValue, forKey: "sidebar.filter")
+        }
+    }
+
     func applicationDidFinishLaunching(_: Notification) {
         // Run as a regular app with a Dock icon and menu bar even when launched from a binary.
         NSApp.setActivationPolicy(.regular)
