@@ -191,7 +191,7 @@ enum SessionTree {
 
 /// The sidebar's status filter.
 enum SessionFilter: String, CaseIterable, Identifiable {
-    case all, needsYou, working, idle
+    case all, needsYou, working, idle, archived
     var id: String { rawValue }
 
     var label: String {
@@ -200,6 +200,7 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .needsYou: "Needs you"
         case .working: "Working"
         case .idle: "Idle"
+        case .archived: "Archived"
         }
     }
 
@@ -209,6 +210,7 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .needsYou: "Waiting on you: asking for something, or finished and not looked at yet"
         case .working: "Thinking, running tools, or waiting on its subagents and background commands"
         case .idle: "Waiting for a prompt, or exited"
+        case .archived: "Archived sessions: stopped and kept, to pick up again (⇧⌘A archives the current one)"
         }
     }
 
@@ -219,6 +221,8 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .needsYou: status == .needsYou || status == .done
         case .working: status == .thinking || status == .working || status == .waiting
         case .idle: status == .idle || status == .ended || status == .exited
+        // Live sessions are never archived; the archive is listed on its own.
+        case .archived: false
         }
     }
 
@@ -227,7 +231,7 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .all: .secondary
         case .needsYou: SessionStatus.needsYou.color
         case .working: SessionStatus.working.color
-        case .idle: .secondary
+        case .idle, .archived: .secondary
         }
     }
 }
@@ -239,7 +243,7 @@ struct FilterBar: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(SessionFilter.allCases) { f in
+            ForEach(SessionFilter.allCases.filter { $0 != .archived }) { f in
                 let count = model.sessions.filter { f.passes(model.status(of: $0)) }.count
                 let on = f == filter
                 Button { filter = f } label: {
@@ -258,6 +262,31 @@ struct FilterBar: View {
             }
             Spacer(minLength: 0)
         }
+    }
+}
+
+/// The way into the archive, beside the dino mark: the filters below keep their room.
+struct ArchiveToggle: View {
+    @EnvironmentObject var model: DinoModel
+    @Binding var filter: SessionFilter
+
+    var body: some View {
+        let on = filter == .archived
+        Button { filter = on ? .all : .archived } label: {
+            HStack(spacing: 3) {
+                Image(systemName: on ? "archivebox.fill" : "archivebox")
+                if !model.archived.isEmpty {
+                    Text("\(model.archived.count)").monospacedDigit()
+                }
+            }
+            .font(.caption.weight(on ? .semibold : .regular))
+            .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(Capsule().fill(on ? Color.primary.opacity(0.1) : .clear))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(on ? "Back to every session" : SessionFilter.archived.help)
     }
 }
 
