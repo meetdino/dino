@@ -228,8 +228,7 @@ struct SessionMenu: View {
         }
         Divider()
         Button("Rename…") { model.renaming = Renaming(id: session.id, place: .sidebar) }
-        // A fan-out member goes with its fan-out: keep or discard that instead.
-        if !model.groups.contains(where: { $0.members.contains { $0.session == session.id } }) {
+        if model.canArchive(session.id) {
             Button("Archive") { model.archive(session.id) }
                 .help("Stop it and keep it in Archived, to pick up again later")
         }
