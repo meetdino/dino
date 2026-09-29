@@ -1,8 +1,8 @@
 //! Git worktrees for fan-out: one checkout per agent, compared, then one kept and the rest removed.
 //!
-//! Worktrees live in `<repo>/.dino/worktrees/<name>` by default (like Claude Desktop's `.claude/worktrees`),
-//! so agents that trust the repo trust its worktrees. The folder is hidden via `.git/info/exclude`.
-//! Settings → Worktrees can move them (`worktrees_dir`).
+//! Worktrees live in `~/.dino/worktrees/<repo>/<name>` by default, outside the repo so they don't nest
+//! copies of it in its own file tree; dino carries the repo's trust over (see `trust`). Settings →
+//! Worktrees can move them (`worktrees_dir`), inside the repo too, hidden via `.git/info/exclude`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -187,6 +187,10 @@ pub fn snapshot(repo: &Path) -> anyhow::Result<String> {
 
 /// Where dino makes `repo`'s worktrees: Settings → Worktrees → location.
 pub fn worktrees_dir(repo: &Path) -> PathBuf {
+    // Tests keep theirs inside their throwaway repos, whatever the settings say.
+    if cfg!(test) {
+        return repo.join(".dino/worktrees");
+    }
     worktrees_dir_at(repo, &crate::settings::Settings::load().worktrees.location)
 }
 
@@ -199,7 +203,7 @@ pub fn worktrees_dir_at(repo: &Path, location: &str) -> PathBuf {
         return home.join(rest).join(name());
     }
     match location {
-        "" => repo.join(crate::settings::DEFAULT_WORKTREE_LOCATION),
+        "" => worktrees_dir_at(repo, crate::settings::DEFAULT_WORKTREE_LOCATION),
         l if l.starts_with('/') => Path::new(l).join(name()),
         l => repo.join(l),
     }
@@ -890,9 +894,9 @@ mod tests {
     fn worktree_locations() {
         let repo = Path::new("/src/app");
         assert_eq!(worktrees_dir_at(repo, ".dino/worktrees"), PathBuf::from("/src/app/.dino/worktrees"));
-        assert_eq!(worktrees_dir_at(repo, ""), PathBuf::from("/src/app/.dino/worktrees"));
-        assert_eq!(worktrees_dir_at(repo, "/Volumes/big/wt/"), PathBuf::from("/Volumes/big/wt/app"));
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(worktrees_dir_at(repo, ""), home.join(".dino/worktrees/app"));
+        assert_eq!(worktrees_dir_at(repo, "/Volumes/big/wt/"), PathBuf::from("/Volumes/big/wt/app"));
         assert_eq!(worktrees_dir_at(repo, "~/worktrees"), home.join("worktrees/app"));
         assert_eq!(inner_dir(repo, &repo.join(".trees/x")).as_deref(), Some(".trees"));
         assert_eq!(inner_dir(repo, Path::new("/elsewhere/app")), None);
