@@ -39,7 +39,7 @@ pub(crate) fn find(d: &Daemon, id: &str) -> anyhow::Result<Arc<Session>> {
 pub(crate) fn start(d: &Daemon, launcher: &str, cwd: Option<String>, prompt: Option<String>, worktree: bool, by: Option<String>) -> anyhow::Result<String> {
     let l: LauncherInfo = d.allowed_launcher(launcher)?;
     // Where the asking session is, when no folder is given.
-    let cwd = cwd.or_else(|| by.as_deref().and_then(|b| find(d, b).ok()).map(|s| s.cwd.display().to_string()));
+    let cwd = cwd.or_else(|| by.as_deref().and_then(|b| find(d, b).ok()).filter(|s| s.host.is_none()).map(|s| s.cwd.display().to_string()));
     let dir = work_dir(cwd.as_deref());
     anyhow::ensure!(dir.is_dir(), "{} isn't a folder", dir.display());
     check_trust(&l, &dir, worktree)?;

@@ -111,7 +111,7 @@ struct OpenInMenu: View {
     /// Looked up once: apps rarely come and go while dino is open.
     @State private var editors = installedEditors()
 
-    private var folder: String? { model.selectedSession?.cwd }
+    private var folder: String? { model.selectedSession.flatMap { $0.host == nil ? $0.cwd : nil } }
     /// The app used here last, else the file pane's editor, else the first installed.
     private var preferred: ExternalEditor? {
         editors.first { $0.bundleID == last }
@@ -137,7 +137,7 @@ struct OpenInMenu: View {
         } primaryAction: {
             if let preferred { open(preferred) }
         }
-        .help(folder.map { "Open \(shortPath($0)) in \(preferred?.name ?? "another app")" } ?? "Open the session's folder in another app")
+        .help(folder.map { "Open \(shortPath($0)) in \(preferred?.name ?? "another app")" } ?? model.selectedSession?.remoteReason ?? "Open the session's folder in another app")
         .disabled(folder == nil || editors.isEmpty)
         .onAppear { editors = installedEditors() }
     }

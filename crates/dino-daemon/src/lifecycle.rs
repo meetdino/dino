@@ -81,7 +81,7 @@ pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
     anyhow::ensure!(super::group_of(d, id).is_none(), "{} is part of a fan-out: keep or discard it instead", s.name);
     let agent_session = {
         let known = s.agent_session.lock().unwrap().clone();
-        if known.is_none() && s.agent_id == "codex" {
+        if known.is_none() && s.agent_id == "codex" && s.host.is_none() {
             let claimed: Vec<String> =
                 d.sessions.lock().unwrap().iter().filter(|o| o.id != s.id).filter_map(|o| o.agent_session.lock().unwrap().clone()).collect();
             find_codex_session(&s.cwd, s.started_at, &claimed)
@@ -103,8 +103,9 @@ pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
         scheduled: s.scheduled.clone(),
         started_by: s.started_by.clone(),
         messaged_by: s.messaged_by.lock().unwrap().clone(),
+        host: s.host.clone(),
     };
-    let w = session_worktree(d, &s.cwd);
+    let w = if s.host.is_some() { None } else { session_worktree(d, &s.cwd) };
     kill(d, id);
     d.closing.lock().unwrap().remove(id);
     d.prs.lock().unwrap().remove(id);
@@ -179,11 +180,15 @@ fn unarchive(d: &Daemon, id: &str) -> anyhow::Result<String> {
         save_worktrees(&worktrees);
     }
     // Where it ran, or the nearest place still there.
-    let cwd = [Some(PathBuf::from(&a.saved.cwd)), a.worktree.as_ref().map(|w| w.path.clone()), a.worktree.as_ref().map(|w| w.repo.clone())]
-        .into_iter()
-        .flatten()
-        .find(|p| p.is_dir())
-        .unwrap_or_else(super::home);
+    let cwd = if a.saved.host.is_some() {
+        PathBuf::from(&a.saved.cwd)
+    } else {
+        [Some(PathBuf::from(&a.saved.cwd)), a.worktree.as_ref().map(|w| w.path.clone()), a.worktree.as_ref().map(|w| w.repo.clone())]
+            .into_iter()
+            .flatten()
+            .find(|p| p.is_dir())
+            .unwrap_or_else(super::home)
+    };
     let saved = {
         let sessions = d.sessions.lock().unwrap();
         let taken = |n: &str| sessions.iter().any(|s| s.name == n);

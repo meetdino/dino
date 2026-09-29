@@ -83,8 +83,10 @@ struct DinoApp: App {
                     .disabled(model.sessions.count < 2)
                 Button(model.showReview ? "Hide Changes" : "Review Changes") { model.showReview.toggle() }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
+                    .disabled(!model.showReview && model.selectedSession?.host != nil)
                 Button(model.sidePane == .preview ? "Hide Preview" : "Show Preview") { model.togglePreview() }
                     .keyboardShortcut("p", modifiers: [.command, .option])
+                    .disabled(model.sidePane != .preview && model.selectedSession?.host != nil)
                 Button(model.sidePane == .tasks ? "Hide Tasks" : "Show Tasks") { model.toggleTasks() }
                     .keyboardShortcut("t", modifiers: [.command, .option])
                     .disabled(model.sidePane != .tasks && !(model.selectedSession?.reportsTasks ?? false))
@@ -284,6 +286,8 @@ struct ContentView: View {
 struct Terminals: View {
     @EnvironmentObject var model: DinoModel
     static let space = "terminals"
+    /// Why the selected session can't use what needs its checkout on this Mac, if it can't.
+    private var remoteReason: String? { model.selectedSession?.remoteReason }
 
     var body: some View {
         ZStack {
@@ -337,6 +341,7 @@ struct Terminals: View {
                     HStack(spacing: 8) {
                         SessionName(session: s, place: .toolbar, font: .system(.body, design: .monospaced).weight(.semibold), color: Brand.green)
                         if s.label == nil, let t = s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
+                        if let host = s.host { HostChip(host: host) }
                         if !s.exited { SessionControlsBar(session: s).padding(.leading, 4) }
                     }
                 }
@@ -368,14 +373,15 @@ struct Terminals: View {
                 Button { model.showReview.toggle() } label: {
                     Label("Changes", systemImage: model.showReview ? "plusminus.circle.fill" : "plusminus.circle")
                 }
-                .help("Review this session's changes; click a line to comment for the agent (⇧⌘D)")
-                .disabled(!model.sessions.contains { $0.id == model.selected })
+                .help(remoteReason ?? "Review this session's changes; click a line to comment for the agent (⇧⌘D)")
+                .disabled(!model.sessions.contains { $0.id == model.selected } || remoteReason != nil)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { model.togglePreview() } label: {
                     Label("Preview", systemImage: model.sidePane == .preview ? "globe.americas.fill" : "globe.americas")
                 }
-                .help("Preview this session's dev server or any local page (⌥⌘P)")
+                .help(remoteReason ?? "Preview this session's dev server or any local page (⌥⌘P)")
+                .disabled(remoteReason != nil && model.sidePane != .preview)
             }
             ToolbarItem(placement: .primaryAction) { TasksToolbarButton() }
             ToolbarItem(placement: .primaryAction) { PRToolbarButton() }
@@ -540,7 +546,11 @@ struct Sidebar: View {
                     ForEach(tree.repos) { node in
                         RepoRows(node: node, filter: filter, collapsed: collapsed)
                     }
-                    ForEach(tree.unfiled) { s in
+                    let remote = Dictionary(grouping: tree.unfiled.filter { $0.host != nil }) { $0.host ?? "" }
+                    ForEach(remote.keys.sorted(), id: \.self) { host in
+                        HostRows(host: host, sessions: remote[host] ?? [], collapsed: collapsed)
+                    }
+                    ForEach(tree.unfiled.filter { $0.host == nil }) { s in
                         SessionRow(session: s, index: 0)
                             .tag(s.id)
                             .contextMenu { SessionMenu(session: s) }

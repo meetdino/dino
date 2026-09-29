@@ -79,8 +79,8 @@ struct PRToolbarButton: View {
                 Button { model.showCreatePR = true } label: {
                     Label("Create PR", systemImage: "arrow.triangle.pull")
                 }
-                .help("Push this session's branch and open a pull request on GitHub")
-                .disabled(session == nil)
+                .help(session?.remoteReason ?? "Push this session's branch and open a pull request on GitHub")
+                .disabled(session == nil || session?.host != nil)
             }
         }
         .popover(isPresented: $model.showPR, arrowEdge: .bottom) {
