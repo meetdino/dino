@@ -41,6 +41,15 @@ struct DinoApp: App {
                         }
                     }
                 }
+                Menu("New Session in Worktree") {
+                    ForEach(model.launchers) { l in
+                        if l == model.launchers.first {
+                            Button(l.label) { model.newSession(l, worktree: true) }.keyboardShortcut("n", modifiers: [.command, .option])
+                        } else {
+                            Button(l.label) { model.newSession(l, worktree: true) }
+                        }
+                    }
+                }
                 Button("Fan Out…") { model.showFanout = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Continue a Session…") {
@@ -161,6 +170,23 @@ struct ContentView: View {
             Text("They're applied to your checkout, uncommitted, for you to review. The other agents stop and every worktree of this fan-out is removed.")
         }
         .alert(
+            model.closingWorktree?.apply == true ? "Apply \(model.closingWorktree?.label ?? "")'s changes?" : "Discard \(model.closingWorktree?.label ?? "")?",
+            isPresented: Binding(get: { model.closingWorktree != nil }, set: { if !$0 { model.closingWorktree = nil } }),
+            presenting: model.closingWorktree
+        ) { w in
+            if w.apply {
+                Button("Apply and Close") { model.closeWorktree(w) }
+                    .keyboardShortcut(.defaultAction)
+            } else {
+                Button("Discard", role: .destructive) { model.closeWorktree(w) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { w in
+            Text(w.apply
+                ? "They're applied to the checkout it came from, uncommitted, for you to review. Its sessions stop, and the worktree and its branch are removed."
+                : "Its sessions stop, and the worktree, its branch and every change in it are removed.")
+        }
+        .alert(
             "Something went wrong",
             isPresented: Binding(get: { model.error != nil && !model.sessions.isEmpty }, set: { if !$0 { model.error = nil } })
         ) {
@@ -261,6 +287,12 @@ struct NewSessionMenu: View {
             ForEach(model.launchers) { l in
                 Button(l.label) { model.newSession(l) }
             }
+            Menu("In a New Worktree") {
+                ForEach(model.launchers) { l in
+                    Button(l.label) { model.newSession(l, worktree: true) }
+                }
+            }
+            .help("Its own worktree and branch: its edits stay off your checkout until you apply them")
             Divider()
             Button("In \(model.folder.lastPathComponent)…") { model.chooseFolder() }
         } label: {
