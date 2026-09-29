@@ -156,6 +156,8 @@ pub enum Request {
     PrAuto { id: String, fix: Option<bool>, merge: Option<bool> },
     /// Name a session, over the title its agent sets; an empty name goes back to that title.
     Rename { id: String, name: String },
+    /// Keep a session at the top of its group, and out of dino's own archiving (or stop).
+    Pin { id: String, pinned: bool },
     /// Stop a session but keep it to pick up later. Its worktree goes too when nothing in it
     /// would be lost (clean, and pushed or merged); `Unarchive` makes it again from the branch.
     Archive { id: String },
@@ -342,6 +344,9 @@ pub struct SessionInfo {
     /// The name the user gave it (`Rename`); `title` already shows it over the agent's.
     #[serde(default)]
     pub label: Option<String>,
+    /// Pinned: kept at the top of its group, never archived by dino on its own.
+    #[serde(default)]
+    pub pinned: bool,
     /// What the agent tracks underneath: its task list, subagents and background commands.
     #[serde(default)]
     pub tasks: SessionTasks,

@@ -73,6 +73,8 @@ struct DinoApp: App {
                 Divider()
                 SplitMenuItems().environmentObject(model)
                 Divider()
+                Button("Find Sessions…") { model.findingSessions = true }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
                 Button("Jump to Session Needing You") { model.jumpToAttention() }
                     .keyboardShortcut("j")
                 Button("Next Session") { model.cycle(by: 1) }
@@ -101,6 +103,12 @@ struct DinoApp: App {
                         .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
                 }
                 Divider()
+                Button(model.selectedSession?.pinned == true ? "Unpin" : "Pin") {
+                    if let s = model.selectedSession { model.pin(s.id, s.pinned != true) }
+                }
+                .disabled(model.selectedSession == nil)
+                Button("Mark as Unread") { if let id = model.selectedSession?.id { model.markUnread(id) } }
+                    .disabled(model.selectedSession == nil || model.selectedSession?.exited == true)
                 Button("Rename…") { if let id = model.selectedSession?.id { model.renaming = Renaming(id: id, place: .toolbar) } }
                     .disabled(model.selectedSession == nil)
                 Button("Archive") { if let id = model.selectedSession?.id { model.archive(id) } }
@@ -585,7 +593,7 @@ struct Sidebar: View {
     /// Changes whenever the sidebar gains, loses or restructures rows.
     private var rowsKey: String {
         let tree = SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
-        return ([filter.rawValue] + tree.repos.map(\.shape) + model.sessions.map(\.id) + model.elsewhere.map(\.id) + model.scheduled.map(\.id)
+        return ([filter.rawValue, model.sidebarQuery, "\(String(describing: model.sidebarScope))"] + tree.repos.map(\.shape) + model.sessions.map(\.id) + model.elsewhere.map(\.id) + model.scheduled.map(\.id)
             + model.archived.map(\.id))
             .joined(separator: "\n")
     }
@@ -607,9 +615,12 @@ struct Sidebar: View {
                 if filter == .archived {
                     ArchivedSection()
                 } else {
-                    let tree = filter == .all
+                    let narrowed = model.sidebarNarrowed
+                    let tree = filter == .all && !narrowed
                         ? SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
-                        : SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups) { filter.passes(model.status(of: $0)) }
+                        : SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups) {
+                            filter.passes(model.status(of: $0)) && model.sidebarShows($0)
+                        }
                     Section("Workspaces") {
                         ForEach(tree.repos) { node in
                             RepoRows(node: node, filter: filter, collapsed: collapsed)
@@ -623,12 +634,15 @@ struct Sidebar: View {
                                 .tag(s.id)
                                 .contextMenu { SessionMenu(session: s) }
                         }
-                        if filter != .all, tree.repos.isEmpty, tree.unfiled.isEmpty {
-                            Text(filter == .needsYou ? "Nothing needs you" : "No \(filter.label.lowercased()) sessions")
+                        if filter != .all || narrowed, tree.repos.isEmpty, tree.unfiled.isEmpty {
+                            let q = model.sidebarQuery.trimmingCharacters(in: .whitespaces)
+                            Text(!q.isEmpty ? "No session matches “\(q)”"
+                                : narrowed ? "No sessions here"
+                                : filter == .needsYou ? "Nothing needs you" : "No \(filter.label.lowercased()) sessions")
                                 .font(.callout).foregroundStyle(.tertiary)
                         }
                     }
-                    if filter == .all {
+                    if filter == .all, !narrowed {
                         Section {
                             ForEach(model.scheduled) { t in
                                 ScheduledRow(task: t).tag("task:\(t.id)")
@@ -654,7 +668,7 @@ struct Sidebar: View {
                         }
                     }
                     // Other terminals' sessions aren't dino's to sort by status.
-                    if !model.elsewhere.isEmpty, filter == .all {
+                    if !model.elsewhere.isEmpty, filter == .all, !narrowed {
                         Section("On this Mac") {
                             ForEach(model.elsewhere) { f in
                                 ElsewhereRow(session: f).tag("move:\(f.id)")
@@ -674,7 +688,20 @@ struct Sidebar: View {
                 HStack {
                     DinoMark(size: 15)
                     Spacer()
+                    if filter != .archived, !model.sessions.isEmpty {
+                        Button { model.findingSessions = true } label: { Image(systemName: "magnifyingglass") }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .help("Find sessions (⇧⌘F)")
+                        ScopeMenu()
+                    }
                     ArchiveToggle(filter: $filter)
+                }
+                if filter != .archived, model.findingSessions || !model.sidebarQuery.isEmpty {
+                    SessionSearchField()
+                }
+                if filter != .archived, model.sidebarScope != nil {
+                    ScopeChip()
                 }
                 if !model.sessions.isEmpty || filter != .all {
                     FilterBar(filter: $filter)
@@ -683,6 +710,8 @@ struct Sidebar: View {
             .padding(.horizontal, 14)
             .padding(.top, 6)
         }
+        // The archive has its own search.
+        .onChange(of: model.findingSessions) { _, on in if on, filter == .archived { filter = .all } }
     }
 }
 
@@ -699,6 +728,12 @@ struct SessionRow: View {
             HStack(spacing: 8) {
                 StatusDot(status: status)
                 SessionName(session: session, place: .sidebar, font: .system(.body, design: .monospaced).weight(.medium))
+                if session.pinned == true {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(45))
+                        .help("Pinned: at the top of its group, and dino won't archive it on its own")
+                }
                 if let task = session.scheduled {
                     Image(systemName: "clock")
                         .font(.caption).foregroundStyle(.tertiary)

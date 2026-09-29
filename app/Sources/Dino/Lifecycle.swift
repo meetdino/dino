@@ -55,6 +55,10 @@ extension DinoConnection {
         _ = try send(["type": "rename", "id": id, "name": name])
     }
 
+    func pin(_ id: String, _ pinned: Bool) throws {
+        _ = try send(["type": "pin", "id": id, "pinned": pinned])
+    }
+
     func archive(_ id: String) throws {
         _ = try send(["type": "archive", "id": id])
     }
@@ -104,6 +108,14 @@ extension DinoModel {
         }
         terminals[id]?.requestFocus()
         lifecycle { try $0.rename(id, to: name) }
+    }
+
+    func pin(_ id: String, _ pinned: Bool) {
+        if let i = sessions.firstIndex(where: { $0.id == id }) {
+            // Show it now; the next poll agrees.
+            sessions[i].pinned = pinned
+        }
+        lifecycle { try $0.pin(id, pinned) }
     }
 
     func archive(_ id: String) {

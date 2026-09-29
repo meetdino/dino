@@ -241,6 +241,12 @@ struct SessionMenu: View {
             Button(session.agent_id == "shell" ? "Restart" : "Resume") { model.resume(session.id) }
         }
         Divider()
+        let pinned = session.pinned == true
+        Button(pinned ? "Unpin" : "Pin") { model.pin(session.id, !pinned) }
+            .help(pinned ? "Let it sort with the others again" : "Keep it at the top of its group; dino won't archive it on its own")
+        Button("Mark as Unread") { model.markUnread(session.id) }
+            .disabled(session.exited)
+            .help("Show it under Needs you until you look at it again")
         Button("Rename…") { model.renaming = Renaming(id: session.id, place: .sidebar) }
         if model.canArchive(session.id) {
             Button("Archive") { model.archive(session.id) }
