@@ -1,7 +1,8 @@
 //! Git worktrees for fan-out: one checkout per agent, compared, then one kept and the rest removed.
 //!
-//! Worktrees live in `<repo>/.dino/worktrees/<name>` (like Claude Desktop's `.claude/worktrees`),
-//! so agents that trust the repo trust its worktrees. `.dino/` is hidden via `.git/info/exclude`.
+//! Worktrees live in `<repo>/.dino/worktrees/<name>` by default (like Claude Desktop's `.claude/worktrees`),
+//! so agents that trust the repo trust its worktrees. The folder is hidden via `.git/info/exclude`.
+//! Settings → Worktrees can move them (`worktrees_dir`).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -184,8 +185,31 @@ pub fn snapshot(repo: &Path) -> anyhow::Result<String> {
     Ok(commit.trim().to_string())
 }
 
+/// Where dino makes `repo`'s worktrees: Settings → Worktrees → location.
 pub fn worktrees_dir(repo: &Path) -> PathBuf {
-    repo.join(".dino/worktrees")
+    worktrees_dir_at(repo, &crate::settings::Settings::load().worktrees.location)
+}
+
+/// `location` relative to `repo` (blank: the default), or, absolute or under `~`, a folder per repo in it.
+pub fn worktrees_dir_at(repo: &Path, location: &str) -> PathBuf {
+    let location = location.trim().trim_end_matches('/');
+    let name = || repo.file_name().map(PathBuf::from).unwrap_or_default();
+    if let Some(rest) = location.strip_prefix("~/").or((location == "~").then_some("")) {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        return home.join(rest).join(name());
+    }
+    match location {
+        "" => repo.join(crate::settings::DEFAULT_WORKTREE_LOCATION),
+        l if l.starts_with('/') => Path::new(l).join(name()),
+        l => repo.join(l),
+    }
+}
+
+/// The folder right inside `repo` that holds its worktrees, when they're inside it (to keep out of git status).
+fn inner_dir(repo: &Path, dir: &Path) -> Option<String> {
+    let rel = dir.strip_prefix(repo).ok()?;
+    let first = rel.components().next()?.as_os_str().to_str()?;
+    (first != "..").then(|| first.to_string())
 }
 
 /// A new worktree at `worktrees_dir(repo)/<name>` on a new `branch` from `base`, with the
@@ -262,11 +286,13 @@ pub fn copy_included(from: &Path, to: &Path) -> Vec<String> {
         })
     };
     let (Ok(src_top), Ok(dst_top)) = (from.canonicalize(), to.canonicalize()) else { return vec![] };
+    // Never the worktrees themselves, wherever they are.
+    let inner = inner_dir(from, &worktrees_dir(from)).map(|d| format!("{d}/"));
     let (mut copied, mut bytes) = (vec![], 0u64);
     let mut wanted: Vec<String> = untracked(&format!("--exclude-from={}", include.display()), false).into_iter().collect();
     wanted.sort();
     for rel in wanted {
-        if !ignored.contains(&rel) || rel.starts_with(".dino/") {
+        if !ignored.contains(&rel) || rel.starts_with(".dino/") || inner.as_deref().is_some_and(|d| rel.starts_with(d)) {
             continue;
         }
         if ignored_dirs.iter().find(|d| rel.starts_with(d.as_str())).is_some_and(|dir| !reaches(dir, &rel)) {
@@ -334,11 +360,33 @@ fn copy_one(src_top: &Path, dst_top: &Path, rel: &str) -> anyhow::Result<u64> {
 }
 
 fn add_bare(repo: &Path, name: &str, branch: &str, base: &str) -> anyhow::Result<PathBuf> {
-    exclude_dino_dir(repo)?;
     let dir = worktrees_dir(repo).join(name);
+    if let Some(inner) = inner_dir(repo, &dir) {
+        exclude_dir(repo, &inner)?;
+    }
     std::fs::create_dir_all(dir.parent().unwrap())?;
     git(repo, &["worktree", "add", "--quiet", "-b", branch, &dir.to_string_lossy(), base])?;
     Ok(dir)
+}
+
+/// Make `dir` again as a worktree of `repo` on `branch`, for a session coming back from the
+/// archive: the branch as it was, or, if it's gone, a new one off the repo's HEAD.
+pub fn restore(repo: &Path, dir: &Path, branch: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!dir.exists(), "{} is in the way", dir.display());
+    if let Some(inner) = inner_dir(repo, dir) {
+        exclude_dir(repo, &inner)?;
+    }
+    std::fs::create_dir_all(dir.parent().unwrap())?;
+    let path = dir.to_string_lossy();
+    let exists = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
+    // A worktree removed by hand leaves an entry that blocks the path.
+    let _ = git(repo, &["worktree", "prune"]);
+    if exists {
+        git(repo, &["worktree", "add", "--quiet", &path, branch])?;
+    } else {
+        git(repo, &["worktree", "add", "--quiet", "-b", branch, &path, "HEAD"])?;
+    }
+    Ok(())
 }
 
 /// A worktree for one session, off the HEAD of `checkout` (a repo's main checkout or one of its
@@ -361,16 +409,42 @@ pub fn start(checkout: &Path, name: &str, branch: &str) -> anyhow::Result<(PathB
     Ok((dir, base))
 }
 
-fn exclude_dino_dir(repo: &Path) -> anyhow::Result<()> {
+/// Hide `repo/<inner>/` from git status via `.git/info/exclude`.
+fn exclude_dir(repo: &Path, inner: &str) -> anyhow::Result<()> {
     let common = git(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
     let exclude = PathBuf::from(common.trim()).join("info/exclude");
     let current = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if !current.lines().any(|l| l.trim() == "/.dino/") {
+    let line = format!("/{inner}/");
+    if !current.lines().any(|l| l.trim() == line) {
         std::fs::create_dir_all(exclude.parent().unwrap())?;
         let sep = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
-        std::fs::write(&exclude, format!("{current}{sep}/.dino/\n"))?;
+        std::fs::write(&exclude, format!("{current}{sep}{line}\n"))?;
     }
     Ok(())
+}
+
+/// Bytes `dir` takes on disk (like `du -sk`), not following symlinks. Slow for big trees: call off
+/// the main thread.
+pub fn disk_size(dir: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            // Hard links count once.
+            if m.nlink() > 1 && !seen.insert((m.dev(), m.ino())) {
+                continue;
+            }
+            total += m.blocks() * 512;
+            if m.is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    total
 }
 
 /// Size of everything the agent changed in `dir` since `base`: edits, new files, its own commits.
@@ -547,6 +621,19 @@ pub fn clean(dir: &Path) -> anyhow::Result<bool> {
     }
     git(&main, &["worktree", "remove", &dir.to_string_lossy()])?;
     Ok(branch.is_some_and(|b| git(&main, &["branch", "-d", &b]).is_ok()))
+}
+
+/// Remove a worktree but keep its branch, to make it again later (`restore`). Never forces.
+pub fn put_away(dir: &Path) -> anyhow::Result<()> {
+    if !git(dir, &["status", "--porcelain", "-uall"])?.trim().is_empty() {
+        anyhow::bail!("it has uncommitted changes");
+    }
+    let main = list(dir)?.into_iter().next().map(|w| PathBuf::from(w.path)).ok_or_else(|| anyhow::anyhow!("no main checkout"))?;
+    if std::fs::canonicalize(&main).ok() == std::fs::canonicalize(dir).ok() {
+        anyhow::bail!("that's the main checkout");
+    }
+    git(&main, &["worktree", "remove", &dir.to_string_lossy()])?;
+    Ok(())
 }
 
 /// Remove a worktree and its branch, discarding whatever is in it.
