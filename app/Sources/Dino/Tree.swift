@@ -91,8 +91,96 @@ enum SessionTree {
         return (nodes, unfiled)
     }
 
+    /// The tree with only the sessions `keep` passes: places, fan-outs and repos left empty go too.
+    static func build(repos: [RepoInfo], sessions: [SessionInfo], groups: [GroupInfo], keep: (SessionInfo) -> Bool) -> (repos: [RepoNode], unfiled: [SessionInfo]) {
+        let kept = sessions.filter(keep)
+        let ids = Set(kept.map(\.id))
+        var tree = build(repos: repos, sessions: kept, groups: groups)
+        tree.repos = tree.repos.compactMap { node in
+            var node = node
+            node.places.removeAll { $0.sessions.isEmpty }
+            node.groups = node.groups.filter { $0.members.contains { ids.contains($0.session) } }
+            return node.places.isEmpty && node.groups.isEmpty ? nil : node
+        }
+        return tree
+    }
+
     static func contains(_ dir: String, _ path: String) -> Bool {
         path == dir || path.hasPrefix(dir.hasSuffix("/") ? dir : dir + "/")
+    }
+}
+
+// MARK: - Filtering by status
+
+/// The sidebar's status filter.
+enum SessionFilter: String, CaseIterable, Identifiable {
+    case all, needsYou, working, idle
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .all: "All"
+        case .needsYou: "Needs you"
+        case .working: "Working"
+        case .idle: "Idle"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .all: "Every session"
+        case .needsYou: "Waiting on you: asking for something, or finished and not looked at yet"
+        case .working: "Thinking or running tools"
+        case .idle: "Waiting for a prompt, or exited"
+        }
+    }
+
+    /// "Needs you" includes finished-unseen: both wait on you.
+    func passes(_ status: SessionStatus) -> Bool {
+        switch self {
+        case .all: true
+        case .needsYou: status == .needsYou || status == .done
+        case .working: status == .thinking || status == .working
+        case .idle: status == .idle || status == .exited
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .all: .secondary
+        case .needsYou: SessionStatus.needsYou.color
+        case .working: SessionStatus.working.color
+        case .idle: .secondary
+        }
+    }
+}
+
+/// All · Needs you · Working · Idle, with counts; one click each.
+struct FilterBar: View {
+    @EnvironmentObject var model: DinoModel
+    @Binding var filter: SessionFilter
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(SessionFilter.allCases) { f in
+                let count = model.sessions.filter { f.passes(model.status(of: $0)) }.count
+                let on = f == filter
+                Button { filter = f } label: {
+                    HStack(spacing: 3) {
+                        Text(f.label).lineLimit(1)
+                        Text("\(count)").monospacedDigit()
+                            .foregroundStyle(on ? AnyShapeStyle(.primary) : count > 0 && f != .all ? AnyShapeStyle(f.color) : AnyShapeStyle(.tertiary))
+                    }
+                    .font(.caption.weight(on ? .semibold : .regular))
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(Capsule().fill(on ? Color.primary.opacity(0.1) : .clear))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(f.help)
+            }
+            Spacer(minLength: 0)
+        }
     }
 }
 
@@ -102,6 +190,7 @@ enum SessionTree {
 struct RepoRows: View {
     @EnvironmentObject var model: DinoModel
     let node: RepoNode
+    var filter = SessionFilter.all
     @Binding var collapsed: Set<String>
 
     var body: some View {
@@ -138,8 +227,9 @@ struct RepoRows: View {
                 ForEach(node.groups) { g in
                     DisclosureGroup(isExpanded: expanded("group:\(g.id)")) {
                         ForEach(g.members) { m in
-                            if let s = model.sessions.first(where: { $0.id == m.session }) {
+                            if let s = model.sessions.first(where: { $0.id == m.session }), filter.passes(model.status(of: s)) {
                                 SessionRow(session: s, index: 0, stat: m.stat).tag(s.id)
+                                    .contextMenu { SessionMenu(session: s) }
                             }
                         }
                     } label: {
@@ -169,9 +259,7 @@ struct RepoRows: View {
         ForEach(sessions) { s in
             SessionRow(session: s, index: 0)
                 .tag(s.id)
-                .contextMenu {
-                    Button("Kill Session", role: .destructive) { model.kill(s.id) }
-                }
+                .contextMenu { SessionMenu(session: s) }
         }
     }
 
