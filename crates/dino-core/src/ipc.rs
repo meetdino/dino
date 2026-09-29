@@ -96,6 +96,9 @@ pub enum Request {
     /// Close a worktree dino made for a session: stop the sessions in it, remove it and its branch.
     /// `apply` first brings its changes into the checkout it came from, uncommitted.
     RemoveWorktree { path: String, apply: bool },
+    /// Remove a finished worktree and its merged branch, never forcing: refuses one with
+    /// uncommitted work, keeps a branch git doesn't see merged.
+    CleanWorktree { path: String },
     /// The settings document.
     Settings,
     /// Replace the settings document.
