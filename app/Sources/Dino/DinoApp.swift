@@ -59,6 +59,9 @@ struct DinoApp: App {
                     .disabled(model.selected == nil)
             }
         }
+        Settings {
+            SettingsView()
+        }
     }
 }
 

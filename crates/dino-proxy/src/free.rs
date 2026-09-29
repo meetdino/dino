@@ -34,7 +34,7 @@ pub(crate) async fn handle(st: AppState, session: String, rest: &str, body: Byte
     if !rest.ends_with("messages") {
         return anthropic_error(StatusCode::NOT_FOUND, "not_found_error", &format!("dino free tier has no /{rest}"));
     }
-    let Some(key) = st.keys.get("NVIDIA_API_KEY").cloned() else {
+    let Some(key) = st.keys.read().unwrap().get("NVIDIA_API_KEY").cloned() else {
         return anthropic_error(StatusCode::UNAUTHORIZED, "authentication_error", "dino: no NVIDIA_API_KEY for the free tier");
     };
     let Ok(raw) = serde_json::from_slice::<Value>(&body) else {
@@ -168,7 +168,7 @@ async fn choose_tier(st: &AppState, session: &str, raw: &Value, key: &str) -> Ti
 }
 
 async fn jev(st: &AppState, state: &str) -> Option<(Tier, f64)> {
-    let key = st.keys.get("TYPESAFE_API_KEY")?;
+    let key = st.keys.read().unwrap().get("TYPESAFE_API_KEY").cloned()?;
     let call = st.client.post(JEV_URL).bearer_auth(key).json(&jev_request(state)).send();
     match tokio::time::timeout(Duration::from_millis(2500), call).await {
         Ok(Ok(r)) if r.status().is_success() => parse_jev(&r.json::<Value>().await.ok()?),

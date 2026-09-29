@@ -76,6 +76,14 @@ pub enum Request {
     Keep { session: String },
     /// Close a fan-out group: stop its agents, remove their worktrees and branches.
     Discard { group: String },
+    /// The settings document.
+    Settings,
+    /// Replace the settings document.
+    SetSettings { settings: crate::settings::Settings },
+    /// Which provider keys exist and where from; never their values.
+    Keys,
+    /// Store a key in dino's key store, or remove it with no `value`. Takes effect at once.
+    SetKey { name: String, value: Option<String> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -88,6 +96,8 @@ pub enum Response {
     Groups { groups: Vec<GroupInfo> },
     Tree { repos: Vec<RepoInfo> },
     Diff { stat: DiffStat, text: String },
+    Settings { settings: crate::settings::Settings },
+    Keys { keys: Vec<crate::settings::KeyInfo> },
     Ok,
     Error { message: String },
 }
