@@ -122,6 +122,8 @@ final class DinoModel: ObservableObject {
 
     /// One live Ghostty surface per session, kept mounted so switching is instant.
     private(set) var terminals: [String: TerminalViewState] = [:]
+    /// The session whose terminal has keyboard focus, for ⌘W.
+    @Published var focusedTerminal: String?
     private(set) var connection: DinoConnection?
     private var polling = false
 
@@ -200,6 +202,13 @@ final class DinoModel: ObservableObject {
     }
 
     private func apply(_ next: [SessionInfo], _ quotas: [QuotaInfo]) {
+        // Output older than 5s all reads as quiet: without this an idle session differs on every
+        // tick and the whole window redraws four times a second.
+        let next = next.map { s in
+            var s = s
+            s.output_ms_ago = s.output_ms_ago.map { min($0, 5000) }
+            return s
+        }
         let appActive = NSApp.isActive
         for s in next {
             guard let prev = sessions.first(where: { $0.id == s.id }) else { continue }
@@ -469,7 +478,9 @@ final class DinoModel: ObservableObject {
         let folders = [folder.path]
         Task.detached {
             guard let list = try? DinoConnection(path: DinoEnvironment.socketPath).tree(folders: folders) else { return }
-            await MainActor.run { if list != self.repos { self.repos = list } }
+            // An answer for a folder we've since left (on launch: home, before the first session
+            // is selected) would show that folder until the next tick.
+            await MainActor.run { if [self.folder.path] == folders, list != self.repos { self.repos = list } }
         }
     }
 
