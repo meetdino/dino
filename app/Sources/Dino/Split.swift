@@ -151,9 +151,9 @@ struct PaneHeader: View {
         let status = model.status(of: session)
         HStack(spacing: 7) {
             StatusDot(status: status)
-            Text(session.name).font(.system(.callout, design: .monospaced).weight(.semibold))
+            Text(session.display).font(.system(.callout, design: .monospaced).weight(.semibold))
                 .foregroundStyle(focused ? Brand.green : .secondary)
-            if let t = session.title { Text(t).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
+            if session.label == nil, let t = session.title { Text(t).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
             Spacer(minLength: 4)
             Text(status.label).font(.caption).foregroundStyle(status.color)
             Button {
@@ -219,6 +219,12 @@ struct SessionMenu: View {
             Button("Close Pane") { model.closePane(session.id) }
         }
         Divider()
+        Button("Rename…") { model.renaming = Renaming(id: session.id, place: .sidebar) }
+        // A fan-out member goes with its fan-out: keep or discard that instead.
+        if !model.groups.contains(where: { $0.members.contains { $0.session == session.id } }) {
+            Button("Archive") { model.archive(session.id) }
+                .help("Stop it and keep it in Archived, to pick up again later")
+        }
         Button("Kill Session", role: .destructive) { model.kill(session.id) }
     }
 }

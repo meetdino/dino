@@ -130,6 +130,22 @@ pub enum Request {
     ReviewCancel { id: String },
     /// Turn the session's PR automation on or off; a missing flag stays as it is.
     PrAuto { id: String, fix: Option<bool>, merge: Option<bool> },
+    /// Name a session, over the title its agent sets; an empty name goes back to that title.
+    Rename { id: String, name: String },
+    /// Stop a session but keep it to pick up later. Its worktree goes too when nothing in it
+    /// would be lost (clean, and pushed or merged); `Unarchive` makes it again from the branch.
+    Archive { id: String },
+    /// Archived sessions, newest first.
+    Archived,
+    /// Start an archived session again, resuming its agent's conversation where the agent can.
+    Unarchive { id: String },
+    /// Forget an archived session for good.
+    DeleteArchived { id: String },
+    /// Every worktree dino made, with its size on disk.
+    Storage,
+    /// Remove a worktree dino made (and its branch when merged), never forcing: refuses one
+    /// with uncommitted work, one a session runs in, and fan-out members (discard the group).
+    RemoveStored { path: String },
     /// The dev servers the session's folder configures (`.dino/launch.json`, `.claude/launch.json`).
     PreviewConfigs { id: String },
     /// Start the named dev server in the session's folder; it stops with the session.
@@ -166,6 +182,8 @@ pub enum Response {
     PrDraft { draft: PrDraft },
     Pr { pr: PrInfo },
     Review { findings: Vec<crate::review::Finding> },
+    Archived { sessions: Vec<ArchivedInfo> },
+    Storage { worktrees: Vec<StoredWorktree> },
     /// A broken launch file lists nothing, and `error` says why.
     PreviewConfigs { configs: Vec<crate::preview::PreviewConfig>, error: Option<String> },
     PreviewLog { text: String },
@@ -241,6 +259,46 @@ pub struct SessionInfo {
     /// The scheduled task that started it, by name.
     #[serde(default)]
     pub scheduled: Option<String>,
+    /// The name the user gave it (`Rename`); `title` already shows it over the agent's.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// A stopped session kept to start again.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ArchivedInfo {
+    pub id: String,
+    pub name: String,
+    pub label: Option<String>,
+    pub launcher: String,
+    pub cwd: String,
+    pub branch: Option<String>,
+    /// Unix seconds.
+    pub archived_at: u64,
+    /// The agent's own session id, when dino can resume its conversation.
+    pub resumable: bool,
+    /// Its worktree was removed and comes back from `branch` when it's started again.
+    pub worktree_removed: bool,
+}
+
+/// A worktree dino made, for the Storage list.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StoredWorktree {
+    pub path: String,
+    pub repo: String,
+    pub branch: String,
+    /// "in_progress", "ready", "merged" or "empty" (see `worktree::Summary`).
+    pub state: String,
+    /// Has uncommitted changes, so dino won't remove it.
+    pub dirty: bool,
+    /// Bytes on disk; None until measured.
+    pub size: Option<u64>,
+    /// A live session running in it, by name.
+    pub session: Option<String>,
+    /// Kept for an archived session (removing it here still lets that one come back from its branch).
+    pub archived: bool,
+    /// Belongs to a fan-out group.
+    pub fanout: bool,
 }
 
 /// What dino does about a session's PR by itself. Kept with the session, so it survives dinod restarts.
