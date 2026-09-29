@@ -6,6 +6,7 @@ pub mod discover;
 pub mod found;
 pub mod ipc;
 pub mod pr;
+pub mod preview;
 pub mod review;
 pub mod schedule;
 pub mod settings;

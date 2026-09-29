@@ -137,6 +137,13 @@ pub enum Request {
     /// Remove a worktree dino made (and its branch when merged), never forcing: refuses one
     /// with uncommitted work, one a session runs in, and fan-out members (discard the group).
     RemoveStored { path: String },
+    /// The dev servers the session's folder configures (`.dino/launch.json`, `.claude/launch.json`).
+    PreviewConfigs { id: String },
+    /// Start the named dev server in the session's folder; it stops with the session.
+    PreviewStart { id: String, name: String },
+    PreviewStop { id: String, name: String },
+    /// What the named dev server has printed (the tail).
+    PreviewLog { id: String, name: String },
     /// Scheduled tasks, with their history and next run.
     ScheduleList,
     /// Add a task (no `id`) or replace one; pausing and resuming is a put with `enabled` changed.
@@ -168,6 +175,9 @@ pub enum Response {
     Review { findings: Vec<crate::review::Finding> },
     Archived { sessions: Vec<ArchivedInfo> },
     Storage { worktrees: Vec<StoredWorktree> },
+    /// A broken launch file lists nothing, and `error` says why.
+    PreviewConfigs { configs: Vec<crate::preview::PreviewConfig>, error: Option<String> },
+    PreviewLog { text: String },
     Schedule { tasks: Vec<crate::schedule::ScheduledTask> },
     Ok,
     Error { message: String },
@@ -216,6 +226,12 @@ pub struct SessionInfo {
     /// What dino does about the PR by itself.
     #[serde(default)]
     pub auto: AutoPr,
+    /// Dev servers started for the session's preview, running or ended.
+    #[serde(default)]
+    pub previews: Vec<PreviewInfo>,
+    /// The last local web address the agent printed (a dev server it started), to offer a preview of.
+    #[serde(default)]
+    pub local_url: Option<String>,
     /// The scheduled task that started it, by name.
     #[serde(default)]
     pub scheduled: Option<String>,
@@ -278,6 +294,7 @@ pub struct AutoPr {
 pub const MAX_AUTO_FIXES: u32 = 3;
 
 pub use crate::pr::{Checks, PrDraft, PrInfo};
+pub use crate::preview::PreviewInfo;
 pub use crate::worktree::Worktree;
 
 /// A git repo, or a plain folder (no worktrees) where sessions run.

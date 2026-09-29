@@ -194,7 +194,7 @@ struct ReviewPanel: View {
                             Section {
                                 if !collapsed.contains(f.path) { fileBody(f) }
                             } header: {
-                                FileHeader(file: f, collapsed: collapsed.contains(f.path)) {
+                                FileHeader(file: f, collapsed: collapsed.contains(f.path), open: opener(c, f)) {
                                     if collapsed.contains(f.path) { collapsed.remove(f.path) } else { collapsed.insert(f.path) }
                                 }
                             }
@@ -207,14 +207,22 @@ struct ReviewPanel: View {
         }
     }
 
+    /// Opens the file in the file pane, at a line; nil for a file that's gone.
+    private func opener(_ c: Changes, _ f: FileDiff) -> ((Int?) -> Void)? {
+        let path = (c.root as NSString).appendingPathComponent(f.path)
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        return { [model, session] line in model.openFile(path, line: line, session: session.id) }
+    }
+
     @ViewBuilder
     private func fileBody(_ f: FileDiff) -> some View {
         if f.binary {
             Placeholder(text: "Binary file").padding(.vertical, 8)
         }
+        let open = changes.flatMap { opener($0, f) }
         ForEach(Array(f.lines.enumerated()), id: \.offset) { _, line in
             let ref = LineRef(path: f.path, line)
-            DiffRow(line: line, commenting: ref != nil && ref == composing) {
+            DiffRow(line: line, commenting: ref != nil && ref == composing, open: open) {
                 guard let ref else { return }
                 draft = ""
                 composing = composing == ref ? nil : ref
@@ -305,6 +313,7 @@ private struct Placeholder: View {
 private struct FileHeader: View {
     let file: FileDiff
     let collapsed: Bool
+    let open: ((Int?) -> Void)?
     let toggle: () -> Void
 
     var body: some View {
@@ -325,6 +334,11 @@ private struct FileHeader: View {
                 Spacer(minLength: 8)
                 Text("+\(file.added)").foregroundStyle(Brand.green)
                 Text("−\(file.removed)").foregroundStyle(SessionStatus.exited.color)
+                if let open {
+                    Button { open(nil) } label: { Image(systemName: "doc.text") }
+                        .buttonStyle(.borderless)
+                        .help("Open \((file.path as NSString).lastPathComponent)")
+                }
             }
             .font(.callout.monospacedDigit())
             .padding(.horizontal, 12)
@@ -332,6 +346,9 @@ private struct FileHeader: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            if let open { Button("Open File") { open(nil) } }
+        }
         // Opaque, so lines scroll under the pinned header rather than through it.
         .background(Color(nsColor: .windowBackgroundColor))
         .overlay(alignment: .bottom) { Divider() }
@@ -360,6 +377,7 @@ private struct StatusLetter: View {
 private struct DiffRow: View {
     let line: DiffLine
     let commenting: Bool
+    var open: ((Int?) -> Void)?
     let onComment: () -> Void
     @State private var hovering = false
 
@@ -393,7 +411,11 @@ private struct DiffRow: View {
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .onTapGesture(perform: onComment)
-            .help("Click to comment on this line")
+            .contextMenu {
+                Button("Comment on This Line", action: onComment)
+                if let open, let n = line.new { Button("Open File at Line \(n)") { open(Int(n)) } }
+            }
+            .help("Click to comment on this line; right-click to open the file there")
         }
     }
 
