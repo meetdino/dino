@@ -185,6 +185,16 @@ pub enum Request {
     /// What a session has been doing, as text: its conversation's last turns when dino can read
     /// them, and the screen now. `lines` bounds the screen part.
     ReadSession { id: String, lines: Option<u32> },
+    /// A subagent and its conversation so far (answers `Subagent`): subagent `agent` of session
+    /// `session`, or the one that made `worktree`.
+    ReadSubagent {
+        #[serde(default)]
+        session: Option<String>,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        worktree: Option<String>,
+    },
     /// Type `text` into session `id` and submit it, only while it's between turns: refused while
     /// it works or waits on a permission. `by` is the session sending it.
     Message { id: String, text: String, by: Option<String> },
@@ -227,6 +237,7 @@ pub enum Response {
     PreviewLog { text: String },
     Schedule { tasks: Vec<crate::schedule::ScheduledTask> },
     Text { text: String },
+    Subagent { subagent: SubagentView },
     Ok,
     Error { message: String },
 }
@@ -364,6 +375,35 @@ pub struct SubagentInfo {
     /// Its own worktree, when it runs in one; symlinks resolved.
     #[serde(default)]
     pub worktree: Option<String>,
+}
+
+/// A subagent, to watch: it runs inside its session's agent, so there's no terminal of its own,
+/// only the conversation its agent writes down.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SubagentView {
+    pub id: String,
+    /// The session whose agent started it.
+    pub session: String,
+    /// Its own worktree, when it has one.
+    #[serde(default)]
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub running: bool,
+    /// Its conversation, oldest first; `None` when dino can't read it (not Claude, or it's gone).
+    #[serde(default)]
+    pub turns: Option<Vec<TurnInfo>>,
+}
+
+/// One thing in a conversation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TurnInfo {
+    /// "task" (what it was asked), "user" (a message since), "agent", "tool" (a call, in short)
+    /// or "note" (the conversation was compacted or interrupted).
+    pub role: String,
+    pub text: String,
 }
 
 /// A shell command or monitor the agent runs in the background.

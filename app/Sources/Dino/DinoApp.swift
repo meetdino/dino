@@ -292,7 +292,9 @@ struct Terminals: View {
     var body: some View {
         ZStack {
             Color(nsColor: .textBackgroundColor).ignoresSafeArea()
-            if model.sessions.isEmpty || model.daemonDown || model.selected?.hasPrefix("dir:") == true {
+            if let ref = model.shownSubagent, !model.daemonDown {
+                SubagentPane(ref: ref).id(ref)
+            } else if model.sessions.isEmpty || model.daemonDown || model.selected?.hasPrefix("dir:") == true {
                 EmptyState()
             }
             GeometryReader { geo in
