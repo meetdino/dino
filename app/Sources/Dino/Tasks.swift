@@ -29,6 +29,12 @@ extension DinoModel {
         select("dir:\(path)")
     }
 
+    /// Show what subagent `agent` of `session` is doing; the pane keeps showing `session`'s tasks.
+    func showSubagent(_ agent: String, of session: String) {
+        tasksFallback = session
+        select(SubagentRef.agent(session: session, id: agent).selection)
+    }
+
     /// File → Open File…, starting in `folder`.
     func chooseFile(in folder: String, session: String?) {
         let panel = NSOpenPanel()
@@ -225,28 +231,42 @@ private struct SubagentRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            Group {
-                if agent.running {
-                    ProgressView().controlSize(.small)
+            // Shows what it's doing; one in a worktree of its own through that worktree's sidebar row.
+            Button {
+                if let wt = agent.worktree {
+                    model.revealWorktree(wt, of: session)
                 } else {
-                    Image(systemName: "checkmark").foregroundStyle(.secondary)
+                    model.showSubagent(agent.id, of: session)
                 }
-            }
-            .frame(width: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(agent.description ?? agent.agent_type ?? "Subagent").lineLimit(2)
-                HStack(spacing: 4) {
-                    if let t = agent.agent_type { Text(t) }
-                    if agent.worktree != nil {
-                        Text("·")
-                        Image(systemName: "arrow.triangle.branch")
-                        Text("own worktree")
+            } label: {
+                HStack(alignment: .center, spacing: 8) {
+                    Group {
+                        if agent.running {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "checkmark").foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(width: 16)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(agent.description ?? agent.agent_type ?? "Subagent").lineLimit(2)
+                        HStack(spacing: 4) {
+                            if let t = agent.agent_type { Text(t) }
+                            if agent.worktree != nil {
+                                Text("·")
+                                Image(systemName: "arrow.triangle.branch")
+                                Text("own worktree")
+                            }
+                        }
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 6)
+                    Elapsed(started: agent.started, finished: agent.finished, running: agent.running)
                 }
-                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                .contentShape(Rectangle())
             }
-            Spacer(minLength: 6)
-            Elapsed(started: agent.started, finished: agent.finished, running: agent.running)
+            .buttonStyle(.plain)
+            .help(agent.worktree.map { "Runs in \(shortPath($0)). Click to see what it's doing" } ?? "Click to see what it's doing")
             if let wt = agent.worktree { WorktreeMenu(path: wt, session: session) }
         }
         .padding(.vertical, 2)
@@ -254,7 +274,6 @@ private struct SubagentRow: View {
             if let wt = agent.worktree { WorktreeMenuItems(path: wt, session: session) }
             Button("Copy Agent ID") { copy(agent.id) }
         }
-        .help(agent.worktree.map { "Runs in \(shortPath($0))" } ?? (agent.description ?? ""))
     }
 }
 
@@ -276,14 +295,15 @@ private struct WorktreeMenu: View {
     }
 }
 
-private struct WorktreeMenuItems: View {
+struct WorktreeMenuItems: View {
     @EnvironmentObject var model: DinoModel
     let path: String
     let session: String
+    var inSidebar = true
 
     var body: some View {
         Button("Open a File from Its Worktree…") { model.chooseFile(in: path, session: session) }
-        Button("Show in Sidebar") { model.revealWorktree(path, of: session) }
+        if inSidebar { Button("Show in Sidebar") { model.revealWorktree(path, of: session) } }
         if let editor = ExternalEditor.preferred(for: path) {
             Button("Open in \(editor.name)") { editor.openFolder(path) }
         }
