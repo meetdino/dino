@@ -10,14 +10,11 @@ struct SubagentDetail: Decodable, Equatable {
     var agent_type: String?
     var description: String?
     var running: Bool
-    /// Nil when its conversation can't be read (not Claude's, or not written yet).
-    var turns: [TurnInfo]?
-}
-
-struct TurnInfo: Decodable, Equatable {
-    /// "task", "user", "agent", "tool" or "note".
-    var role: String
-    var text: String
+    /// What it was asked.
+    var task: String?
+    /// The newest part of its conversation; nil when it can't be read (not Claude's, or not
+    /// written yet).
+    var conversation: ConversationPage?
 }
 
 private struct SubagentResponse: Decodable {
@@ -127,8 +124,13 @@ struct SubagentPane: View {
             VStack(spacing: 0) {
                 header
                 Divider()
-                TranscriptView(turns: detail?.turns, loading: detail == nil && failed == nil,
-                               unreadable: failed ?? "Its conversation can’t be read: only Claude’s subagents write one dino can show.")
+                let id = detail?.id
+                ConversationView(page: detail?.conversation, task: detail?.task, loading: detail == nil && failed == nil,
+                                 unreadable: failed ?? "Its conversation can’t be read: only Claude’s subagents write one dino can show.") { before in
+                    guard let id else { return nil }
+                    return try? await ConversationPage.fetch(agent: "claude", id: id, before: before).get()
+                }
+                .id(ref)
             }
             // Polls while it runs; once more when it stops.
             .task(id: "\(ref.selection)|\(running)") { await follow() }
@@ -219,71 +221,6 @@ struct SubagentPane: View {
             }
             guard running || detail?.running == true else { return }
             try? await Task.sleep(for: .seconds(2))
-        }
-    }
-}
-
-/// A conversation read from an agent's transcript, oldest first, kept scrolled to the newest.
-struct TranscriptView: View {
-    let turns: [TurnInfo]?
-    var loading = false
-    /// Shown when there's nothing to show and it isn't loading.
-    var unreadable = "This conversation can’t be read."
-
-    var body: some View {
-        if let turns, !turns.isEmpty {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(turns.indices, id: \.self) { i in TurnRow(turn: turns[i]) }
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .defaultScrollAnchor(.bottom)
-        } else {
-            VStack(spacing: 8) {
-                if loading {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Text(turns == nil ? unreadable : "Nothing said yet.")
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-            }
-            .padding(40)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-}
-
-private struct TurnRow: View {
-    let turn: TurnInfo
-
-    var body: some View {
-        switch turn.role {
-        case "tool":
-            Label(turn.text, systemImage: "wrench.and.screwdriver")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.tail)
-        case "note":
-            Text(turn.text)
-                .font(.caption.italic())
-                .foregroundStyle(.tertiary)
-                .frame(maxWidth: .infinity)
-        case "task", "user":
-            VStack(alignment: .leading, spacing: 4) {
-                Text(turn.role == "task" ? "Task" : "Message").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Text(turn.text).textSelection(.enabled)
-            }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Brand.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-        default:
-            Text((try? AttributedString(markdown: turn.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(turn.text))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

@@ -447,7 +447,8 @@ final class DinoConnection: @unchecked Sendable {
         try JSONDecoder().decode(FoundResponse.self, from: send(["type": "found", "cloud": cloud, "running_only": runningOnly])).sessions
     }
 
-    /// Part of a found session's conversation, ending at byte `before` of its file (default: the end).
+    /// Part of a conversation (a found session's, or a Claude subagent's by its id), ending at byte
+    /// `before` of its file (default: the end).
     func conversation(agent: String, sessionID: String, before: UInt64? = nil) throws -> ConversationPage {
         var body: [String: Any] = ["type": "conversation", "agent": agent, "session_id": sessionID]
         if let before { body["before"] = before }
