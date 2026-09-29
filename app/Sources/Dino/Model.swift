@@ -5,12 +5,14 @@ import UserNotifications
 
 enum SessionStatus {
     /// `ended`: its program exited cleanly and can be resumed; `exited`: it failed.
-    case thinking, working, idle, done, needsYou, ended, exited
+    /// `waiting`: its turn ended on subagents or background commands that still run.
+    case thinking, working, waiting, idle, done, needsYou, ended, exited
 
     var label: String {
         switch self {
         case .thinking: "thinking"
         case .working: "working"
+        case .waiting: "waiting"
         case .idle: "idle"
         case .done: "done"
         case .needsYou: "needs you"
@@ -23,6 +25,7 @@ enum SessionStatus {
         switch self {
         case .thinking: Color(red: 0.78, green: 0.52, blue: 1.0)
         case .working: Brand.green
+        case .waiting: Brand.green.opacity(0.7)
         case .idle: .secondary
         case .done: Color(red: 0.45, green: 0.82, blue: 0.95)
         case .needsYou: Color(red: 1.0, green: 0.78, blue: 0.2)
@@ -220,7 +223,7 @@ final class DinoModel: ObservableObject {
             let looking = appActive && s.id == selected
             if !looking {
                 if s.bells > prev.bells { attention.insert(s.id) }
-                let wasBusy = prev.activity == "working" || prev.needs != nil
+                let wasBusy = prev.activity == "working" || prev.needs != nil || prev.waitingOn != nil
                 if s.activity == "done", wasBusy {
                     unseenDone.insert(s.id)
                     if s.scheduled == nil {
@@ -233,7 +236,7 @@ final class DinoModel: ObservableObject {
             }
             // Nobody watched a scheduled run start: say when it's done, even if it's in front of you.
             if let task = s.scheduled {
-                let busy = !s.exited && (s.activity == "working" || s.in_flight > 0 || (s.activity == nil && (s.output_ms_ago ?? .max) < 5000))
+                let busy = !s.exited && (s.activity == "working" || s.waitingOn != nil || s.in_flight > 0 || (s.activity == nil && (s.output_ms_ago ?? .max) < 5000))
                 if busy {
                     scheduledBusy.insert(s.id)
                 } else if scheduledBusy.remove(s.id) != nil {
@@ -297,7 +300,9 @@ final class DinoModel: ObservableObject {
             return unseenDone.contains(s.id) ? .done : .idle
         }
         // Agents with hooks (Claude) say when a turn starts and ends. Between turns, their side
-        // calls and their redraws when you focus or resize the pane aren't work.
+        // calls and their redraws when you focus or resize the pane aren't work. A turn that ended
+        // on subagents or background commands isn't done until they are.
+        if s.waitingOn != nil { return .waiting }
         if let a = s.activity, a != "working" { return unseenDone.contains(s.id) ? .done : .idle }
         if s.in_flight > 0 { return .thinking }
         if s.activity == "working" || (s.output_ms_ago ?? .max) < 1500 { return .working }

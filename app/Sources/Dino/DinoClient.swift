@@ -58,6 +58,12 @@ struct SessionInfo: Codable, Identifiable, Equatable {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
         return String(a.dropFirst(6))
     }
+
+    /// Its turn ended on work that still runs: "1 agent", "2 commands", "1 agent, 1 command".
+    var waitingOn: String? {
+        guard let a = activity, a.hasPrefix("waiting:") else { return nil }
+        return String(a.dropFirst(8))
+    }
 }
 
 /// What an agent tracks underneath its conversation (see crates/dino-core/src/ipc.rs).
