@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod controls;
 pub mod discover;
 pub mod found;
 pub mod ipc;

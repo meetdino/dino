@@ -29,6 +29,13 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var previews: [PreviewInfo]?
     /// The last local web address it printed, to offer a preview of.
     var local_url: String?
+    /// The mode, model and effort it runs with; nil from an older dinod.
+    var controls: Controls?
+    /// Asked for mid-turn; applied (by a restart) once the turn is over.
+    var pending: Controls?
+    /// How full the context window is: tokens the last model call read, and the window's size.
+    var context_tokens: UInt64?
+    var context_limit: UInt64?
     /// The scheduled task that started it.
     var scheduled: String?
 
@@ -117,7 +124,54 @@ struct LauncherInfo: Codable, Identifiable, Equatable {
     var agent_id: String
     var label: String
     var program: String
+    /// The mode, model and effort it offers; nil from an older dinod.
+    var knobs: Knobs?
     var id: String { short }
+}
+
+/// A session's permission mode, model and effort (see crates/dino-core/src/controls.rs).
+/// Nil is the agent's own default.
+struct Controls: Codable, Equatable, Hashable {
+    var mode: String?
+    var model: String?
+    var effort: String?
+
+    var json: [String: Any] {
+        var d: [String: Any] = [:]
+        if let mode { d["mode"] = mode }
+        if let model { d["model"] = model }
+        if let effort { d["effort"] = effort }
+        return d
+    }
+}
+
+/// What a launcher lets you choose; empty lists mean it has no such control.
+struct Knobs: Codable, Equatable {
+    var modes: [String]
+    var model: Bool
+    /// Short model names it understands; others can be typed.
+    var models: [String]
+    var efforts: [String]
+    /// Changing a control restarts the agent, resuming its conversation.
+    var restart: Bool
+
+    var any: Bool { !modes.isEmpty || model || !efforts.isEmpty }
+}
+
+/// Neutral permission modes: dino maps each to the agent's own flags.
+enum Mode {
+    static let all: [(id: String, label: String, help: String)] = [
+        ("ask", "Ask", "Asks before editing files or running commands"),
+        ("edits", "Accept edits", "Edits files without asking; asks before commands"),
+        ("plan", "Plan", "Reads and plans; changes nothing"),
+        ("auto", "Auto", "The agent decides what's safe to do without asking"),
+        ("bypass", "Bypass", "Never asks. Only in a sandbox you trust"),
+    ]
+    static func label(_ id: String?) -> String {
+        guard let id else { return "Default" }
+        return all.first { $0.id == id }?.label ?? id
+    }
+    static func help(_ id: String) -> String { all.first { $0.id == id }?.help ?? "" }
 }
 
 /// A session dino didn't start: running in another terminal, recent on disk, or in the cloud.
@@ -386,6 +440,11 @@ final class DinoConnection: @unchecked Sendable {
 
     func previewLog(session: String, name: String) throws -> String {
         try JSONDecoder().decode(PreviewLogResponse.self, from: send(["type": "preview_log", "id": session, "name": name])).text
+    }
+
+    /// Change mode, model or effort. The agent restarts, resuming its conversation; mid-turn, once the turn is over.
+    func setControls(session: String, controls: Controls) throws {
+        _ = try send(["type": "set_controls", "id": session, "controls": controls.json])
     }
 
     /// Continue `session` in dino; returns the new dino session id.
