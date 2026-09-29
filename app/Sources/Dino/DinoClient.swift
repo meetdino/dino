@@ -21,11 +21,59 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var error: String?
     /// Where it runs, symlinks resolved; nil from an older dinod.
     var cwd: String?
+    /// The pull request for its branch, whoever opened it.
+    var pr: PrInfo?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
         return String(a.dropFirst(6))
     }
+}
+
+/// A GitHub pull request, as `gh pr view` sees it (see crates/dino-core/src/pr.rs).
+struct PrInfo: Codable, Equatable {
+    var number: UInt32
+    var url: String
+    var title: String
+    /// "open", "merged" or "closed".
+    var state: String
+    var draft: Bool
+    var checks: Checks
+    /// "approved", "changes_requested" or "review_required".
+    var review: String?
+
+    var isOpen: Bool { state == "open" }
+    var canMerge: Bool { isOpen && !draft && checks.failed == 0 && checks.pending == 0 }
+}
+
+/// CI checks on a PR; all zero when the repo has none.
+struct Checks: Codable, Equatable {
+    var passed: UInt32
+    var failed: UInt32
+    var pending: UInt32
+    /// Names of the checks that failed.
+    var failing: [String]
+}
+
+/// What the Create PR sheet starts from.
+struct PrDraft: Codable, Equatable {
+    var branch: String
+    var base: String
+    var title: String
+    var body: String
+    /// Changed files not committed yet: committed with the title as the message first.
+    var uncommitted: UInt32
+    var commits: UInt32
+    /// Why a PR can't be made from here.
+    var note: String?
+}
+
+private struct PrDraftResponse: Decodable {
+    var draft: PrDraft
+}
+
+private struct PrResponse: Decodable {
+    var pr: PrInfo
 }
 
 struct WindowInfo: Codable, Equatable {
@@ -213,6 +261,26 @@ final class DinoConnection: @unchecked Sendable {
     /// Type `text` into a session as a paste; `submit` presses Return after it.
     func sendInput(session: String, text: String, submit: Bool) throws {
         _ = try send(["type": "send_input", "id": session, "text": text, "submit": submit])
+    }
+
+    func prDraft(session: String) throws -> PrDraft {
+        try JSONDecoder().decode(PrDraftResponse.self, from: send(["type": "pr_draft", "id": session])).draft
+    }
+
+    /// Commit what's uncommitted, push the branch and open the PR.
+    func prCreate(session: String, title: String, body: String, base: String, draft: Bool) throws -> PrInfo {
+        try JSONDecoder().decode(PrResponse.self, from: send([
+            "type": "pr_create", "id": session, "title": title, "body": body, "base": base, "draft": draft,
+        ])).pr
+    }
+
+    /// Hand the failing checks' logs to the session's agent.
+    func prFix(session: String) throws {
+        _ = try send(["type": "pr_fix", "id": session])
+    }
+
+    func prMerge(session: String) throws -> PrInfo {
+        try JSONDecoder().decode(PrResponse.self, from: send(["type": "pr_merge", "id": session])).pr
     }
 
     /// Continue `session` in dino; returns the new dino session id.
