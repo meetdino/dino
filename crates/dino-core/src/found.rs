@@ -1,7 +1,6 @@
 //! Agent sessions that exist outside dino: running in another terminal, recent on disk, or in the
 //! cloud. dino can continue any of them (see dinod's `Adopt`).
 
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -130,7 +129,7 @@ fn running_claude() -> Vec<FoundSession> {
             continue;
         }
         let cwd = v["cwd"].as_str().map(String::from);
-        let title = claude_title(sid).or_else(|| v["name"].as_str().map(String::from)).unwrap_or_else(|| "Claude Code session".into());
+        let title = crate::history::claude_title(sid).or_else(|| v["name"].as_str().map(String::from)).unwrap_or_else(|| "Claude Code session".into());
         out.push(FoundSession {
             source: Source::Running,
             agent: "claude".into(),
@@ -151,25 +150,26 @@ fn running_claude() -> Vec<FoundSession> {
 /// Codex keeps its rollout file open; `lsof` names the session and its cwd.
 fn running_codex() -> Vec<FoundSession> {
     let Some(pids) = run("pgrep", &["-x", "codex"]) else { return vec![] };
-    let names = codex_names();
+    let titles = crate::history::codex_titles();
     let mut out = vec![];
     for pid in pids.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
         let Some(files) = run("lsof", &["-p", &pid.to_string(), "-Fn"]) else { continue };
         let Some(rollout) = files.lines().filter_map(|l| l.strip_prefix('n')).find(|f| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) else {
             continue;
         };
-        let Some(sid) = rollout_id(Path::new(rollout)) else { continue };
+        let rollout = Path::new(rollout);
+        let Some(sid) = crate::history::rollout_id(rollout) else { continue };
         let cwd = run("lsof", &["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
             .and_then(|s| s.lines().find_map(|l| l.strip_prefix('n').map(String::from)));
         out.push(FoundSession {
             source: Source::Running,
             agent: "codex".into(),
-            title: names.iter().find(|(id, ..)| *id == sid).map(|(_, n, _)| n.clone()).unwrap_or_else(|| "Codex session".into()),
+            title: titles.get(&sid).cloned().or_else(|| crate::history::codex_meta(rollout).title).unwrap_or_else(|| "Codex session".into()),
             session_id: sid,
             cwd,
-            updated_at: mtime(Path::new(rollout)),
+            updated_at: mtime(rollout),
             pid: Some(pid),
-            status: None,
+            status: crate::history::codex_status(rollout),
             terminal: terminal_of(pid),
             args: portable_flags("codex", &args_of(pid)),
             url: None,
@@ -182,122 +182,6 @@ pub fn running() -> Vec<FoundSession> {
     let mut v = running_claude();
     v.extend(running_codex());
     v
-}
-
-/// Session id from a rollout filename: `rollout-<timestamp>-<uuid>.jsonl`.
-fn rollout_id(p: &Path) -> Option<String> {
-    let stem = p.file_stem()?.to_str()?;
-    let id = stem.get(stem.len().checked_sub(36)?..)?;
-    (id.len() == 36 && id.chars().filter(|&c| c == '-').count() == 4).then(|| id.to_string())
-}
-
-/// (id, thread name, updated) from `~/.codex/session_index.jsonl`; later lines win.
-fn codex_names() -> Vec<(String, String, String)> {
-    let text = std::fs::read_to_string(home().join(".codex/session_index.jsonl")).unwrap_or_default();
-    let mut out: Vec<(String, String, String)> = vec![];
-    for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
-        let (Some(id), Some(name)) = (v["id"].as_str(), v["thread_name"].as_str()) else { continue };
-        out.retain(|(i, ..)| i != id);
-        out.push((id.into(), name.into(), v["updated_at"].as_str().unwrap_or_default().into()));
-    }
-    out
-}
-
-/// Title and cwd from a Claude transcript: the latest `ai-title`, else the last prompt.
-fn claude_transcript_info(path: &Path) -> (Option<String>, Option<String>) {
-    let Ok(f) = std::fs::File::open(path) else { return (None, None) };
-    let (mut title, mut prompt, mut cwd) = (None, None, None);
-    for line in BufReader::new(f).lines().map_while(Result::ok) {
-        if line.contains("\"type\":\"ai-title\"") {
-            title = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["aiTitle"].as_str().map(String::from));
-        } else if line.contains("\"type\":\"last-prompt\"") {
-            prompt = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["lastPrompt"].as_str().map(String::from));
-        } else if cwd.is_none() && line.contains("\"cwd\":") {
-            cwd = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["cwd"].as_str().map(String::from));
-        }
-    }
-    let title = title.or(prompt.map(|p| p.chars().take(60).collect()));
-    (title, cwd)
-}
-
-fn claude_title(session_id: &str) -> Option<String> {
-    let projects = home().join(".claude/projects");
-    std::fs::read_dir(projects)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|d| d.path().join(format!("{session_id}.jsonl")))
-        .find(|p| p.exists())
-        .and_then(|p| claude_transcript_info(&p).0)
-}
-
-/// Recent conversations on disk, newest first, excluding ones currently running.
-pub fn recent(limit: usize, running: &[FoundSession]) -> Vec<FoundSession> {
-    let is_running = |id: &str| running.iter().any(|r| r.session_id == id);
-    let mut out = vec![];
-
-    let mut transcripts: Vec<(u64, PathBuf)> = std::fs::read_dir(home().join(".claude/projects"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .flat_map(|d| std::fs::read_dir(d.path()).into_iter().flatten().flatten())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
-        .map(|p| (mtime(&p), p))
-        .collect();
-    transcripts.sort_by(|a, b| b.0.cmp(&a.0));
-    for (updated, p) in transcripts.into_iter().take(limit) {
-        let Some(sid) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else { continue };
-        if is_running(&sid) {
-            continue;
-        }
-        let (title, cwd) = claude_transcript_info(&p);
-        // Transcripts with no prompt yet aren't worth resuming.
-        let Some(title) = title else { continue };
-        out.push(FoundSession { source: Source::Recent, agent: "claude".into(), session_id: sid, title, cwd, updated_at: updated, pid: None, status: None, terminal: None, args: vec![], url: None });
-    }
-
-    let names = codex_names();
-    let mut rollouts: Vec<(u64, PathBuf)> = walk_rollouts(&home().join(".codex/sessions")).into_iter().map(|p| (mtime(&p), p)).collect();
-    rollouts.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut seen = vec![];
-    for (updated, p) in rollouts {
-        let Some(sid) = rollout_id(&p) else { continue };
-        if is_running(&sid) || seen.contains(&sid) {
-            continue;
-        }
-        seen.push(sid.clone());
-        if seen.len() > limit {
-            break;
-        }
-        let meta = first_line(&p).and_then(|l| serde_json::from_str::<Value>(&l).ok());
-        let cwd = meta.as_ref().and_then(|m| m["payload"]["cwd"].as_str().map(String::from));
-        let title = names.iter().find(|(id, ..)| *id == sid).map(|(_, n, _)| n.clone()).unwrap_or_else(|| "Codex session".into());
-        out.push(FoundSession { source: Source::Recent, agent: "codex".into(), session_id: sid, title, cwd, updated_at: updated, pid: None, status: None, terminal: None, args: vec![], url: None });
-    }
-    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    out.truncate(limit);
-    out
-}
-
-fn walk_rollouts(root: &Path) -> Vec<PathBuf> {
-    let mut out = vec![];
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
-                out.push(p);
-            }
-        }
-    }
-    out
-}
-
-fn first_line(p: &Path) -> Option<String> {
-    BufReader::new(std::fs::File::open(p).ok()?).lines().next()?.ok()
 }
 
 /// Cloud work: Codex cloud tasks, plus Claude Code web sessions (picked via `--teleport`).
@@ -473,9 +357,9 @@ pub fn inside(fg: u32) -> Option<FoundSession> {
                 let files = run("lsof", &["-p", &pid.to_string(), "-Fn"]).unwrap_or_default();
                 let names: Vec<&str> = files.lines().filter_map(|l| l.strip_prefix('n')).collect();
                 if let Some(rollout) = names.iter().find(|f| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) {
-                    s.session_id = rollout_id(Path::new(rollout)).unwrap_or_default();
+                    s.session_id = crate::history::rollout_id(Path::new(rollout)).unwrap_or_default();
                     s.updated_at = mtime(Path::new(rollout));
-                    if let Some((.., n, _)) = codex_names().into_iter().find(|(id, ..)| *id == s.session_id) {
+                    if let Some(n) = crate::history::codex_titles().remove(&s.session_id) {
                         s.title = n;
                     }
                 }
@@ -542,11 +426,5 @@ mod tests {
         assert_eq!(portable_flags("claude", &args), ["--dangerously-skip-permissions", "--model", "opus"]);
         let args: Vec<String> = ["--resume", "abc-123", "--permission-mode", "plan"].iter().map(|s| s.to_string()).collect();
         assert_eq!(portable_flags("claude", &args), ["--permission-mode", "plan"]);
-    }
-
-    #[test]
-    fn rollout_ids() {
-        let p = Path::new("/x/rollout-2026-09-28T14-16-05-01a0e93b-2fcf-7a20-8efb-916be31ad524.jsonl");
-        assert_eq!(rollout_id(p).as_deref(), Some("01a0e93b-2fcf-7a20-8efb-916be31ad524"));
     }
 }

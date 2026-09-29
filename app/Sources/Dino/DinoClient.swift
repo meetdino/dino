@@ -253,6 +253,13 @@ struct FoundSession: Codable, Identifiable, Equatable {
     var agentName: String { ["claude": "Claude", "codex": "Codex", "gemini": "Gemini"][agent] ?? agent }
 }
 
+/// Part of a conversation, oldest first. `start` is where it begins in its file; 0 means the beginning.
+struct ConversationPage: Codable, Equatable {
+    var turns: [ConversationTurn]
+    var start: UInt64
+    var path: String?
+}
+
 struct DiffStat: Codable, Equatable {
     var files: UInt32
     var added: UInt32
@@ -368,6 +375,10 @@ private struct FoundResponse: Decodable {
     var sessions: [FoundSession]
 }
 
+private struct ConversationResponse: Decodable {
+    var page: ConversationPage
+}
+
 struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
@@ -431,8 +442,16 @@ final class DinoConnection: @unchecked Sendable {
         try JSONDecoder().decode(Response.self, from: send(body))
     }
 
-    func found(cloud: Bool) throws -> [FoundSession] {
-        try JSONDecoder().decode(FoundResponse.self, from: send(["type": "found", "cloud": cloud])).sessions
+    /// `runningOnly` skips finished conversations on disk (cheap enough to poll).
+    func found(cloud: Bool, runningOnly: Bool = false) throws -> [FoundSession] {
+        try JSONDecoder().decode(FoundResponse.self, from: send(["type": "found", "cloud": cloud, "running_only": runningOnly])).sessions
+    }
+
+    /// Part of a found session's conversation, ending at byte `before` of its file (default: the end).
+    func conversation(agent: String, sessionID: String, before: UInt64? = nil) throws -> ConversationPage {
+        var body: [String: Any] = ["type": "conversation", "agent": agent, "session_id": sessionID]
+        if let before { body["before"] = before }
+        return try JSONDecoder().decode(ConversationResponse.self, from: send(body)).page
     }
 
     func groups() throws -> [GroupInfo] {
