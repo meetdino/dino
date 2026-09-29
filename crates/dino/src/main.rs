@@ -928,7 +928,7 @@ fn cmd_found() -> anyhow::Result<()> {
             let place = f.terminal.as_deref().map(|t| format!("in {t}")).unwrap_or_default();
             let status = f.status.as_deref().unwrap_or("");
             let cwd = f.cwd.as_deref().unwrap_or("").replace(&std::env::var("HOME").unwrap_or_default(), "~");
-            println!("  {:<6} {:<38} {:<22} {:<10} {:<9} {}  {}", f.agent, truncate(&f.title, 38), cwd, place, status, &f.session_id.get(..8).unwrap_or(""), f.args.join(" "));
+            println!("  {:<6} {:<38} {:<32} {:<10} {:<9} {}  {}", f.agent, truncate(&f.title, 38), truncate_left(&cwd, 32), place, status, &f.session_id.get(..8).unwrap_or(""), f.args.join(" "));
         }
     }
     Ok(())
