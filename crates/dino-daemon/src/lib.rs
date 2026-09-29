@@ -768,6 +768,7 @@ fn state(d: &Daemon) -> Response {
                 None => (0, None),
             };
             let label = s.label.lock().unwrap().clone();
+            let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -800,6 +801,7 @@ fn state(d: &Daemon) -> Response {
                 context_limit,
                 scheduled: s.scheduled.clone(),
                 label,
+                tasks,
             }
         })
         .collect();
@@ -1308,6 +1310,44 @@ fn summary(d: &Daemon, path: &str, branch: Option<&str>, base: &str) -> Option<w
     let s = worktree::summary(Path::new(path), branch, base).ok();
     d.summaries.lock().unwrap().insert(path.to_string(), (Instant::now(), s.clone()));
     s
+}
+
+/// Its task list and background work, for the Tasks pane. Nothing runs in a session that ended.
+fn session_tasks(st: &dino_proxy::SessionStats, cwd: &Path, exited: bool) -> ipc::SessionTasks {
+    let here = real(cwd);
+    ipc::SessionTasks {
+        todos: st
+            .todos
+            .iter()
+            .map(|t| ipc::TodoInfo { id: t.id.clone(), subject: t.subject.clone(), status: t.status.clone(), active: t.active.clone() })
+            .collect(),
+        subagents: st
+            .subagents
+            .iter()
+            .map(|a| ipc::SubagentInfo {
+                id: a.id.clone(),
+                agent_type: a.agent_type.clone(),
+                description: a.description.clone(),
+                running: a.running && !exited,
+                started: a.started,
+                finished: a.finished,
+                worktree: a.cwd.as_deref().map(|c| real(Path::new(c))).filter(|w| *w != here),
+            })
+            .collect(),
+        background: st
+            .background
+            .iter()
+            .map(|b| ipc::BackgroundInfo {
+                id: b.id.clone(),
+                kind: b.kind.clone(),
+                description: b.description.clone(),
+                command: b.command.clone(),
+                running: b.running && !exited,
+                started: b.started,
+                finished: b.finished,
+            })
+            .collect(),
+    }
 }
 
 /// A subagent that runs in a worktree of its own: which session started it and for what.
