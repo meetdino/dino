@@ -37,11 +37,13 @@ struct WorktreesPane: View {
                         Button("Choose…") { chooseLocation() }
                     }
                 }
+                .orgLocked("worktrees.location")
                 LabeledContent("Branch prefix") {
                     TextField("", text: $prefix, prompt: Text(DinoSettings.Worktrees.defaultPrefix))
                         .onSubmit { savePrefix() }
                         .frame(width: 140)
                 }
+                .orgLocked("worktrees.branch_prefix")
             } footer: {
                 Footnote("A relative location is inside each repo, and dino keeps it out of git status. An absolute one gets a folder per repo. Both apply to worktrees dino makes from now on: sessions, fan-outs and scheduled tasks. Branches are named like \(prefixShown)claude-3f2a.")
             }

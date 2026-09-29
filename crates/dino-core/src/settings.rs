@@ -123,8 +123,13 @@ impl Settings {
         config_dir().join("settings.toml")
     }
 
-    /// The saved settings; on first use, what the old `config` file said.
+    /// What's in effect: the user's settings with the organization's (see [`Managed`]) over them.
     pub fn load() -> Self {
+        Self::load_user().managed_by(&Managed::load())
+    }
+
+    /// The user's own settings; on first use, what the old `config` file said.
+    pub fn load_user() -> Self {
         match std::fs::read_to_string(Self::path()) {
             Ok(text) => toml::from_str(&text).unwrap_or_default(),
             Err(_) => {
@@ -145,7 +150,40 @@ impl Settings {
         self.agents.get(agent_id).cloned().unwrap_or_default()
     }
 
+    /// `self` with the managed values over it. A managed document that doesn't fit is ignored whole,
+    /// so a typo can't leave half a policy.
+    fn managed_by(self, m: &Managed) -> Self {
+        if m.locked.is_empty() {
+            return self;
+        }
+        let Ok(mut v) = serde_json::to_value(&self) else { return self };
+        merge(&mut v, m.doc.clone());
+        serde_json::from_value(v).unwrap_or_else(|e| {
+            eprintln!("dino: ignoring managed settings: {e}");
+            self
+        })
+    }
+
+    /// Save as the user's settings. Values the organization sets may come back unchanged (the app
+    /// sends the whole document) but not changed, and the user's own value for them is kept, so it
+    /// returns if the managed file goes.
     pub fn save(&self) -> anyhow::Result<()> {
+        let m = Managed::load();
+        let mut mine = serde_json::to_value(self)?;
+        if !m.locked.is_empty() {
+            let effective = serde_json::to_value(self.clone().managed_by(&m))?;
+            if let Some(path) = m.locked.iter().find(|p| at(&mine, p) != at(&effective, p)) {
+                anyhow::bail!("“{}” is set by your organization and can't be changed", path.join("."));
+            }
+            let user = serde_json::to_value(Self::load_user())?;
+            for path in &m.locked {
+                put(&mut mine, path, at(&user, path).cloned());
+            }
+        }
+        serde_json::from_value::<Self>(mine)?.write()
+    }
+
+    fn write(&self) -> anyhow::Result<()> {
         for k in self.repos.values().flat_map(|r| r.env.keys()) {
             let valid = !k.is_empty() && !k.starts_with(|c: char| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             anyhow::ensure!(valid, "{k:?} isn't a valid environment variable name");
@@ -159,6 +197,103 @@ impl Settings {
         drop(f);
         std::fs::rename(tmp, Self::path())?;
         Ok(())
+    }
+}
+
+/// Settings an organization deploys, like Claude Code's `managed-settings.json`: the same shape as
+/// `Settings`, any part of it. What it sets wins over the user's value and can't be changed in dino.
+/// `managed-settings.json` is the base; `managed-settings.d/*.json` beside it go on top in name order.
+/// A file that isn't a JSON object is skipped.
+#[derive(Debug, Clone, Default)]
+pub struct Managed {
+    doc: serde_json::Value,
+    /// Key paths it sets, like `["policies", "allow_bypass"]`.
+    pub locked: Vec<Vec<String>>,
+}
+
+impl Managed {
+    /// Only an admin can write it. `DINO_MANAGED_SETTINGS` names another file (for tests).
+    pub fn path() -> PathBuf {
+        std::env::var_os("DINO_MANAGED_SETTINGS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/Library/Application Support/Dino/managed-settings.json"))
+    }
+
+    pub fn load() -> Self {
+        let base = Self::path();
+        let mut files = vec![base.clone()];
+        if let Some(dir) = base.parent().and_then(|p| std::fs::read_dir(p.join("managed-settings.d")).ok()) {
+            let mut more: Vec<PathBuf> = dir.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+            more.sort();
+            files.extend(more);
+        }
+        let mut doc = serde_json::Value::Object(Default::default());
+        for f in files {
+            let Ok(text) = std::fs::read_to_string(&f) else { continue };
+            match serde_json::from_str(&text) {
+                Ok(v @ serde_json::Value::Object(_)) => merge(&mut doc, v),
+                _ => eprintln!("dino: ignoring {}: not a JSON object", f.display()),
+            }
+        }
+        let mut locked = vec![];
+        leaves(&doc, &mut vec![], &mut locked);
+        Self { doc, locked }
+    }
+
+    /// Locked key paths joined with dots, as clients get them.
+    pub fn locked_paths(&self) -> Vec<String> {
+        self.locked.iter().map(|p| p.join(".")).collect()
+    }
+}
+
+/// `over` into `into`: objects key by key, anything else replaced.
+fn merge(into: &mut serde_json::Value, over: serde_json::Value) {
+    match (into, over) {
+        (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+            for (k, v) in b {
+                merge(a.entry(k).or_insert(serde_json::Value::Null), v);
+            }
+        }
+        (a, b) => *a = b,
+    }
+}
+
+fn leaves(v: &serde_json::Value, path: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, v) in m {
+                path.push(k.clone());
+                leaves(v, path, out);
+                path.pop();
+            }
+        }
+        _ => out.push(path.clone()),
+    }
+}
+
+fn at<'a>(v: &'a serde_json::Value, path: &[String]) -> Option<&'a serde_json::Value> {
+    path.iter().try_fold(v, |v, k| v.get(k))
+}
+
+/// Set `path` in `v`, making objects on the way; `None` removes it.
+fn put(v: &mut serde_json::Value, path: &[String], value: Option<serde_json::Value>) {
+    let Some((last, parents)) = path.split_last() else { return };
+    let mut cur = v;
+    for k in parents {
+        if !cur.is_object() {
+            *cur = serde_json::Value::Object(Default::default());
+        }
+        cur = cur.as_object_mut().unwrap().entry(k.clone()).or_insert(serde_json::Value::Object(Default::default()));
+    }
+    if let Some(obj) = cur.as_object_mut() {
+        match value {
+            Some(x) => {
+                obj.insert(last.clone(), x);
+            }
+            None => {
+                obj.remove(last);
+            }
+        }
     }
 }
 
@@ -270,6 +405,38 @@ mod tests {
         assert_eq!(std::fs::metadata(Settings::path()).unwrap().permissions().mode() & 0o777, 0o600, "may hold secrets");
         s4.repos.insert("/x".into(), Repo { env: [("BAD NAME".to_string(), "v".to_string())].into() });
         assert!(s4.save().is_err());
+
+        // Managed: wins, locks, and leaves the user's own value in the file.
+        let managed = dir.join("managed-settings.json");
+        unsafe { std::env::set_var("DINO_MANAGED_SETTINGS", &managed) };
+        let mut mine = Settings::default();
+        mine.policies.allow_bypass = true;
+        mine.policies.session_token_budget = 7;
+        mine.save().unwrap();
+        std::fs::write(&managed, r#"{"policies": {"allow_bypass": false, "allowed_agents": ["claude"]}, "routing": {"proxy": true}}"#).unwrap();
+        std::fs::create_dir_all(dir.join("managed-settings.d")).unwrap();
+        std::fs::write(dir.join("managed-settings.d/10-budget.json"), r#"{"policies": {"session_token_budget": 1000000}}"#).unwrap();
+        std::fs::write(dir.join("managed-settings.d/20-broken.json"), "{nope").unwrap();
+        let m = Managed::load();
+        assert_eq!(m.locked_paths(), ["policies.allow_bypass", "policies.allowed_agents", "policies.session_token_budget", "routing.proxy"]);
+        let s = Settings::load();
+        assert!(!s.policies.allow_bypass && s.policies.allowed_agents == ["claude"] && s.policies.session_token_budget == 1_000_000);
+        assert!(Settings::load_user().policies.allow_bypass);
+        let mut changed = s.clone();
+        changed.policies.allow_bypass = true;
+        let err = changed.save().unwrap_err().to_string();
+        assert!(err.contains("policies.allow_bypass"), "{err}");
+        let mut other = s.clone();
+        other.policies.close_merged = true;
+        other.save().unwrap();
+        let user = Settings::load_user();
+        assert!(user.policies.close_merged && user.policies.allow_bypass && user.policies.session_token_budget == 7, "own values kept under the lock");
+        std::fs::write(&managed, r#"{"policies": {"allow_bypass": "yes"}}"#).unwrap();
+        std::fs::remove_dir_all(dir.join("managed-settings.d")).unwrap();
+        assert!(Settings::load().policies.allow_bypass, "a managed value that doesn't fit is ignored");
+        std::fs::remove_file(&managed).unwrap();
+        assert!(Managed::load().locked.is_empty());
+        unsafe { std::env::remove_var("DINO_MANAGED_SETTINGS") };
 
         set_key("DINO_TEST_A_KEY", Some(" abc ")).unwrap();
         set_key("DINO_TEST_B_KEY", Some("def")).unwrap();
