@@ -375,10 +375,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::Found { cloud } => Response::Found { sessions: discover(d, cloud) },
+            Request::Found { cloud, running_only } => Response::Found { sessions: discover(d, cloud, running_only) },
             Request::TakeOver { id } => match take_over(d, &id) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Conversation { agent, session_id, before } => match dino_core::history::conversation(&agent, &session_id, before) {
+                Some(page) => Response::Conversation { page },
+                None => Response::Error { message: "no transcript for that session on this Mac".into() },
             },
             Request::Adopt { session, cwd } => match adopt(d, session, cwd) {
                 Ok(id) => {
@@ -1366,14 +1370,16 @@ fn home() -> PathBuf {
 // ---- Continue anything: sessions dino didn't start. ----
 
 /// Found sessions minus the ones dino itself is running, or that run inside its shells.
-fn discover(d: &Daemon, cloud: bool) -> Vec<FoundSession> {
+fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
     let sessions = d.sessions.lock().unwrap().clone();
     let inside: Vec<FoundSession> = sessions.iter().filter_map(|s| s.inside.lock().unwrap().found.clone()).collect();
+    // dino's own conversations, live or archived, are listed as dino sessions already.
     let mut ours: Vec<String> = sessions.iter().filter_map(|s| s.agent_session.lock().unwrap().clone()).collect();
+    ours.extend(d.archived.lock().unwrap().iter().filter_map(|a| a.saved.agent_session.clone()));
     ours.extend(inside.iter().map(|f| f.session_id.clone()).filter(|id| !id.is_empty()));
     let in_shell = |f: &FoundSession| f.pid.is_some() && inside.iter().any(|i| i.pid == f.pid);
     let running: Vec<FoundSession> = found::running().into_iter().filter(|f| !ours.contains(&f.session_id) && !in_shell(f)).collect();
-    let mut out = found::recent(25, &running);
+    let mut out = if running_only { vec![] } else { dino_core::history::finished(&running) };
     out.retain(|f| !ours.contains(&f.session_id));
     out.splice(0..0, running);
     if cloud {
