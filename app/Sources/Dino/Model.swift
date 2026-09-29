@@ -56,6 +56,10 @@ final class DinoModel: ObservableObject {
     /// A member whose changes the user is about to keep.
     @Published var confirmKeep: MemberInfo?
 
+    /// The review panel beside the terminal, and the comments waiting to go to each session.
+    @Published var showReview = false
+    @Published var comments: [String: [ReviewComment]] = [:]
+
     var elsewhere: [FoundSession] { found.filter { $0.source == "running" } }
 
     /// Where new sessions start.
@@ -356,6 +360,22 @@ final class DinoModel: ObservableObject {
 
     func diff(_ session: String) async -> String {
         await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).diff(session: session)) ?? "" }.value
+    }
+
+    /// Nil when dinod can't be reached; the panel keeps what it last showed.
+    func changes(_ session: String) async -> Changes? {
+        await Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).changes(session: session) }.value
+    }
+
+    /// Hand the review to the agent as one message, submitted, as if the user had typed it.
+    func sendComments(to session: String) async throws {
+        guard let list = comments[session], !list.isEmpty else { return }
+        let text = ReviewComment.message(list)
+        try await Task.detached {
+            try DinoConnection(path: DinoEnvironment.socketPath).sendInput(session: session, text: text, submit: true)
+        }.value
+        comments[session] = nil
+        select(session)
     }
 
     /// Apply this member's changes to the checkout and close its fan-out.
