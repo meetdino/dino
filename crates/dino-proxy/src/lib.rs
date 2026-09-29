@@ -107,6 +107,15 @@ impl Stats {
         self.sessions.lock().unwrap().get(id).cloned().unwrap_or_default()
     }
 
+    /// The agent's turn is over although no hook said so (Esc while a tool runs fires none).
+    pub fn end_turn(&self, id: &str) {
+        self.update(id, |s| {
+            if s.activity == Some(Activity::Working) && s.in_flight == 0 {
+                s.activity = Some(Activity::Done);
+            }
+        });
+    }
+
     pub fn quota(&self, provider: &str) -> Option<Quota> {
         self.quotas.lock().unwrap().get(provider).cloned()
     }
@@ -341,9 +350,20 @@ struct Tap {
 
 impl Drop for Tap {
     fn drop(&mut self) {
-        if let Some(u) = self.meter.seen.take() {
-            self.stats.update(&self.session, |s| s.usage.add(&u));
+        let aborted = self._in_flight.is_some() && !self.meter.complete;
+        if aborted {
+            log(format_args!("{} model call dropped by the agent", self.session));
         }
+        self.stats.update(&self.session, |s| {
+            if let Some(u) = self.meter.seen.take() {
+                s.usage.add(&u);
+            }
+            // The agent hung up mid-answer with nothing else in flight: the user interrupted the
+            // turn (Esc). Claude Code fires no hook for that, so the turn would look busy forever.
+            if aborted && s.in_flight <= 1 && s.activity == Some(Activity::Working) {
+                s.activity = Some(Activity::Done);
+            }
+        });
     }
 }
 
@@ -353,6 +373,8 @@ async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Byt
     let event = v["hook_event_name"].as_str().unwrap_or_default();
     let tool = || v["tool_name"].as_str().unwrap_or("tool").to_string();
     let activity = match event {
+        // An interrupted tool, when the agent reports one (Claude often sends nothing; see `end_turn`).
+        "PostToolUseFailure" if v["is_interrupt"].as_bool() == Some(true) => Some(Activity::Done),
         "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some(Activity::Working),
         "PermissionRequest" => Some(Activity::NeedsPermission(tool())),
         "Notification" => match v["notification_type"].as_str() {
@@ -360,6 +382,8 @@ async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Byt
                 let msg = v["message"].as_str().unwrap_or("needs input").to_string();
                 Some(Activity::NeedsPermission(msg))
             }
+            // Sent after a minute at the prompt: a backstop for any turn end we missed.
+            Some("idle_prompt") => Some(Activity::Done),
             _ => None,
         },
         "Stop" | "StopFailure" | "SessionStart" => Some(Activity::Done),
@@ -487,6 +511,9 @@ struct Meter {
     body: Vec<u8>,
     sse: Option<bool>,
     seen: Option<Usage>,
+    /// The whole answer came through. Agents hang up once they have it, so the body running
+    /// out can't tell a finished answer from an interrupted one; its last event can.
+    complete: bool,
 }
 
 impl Meter {
@@ -496,6 +523,7 @@ impl Meter {
             self.body.extend_from_slice(bytes);
             if let Ok(v) = serde_json::from_slice::<Value>(&self.body) {
                 self.observe(&v);
+                self.complete = true;
             }
             return;
         }
@@ -503,9 +531,15 @@ impl Meter {
             if b == b'\n' {
                 let line = std::mem::take(&mut self.line);
                 if let Some(data) = line.strip_prefix(b"data:") {
-                    if let Ok(v) = serde_json::from_slice::<Value>(data.trim_ascii()) {
+                    let data = data.trim_ascii();
+                    if let Ok(v) = serde_json::from_slice::<Value>(data) {
                         self.observe(&v);
+                        // Anthropic's last event, and the Responses API's ways to end.
+                        let last = ["message_stop", "error", "response.completed", "response.incomplete", "response.failed"];
+                        self.complete |= v["type"].as_str().is_some_and(|t| last.contains(&t));
                     }
+                    // Chat Completions.
+                    self.complete |= data == b"[DONE]";
                 }
             } else {
                 self.line.push(b);
