@@ -7,6 +7,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var agent_id: String
     var title: String?
     var exited: Bool
+    /// How its program exited, once it has; nil from an older dinod.
+    var exit_code: UInt32?
     var output_ms_ago: UInt64?
     var bells: UInt64
     var requests: UInt64
@@ -49,6 +51,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var messaged_by: String?
     /// The SSH host it runs on (`cwd` is then a path there); nil for this Mac.
     var host: String?
+    /// A shell's: the agent someone started in it by hand, while it runs.
+    var inside: FoundSession?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
@@ -244,6 +248,16 @@ struct FoundSession: Codable, Identifiable, Equatable {
 
     var id: String { "\(source)-\(agent)-\(session_id)-\(pid ?? 0)" }
     var isBusy: Bool { status == "busy" }
+    /// Started by hand in a dino shell, and dino can continue it (it has a conversation to resume).
+    var continuable: Bool { ["claude", "codex"].contains(agent) && !session_id.isEmpty }
+    var agentName: String { ["claude": "Claude", "codex": "Codex", "gemini": "Gemini"][agent] ?? agent }
+}
+
+/// Part of a conversation, oldest first. `start` is where it begins in its file; 0 means the beginning.
+struct ConversationPage: Codable, Equatable {
+    var turns: [ConversationTurn]
+    var start: UInt64
+    var path: String?
 }
 
 struct DiffStat: Codable, Equatable {
@@ -361,6 +375,10 @@ private struct FoundResponse: Decodable {
     var sessions: [FoundSession]
 }
 
+private struct ConversationResponse: Decodable {
+    var page: ConversationPage
+}
+
 struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
@@ -424,8 +442,16 @@ final class DinoConnection: @unchecked Sendable {
         try JSONDecoder().decode(Response.self, from: send(body))
     }
 
-    func found(cloud: Bool) throws -> [FoundSession] {
-        try JSONDecoder().decode(FoundResponse.self, from: send(["type": "found", "cloud": cloud])).sessions
+    /// `runningOnly` skips finished conversations on disk (cheap enough to poll).
+    func found(cloud: Bool, runningOnly: Bool = false) throws -> [FoundSession] {
+        try JSONDecoder().decode(FoundResponse.self, from: send(["type": "found", "cloud": cloud, "running_only": runningOnly])).sessions
+    }
+
+    /// Part of a found session's conversation, ending at byte `before` of its file (default: the end).
+    func conversation(agent: String, sessionID: String, before: UInt64? = nil) throws -> ConversationPage {
+        var body: [String: Any] = ["type": "conversation", "agent": agent, "session_id": sessionID]
+        if let before { body["before"] = before }
+        return try JSONDecoder().decode(ConversationResponse.self, from: send(body)).page
     }
 
     func groups() throws -> [GroupInfo] {
@@ -514,12 +540,22 @@ final class DinoConnection: @unchecked Sendable {
         _ = try send(["type": "set_controls", "id": session, "controls": controls.json])
     }
 
+    /// Start a session whose program ended again, in place: the agent resumes its conversation.
+    func resume(session: String) throws {
+        _ = try send(["type": "resume", "id": session])
+    }
+
     /// Continue `session` in dino; returns the new dino session id.
     func adopt(_ session: FoundSession, cwd: String?) throws -> String? {
         let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(session))
         var body: [String: Any] = ["type": "adopt", "session": encoded]
         if let cwd { body["cwd"] = cwd }
         return try request(body).id
+    }
+
+    /// Continue the agent started by hand in shell `session` as a dino session, in the shell's place.
+    func takeOver(session: String) throws {
+        _ = try send(["type": "take_over", "id": session])
     }
 
     /// One request/response exchange; throws dinod's error message as-is.

@@ -218,7 +218,7 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .all: true
         case .needsYou: status == .needsYou || status == .done
         case .working: status == .thinking || status == .working
-        case .idle: status == .idle || status == .exited
+        case .idle: status == .idle || status == .ended || status == .exited
         }
     }
 
@@ -353,19 +353,7 @@ struct RepoRows: View {
 
     @ViewBuilder
     private func placeMenu(_ place: PlaceNode) -> some View {
-        if place.dino {
-            Button("Apply Changes and Close Worktree…") {
-                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: true)
-            }
-            Button("Discard Worktree…", role: .destructive) {
-                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: false)
-            }
-            Divider()
-        } else if place.cleanable {
-            Button("Clean Up Worktree") { model.cleanWorktrees([place.path]) }
-                .help("Removes the worktree, and its branch if it's merged. Never forced.")
-            Divider()
-        }
+        WorktreeClosingItems(place: place)
         Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: place.path) }
     }
 
@@ -523,5 +511,27 @@ struct WorktreeRow: View {
         if let t = place.owner?.agentType { lines.append("Made by a \(t) subagent") }
         if let ahead = place.git?.ahead, ahead > 0 { lines.append("\(ahead) commit\(ahead == 1 ? "" : "s") not on the main branch") }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// Close a worktree dino made, or clean up one nothing would be lost from.
+struct WorktreeClosingItems: View {
+    @EnvironmentObject var model: DinoModel
+    let place: PlaceNode
+
+    var body: some View {
+        if place.dino {
+            Button("Apply Changes and Close Worktree…") {
+                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: true)
+            }
+            Button("Discard Worktree…", role: .destructive) {
+                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: false)
+            }
+            Divider()
+        } else if place.cleanable {
+            Button("Clean Up Worktree") { model.cleanWorktrees([place.path]) }
+                .help("Removes the worktree, and its branch if it's merged. Never forced.")
+            Divider()
+        }
     }
 }

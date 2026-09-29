@@ -292,7 +292,9 @@ struct Terminals: View {
     var body: some View {
         ZStack {
             Color(nsColor: .textBackgroundColor).ignoresSafeArea()
-            if model.sessions.isEmpty || model.daemonDown || model.selected?.hasPrefix("dir:") == true {
+            if let ref = model.shownSubagent, !model.daemonDown {
+                SubagentPane(ref: ref).id(ref)
+            } else if model.sessions.isEmpty || model.daemonDown || model.selected?.hasPrefix("dir:") == true {
                 EmptyState()
             }
             GeometryReader { geo in
@@ -340,9 +342,15 @@ struct Terminals: View {
                 if let s = model.sessions.first(where: { $0.id == model.selected }) {
                     HStack(spacing: 8) {
                         SessionName(session: s, place: .toolbar, font: .system(.body, design: .monospaced).weight(.semibold), color: Brand.green)
-                        if s.label == nil, let t = s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
+                        if let f = s.inside { AgentBadge(agent: f.agent) }
+                        if s.label == nil, let t = s.inside?.title ?? s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
+                        if let f = s.inside, f.continuable { TakeOverButton(session: s, found: f) }
                         if let host = s.host { HostChip(host: host) }
-                        if !s.exited { SessionControlsBar(session: s).padding(.leading, 4) }
+                        if !s.exited {
+                            SessionControlsBar(session: s).padding(.leading, 4)
+                        } else {
+                            ResumeButton(session: s).padding(.leading, 4)
+                        }
                     }
                 }
             }
@@ -645,6 +653,13 @@ struct SessionRow: View {
                 Spacer()
                 Text(status.label).font(.caption).foregroundStyle(status.color)
             }
+            if let f = session.inside {
+                HStack(spacing: 5) {
+                    AgentBadge(agent: f.agent)
+                    Text(f.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .help("\(f.agentName) started by hand in this shell")
+            }
             if let needs = session.needs {
                 Label(needs, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(SessionStatus.needsYou.color).lineLimit(1)
@@ -678,6 +693,22 @@ struct SessionRow: View {
     }
 }
 
+/// For a session whose program ended: start it again in place (Enter in its pane does the same).
+struct ResumeButton: View {
+    @EnvironmentObject var model: DinoModel
+    let session: SessionInfo
+
+    var body: some View {
+        let shell = session.agent_id == "shell"
+        Button { model.resume(session.id) } label: {
+            Label(shell ? "Restart" : "Resume", systemImage: "play.fill")
+        }
+        .labelStyle(.titleAndIcon)
+        .controlSize(.small)
+        .help(shell ? "Start a new shell in the same folder (Enter in the pane)" : "Resume the conversation where it left off (Enter in the pane)")
+    }
+}
+
 struct StatusDot: View {
     let status: SessionStatus
     @State private var pulse = false
@@ -691,6 +722,8 @@ struct StatusDot: View {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(status.color)
             case .exited:
                 Image(systemName: "xmark.circle").foregroundStyle(status.color)
+            case .ended:
+                Image(systemName: "stop.circle").foregroundStyle(status.color)
             case .idle:
                 Circle().strokeBorder(.secondary, lineWidth: 1.5).frame(width: 10, height: 10)
             case .thinking, .working:
@@ -789,11 +822,26 @@ struct AgentBadge: View {
     let agent: String
 
     var body: some View {
-        Text(agent == "codex" ? "codex" : "claude")
+        Text(["codex", "gemini"].contains(agent) ? agent : "claude")
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
             .padding(.horizontal, 4).padding(.vertical, 1)
-            .background(RoundedRectangle(cornerRadius: 3).fill((agent == "codex" ? Color.blue : Brand.spike).opacity(0.18)))
-            .foregroundStyle(agent == "codex" ? Color.blue : Brand.spike)
+            .background(RoundedRectangle(cornerRadius: 3).fill(color.opacity(0.18)))
+            .foregroundStyle(color)
+    }
+
+    private var color: Color { agent == "codex" ? .blue : agent == "gemini" ? .purple : Brand.spike }
+}
+
+/// Continue an agent started by hand in a shell as a dino session: same row, conversation resumed.
+struct TakeOverButton: View {
+    @EnvironmentObject var model: DinoModel
+    let session: SessionInfo
+    let found: FoundSession
+
+    var body: some View {
+        Button("Continue as a \(found.agentName) session") { model.takeOver(session) }
+            .controlSize(.small)
+            .help("Restart \(found.agentName) under dino with this conversation, once its turn is over: status, tasks, controls and previews then work. The shell goes.")
     }
 }
 
@@ -845,88 +893,6 @@ func ago(_ secs: UInt64) -> String {
     }
 }
 
-struct ContinueSheet: View {
-    @EnvironmentObject var model: DinoModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var query = ""
-
-    private func matches(_ f: FoundSession) -> Bool {
-        query.isEmpty || f.title.localizedCaseInsensitiveContains(query) || (f.cwd ?? "").localizedCaseInsensitiveContains(query)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Continue a session — search titles and folders", text: $query)
-                    .textFieldStyle(.plain).font(.title3)
-            }
-            .padding(14)
-            Divider()
-            List {
-                section("Running elsewhere", "Moves here when its current turn finishes", model.found.filter { $0.source == "running" && matches($0) })
-                section("Recent", nil, model.found.filter { $0.source == "recent" && matches($0) })
-                section("Cloud", model.loadingCloud ? "Checking cloud sessions…" : "Lands in \(shortPath(model.folder.path))", model.found.filter { $0.source == "cloud" && matches($0) })
-            }
-            .listStyle(.inset)
-            Divider()
-            HStack {
-                Text("↵ continue · esc close").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
-            .padding(10)
-        }
-        .frame(width: 640, height: 520)
-    }
-
-    @ViewBuilder
-    private func section(_ title: String, _ note: String?, _ items: [FoundSession]) -> some View {
-        if !items.isEmpty || (title == "Cloud" && model.loadingCloud) {
-            Section {
-                ForEach(items) { f in
-                    Button {
-                        if f.source == "running" {
-                            model.showContinue = false
-                            model.confirmMove = f
-                        } else {
-                            model.adopt(f)
-                        }
-                    } label: { FoundRow(session: f) }
-                        .buttonStyle(.plain)
-                }
-            } header: {
-                HStack {
-                    Text(title)
-                    if let note { Text(note).foregroundStyle(.tertiary).font(.caption) }
-                }
-            }
-        }
-    }
-}
-
-struct FoundRow: View {
-    let session: FoundSession
-
-    var body: some View {
-        HStack(spacing: 10) {
-            AgentBadge(agent: session.agent)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(session.title).lineLimit(1)
-                Text(whereText(session)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer()
-            if session.isBusy {
-                Text("working").font(.caption).foregroundStyle(SessionStatus.working.color)
-            }
-            Text(ago(session.updated_at)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
-            Image(systemName: "arrow.right.circle").foregroundStyle(Brand.green)
-        }
-        .contentShape(Rectangle())
-        .padding(.vertical, 3)
-    }
-}
-
 struct MovingOverlay: View {
     let session: FoundSession
 
@@ -939,6 +905,8 @@ struct MovingOverlay: View {
                 if session.source == "running" {
                     Text(session.isBusy
                         ? "Waiting for its current turn to finish, then it continues here."
+                        : session.terminal == "dino"
+                        ? "Restarting it under dino, in the same row."
                         : "Closing it in \(session.terminal ?? "the other terminal") and continuing here.")
                         .foregroundStyle(.secondary)
                 }

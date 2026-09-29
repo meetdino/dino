@@ -763,7 +763,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
-       dino ls | new [--worktree] <agent> [args...] | attach <id> | kill <id> | ping | stop | daemon
+       dino ls | new [--worktree] <agent> [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
        dino found | continue <session-id prefix>
        dino mcp [--read-only]   (MCP server on stdio: agents list, read, message and start sessions)
        dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>";
@@ -805,6 +805,7 @@ fn main() -> anyhow::Result<()> {
             return print_response(client::request(&req)?);
         }
         Some("kill") => return print_response(client::request(&Request::Kill { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),
+        Some("resume") => return print_response(client::request(&Request::Resume { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),
         Some("stop") => {
             if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
                 println!("dinod is not running");
@@ -914,10 +915,16 @@ fn cmd_ls() -> anyhow::Result<()> {
 fn cmd_found() -> anyhow::Result<()> {
     use dino_core::found::Source;
     // Through dinod, so its own sessions aren't listed as "elsewhere".
-    let Response::Found { sessions } = client::request(&Request::Found { cloud: true })? else { anyhow::bail!("unexpected reply") };
+    let Response::Found { sessions } = client::request(&Request::Found { cloud: true, running_only: false })? else { anyhow::bail!("unexpected reply") };
+    // The rest are in the app's browser, and `dino continue` finds them all.
+    const SHOWN: usize = 25;
     for (label, source) in [("RUNNING ELSEWHERE", Source::Running), ("RECENT", Source::Recent), ("CLOUD", Source::Cloud)] {
         println!("{label}");
-        for f in sessions.iter().filter(|f| f.source == source) {
+        let group: Vec<_> = sessions.iter().filter(|f| f.source == source).collect();
+        if group.len() > SHOWN {
+            println!("  (newest {SHOWN} of {})", group.len());
+        }
+        for f in group.into_iter().take(SHOWN) {
             let place = f.terminal.as_deref().map(|t| format!("in {t}")).unwrap_or_default();
             let status = f.status.as_deref().unwrap_or("");
             let cwd = f.cwd.as_deref().unwrap_or("").replace(&std::env::var("HOME").unwrap_or_default(), "~");
@@ -961,7 +968,7 @@ fn cmd_groups() -> anyhow::Result<()> {
 
 /// Continue a session dino didn't start (see `dino found`).
 fn cmd_continue(prefix: &str) -> anyhow::Result<()> {
-    let Response::Found { sessions } = client::request(&Request::Found { cloud: false })? else { anyhow::bail!("unexpected reply") };
+    let Response::Found { sessions } = client::request(&Request::Found { cloud: false, running_only: false })? else { anyhow::bail!("unexpected reply") };
     let session = sessions.into_iter().find(|f| f.session_id.starts_with(prefix)).ok_or_else(|| anyhow::anyhow!("no session matching {prefix}"))?;
     if session.pid.is_some() {
         eprintln!("moving \"{}\" into dino (waits for its current turn to finish)…", session.title);

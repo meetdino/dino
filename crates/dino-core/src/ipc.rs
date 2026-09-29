@@ -2,7 +2,9 @@
 //!
 //! Every message is a frame: `[kind: u8][len: u32 BE][payload]`. Control traffic is JSON
 //! request/response frames. After a successful `Attach`, the connection also carries raw
-//! terminal bytes (`Data`) both ways, client `Resize`s, and a final server `Exit`.
+//! terminal bytes (`Data`) both ways, client `Resize`s, and a final server `Exit`. The `Exit`'s
+//! payload, when there is one, says the session ended but is kept, and can be resumed (text to
+//! show the user); an empty one means it's gone.
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -81,14 +83,33 @@ pub enum Request {
     /// mid-turn, that waits until the turn is over. Each field replaces the session's, so `None`
     /// goes back to the agent's own default.
     SetControls { id: String, controls: Controls },
-    /// Switch this connection to a live terminal stream for session `id`.
-    Attach { id: String, cols: u16, rows: u16 },
+    /// Switch this connection to a live terminal stream for session `id`. `wait`: if its agent
+    /// has ended, wait until it runs again (see `Resume`) rather than answer right away.
+    Attach {
+        id: String,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        wait: bool,
+    },
+    /// Start the agent of a session that ended again, in place, continuing its conversation.
+    Resume { id: String },
     Shutdown,
-    /// Agent sessions outside dino that it can continue. `cloud` also asks providers (slower).
-    Found { cloud: bool },
+    /// Agent sessions outside dino that it can continue. `cloud` also asks providers (slower);
+    /// `running_only` leaves out finished conversations on disk.
+    Found {
+        cloud: bool,
+        #[serde(default)]
+        running_only: bool,
+    },
+    /// Read a found session's conversation (see `history::conversation`).
+    Conversation { agent: String, session_id: String, before: Option<u64> },
     /// Continue a found session in dino: running ones are handed off (waited on until idle,
     /// stopped, resumed here). `cwd` is where cloud sessions land.
     Adopt { session: crate::found::FoundSession, cwd: Option<String> },
+    /// Shell `id` is running an agent started by hand (`SessionInfo::inside`): once it's idle,
+    /// stop it and resume its conversation as session `id`, in the shell's place.
+    TakeOver { id: String },
     /// One prompt to several agents, each in its own git worktree of the repo at `cwd`.
     Fanout { prompt: String, launchers: Vec<String>, cwd: Option<String> },
     Groups,
@@ -171,6 +192,16 @@ pub enum Request {
     /// What a session has been doing, as text: its conversation's last turns when dino can read
     /// them, and the screen now. `lines` bounds the screen part.
     ReadSession { id: String, lines: Option<u32> },
+    /// A subagent and its conversation so far (answers `Subagent`): subagent `agent` of session
+    /// `session`, or the one that made `worktree`.
+    ReadSubagent {
+        #[serde(default)]
+        session: Option<String>,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        worktree: Option<String>,
+    },
     /// Type `text` into session `id` and submit it, only while it's between turns: refused while
     /// it works or waits on a permission. `by` is the session sending it.
     Message { id: String, text: String, by: Option<String> },
@@ -187,6 +218,7 @@ pub enum Response {
     Launchers { launchers: Vec<LauncherInfo> },
     Created { id: String },
     Found { sessions: Vec<crate::found::FoundSession> },
+    Conversation { page: crate::history::Page },
     Groups { groups: Vec<GroupInfo> },
     Tree { repos: Vec<RepoInfo> },
     Diff { stat: DiffStat, text: String },
@@ -213,6 +245,7 @@ pub enum Response {
     PreviewLog { text: String },
     Schedule { tasks: Vec<crate::schedule::ScheduledTask> },
     Text { text: String },
+    Subagent { subagent: SubagentView },
     Ok,
     Error { message: String },
 }
@@ -236,6 +269,9 @@ pub struct SessionInfo {
     pub agent_id: String,
     pub title: Option<String>,
     pub exited: bool,
+    /// How its agent exited, when it has: 0 is a clean exit (the user quit it).
+    #[serde(default)]
+    pub exit_code: Option<u32>,
     /// Milliseconds since the agent last wrote to its terminal.
     pub output_ms_ago: Option<u64>,
     /// Monotonic bell count; a client notices increases.
@@ -303,6 +339,9 @@ pub struct SessionInfo {
     /// What the agent tracks underneath: its task list, subagents and background commands.
     #[serde(default)]
     pub tasks: SessionTasks,
+    /// A shell's foreground agent that someone started by hand: its title and busy/idle status.
+    #[serde(default)]
+    pub inside: Option<crate::found::FoundSession>,
 }
 
 /// From the agent's hooks, so Claude only for now; empty for agents that don't report them.
@@ -344,6 +383,35 @@ pub struct SubagentInfo {
     /// Its own worktree, when it runs in one; symlinks resolved.
     #[serde(default)]
     pub worktree: Option<String>,
+}
+
+/// A subagent, to watch: it runs inside its session's agent, so there's no terminal of its own,
+/// only the conversation its agent writes down.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SubagentView {
+    pub id: String,
+    /// The session whose agent started it.
+    pub session: String,
+    /// Its own worktree, when it has one.
+    #[serde(default)]
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub running: bool,
+    /// Its conversation, oldest first; `None` when dino can't read it (not Claude, or it's gone).
+    #[serde(default)]
+    pub turns: Option<Vec<TurnInfo>>,
+}
+
+/// One thing in a conversation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TurnInfo {
+    /// "task" (what it was asked), "user" (a message since), "agent", "tool" (a call, in short)
+    /// or "note" (the conversation was compacted or interrupted).
+    pub role: String,
+    pub text: String,
 }
 
 /// A shell command or monitor the agent runs in the background.
