@@ -952,6 +952,11 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
         }
         while let Ok(bytes) = rx.recv() {
             if bytes.is_empty() {
+                // A fullscreen agent ends on its last screen, not the one it switched back to.
+                if s2.pane.shared.kept_alt.load(Ordering::Relaxed) {
+                    let screen = [b"\x1b[H\x1b[2J\x1b[3J".as_slice(), &s2.pane.replay(REPLAY_HISTORY)].concat();
+                    let _ = ipc::write_frame(&mut out, ipc::DATA, &screen);
+                }
                 let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
                 break;
             }
