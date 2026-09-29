@@ -354,13 +354,21 @@ struct ShortcutSheet: View {
         Entry(title: "Unarchive a session", keys: "double-click"),
     ])
 
+    /// Claude desktop's keys for what the menus list under dino's own (see `AppDelegate.desktopKey`).
+    private static let desktop = MenuGroup(menu: "Also, as in Claude desktop", entries: [
+        Entry(title: "Next Session", keys: "⇧⌘]"),
+        Entry(title: "Previous Session", keys: "⇧⌘["),
+        Entry(title: "Show or Hide Preview", keys: "⇧⌘B"),
+        Entry(title: "Ask About This Session…", keys: "⌘;"),
+    ])
+
     private var groups: [MenuGroup] {
         let menus = NSApp.mainMenu?.items.compactMap { item -> MenuGroup? in
             guard let menu = item.submenu else { return nil }
             let entries = Self.entries(in: menu, prefix: "")
             return entries.isEmpty ? nil : MenuGroup(menu: item.title, entries: entries)
         } ?? []
-        return menus + [Self.extra]
+        return menus + [Self.extra, Self.desktop]
     }
 
     private static func entries(in menu: NSMenu, prefix: String) -> [Entry] {

@@ -137,6 +137,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Run as a regular app with a Dock icon and menu bar even when launched from a binary.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        desktopKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
+            guard let model = self?.model, let w = e.window, !(w is NSPanel), w.attachedSheet == nil,
+                  w.identifier?.rawValue != SettingsView.windowID,
+                  Self.desktopKey(e, model: model) else { return e }
+            return nil
+        }
+    }
+
+    private var desktopKeys: Any?
+
+    /// Claude desktop's keys. Some are aliases for what the menus have under dino's own keys (a menu
+    /// item shows one); the rest are in the Split menu too, but handled here so they work even when
+    /// SwiftUI hasn't brought the menu's enabled state up to date. Seen before the terminal, which
+    /// would otherwise take ⇧⌘] and ⇧⌘[ for tabs.
+    private static func desktopKey(_ e: NSEvent, model: DinoModel) -> Bool {
+        let mods = e.modifierFlags.intersection([.command, .shift, .option, .control])
+        switch (mods, e.charactersIgnoringModifiers ?? "") {
+        case ([.control], "`"):
+            guard model.selectedSession != nil else { return false }
+            model.toggleTerminal()
+        case ([.command], "\\"):
+            guard model.shownSplit != nil || model.sidePane != nil else { return false }
+            model.closeFocusedPane()
+        case ([.command, .shift], "]"), ([.command, .shift], "}"):
+            guard model.sessions.count > 1 else { return false }
+            model.cycle(by: 1)
+        case ([.command, .shift], "["), ([.command, .shift], "{"):
+            guard model.sessions.count > 1 else { return false }
+            model.cycle(by: -1)
+        case ([.command, .shift], "b"), ([.command, .shift], "B"):
+            guard model.sidePane == .preview || model.selectedSession?.host == nil else { return false }
+            model.togglePreview()
+        case ([.command], ";"):
+            guard let s = model.selectedSession else { return false }
+            model.askingAbout = s
+        default:
+            return false
+        }
+        return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { true }
