@@ -365,6 +365,17 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(text) => Response::Text { text },
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::ReadSubagent { session, agent, worktree } => {
+                let found = match (&session, &agent, &worktree) {
+                    (Some(session), Some(agent), _) => read_subagent(d, session, agent),
+                    (_, _, Some(worktree)) => subagent_of_worktree(d, worktree),
+                    _ => None,
+                };
+                match found {
+                    Some(subagent) => Response::Subagent { subagent },
+                    None => Response::Error { message: "dino doesn't know that subagent".into() },
+                }
+            }
             Request::Message { id, text, by } => peers::ipc_result(peers::message(d, &id, &text, by)),
             Request::Ask { id, question } => match peers::ask(d, &id, &question) {
                 Ok(text) => Response::Text { text },
@@ -1633,6 +1644,67 @@ fn subagent_owners(d: &Daemon) -> Vec<(String, worktree::Owner)> {
             (a.worktree.clone(), owner)
         })
         .collect()
+}
+
+/// The subagent that made `worktree`.
+fn subagent_of_worktree(d: &Daemon, worktree: &str) -> Option<ipc::SubagentView> {
+    let path = real(Path::new(worktree));
+    let (session, id) = {
+        subagent_owners(d);
+        let all = d.subagents.lock().unwrap();
+        let a = all.iter().find(|a| a.worktree == path)?;
+        (a.session.clone(), a.id.clone())
+    };
+    read_subagent(d, &session, &id)
+}
+
+/// Subagent `id` of `session`, and what it has said and done: read from its agent's transcript
+/// each time, so a view that asks again follows it live. Also after its session is gone, while
+/// dino remembers its worktree.
+fn read_subagent(d: &Daemon, session: &str, id: &str) -> Option<ipc::SubagentView> {
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == session).cloned();
+    let known = s.as_ref().and_then(|s| {
+        let st = d.proxy.stats.session(session);
+        let exited = s.pane.is_exited();
+        let info = session_tasks(&st, &s.cwd, exited).subagents.into_iter().find(|a| a.id == id)?;
+        let output = st.subagents.iter().find(|a| a.id == id).and_then(|a| a.output.clone());
+        Some((info, output))
+    });
+    let (view, output) = match known {
+        Some((a, output)) => (
+            ipc::SubagentView {
+                id: a.id,
+                session: session.into(),
+                worktree: a.worktree,
+                agent_type: a.agent_type,
+                description: a.description,
+                running: a.running,
+                turns: None,
+            },
+            output,
+        ),
+        None => {
+            let a = d.subagents.lock().unwrap().iter().find(|a| a.id == id && a.session == session).cloned()?;
+            let view = ipc::SubagentView {
+                id: a.id,
+                session: a.session,
+                worktree: Some(a.worktree),
+                agent_type: a.agent_type,
+                description: a.description,
+                running: false,
+                turns: None,
+            };
+            (view, None)
+        }
+    };
+    // Where the Agent tool said it writes; else under its session's conversation; else anywhere.
+    let parent = s.as_ref().and_then(|s| s.agent_session.lock().unwrap().clone());
+    let transcript = output
+        .map(PathBuf::from)
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl") && p.exists())
+        .or_else(|| parent.as_deref().and_then(|p| dino_core::transcript::claude_subagent_path(Some(p), id)))
+        .or_else(|| dino_core::transcript::claude_subagent_path(None, id));
+    Some(ipc::SubagentView { turns: transcript.and_then(|p| dino_core::transcript::claude_turns(&p)), ..view })
 }
 
 fn base_name(path: &str) -> String {
