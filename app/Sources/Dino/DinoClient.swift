@@ -33,6 +33,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var controls: Controls?
     /// Asked for mid-turn; applied (by a restart) once the turn is over.
     var pending: Controls?
+    /// The permission mode the agent says it's in; differs from `controls` after Claude's Shift+Tab.
+    var agent_mode: String?
     /// How full the context window is: tokens the last model call read, and the window's size.
     var context_tokens: UInt64?
     var context_limit: UInt64?

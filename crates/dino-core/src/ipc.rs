@@ -278,6 +278,10 @@ pub struct SessionInfo {
     /// Asked for mid-turn; applied (by a restart) once the turn is over.
     #[serde(default)]
     pub pending: Option<Controls>,
+    /// The permission mode the agent says it's in, in dino's words: it can differ from `controls`
+    /// when changed in the agent itself (Claude's Shift+Tab).
+    #[serde(default)]
+    pub agent_mode: Option<String>,
     /// Tokens the last model call read (cached ones included): how full the context window is.
     #[serde(default)]
     pub context_tokens: u64,
