@@ -20,6 +20,8 @@ use dino_core::{detect_agents, load_keys, pr, proxy_wiring, trust, user_shell, w
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
+mod schedule;
+
 /// Scrollback lines replayed to a newly attached client.
 const REPLAY_HISTORY: usize = 2000;
 
@@ -44,6 +46,8 @@ struct Session {
     poked: Arc<Mutex<Option<Instant>>>,
     attached: AtomicUsize,
     auto: Mutex<AutoState>,
+    /// The scheduled task that started it, by name.
+    scheduled: Option<String>,
 }
 
 impl Daemon {
@@ -84,6 +88,7 @@ struct Daemon {
     pr_poll: Mutex<()>,
     /// Sessions whose PR merged, to close once they have nothing to lose; since when.
     closing: Mutex<HashMap<String, Instant>>,
+    schedule: schedule::Scheduler,
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -113,6 +118,7 @@ pub fn run() -> anyhow::Result<()> {
         prs: Mutex::default(),
         pr_poll: Mutex::default(),
         closing: Mutex::default(),
+        schedule: schedule::Scheduler::load(),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
@@ -136,6 +142,7 @@ pub fn run() -> anyhow::Result<()> {
             }
         });
     }
+    schedule::start(&daemon);
     eprintln!("dinod listening on {}", path.display());
     for stream in listener.incoming().flatten() {
         let daemon = daemon.clone();
@@ -182,10 +189,28 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::SetSettings { settings } => match settings.save() {
                 Ok(()) => {
                     d.proxy.set_budget(settings.policies.session_token_budget);
+                    schedule::keep_awake(d);
                     Response::Ok
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::ScheduleList => Response::Schedule { tasks: schedule::list(d) },
+            Request::SchedulePut { task } => match schedule::put(d, task) {
+                Ok(_) => Response::Schedule { tasks: schedule::list(d) },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ScheduleDelete { id } => match schedule::delete(d, &id) {
+                Ok(()) => Response::Schedule { tasks: schedule::list(d) },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ScheduleRun { id } => match schedule::run_now(d, &id) {
+                Ok(id) => Response::Created { id },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ScheduleTick { now } => {
+                schedule::tick(d, now.unwrap_or_else(now_secs));
+                Response::Schedule { tasks: schedule::list(d) }
+            }
             Request::Keys => Response::Keys { keys: settings::key_status() },
             Request::SetKey { name, value } => match settings::set_key(&name, value.as_deref()) {
                 Ok(()) => {
@@ -365,6 +390,8 @@ struct Launch {
     restore: Option<SavedSession>,
     name: Option<String>,
     prompt: Option<String>,
+    /// The scheduled task starting it, by name.
+    scheduled: Option<String>,
 }
 
 impl Launch {
@@ -374,7 +401,7 @@ impl Launch {
 }
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt } = launch;
+    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, scheduled } = launch;
     let launcher = launcher.as_str();
     // Sessions already running come back even if the policies changed since; new ones must be allowed.
     let l = match restore {
@@ -462,6 +489,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         poked,
         attached: AtomicUsize::new(0),
         auto: Mutex::new(restore.as_ref().map(|r| r.auto.clone()).unwrap_or_default()),
+        scheduled: restore.as_ref().map_or(scheduled, |r| r.scheduled.clone()),
     }));
     Ok(id)
 }
@@ -591,6 +619,7 @@ fn state(d: &Daemon) -> Response {
                 cwd: real(&s.cwd),
                 pr: prs.get(&s.id).cloned(),
                 auto: s.auto.lock().unwrap().pr.clone(),
+                scheduled: s.scheduled.clone(),
             }
         })
         .collect();
@@ -619,6 +648,8 @@ struct SavedSession {
     agent_session: Option<String>,
     #[serde(default)]
     auto: AutoState,
+    #[serde(default)]
+    scheduled: Option<String>,
 }
 
 fn saved_path() -> PathBuf {
@@ -652,6 +683,7 @@ fn save(d: &Daemon) {
                 started_at: s.started_at,
                 agent_session: agent_session.clone(),
                 auto: s.auto.lock().unwrap().clone(),
+                scheduled: s.scheduled.clone(),
             }
         })
         .collect();
@@ -787,6 +819,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         started_at: now_secs(),
         agent_session: Some(f.session_id.clone()),
         auto: AutoState::default(),
+        scheduled: None,
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {

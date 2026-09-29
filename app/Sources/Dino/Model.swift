@@ -58,6 +58,13 @@ final class DinoModel: ObservableObject {
     /// A session worktree the user is about to close, and whether its changes come along.
     @Published var closingWorktree: ClosingWorktree?
 
+    /// Prompts dinod runs on a schedule, the one open in the editor and the one about to go.
+    @Published var scheduled: [ScheduledTask] = []
+    @Published var editingTask: ScheduledTask?
+    @Published var deletingTask: ScheduledTask?
+    /// Scheduled runs that have been working, to say when they go quiet.
+    private var scheduledBusy: Set<String> = []
+
     /// The review panel beside the terminal, and the comments waiting to go to each session.
     @Published var showReview = false
     @Published var comments: [String: [ReviewComment]] = [:]
@@ -182,10 +189,21 @@ final class DinoModel: ObservableObject {
                 let wasBusy = prev.activity == "working" || prev.needs != nil
                 if s.activity == "done", wasBusy {
                     unseenDone.insert(s.id)
-                    Notifier.post(session: s, title: "\(s.name) finished", body: s.title ?? "Ready for your review")
+                    if s.scheduled == nil {
+                        Notifier.post(session: s, title: "\(s.name) finished", body: s.title ?? "Ready for your review")
+                    }
                 }
                 if let needs = s.needs, prev.needs == nil {
                     Notifier.post(session: s, title: "\(s.name) needs you", body: needs)
+                }
+            }
+            // Nobody watched a scheduled run start: say when it's done, even if it's in front of you.
+            if let task = s.scheduled {
+                let busy = !s.exited && (s.activity == "working" || s.in_flight > 0 || (s.activity == nil && (s.output_ms_ago ?? .max) < 5000))
+                if busy {
+                    scheduledBusy.insert(s.id)
+                } else if scheduledBusy.remove(s.id) != nil {
+                    Notifier.post(session: s, title: "\(task) finished", body: s.title ?? (s.exited ? "The session ended" : "Ready for your review"))
                 }
             }
             // CI runs for minutes: say when it's done, even about the session in front of you.
@@ -368,7 +386,9 @@ final class DinoModel: ObservableObject {
             while true {
                 if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let list = try? conn.groups() {
                     let launchers = try? conn.request(["type": "launchers"]).launchers
+                    let tasks = try? conn.scheduleList()
                     await MainActor.run {
+                        if let tasks { self.applySchedule(tasks) }
                         if let launchers, launchers != self.launchers { self.launchers = launchers }
                         if list != self.groups { self.groups = list }
                         if let want = self.pendingGroup, list.contains(where: { $0.id == want }) {
@@ -548,6 +568,88 @@ final class DinoModel: ObservableObject {
                 _ = try DinoConnection(path: DinoEnvironment.socketPath).request(["type": "remove_worktree", "path": w.path, "apply": w.apply])
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
+            }
+        }
+    }
+
+    // MARK: Scheduled tasks
+
+    /// A new task as the editor opens it: daily at 9 in the current folder, with the first agent.
+    func newTask() {
+        var t = ScheduledTask()
+        t.cwd = folder.path
+        t.launcher = launchers.first { $0.agent_id != "shell" }?.short ?? launchers.first?.short ?? ""
+        editingTask = t
+    }
+
+    func launcherLabel(_ short: String) -> String {
+        launchers.first { $0.short == short }?.label ?? short
+    }
+
+    /// Say what happened to runs nobody asked for just now: missed times made up, skips, failures.
+    private func applySchedule(_ tasks: [ScheduledTask]) {
+        for t in tasks {
+            guard let prev = scheduled.first(where: { $0.id == t.id }) else { continue }
+            let seen = prev.history.last?.at ?? 0
+            for run in t.history where run.at > seen && run.due != nil {
+                let when = run.due.map(whenText) ?? ""
+                switch run.outcome {
+                case "failed":
+                    Notifier.post(key: "schedule-\(t.id)", title: "\(t.name) couldn't run", body: run.reason ?? "")
+                case "skipped":
+                    Notifier.post(key: "schedule-\(t.id)", title: "Skipped \(t.name) (\(when))", body: run.reason ?? "")
+                case _ where run.catch_up:
+                    Notifier.post(key: "schedule-\(t.id)", title: "Running \(t.name)", body: "It was due \(when), while your Mac was asleep.", session: run.session)
+                default:
+                    break
+                }
+            }
+        }
+        if tasks != scheduled { scheduled = tasks }
+    }
+
+    /// Throws dinod's reason the task can't run as set up (untrusted folder, no repo for a worktree, …).
+    func saveTask(_ task: ScheduledTask) async throws {
+        let tasks = try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).schedulePut(task) }.value
+        scheduled = tasks
+    }
+
+    func setTask(_ task: ScheduledTask, enabled: Bool) {
+        var t = task
+        t.enabled = enabled
+        Task {
+            do { try await saveTask(t) } catch { self.error = error.localizedDescription }
+        }
+    }
+
+    func deleteTask(_ task: ScheduledTask) {
+        Task.detached {
+            do {
+                let tasks = try DinoConnection(path: DinoEnvironment.socketPath).scheduleDelete(task.id)
+                await MainActor.run { self.scheduled = tasks }
+            } catch {
+                await MainActor.run { self.error = error.localizedDescription }
+            }
+        }
+    }
+
+    /// Start a run now and show it once dinod lists it.
+    func runTask(_ task: ScheduledTask) {
+        Task.detached {
+            do {
+                let conn = try DinoConnection(path: DinoEnvironment.socketPath)
+                let id = try conn.scheduleRun(task.id)
+                let tasks = try? conn.scheduleList()
+                await MainActor.run {
+                    if let tasks { self.scheduled = tasks }
+                    self.pendingSelect = id
+                }
+            } catch {
+                let tasks = try? DinoConnection(path: DinoEnvironment.socketPath).scheduleList()
+                await MainActor.run {
+                    if let tasks { self.scheduled = tasks }
+                    self.error = error.localizedDescription
+                }
             }
         }
     }
