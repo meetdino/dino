@@ -355,7 +355,7 @@ struct NewSessionMenu: View {
                     Button(l.label) { model.newSession(l, worktree: true) }
                 }
             }
-            .help("Its own worktree and branch: its edits stay off your checkout until you apply them")
+            .help("Its own worktree and branch: its edits stay off your checkout until you apply them. Ignored files listed in .worktreeinclude, like .env, are copied in")
             Divider()
             Button("In \(model.folder.lastPathComponent)…") { model.chooseFolder() }
         } label: {
