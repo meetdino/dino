@@ -52,6 +52,9 @@ pub fn repo_root(dir: &Path) -> anyhow::Result<PathBuf> {
 pub struct Worktree {
     pub path: String,
     pub branch: Option<String>,
+    /// dino made it for a session: closing it can apply its changes and remove it.
+    #[serde(default)]
+    pub dino: bool,
 }
 
 /// Every worktree of the repo containing `dir`, the main checkout first.
@@ -63,7 +66,7 @@ pub fn list(dir: &Path) -> anyhow::Result<Vec<Worktree>> {
         .filter_map(|b| {
             let path = b.lines().next()?.strip_prefix("worktree ")?.to_string();
             let branch = b.lines().find_map(|l| l.strip_prefix("branch refs/heads/")).map(String::from);
-            Some(Worktree { path, branch })
+            Some(Worktree { path, branch, dino: false })
         })
         .collect())
 }
@@ -87,6 +90,25 @@ pub fn add(repo: &Path, name: &str, branch: &str, base: &str) -> anyhow::Result<
     std::fs::create_dir_all(dir.parent().unwrap())?;
     git(repo, &["worktree", "add", "--quiet", "-b", branch, &dir.to_string_lossy(), base])?;
     Ok(dir)
+}
+
+/// A worktree for one session, off the HEAD of `checkout` (a repo's main checkout or one of its
+/// worktrees), with the checkout's uncommitted edits carried over uncommitted: the new branch holds
+/// only what the agent commits. Returns the worktree and the commit its changes count from.
+pub fn start(checkout: &Path, name: &str, branch: &str) -> anyhow::Result<(PathBuf, String)> {
+    let base = snapshot(checkout)?;
+    let head = git(checkout, &["rev-parse", "HEAD"])?.trim().to_string();
+    // Worktrees all live in the main checkout, even when this one is a worktree itself.
+    let main = list(checkout)?.into_iter().next().map_or_else(|| checkout.to_path_buf(), |w| PathBuf::from(w.path));
+    let dir = add(&main, name, branch, &head)?;
+    if base != head {
+        let patch = git(checkout, &["diff", "--binary", &head, &base])?;
+        if let Err(e) = git_in(&dir, &["apply", "--whitespace=nowarn", "-"], Some(patch.as_bytes())) {
+            remove(&main, &dir, branch);
+            return Err(e);
+        }
+    }
+    Ok((dir, base))
 }
 
 fn exclude_dino_dir(repo: &Path) -> anyhow::Result<()> {
@@ -328,8 +350,8 @@ mod tests {
         let all = list(&wt).unwrap();
         let real = |p: &Path| p.canonicalize().unwrap().to_string_lossy().into_owned();
         assert_eq!(all, vec![
-            Worktree { path: real(repo), branch: Some("main".into()) },
-            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()) },
+            Worktree { path: real(repo), branch: Some("main".into()), dino: false },
+            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()), dino: false },
         ]);
 
         std::fs::write(wt.join("a.txt"), "one\ntwo\nthree\n").unwrap();
@@ -344,6 +366,17 @@ mod tests {
 
         remove(repo, &wt, "dino/g/claude");
         assert!(!wt.exists());
+
+        // A session's worktree: the branch starts at HEAD, the uncommitted edits come along uncommitted.
+        let (one, base) = start(repo, "claude-ab12", "dino/claude-ab12").unwrap();
+        assert_eq!(git(&one, &["rev-parse", "HEAD"]).unwrap(), git(repo, &["rev-parse", "HEAD"]).unwrap());
+        assert_eq!(std::fs::read_to_string(one.join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+        assert_eq!(stat(&one, &base).unwrap(), DiffStat::default(), "carried-over edits aren't the agent's");
+        // Started from inside it, the next one still lands in the main checkout's worktrees folder.
+        let (two, _) = start(&one, "codex-cd34", "dino/codex-cd34").unwrap();
+        assert_eq!(real(two.parent().unwrap()), real(&worktrees_dir(repo)));
+        remove(repo, &two, "dino/codex-cd34");
+        remove(repo, &one, "dino/claude-ab12");
         assert!(git(repo, &["branch", "--list", "dino/*"]).unwrap().trim().is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -71,6 +71,7 @@ struct Daemon {
     launchers: RwLock<Vec<LauncherInfo>>,
     sessions: Mutex<Vec<Arc<Session>>>,
     groups: Mutex<Vec<Group>>,
+    worktrees: Mutex<Vec<SessionWorktree>>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -96,6 +97,7 @@ pub fn run() -> anyhow::Result<()> {
         launchers: RwLock::new(launchers(free_tier)),
         sessions: Mutex::default(),
         groups: Mutex::new(load_groups()),
+        worktrees: Mutex::new(load_worktrees()),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
@@ -170,13 +172,16 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::New { launcher, args, cwd, cols, rows } => match spawn(d, Launch { cols, rows, ..Launch::new(&launcher, args, cwd) }) {
-                Ok(id) => {
-                    save(d);
-                    Response::Created { id }
+            Request::New { launcher, args, cwd, cols, rows, worktree } => {
+                let launch = Launch { cols, rows, ..Launch::new(&launcher, args, cwd) };
+                match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {
+                    Ok(id) => {
+                        save(d);
+                        Response::Created { id }
+                    }
+                    Err(e) => Response::Error { message: e.to_string() },
                 }
-                Err(e) => Response::Error { message: e.to_string() },
-            },
+            }
             Request::Kill { id } => {
                 if kill(d, &id) {
                     save(d);
@@ -230,6 +235,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Discard { group } => match close_group(d, &group) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::RemoveWorktree { path, apply } => match remove_worktree(d, &path, apply) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
@@ -755,12 +764,10 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
     }
     anyhow::ensure!(!picked.is_empty(), "pick at least one agent");
 
-    let dir = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    let dir = work_dir(cwd.as_deref());
     let repo = worktree::repo_root(&dir)?;
     let base = worktree::snapshot(&repo)?;
-    let policies = Settings::load().policies;
-    // Where in the repo Claude was trusted, if it was: the same folder in each worktree is too.
-    let claude_trusted = if policies.worktree_trust { trust::claude_trusted_in(&dir, &repo) } else { None };
+    let claude_trusted = carried_trust(&dir, &repo);
     let id = format!("{}-{}", session_name(prompt), &new_uuid()[..4]);
     let mut group = Group { id: id.clone(), prompt: prompt.into(), repo: repo.clone(), base: base.clone(), members: vec![] };
     for l in picked {
@@ -768,11 +775,7 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
         let wt = worktree::add(&repo, &format!("{id}/{}", l.short), &branch, &base)?;
         // Same folder inside the worktree as the user was in inside the repo.
         let cwd = wt.join(dir.strip_prefix(&repo).unwrap_or(std::path::Path::new("")));
-        if let Some(rel) = claude_trusted.as_ref().filter(|_| l.agent_id.starts_with("claude")) {
-            if let Err(e) = trust::claude_trust(&trust::join(&wt, rel)) {
-                eprintln!("dinod: couldn't trust {} for Claude: {e}", wt.display());
-            }
-        }
+        carry_trust(&l, claude_trusted.as_deref(), &wt);
         let session = spawn(d, Launch {
             name: Some(format!("{}·{}", l.short, &id[id.len() - 4..])),
             prompt: Some(prompt.into()),
@@ -794,6 +797,9 @@ fn real(p: &Path) -> String {
 fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
     let mut dirs: Vec<String> = d.sessions.lock().unwrap().iter().map(|s| real(&s.cwd)).collect();
     dirs.extend(d.groups.lock().unwrap().iter().map(|g| real(Path::new(&g.repo))));
+    // A session's worktree stays after the session ends, until the user closes it.
+    let made: Vec<String> = d.worktrees.lock().unwrap().iter().map(|w| real(&w.path)).collect();
+    dirs.extend(made.iter().cloned());
     dirs.extend(folders.iter().map(|f| real(Path::new(f))));
     // Shallowest first, so a folder comes before the folders inside it.
     dirs.sort_by_key(|d| d.len());
@@ -806,7 +812,10 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
             continue;
         }
         match worktree::list(Path::new(&dir)) {
-            Ok(w) if !w.is_empty() => {
+            Ok(mut w) if !w.is_empty() => {
+                for w in &mut w {
+                    w.dino = made.contains(&real(Path::new(&w.path)));
+                }
                 let path = w[0].path.clone();
                 repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w });
             }
@@ -910,5 +919,114 @@ fn close_group(d: &Daemon, id: &str) -> anyhow::Result<()> {
         dino_core::worktree::remove(&group.repo, &m.worktree, &m.branch);
         let _ = trust::claude_forget(&m.worktree);
     }
+    Ok(())
+}
+
+/// Where a worktree is made from, symlinks resolved like git's paths (`/tmp` is `/private/tmp`),
+/// so the folder the user was in maps to the same one in the worktree.
+fn work_dir(cwd: Option<&str>) -> PathBuf {
+    let dir = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    std::fs::canonicalize(&dir).unwrap_or(dir)
+}
+
+/// Where Claude is trusted in `repo`, from `dir` up, when the policies carry trust into worktrees.
+fn carried_trust(dir: &Path, repo: &Path) -> Option<PathBuf> {
+    Settings::load().policies.worktree_trust.then(|| trust::claude_trusted_in(dir, repo)).flatten()
+}
+
+/// Trust the same folder in worktree `wt`, so Claude starts there without asking again.
+fn carry_trust(l: &LauncherInfo, rel: Option<&Path>, wt: &Path) {
+    if let Some(rel) = rel.filter(|_| l.agent_id.starts_with("claude")) {
+        if let Err(e) = trust::claude_trust(&trust::join(wt, rel)) {
+            eprintln!("dinod: couldn't trust {} for Claude: {e}", wt.display());
+        }
+    }
+}
+
+// ---- A session in its own worktree: fan-out's isolation for one agent, kept until closed. ----
+
+/// A worktree dino made for a session. It outlives the session: when to close it is the user's call.
+#[derive(Serialize, Deserialize, Clone)]
+struct SessionWorktree {
+    path: PathBuf,
+    branch: String,
+    /// The repo's main checkout, which holds every worktree.
+    repo: PathBuf,
+    /// The checkout it came from, where its changes are applied.
+    checkout: PathBuf,
+    /// The commit its changes count from.
+    base: String,
+}
+
+fn worktrees_path() -> PathBuf {
+    dino_core::config_dir().join("worktrees.json")
+}
+
+fn load_worktrees() -> Vec<SessionWorktree> {
+    let all: Vec<SessionWorktree> = std::fs::read(worktrees_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    // Ones removed by hand are gone.
+    all.into_iter().filter(|w| w.path.exists()).collect()
+}
+
+fn save_worktrees(worktrees: &[SessionWorktree]) {
+    let tmp = worktrees_path().with_extension("json.tmp");
+    if std::fs::write(&tmp, serde_json::to_vec_pretty(worktrees).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(tmp, worktrees_path());
+    }
+}
+
+fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
+    let l = d.allowed_launcher(&launch.launcher)?;
+    let dir = work_dir(launch.cwd.as_deref());
+    let checkout = worktree::repo_root(&dir)?;
+    let name = format!("{}-{}", l.short, &new_uuid()[..4]);
+    let branch = format!("dino/{name}");
+    let (wt, base) = worktree::start(&checkout, &name, &branch)?;
+    let repo = worktree::list(&wt)?.into_iter().next().map_or_else(|| checkout.clone(), |w| PathBuf::from(w.path));
+    carry_trust(&l, carried_trust(&dir, &checkout).as_deref(), &wt);
+    // Same folder inside the worktree as the user was in inside the checkout.
+    let cwd = wt.join(dir.strip_prefix(&checkout).unwrap_or(Path::new("")));
+    match spawn(d, Launch { cwd: Some(cwd.display().to_string()), ..launch }) {
+        Ok(id) => {
+            let mut worktrees = d.worktrees.lock().unwrap();
+            worktrees.push(SessionWorktree { path: wt, branch, repo, checkout, base });
+            save_worktrees(&worktrees);
+            Ok(id)
+        }
+        Err(e) => {
+            worktree::remove(&repo, &wt, &branch);
+            let _ = trust::claude_forget(&wt);
+            Err(e)
+        }
+    }
+}
+
+fn remove_worktree(d: &Daemon, path: &str, apply: bool) -> anyhow::Result<()> {
+    let target = real(Path::new(path));
+    let w = d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == target).cloned();
+    let w = w.ok_or_else(|| anyhow::anyhow!("{path} isn't a worktree dino made for a session"))?;
+    if apply {
+        worktree::apply(&w.path, &w.base, &w.checkout)?;
+    }
+    let inside: Vec<String> = d
+        .sessions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| {
+            let cwd = real(&s.cwd);
+            cwd == target || cwd.starts_with(&format!("{target}/"))
+        })
+        .map(|s| s.id.clone())
+        .collect();
+    for id in &inside {
+        kill(d, id);
+    }
+    save(d);
+    worktree::remove(&w.repo, &w.path, &w.branch);
+    let _ = trust::claude_forget(&w.path);
+    let mut worktrees = d.worktrees.lock().unwrap();
+    worktrees.retain(|o| o.path != w.path);
+    save_worktrees(&worktrees);
     Ok(())
 }
