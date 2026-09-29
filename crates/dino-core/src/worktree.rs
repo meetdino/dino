@@ -55,6 +55,111 @@ pub struct Worktree {
     /// dino made it for a session: closing it can apply its changes and remove it.
     #[serde(default)]
     pub dino: bool,
+    /// What's in it compared with the main checkout's branch; None for the main checkout.
+    #[serde(default)]
+    pub git: Option<Summary>,
+    /// The agent that made it, when its agent says so (Claude's subagent hooks).
+    #[serde(default)]
+    pub owner: Option<Owner>,
+}
+
+/// Who made a worktree: a subagent of a session.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Owner {
+    pub session: String,
+    /// The task it was given ("Review code button"), when known.
+    pub description: Option<String>,
+    pub agent_type: Option<String>,
+    pub running: bool,
+}
+
+/// A worktree at a glance, for the sidebar.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    /// The latest commit subject not on the base branch, else a readable branch name.
+    pub label: String,
+    /// Everything changed since it branched off, uncommitted work and new files included.
+    pub added: u32,
+    pub removed: u32,
+    /// Uncommitted or new files.
+    pub dirty: bool,
+    /// Commits the base branch doesn't have.
+    pub ahead: u32,
+    /// "in_progress" (uncommitted work), "ready" (committed, not merged), "merged" (its changes
+    /// are on the base branch) or "empty" (nothing done yet).
+    pub state: String,
+}
+
+/// A branch name for people: `worktree-agent-a367461d…` reads "Subagent a367461", `dino/fix-x` "fix-x".
+pub fn readable_branch(branch: &str) -> String {
+    let b = branch.strip_prefix("worktree-").or_else(|| branch.strip_prefix("dino/")).unwrap_or(branch);
+    match b.strip_prefix("agent-") {
+        Some(id) if !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit()) => {
+            format!("Subagent {}", &id[..id.len().min(7)])
+        }
+        _ => b.to_string(),
+    }
+}
+
+/// `had_commits`: the branch moved since it was made. `same_as_base`: the files it changed read
+/// the same on the base branch, so it landed even if squashed.
+pub fn state(dirty: bool, ahead: u32, had_commits: bool, same_as_base: bool) -> &'static str {
+    if dirty {
+        "in_progress"
+    } else if had_commits && (ahead == 0 || same_as_base) {
+        "merged"
+    } else if ahead > 0 {
+        "ready"
+    } else {
+        "empty"
+    }
+}
+
+/// `dir` at a glance next to `base` (a branch of its repo). Only reads: it may be another agent's
+/// worktree, so its index is left alone.
+pub fn summary(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<Summary> {
+    let tip = git(dir, &["rev-parse", "HEAD"])?.trim().to_string();
+    let mb = git(dir, &["merge-base", "HEAD", base])?.trim().to_string();
+    let ahead: u32 = git(dir, &["rev-list", "--count", &format!("{base}..HEAD")])?.trim().parse().unwrap_or(0);
+    let status = git(dir, &["status", "--porcelain", "-uall"])?;
+    let dirty = !status.trim().is_empty();
+    let (mut added, mut removed) = (0, 0);
+    for line in git(dir, &["diff", "--numstat", &mb])?.lines() {
+        let mut parts = line.split('\t');
+        added += parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        removed += parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    }
+    // New files aren't in the diff without touching the index: count their lines.
+    for path in status.lines().filter_map(|l| l.strip_prefix("?? ")) {
+        let file = dir.join(path.trim_matches('"'));
+        if std::fs::metadata(&file).is_ok_and(|m| m.len() < 1 << 20) {
+            added += std::fs::read(&file).map_or(0, |b| b.iter().filter(|&&c| c == b'\n').count() as u32);
+        }
+    }
+    // The oldest reflog entry is where the branch started; no reflog, then judge by the base.
+    let start = branch
+        .and_then(|b| git(dir, &["reflog", "show", "--format=%H", &format!("refs/heads/{b}")]).ok())
+        .and_then(|log| log.lines().last().map(str::to_string));
+    let had_commits = start.as_deref().map_or(ahead > 0, |s| s != tip);
+    let same_as_base = ahead > 0 && {
+        let changed = git(dir, &["diff", "--name-only", &mb, "HEAD"])?;
+        let files: Vec<&str> = changed.lines().collect();
+        !files.is_empty() && {
+            let mut args = vec!["diff", "--quiet", base, "HEAD", "--"];
+            args.extend(files);
+            git(dir, &args).is_ok()
+        }
+    };
+    let subject = if ahead > 0 { git(dir, &["log", "-1", "--format=%s"]).ok().map(|s| s.trim().to_string()) } else { None };
+    let label = subject
+        .filter(|s| !s.is_empty())
+        .or_else(|| branch.map(readable_branch))
+        .unwrap_or_else(|| base_name(dir));
+    Ok(Summary { label, added, removed, dirty, ahead, state: state(dirty, ahead, had_commits, same_as_base).into() })
+}
+
+fn base_name(dir: &Path) -> String {
+    dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// Every worktree of the repo containing `dir`, the main checkout first.
@@ -66,7 +171,7 @@ pub fn list(dir: &Path) -> anyhow::Result<Vec<Worktree>> {
         .filter_map(|b| {
             let path = b.lines().next()?.strip_prefix("worktree ")?.to_string();
             let branch = b.lines().find_map(|l| l.strip_prefix("branch refs/heads/")).map(String::from);
-            Some(Worktree { path, branch, dino: false })
+            Some(Worktree { path, branch, dino: false, git: None, owner: None })
         })
         .collect())
 }
@@ -428,6 +533,22 @@ pub fn apply(dir: &Path, base: &str, repo: &Path) -> anyhow::Result<DiffStat> {
     Ok(stat)
 }
 
+/// Remove a worktree whose work is done, and its branch if git agrees it's merged. Never forces:
+/// a worktree with uncommitted work stays, and so does a branch git doesn't see merged (squashed).
+/// Says whether the branch went too.
+pub fn clean(dir: &Path) -> anyhow::Result<bool> {
+    if !git(dir, &["status", "--porcelain", "-uall"])?.trim().is_empty() {
+        anyhow::bail!("it has uncommitted changes");
+    }
+    let branch = git(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok().map(|b| b.trim().to_string());
+    let main = list(dir)?.into_iter().next().map(|w| PathBuf::from(w.path)).ok_or_else(|| anyhow::anyhow!("no main checkout"))?;
+    if main == dir || std::fs::canonicalize(&main).ok() == std::fs::canonicalize(dir).ok() {
+        anyhow::bail!("that's the main checkout");
+    }
+    git(&main, &["worktree", "remove", &dir.to_string_lossy()])?;
+    Ok(branch.is_some_and(|b| git(&main, &["branch", "-d", &b]).is_ok()))
+}
+
 /// Remove a worktree and its branch, discarding whatever is in it.
 pub fn remove(repo: &Path, dir: &Path, branch: &str) {
     let _ = git(repo, &["worktree", "remove", "--force", &dir.to_string_lossy()]);
@@ -555,6 +676,79 @@ mod tests {
     }
 
     #[test]
+    fn readable_branch_names() {
+        assert_eq!(readable_branch("worktree-agent-a61958b8bbd9bb8e1"), "Subagent a61958b");
+        assert_eq!(readable_branch("agent-abc"), "Subagent abc");
+        assert_eq!(readable_branch("dino/fix-login"), "fix-login");
+        assert_eq!(readable_branch("worktree-review-code"), "review-code");
+        assert_eq!(readable_branch("agent-not-hex"), "agent-not-hex");
+        assert_eq!(readable_branch("main"), "main");
+    }
+
+    #[test]
+    fn states() {
+        assert_eq!(state(true, 3, true, true), "in_progress");
+        assert_eq!(state(false, 0, false, false), "empty");
+        assert_eq!(state(false, 2, true, false), "ready");
+        assert_eq!(state(false, 0, true, false), "merged", "merged with a merge or fast-forward");
+        assert_eq!(state(false, 2, true, true), "merged", "squashed onto the base");
+    }
+
+    #[test]
+    fn summary_through_a_worktrees_life() {
+        let tmp = std::env::temp_dir().join(format!("dino-summary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let commit = |dir: &Path, msg: &str| {
+            git(dir, &["add", "-A"]).unwrap();
+            git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg]).unwrap();
+        };
+        git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        commit(&repo, "init");
+
+        let wt = tmp.join("agent-abc1234def");
+        git(&repo, &["worktree", "add", "-q", "-b", "worktree-agent-abc1234def", &wt.to_string_lossy(), "main"]).unwrap();
+        let s = |dir: &Path, b: &str| summary(dir, Some(b), "main").unwrap();
+        let b = "worktree-agent-abc1234def";
+        let fresh = s(&wt, b);
+        assert_eq!((fresh.label.as_str(), fresh.state.as_str(), fresh.added, fresh.dirty), ("Subagent abc1234", "empty", 0, false));
+
+        std::fs::write(wt.join("x.txt"), "x\ny\n").unwrap();
+        std::fs::write(wt.join("a.txt"), "uno\n").unwrap();
+        let busy = s(&wt, b);
+        assert_eq!((busy.state.as_str(), busy.added, busy.removed, busy.dirty), ("in_progress", 3, 1, true));
+        assert!(git(&wt, &["diff", "--cached", "--name-only"]).unwrap().trim().is_empty(), "the index is left alone");
+        assert!(git(&wt, &["status", "--porcelain"]).unwrap().contains("?? x.txt"));
+        assert!(clean(&wt).is_err(), "never removes uncommitted work");
+
+        commit(&wt, "Add x");
+        let ready = s(&wt, b);
+        assert_eq!((ready.label.as_str(), ready.state.as_str(), ready.ahead, ready.added), ("Add x", "ready", 1, 3));
+
+        // Squashed onto main: still ahead, but its changes are there.
+        git(&repo, &["merge", "--squash", "-q", b]).unwrap();
+        commit(&repo, "Squashed x");
+        assert_eq!(s(&wt, b).state, "merged");
+        assert!(!clean(&wt).unwrap(), "git doesn't see a squashed branch merged, so it stays");
+        assert!(!wt.exists());
+        assert!(!git(&repo, &["branch", "--list", b]).unwrap().trim().is_empty());
+
+        // Merged the usual way: the branch goes too.
+        let wt2 = tmp.join("two");
+        git(&repo, &["worktree", "add", "-q", "-b", "two", &wt2.to_string_lossy(), "main"]).unwrap();
+        std::fs::write(wt2.join("y.txt"), "y\n").unwrap();
+        commit(&wt2, "Add y");
+        git(&repo, &["merge", "--ff-only", "-q", "two"]).unwrap();
+        let merged = s(&wt2, "two");
+        assert_eq!((merged.state.as_str(), merged.ahead, merged.label.as_str()), ("merged", 0, "two"));
+        assert!(clean(&wt2).unwrap());
+        assert!(git(&repo, &["branch", "--list", "two"]).unwrap().trim().is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn fan_out_round_trip() {
         let tmp = std::env::temp_dir().join(format!("dino-wt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -574,8 +768,8 @@ mod tests {
         let all = list(&wt).unwrap();
         let real = |p: &Path| p.canonicalize().unwrap().to_string_lossy().into_owned();
         assert_eq!(all, vec![
-            Worktree { path: real(repo), branch: Some("main".into()), dino: false },
-            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()), dino: false },
+            Worktree { path: real(repo), branch: Some("main".into()), dino: false, git: None, owner: None },
+            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()), dino: false, git: None, owner: None },
         ]);
 
         std::fs::write(wt.join("a.txt"), "one\ntwo\nthree\n").unwrap();

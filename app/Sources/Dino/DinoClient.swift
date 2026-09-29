@@ -32,6 +32,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     /// How full the context window is: tokens the last model call read, and the window's size.
     var context_tokens: UInt64?
     var context_limit: UInt64?
+    /// The scheduled task that started it.
+    var scheduled: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
