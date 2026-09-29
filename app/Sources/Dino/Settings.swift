@@ -14,6 +14,8 @@ struct DinoSettings: Codable, Equatable {
         var close_merged: Bool?
         /// Offer the mode that never asks; nil from an older dinod.
         var allow_bypass: Bool?
+        /// Give Claude sessions dino's session tools; nil from an older dinod.
+        var session_tools: Bool?
 
         func allows(_ short: String) -> Bool {
             short == "shell" || allowed_agents.isEmpty || allowed_agents.contains(short)
@@ -492,6 +494,17 @@ private struct PoliciesPane: View {
                 Text("Permissions")
             } footer: {
                 Footnote("Bypass lets an agent edit files and run any command without asking. Off, dino hides it and won't start or switch a session into it. Sessions already in it keep running.")
+            }
+            Section {
+                Toggle("Cross-session communication", isOn: Binding(
+                    get: { policies?.session_tools ?? false },
+                    set: { on in store.update { $0.policies.session_tools = on } }
+                ))
+                .orgLocked("policies.session_tools")
+            } header: {
+                Text("Sessions")
+            } footer: {
+                Footnote("Gives Claude sessions dino's tools to list and read every session in dino, whatever the agent, and, when you allow it, to message an idle one or start a new one. Applies to new sessions. For other agents, add “dino mcp” as an MCP server in their own settings.")
             }
             Section {
                 Picker("Tokens per session", selection: Binding(

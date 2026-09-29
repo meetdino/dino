@@ -16,6 +16,20 @@ const MAX_SCREEN_LINES: u32 = 400;
 /// Characters of conversation `read_session` gives.
 const CONVERSATION_BUDGET: usize = 12_000;
 
+/// For Claude: `--mcp-config` that gives it dino's tools, and the settings (already in `args`, from
+/// the proxy wiring) extended so the tools that only look don't ask.
+pub(crate) fn wire_claude(id: &str, args: &mut Vec<String>) {
+    let Ok(dino) = std::env::current_exe() else { return };
+    if let Some(i) = args.iter().position(|a| a == "--settings")
+        && let Some(mut v) = args.get(i + 1).and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    {
+        v["permissions"]["allow"] = serde_json::json!(dino_core::mcp::READ_TOOLS);
+        args[i + 1] = v.to_string();
+    }
+    // `--mcp-config` takes several values: it goes before the flags that follow it, never last.
+    args.splice(0..0, ["--mcp-config".to_string(), dino_core::mcp::config(&dino, Some(id), false)]);
+}
+
 pub(crate) fn find(d: &Daemon, id: &str) -> anyhow::Result<Arc<Session>> {
     d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))
 }
