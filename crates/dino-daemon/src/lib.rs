@@ -1730,15 +1730,26 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
                 // Compared with what the main checkout has out.
                 let base = w[0].branch.clone().unwrap_or_else(|| "HEAD".into());
                 let base = if base == "HEAD" { worktree::head(Path::new(&w[0].path)) } else { base };
-                for w in w.iter_mut().skip(1) {
-                    let path = real(Path::new(&w.path));
-                    w.dino = made.contains(&path);
-                    // Fan-out members show their own stat.
-                    if !fanned.contains(&path) {
-                        w.git = summary(d, &path, w.branch.as_deref(), &base);
-                        w.owner = owners.iter().find(|o| o.0 == path).map(|o| o.1.clone());
+                // Each summary waits on git, so they're read side by side.
+                std::thread::scope(|sc| {
+                    let reads: Vec<_> = w
+                        .iter()
+                        .skip(1)
+                        .map(|w| {
+                            let (path, branch, base) = (real(Path::new(&w.path)), w.branch.clone(), &base);
+                            // Fan-out members show their own stat.
+                            (!fanned.contains(&path)).then(|| sc.spawn(move || summary(d, &path, branch.as_deref(), base)))
+                        })
+                        .collect();
+                    for (w, read) in w.iter_mut().skip(1).zip(reads) {
+                        let path = real(Path::new(&w.path));
+                        w.dino = made.contains(&path);
+                        if let Some(read) = read {
+                            w.git = read.join().unwrap_or_default();
+                            w.owner = owners.iter().find(|o| o.0 == path).map(|o| o.1.clone());
+                        }
                     }
-                }
+                });
                 let path = w[0].path.clone();
                 repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w });
             }

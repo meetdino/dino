@@ -1,12 +1,16 @@
 //! Agent sessions that exist outside dino: running in another terminal, recent on disk, or in the
 //! cloud. dino can continue any of them (see dinod's `Adopt`).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::procinfo;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -51,7 +55,22 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
 }
 
 fn alive(pid: u32) -> bool {
-    run("ps", &["-p", &pid.to_string(), "-o", "pid="]).is_some_and(|s| !s.trim().is_empty())
+    // Signal 0 only checks: EPERM still means it exists.
+    let sent = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// A process's terminal and launch flags never change, and finding them takes a `ps` per parent:
+/// read once per process, kept while it lives.
+static PROCS: Mutex<Option<HashMap<u32, (Option<String>, Vec<String>)>>> = Mutex::new(None);
+
+fn terminal_and_flags(agent: &str, pid: u32) -> (Option<String>, Vec<String>) {
+    if let Some(known) = PROCS.lock().unwrap().get_or_insert_default().get(&pid) {
+        return known.clone();
+    }
+    let found = (terminal_of(pid), portable_flags(agent, &args_of(pid)));
+    PROCS.lock().unwrap().get_or_insert_default().insert(pid, found.clone());
+    found
 }
 
 /// The GUI app (or multiplexer) a process lives in, found by walking up its parents.
@@ -116,6 +135,7 @@ pub fn portable_flags(agent: &str, args: &[String]) -> Vec<String> {
 /// Claude Code writes `~/.claude/sessions/<pid>.json` for every live process.
 fn running_claude() -> Vec<FoundSession> {
     let dir = home().join(".claude/sessions");
+    PROCS.lock().unwrap().get_or_insert_default().retain(|&pid, _| alive(pid));
     let mut out = vec![];
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
@@ -130,6 +150,7 @@ fn running_claude() -> Vec<FoundSession> {
         }
         let cwd = v["cwd"].as_str().map(String::from);
         let title = crate::history::claude_title(sid).or_else(|| v["name"].as_str().map(String::from)).unwrap_or_else(|| "Claude Code session".into());
+        let (terminal, args) = terminal_and_flags("claude", pid);
         out.push(FoundSession {
             source: Source::Running,
             agent: "claude".into(),
@@ -139,28 +160,29 @@ fn running_claude() -> Vec<FoundSession> {
             updated_at: v["updatedAt"].as_u64().map_or(0, |ms| ms / 1000),
             pid: Some(pid),
             status: v["status"].as_str().map(String::from),
-            terminal: terminal_of(pid),
-            args: portable_flags("claude", &args_of(pid)),
+            terminal,
+            args,
             url: None,
         });
     }
     out
 }
 
-/// Codex keeps its rollout file open; `lsof` names the session and its cwd.
+/// Codex keeps its rollout file open; that names the session, the process's cwd the folder.
 fn running_codex() -> Vec<FoundSession> {
-    let Some(pids) = run("pgrep", &["-x", "codex"]) else { return vec![] };
+    let pids = procinfo::pids_named("codex");
+    if pids.is_empty() {
+        return vec![];
+    }
     let titles = crate::history::codex_titles();
     let mut out = vec![];
-    for pid in pids.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
-        let Some(files) = run("lsof", &["-p", &pid.to_string(), "-Fn"]) else { continue };
-        let Some(rollout) = files.lines().filter_map(|l| l.strip_prefix('n')).find(|f| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) else {
-            continue;
-        };
+    for pid in pids {
+        let files = procinfo::open_files(pid);
+        let Some(rollout) = files.iter().find(|f| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) else { continue };
         let rollout = Path::new(rollout);
         let Some(sid) = crate::history::rollout_id(rollout) else { continue };
-        let cwd = run("lsof", &["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-            .and_then(|s| s.lines().find_map(|l| l.strip_prefix('n').map(String::from)));
+        let cwd = procinfo::cwd_of(pid);
+        let (terminal, args) = terminal_and_flags("codex", pid);
         out.push(FoundSession {
             source: Source::Running,
             agent: "codex".into(),
@@ -170,8 +192,8 @@ fn running_codex() -> Vec<FoundSession> {
             updated_at: mtime(rollout),
             pid: Some(pid),
             status: crate::history::codex_status(rollout),
-            terminal: terminal_of(pid),
-            args: portable_flags("codex", &args_of(pid)),
+            terminal,
+            args,
             url: None,
         });
     }
