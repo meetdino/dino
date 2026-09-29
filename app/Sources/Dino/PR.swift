@@ -112,7 +112,7 @@ struct PRPopover: View {
                 }
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
-                if pr.isOpen, pr.checks.failed > 0 {
+                if pr.isOpen, pr.checks.failed > 0, session.agent_id != "shell" {  // a shell has no one to read it
                     Button("Ask \(session.name) to Fix") { run { try await model.fixPR(session.id) } }
                         .help("Paste the failing checks' logs into \(session.name) and ask it to fix them")
                 }
