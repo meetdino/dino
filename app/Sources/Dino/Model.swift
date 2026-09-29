@@ -61,6 +61,10 @@ final class DinoModel: ObservableObject {
     /// The review panel beside the terminal, and the comments waiting to go to each session.
     @Published var showReview = false
     @Published var comments: [String: [ReviewComment]] = [:]
+    /// Claude's review of each session's changes; its findings join that session's comments.
+    @Published var reviews: [String: ReviewRun] = [:]
+    /// The review each session is waiting on, so a cancelled one's late answer is dropped.
+    private var reviewRuns: [String: UUID] = [:]
 
     /// The Create PR sheet, and the popover about the selected session's PR.
     @Published var showCreatePR = false
@@ -404,6 +408,41 @@ final class DinoModel: ObservableObject {
     /// Nil when dinod can't be reached; the panel keeps what it last showed.
     func changes(_ session: String) async -> Changes? {
         await Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).changes(session: session) }.value
+    }
+
+    /// Have Claude review the session's changes. Its findings replace the last review's among the
+    /// comments, quoting lines from `changes`.
+    func review(_ session: String, changes: Changes?) {
+        guard reviews[session] != .running else { return }
+        reviews[session] = .running
+        let run = UUID()
+        reviewRuns[session] = run
+        Task {
+            do {
+                let found = try await Task.detached {
+                    try DinoConnection(path: DinoEnvironment.socketPath).review(session: session)
+                }.value
+                guard reviewRuns[session] == run else { return }
+                let added = found.map { f in
+                    let at = LineRef(path: f.file, line: f.line, removed: false)
+                    let code = changes?.files.first { $0.path == f.file }?.lines.first { LineRef(path: f.file, $0) == at }?.text ?? ""
+                    return ReviewComment(at: at, code: code, text: f.message, severity: f.severity)
+                }
+                let list = (comments[session] ?? []).filter { $0.severity == nil } + added
+                comments[session] = list.isEmpty ? nil : list
+                reviews[session] = .done(found: found.count)
+            } catch {
+                // Cancelled, or replaced by a newer review.
+                guard reviewRuns[session] == run else { return }
+                reviews[session] = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    func cancelReview(_ session: String) {
+        reviews[session] = nil
+        reviewRuns[session] = nil
+        Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).cancelReview(session: session) }
     }
 
     /// Hand the review to the agent as one message, submitted, as if the user had typed it.

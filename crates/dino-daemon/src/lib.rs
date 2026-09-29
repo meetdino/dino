@@ -236,6 +236,15 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Changes { id } => changes(d, &id).unwrap_or_else(|e| Response::Error { message: e.to_string() }),
+            // Each connection has its own thread, so a review blocks only the one asking.
+            Request::Review { id } => match review(d, &id) {
+                Ok(findings) => Response::Review { findings },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ReviewCancel { id } => {
+                dino_core::review::cancel(&id);
+                Response::Ok
+            }
             Request::SendInput { id, text, submit } => {
                 let session = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
                 match session {
@@ -964,20 +973,34 @@ fn member_diff(d: &Daemon, session: &str) -> anyhow::Result<(ipc::DiffStat, Stri
 /// What `id` changed: a fan-out member since its fan-out began (edits it committed included),
 /// any other session since the last commit of the checkout it runs in.
 fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
+    Ok(match changes_base(d, id)? {
+        Ok((dir, base, label)) => Response::Changes { root: real(&dir), files: worktree::changes(&dir, &base)?, base: label, note: None },
+        Err((cwd, note)) => Response::Changes { root: real(&cwd), base: String::new(), files: vec![], note: Some(note) },
+    })
+}
+
+/// Where `id`'s changes are and what they're compared with: (checkout, base, base in words).
+/// Not in a repo: its cwd and why.
+fn changes_base(d: &Daemon, id: &str) -> anyhow::Result<Result<(PathBuf, String, String), (PathBuf, String)>> {
     let cwd = d.sessions.lock().unwrap().iter().find(|s| s.id == id).map(|s| s.cwd.clone());
     let cwd = cwd.ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-    let (dir, base, label) = match (find_member(d, id), session_worktree(d, &cwd)) {
-        (Ok((g, m)), _) => (m.worktree, g.base, "where the fan-out started".to_string()),
-        (Err(_), Some(w)) => (w.path, w.base, "where the worktree started".to_string()),
+    Ok(match (find_member(d, id), session_worktree(d, &cwd)) {
+        (Ok((g, m)), _) => Ok((m.worktree, g.base, "where the fan-out started".to_string())),
+        (Err(_), Some(w)) => Ok((w.path, w.base, "where the worktree started".to_string())),
         (Err(_), None) => match worktree::repo_root(&cwd) {
             Ok(root) => {
                 let head = worktree::head(&root);
-                (root, head, "the last commit".to_string())
+                Ok((root, head, "the last commit".to_string()))
             }
-            Err(e) => return Ok(Response::Changes { root: real(&cwd), base: String::new(), files: vec![], note: Some(e.to_string()) }),
+            Err(e) => Err((cwd, e.to_string())),
         },
-    };
-    Ok(Response::Changes { root: real(&dir), files: worktree::changes(&dir, &base)?, base: label, note: None })
+    })
+}
+
+/// Claude's review of what `changes` shows for `id`.
+fn review(d: &Daemon, id: &str) -> anyhow::Result<Vec<dino_core::review::Finding>> {
+    let (dir, base, _) = changes_base(d, id)?.map_err(|(_, note)| anyhow::anyhow!(note))?;
+    dino_core::review::run(id, &dir, &base)
 }
 
 /// The worktree dino made that `dir` is in: its commits count as changes too.
