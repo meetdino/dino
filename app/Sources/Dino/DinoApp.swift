@@ -171,6 +171,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
+        .sheet(isPresented: $model.showCreatePR) {
+            if let s = model.selectedSession { CreatePRSheet(session: s) }
+        }
         .alert(
             "Keep \(model.confirmKeep?.launcher ?? "")'s changes?",
             isPresented: Binding(get: { model.confirmKeep != nil }, set: { if !$0 { model.confirmKeep = nil } }),
@@ -315,6 +318,7 @@ struct Terminals: View {
                 .help("Review this session's changes; click a line to comment for the agent (⇧⌘D)")
                 .disabled(!model.sessions.contains { $0.id == model.selected })
             }
+            ToolbarItem(placement: .primaryAction) { PRToolbarButton() }
         }
     }
 }
@@ -514,6 +518,7 @@ struct SessionRow: View {
             HStack(spacing: 8) {
                 StatusDot(status: status)
                 Text(session.name).font(.system(.body, design: .monospaced).weight(.medium))
+                if let pr = model.pr(of: session) { PRChip(pr: pr) }
                 if let split = model.splits.first(where: { $0.contains(session.id) }) {
                     Image(systemName: split.vertical ? "rectangle.split.1x2" : "rectangle.split.2x1")
                         .font(.caption).foregroundStyle(.tertiary)
