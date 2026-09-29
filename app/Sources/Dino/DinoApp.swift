@@ -340,7 +340,9 @@ struct Terminals: View {
                 if let s = model.sessions.first(where: { $0.id == model.selected }) {
                     HStack(spacing: 8) {
                         SessionName(session: s, place: .toolbar, font: .system(.body, design: .monospaced).weight(.semibold), color: Brand.green)
-                        if s.label == nil, let t = s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
+                        if let f = s.inside { AgentBadge(agent: f.agent) }
+                        if s.label == nil, let t = s.inside?.title ?? s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
+                        if let f = s.inside, f.continuable { TakeOverButton(session: s, found: f) }
                         if let host = s.host { HostChip(host: host) }
                         if !s.exited { SessionControlsBar(session: s).padding(.leading, 4) }
                     }
@@ -645,6 +647,13 @@ struct SessionRow: View {
                 Spacer()
                 Text(status.label).font(.caption).foregroundStyle(status.color)
             }
+            if let f = session.inside {
+                HStack(spacing: 5) {
+                    AgentBadge(agent: f.agent)
+                    Text(f.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .help("\(f.agentName) started by hand in this shell")
+            }
             if let needs = session.needs {
                 Label(needs, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(SessionStatus.needsYou.color).lineLimit(1)
@@ -789,11 +798,26 @@ struct AgentBadge: View {
     let agent: String
 
     var body: some View {
-        Text(agent == "codex" ? "codex" : "claude")
+        Text(["codex", "gemini"].contains(agent) ? agent : "claude")
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
             .padding(.horizontal, 4).padding(.vertical, 1)
-            .background(RoundedRectangle(cornerRadius: 3).fill((agent == "codex" ? Color.blue : Brand.spike).opacity(0.18)))
-            .foregroundStyle(agent == "codex" ? Color.blue : Brand.spike)
+            .background(RoundedRectangle(cornerRadius: 3).fill(color.opacity(0.18)))
+            .foregroundStyle(color)
+    }
+
+    private var color: Color { agent == "codex" ? .blue : agent == "gemini" ? .purple : Brand.spike }
+}
+
+/// Continue an agent started by hand in a shell as a dino session: same row, conversation resumed.
+struct TakeOverButton: View {
+    @EnvironmentObject var model: DinoModel
+    let session: SessionInfo
+    let found: FoundSession
+
+    var body: some View {
+        Button("Continue as a \(found.agentName) session") { model.takeOver(session) }
+            .controlSize(.small)
+            .help("Restart \(found.agentName) under dino with this conversation, once its turn is over: status, tasks, controls and previews then work. The shell goes.")
     }
 }
 
@@ -939,6 +963,8 @@ struct MovingOverlay: View {
                 if session.source == "running" {
                     Text(session.isBusy
                         ? "Waiting for its current turn to finish, then it continues here."
+                        : session.terminal == "dino"
+                        ? "Restarting it under dino, in the same row."
                         : "Closing it in \(session.terminal ?? "the other terminal") and continuing here.")
                         .foregroundStyle(.secondary)
                 }

@@ -156,8 +156,10 @@ struct PaneHeader: View {
             StatusDot(status: status)
             Text(session.display).font(.system(.callout, design: .monospaced).weight(.semibold))
                 .foregroundStyle(focused ? Brand.green : .secondary)
-            if session.label == nil, let t = session.title { Text(t).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
+            if let f = session.inside { AgentBadge(agent: f.agent) }
+            if session.label == nil, let t = session.inside?.title ?? session.title { Text(t).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
             Spacer(minLength: 4)
+            if let f = session.inside, f.continuable { TakeOverButton(session: session, found: f) }
             Text(status.label).font(.caption).foregroundStyle(status.color)
             Button {
                 model.updateSplit(split) { $0.vertical.toggle() }
