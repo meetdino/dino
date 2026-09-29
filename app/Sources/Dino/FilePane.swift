@@ -3,15 +3,17 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// What sits beside the terminals: a file, or the selected session's web preview.
+/// What sits beside the terminals: a file, the selected session's web preview, or its tasks.
 enum SidePane: Equatable {
     case file(OpenFile)
     case preview
+    case tasks
 
     static func == (a: SidePane, b: SidePane) -> Bool {
         switch (a, b) {
         case let (.file(x), .file(y)): x === y
         case (.preview, .preview): true
+        case (.tasks, .tasks): true
         default: false
         }
     }
@@ -239,6 +241,7 @@ struct SidePaneView: View {
             switch pane {
             case let .file(f): FilePane(file: f)
             case .preview: PreviewPane(session: model.selectedSession)
+            case .tasks: TasksPane(session: model.tasksSession)
             }
         }
         .onExitCommand { model.closeSidePane() }
