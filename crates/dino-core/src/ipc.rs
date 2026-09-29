@@ -89,6 +89,9 @@ pub enum Request {
     /// Continue a found session in dino: running ones are handed off (waited on until idle,
     /// stopped, resumed here). `cwd` is where cloud sessions land.
     Adopt { session: crate::found::FoundSession, cwd: Option<String> },
+    /// Shell `id` is running an agent started by hand (`SessionInfo::inside`): once it's idle,
+    /// stop it and resume its conversation as session `id`, in the shell's place.
+    TakeOver { id: String },
     /// One prompt to several agents, each in its own git worktree of the repo at `cwd`.
     Fanout { prompt: String, launchers: Vec<String>, cwd: Option<String> },
     Groups,
@@ -303,6 +306,9 @@ pub struct SessionInfo {
     /// What the agent tracks underneath: its task list, subagents and background commands.
     #[serde(default)]
     pub tasks: SessionTasks,
+    /// A shell's foreground agent that someone started by hand: its title and busy/idle status.
+    #[serde(default)]
+    pub inside: Option<crate::found::FoundSession>,
 }
 
 /// From the agent's hooks, so Claude only for now; empty for agents that don't report them.
