@@ -45,13 +45,13 @@ fn save_archived(all: &[Archived]) {
     }
 }
 
-/// Answer a lifecycle request; any other comes back.
-pub(crate) fn serve(d: &Arc<Daemon>, req: Request) -> Result<Response, Request> {
+/// Answer a lifecycle request.
+pub(crate) fn serve(d: &Arc<Daemon>, req: Request) -> Response {
     let done = |r: anyhow::Result<()>| match r {
         Ok(()) => Response::Ok,
         Err(e) => Response::Error { message: e.to_string() },
     };
-    Ok(match req {
+    match req {
         Request::Rename { id, name } => done(rename(d, &id, &name)),
         Request::Archive { id } => done(archive(d, &id)),
         Request::Archived => Response::Archived { sessions: list(d) },
@@ -62,8 +62,8 @@ pub(crate) fn serve(d: &Arc<Daemon>, req: Request) -> Result<Response, Request> 
         Request::DeleteArchived { id } => done(delete(d, &id)),
         Request::Storage => Response::Storage { worktrees: storage(d) },
         Request::RemoveStored { path } => done(remove_stored(d, &path)),
-        other => return Err(other),
-    })
+        other => Response::Error { message: format!("not a lifecycle request: {other:?}") },
+    }
 }
 
 fn rename(d: &Daemon, id: &str, name: &str) -> anyhow::Result<()> {
@@ -99,6 +99,7 @@ pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
         started_at: s.started_at,
         agent_session,
         auto: s.auto.lock().unwrap().clone(),
+        scheduled: s.scheduled.clone(),
     };
     let w = session_worktree(d, &s.cwd);
     kill(d, id);

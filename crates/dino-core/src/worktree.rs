@@ -885,4 +885,49 @@ mod tests {
         assert!(git(repo, &["branch", "--list", "dino/*"]).unwrap().trim().is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn worktree_locations() {
+        let repo = Path::new("/src/app");
+        assert_eq!(worktrees_dir_at(repo, ".dino/worktrees"), PathBuf::from("/src/app/.dino/worktrees"));
+        assert_eq!(worktrees_dir_at(repo, ""), PathBuf::from("/src/app/.dino/worktrees"));
+        assert_eq!(worktrees_dir_at(repo, "/Volumes/big/wt/"), PathBuf::from("/Volumes/big/wt/app"));
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(worktrees_dir_at(repo, "~/worktrees"), home.join("worktrees/app"));
+        assert_eq!(inner_dir(repo, &repo.join(".trees/x")).as_deref(), Some(".trees"));
+        assert_eq!(inner_dir(repo, Path::new("/elsewhere/app")), None);
+    }
+
+    #[test]
+    fn put_away_and_restore() {
+        let tmp = std::env::temp_dir().join(format!("dino-putaway-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let commit = |dir: &Path, msg: &str| {
+            git(dir, &["add", "-A"]).unwrap();
+            git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg]).unwrap();
+        };
+        git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        commit(&repo, "init");
+        let wt = repo.join(".dino/worktrees/claude-ab12");
+        restore(&repo, &wt, "dino/claude-ab12").unwrap();
+        assert!(wt.join("a.txt").is_file(), "a missing branch starts from HEAD");
+        assert!(disk_size(&wt) > 0);
+
+        std::fs::write(wt.join("b.txt"), "two\n").unwrap();
+        assert!(put_away(&wt).is_err(), "never removes uncommitted work");
+        commit(&wt, "Add b");
+        put_away(&wt).unwrap();
+        assert!(!wt.exists());
+        assert!(git(&repo, &["rev-parse", "--verify", "dino/claude-ab12"]).is_ok(), "the branch stays");
+        assert!(put_away(&repo).is_err(), "never the main checkout");
+
+        restore(&repo, &wt, "dino/claude-ab12").unwrap();
+        assert!(wt.join("b.txt").is_file(), "back on its branch, commits and all");
+        assert!(restore(&repo, &wt, "dino/claude-ab12").is_err(), "not over something in the way");
+        remove(&repo, &wt, "dino/claude-ab12");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

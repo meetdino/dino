@@ -242,4 +242,14 @@ mod tests {
         assert!(set_key("DINO_TEST_A_KEY", Some("a\nb")).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn branch_prefix_falls_back_when_unusable() {
+        let w = |p: &str| Worktrees { branch_prefix: p.into(), ..Default::default() }.prefix();
+        assert_eq!(w("agents/"), "agents/");
+        assert_eq!(w(" ben- "), "ben-");
+        for bad in ["", "  ", "/x", "-x", "a b/", "a..b/", "x~/", "a:b"] {
+            assert_eq!(w(bad), DEFAULT_BRANCH_PREFIX, "{bad:?}");
+        }
+    }
 }
