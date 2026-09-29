@@ -10,7 +10,7 @@ struct DinoSettings: Codable, Equatable {
         var worktree_trust: Bool
         /// 0 means no limit.
         var session_token_budget: UInt64
-        /// Archive a session after its PR merges; nil from an older dinod.
+        /// Archive a session after its PR merges or closes; nil from an older dinod.
         var close_merged: Bool?
         /// Offer the mode that never asks; nil from an older dinod.
         var allow_bypass: Bool?
@@ -474,7 +474,7 @@ private struct PoliciesPane: View {
                 Footnote("Claude asks whether to trust each new folder, and every fan-out worktree is one. When you've trusted the repo, dino tells Claude its worktrees are trusted too, and forgets them when the fan-out closes. Codex does this on its own.")
             }
             Section {
-                Toggle("Archive sessions after their PR merges", isOn: Binding(
+                Toggle("Archive sessions after their PR merges or closes", isOn: Binding(
                     get: { policies?.close_merged ?? false },
                     set: { on in store.update { $0.policies.close_merged = on } }
                 ))
@@ -482,7 +482,7 @@ private struct PoliciesPane: View {
             } header: {
                 Text("Pull requests")
             } footer: {
-                Footnote("When a session's PR merges, dino archives it once its agent is idle: the session stops, and the worktree dino made for it is removed if nothing in it would be lost. Unarchive it to pick the conversation up again, worktree and all. Sessions outside a dino worktree stay open.")
+                Footnote("When a session's PR merges or is closed, dino archives it once its agent is idle, so the conversation can be picked up again. After a merge, the worktree dino made for it is removed too if nothing in it would be lost; after a close it stays (see Worktrees → Storage), since the work never landed. Unarchive it to pick up where it left off, worktree and all. Sessions outside a dino worktree stay open.")
             }
             Section {
                 Toggle("Allow bypass permissions mode", isOn: Binding(

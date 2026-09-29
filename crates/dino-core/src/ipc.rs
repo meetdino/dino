@@ -170,6 +170,9 @@ pub enum Request {
     /// Remove a worktree dino made (and its branch when merged), never forcing: refuses one
     /// with uncommitted work, one a session runs in, and fan-out members (discard the group).
     RemoveStored { path: String },
+    /// Remove every worktree dino made that nothing would be lost from: no session running in
+    /// it, not a fan-out member, no uncommitted changes, and its commits merged or pushed.
+    FreeUpSpace,
     /// The dev servers the session's folder configures (`.dino/launch.json`, `.claude/launch.json`).
     PreviewConfigs { id: String },
     /// Start the named dev server in the session's folder; it stops with the session.
@@ -240,6 +243,8 @@ pub enum Response {
     Review { findings: Vec<crate::review::Finding> },
     Archived { sessions: Vec<ArchivedInfo> },
     Storage { worktrees: Vec<StoredWorktree> },
+    /// What Free up space removed, and how many bytes that gave back (as last measured).
+    Freed { removed: Vec<String>, bytes: u64 },
     /// A broken launch file lists nothing, and `error` says why.
     PreviewConfigs { configs: Vec<crate::preview::PreviewConfig>, error: Option<String> },
     PreviewLog { text: String },
@@ -458,10 +463,17 @@ pub struct StoredWorktree {
     pub size: Option<u64>,
     /// A live session running in it, by name.
     pub session: Option<String>,
+    /// That session's state: "working", "idle", or "ended" (its agent exited; removing the
+    /// worktree archives it). None when no session is there.
+    #[serde(default)]
+    pub session_state: Option<String>,
     /// Kept for an archived session (removing it here still lets that one come back from its branch).
     pub archived: bool,
     /// Belongs to a fan-out group.
     pub fanout: bool,
+    /// Free up space would remove it: see [`Request::FreeUpSpace`].
+    #[serde(default)]
+    pub reclaimable: bool,
 }
 
 /// What dino does about a session's PR by itself. Kept with the session, so it survives dinod restarts.

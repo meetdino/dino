@@ -62,6 +62,10 @@ pub(crate) fn serve(d: &Arc<Daemon>, req: Request) -> Response {
         Request::DeleteArchived { id } => done(delete(d, &id)),
         Request::Storage => Response::Storage { worktrees: storage(d) },
         Request::RemoveStored { path } => done(remove_stored(d, &path)),
+        Request::FreeUpSpace => {
+            let (removed, bytes) = free_up_space(d);
+            Response::Freed { removed, bytes }
+        }
         other => Response::Error { message: format!("not a lifecycle request: {other:?}") },
     }
 }
@@ -77,6 +81,11 @@ fn rename(d: &Daemon, id: &str, name: &str) -> anyhow::Result<()> {
 /// Stop the session and keep what it takes to start it again. Its worktree is put away when no
 /// other session runs there and nothing in it would be lost: clean, and pushed or merged.
 pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
+    archive_as(d, id, true)
+}
+
+/// Archive it; `put_away` false keeps its worktree on disk whatever state it's in.
+fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
     anyhow::ensure!(super::group_of(d, id).is_none(), "{} is part of a fan-out: keep or discard it instead", s.name);
     let agent_session = {
@@ -117,7 +126,7 @@ pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
     if let Some(w) = &w {
         let target = real(&w.path);
         let others = sessions_in(d, &target).iter().any(|o| !o.pane.is_exited());
-        if !others && nothing_to_lose(d, w) && worktree::put_away(&w.path).is_ok() {
+        if put_away && !others && nothing_to_lose(d, w) && worktree::put_away(&w.path).is_ok() {
             worktree_removed = true;
             let mut worktrees = d.worktrees.lock().unwrap();
             worktrees.retain(|o| o.path != w.path);
@@ -236,6 +245,7 @@ fn storage(d: &Arc<Daemon>) -> Vec<ipc::StoredWorktree> {
     all.retain(|(p, ..)| p.is_dir());
     let mut bases: HashMap<PathBuf, String> = HashMap::new();
     let sizes = d.sizes.lock().unwrap().clone();
+    let pushed = d.pushed.lock().unwrap().clone();
     let mut stale = vec![];
     let out = all
         .into_iter()
@@ -252,15 +262,28 @@ fn storage(d: &Arc<Daemon>) -> Vec<ipc::StoredWorktree> {
             if size.is_none() {
                 stale.push(key.clone());
             }
-            let session = sessions_in(d, &key).into_iter().find(|s| !s.pane.is_exited()).map(|s| s.label.lock().unwrap().clone().unwrap_or_else(|| s.name.clone()));
+            let here = sessions_in(d, &key);
+            let live = here.iter().find(|s| !s.pane.is_exited());
+            let session = live.map(|s| s.label.lock().unwrap().clone().unwrap_or_else(|| s.name.clone()));
+            let session_state = match live {
+                Some(s) if super::finished(d, s) => Some("idle"),
+                Some(_) => Some("working"),
+                None if !here.is_empty() => Some("ended"),
+                None => None,
+            };
+            let state = summary.as_ref().map_or_else(|| "in_progress".into(), |s| s.state.clone());
+            let dirty = summary.as_ref().is_none_or(|s| s.dirty);
+            let landed = state == "merged" || state == "empty" || pushed.get(&key) == Some(&true);
             ipc::StoredWorktree {
                 path: key.clone(),
                 repo: real(&repo),
                 branch,
-                state: summary.as_ref().map_or_else(|| "in_progress".into(), |s| s.state.clone()),
-                dirty: summary.as_ref().is_none_or(|s| s.dirty),
+                reclaimable: live.is_none() && !fanout && !dirty && landed,
+                state,
+                dirty,
                 size,
                 session,
+                session_state: session_state.map(String::from),
                 archived: archived.contains(&key),
                 fanout,
             }
@@ -279,13 +302,16 @@ fn measure(d: &Arc<Daemon>, paths: Vec<String>) {
     std::thread::spawn(move || {
         for p in paths {
             let n = worktree::disk_size(Path::new(&p));
+            let pushed = pr::nothing_to_lose(Path::new(&p));
+            d.pushed.lock().unwrap().insert(p.clone(), pushed);
             d.sizes.lock().unwrap().insert(p, (Instant::now(), n));
         }
         d.measuring.store(false, Ordering::Release);
     });
 }
 
-/// Remove a worktree dino made, never forcing. The branch goes too if git sees it merged.
+/// Remove a worktree dino made, never forcing. The branch goes too if git sees it merged. A
+/// session that ended in it is archived, so its conversation can still be picked up.
 fn remove_stored(d: &Daemon, path: &str) -> anyhow::Result<()> {
     let target = real(Path::new(path));
     let fanout = d.groups.lock().unwrap().iter().any(|g| g.members.iter().any(|m| real(&m.worktree) == target));
@@ -297,7 +323,9 @@ fn remove_stored(d: &Daemon, path: &str) -> anyhow::Result<()> {
     }
     worktree::clean(&w.path).map_err(|e| anyhow::anyhow!("Kept {}: {e}", w.branch))?;
     for s in sessions_in(d, &target) {
-        kill(d, &s.id);
+        if archive_as(d, &s.id, false).is_err() {
+            kill(d, &s.id);
+        }
     }
     {
         let mut worktrees = d.worktrees.lock().unwrap();
@@ -306,6 +334,7 @@ fn remove_stored(d: &Daemon, path: &str) -> anyhow::Result<()> {
     }
     d.summaries.lock().unwrap().remove(&target);
     d.sizes.lock().unwrap().remove(&target);
+    d.pushed.lock().unwrap().remove(&target);
     // An archived session that ran here makes it again from its branch (or a new one) if it's started.
     let mut archived = d.archived.lock().unwrap();
     let mut kept = false;
@@ -320,11 +349,30 @@ fn remove_stored(d: &Daemon, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Sessions whose PR merged are archived rather than killed, with their worktree put away: a
-/// merged PR can have follow-ups, and the conversation is worth keeping.
-pub(crate) fn archive_merged(d: &Daemon, target: &str) -> anyhow::Result<()> {
+/// Remove every worktree that nothing would be lost from (see `Request::FreeUpSpace`), checked
+/// again with git now rather than from the last Storage list. Returns what went and the bytes freed.
+fn free_up_space(d: &Arc<Daemon>) -> (Vec<String>, u64) {
+    let sizes = d.sizes.lock().unwrap().clone();
+    let mut removed = vec![];
+    let mut bytes = 0;
+    for s in storage(d).into_iter().filter(|s| s.reclaimable) {
+        let w = d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == s.path).cloned();
+        let Some(w) = w else { continue };
+        if !nothing_to_lose(d, &w) || remove_stored(d, &s.path).is_err() {
+            continue;
+        }
+        bytes += sizes.get(&s.path).map_or(0, |(_, n)| *n);
+        removed.push(s.path);
+    }
+    (removed, bytes)
+}
+
+/// Sessions whose PR merged or closed are archived rather than killed: a PR can have follow-ups,
+/// and the conversation is worth keeping. After a merge their worktree is put away (when nothing
+/// would be lost); after a close it stays, since the work never landed (see Storage).
+pub(crate) fn archive_pr_done(d: &Daemon, target: &str, merged: bool) -> anyhow::Result<()> {
     for s in sessions_in(d, target) {
-        archive(d, &s.id)?;
+        archive_as(d, &s.id, merged)?;
     }
     Ok(())
 }
