@@ -29,6 +29,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var previews: [PreviewInfo]?
     /// The last local web address it printed, to offer a preview of.
     var local_url: String?
+    /// The scheduled task that started it.
+    var scheduled: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
