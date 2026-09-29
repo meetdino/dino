@@ -102,7 +102,7 @@ pub enum Request {
         #[serde(default)]
         running_only: bool,
     },
-    /// Read a found session's conversation (see `history::conversation`).
+    /// Read a conversation, a found session's or a subagent's (see `history::conversation`).
     Conversation { agent: String, session_id: String, before: Option<u64> },
     /// Continue a found session in dino: running ones are handed off (waited on until idle,
     /// stopped, resumed here). `cwd` is where cloud sessions land.
@@ -400,18 +400,13 @@ pub struct SubagentView {
     #[serde(default)]
     pub description: Option<String>,
     pub running: bool,
-    /// Its conversation, oldest first; `None` when dino can't read it (not Claude, or it's gone).
+    /// What it was asked, even when `conversation` starts after it.
     #[serde(default)]
-    pub turns: Option<Vec<TurnInfo>>,
-}
-
-/// One thing in a conversation.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct TurnInfo {
-    /// "task" (what it was asked), "user" (a message since), "agent", "tool" (a call, in short)
-    /// or "note" (the conversation was compacted or interrupted).
-    pub role: String,
-    pub text: String,
+    pub task: Option<String>,
+    /// The newest part of its conversation (older parts: `Conversation` with its id); `None` when
+    /// dino can't read it (not Claude, or it's gone).
+    #[serde(default)]
+    pub conversation: Option<crate::history::Page>,
 }
 
 /// A shell command or monitor the agent runs in the background.
