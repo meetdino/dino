@@ -85,6 +85,9 @@ struct DinoApp: App {
                     .keyboardShortcut("d", modifiers: [.command, .shift])
                 Button(model.sidePane == .preview ? "Hide Preview" : "Show Preview") { model.togglePreview() }
                     .keyboardShortcut("p", modifiers: [.command, .option])
+                Button(model.sidePane == .tasks ? "Hide Tasks" : "Show Tasks") { model.toggleTasks() }
+                    .keyboardShortcut("t", modifiers: [.command, .option])
+                    .disabled(model.sidePane != .tasks && !(model.selectedSession?.reportsTasks ?? false))
                 Divider()
                 ControlMenuItems().environmentObject(model)
                 Divider()
@@ -370,6 +373,7 @@ struct Terminals: View {
                 }
                 .help("Preview this session's dev server or any local page (⌥⌘P)")
             }
+            ToolbarItem(placement: .primaryAction) { TasksToolbarButton() }
             ToolbarItem(placement: .primaryAction) { PRToolbarButton() }
             ToolbarItem(placement: .primaryAction) { OpenInMenu() }
         }

@@ -259,7 +259,7 @@ struct CloseCommand: View {
     @EnvironmentObject var model: DinoModel
 
     var body: some View {
-        Button(model.sidePane.map { $0 == .preview ? "Close Preview" : "Close File" } ?? (model.shownSplit == nil ? "Close Window" : "Close Pane")) {
+        Button(model.sidePane.map { $0 == .preview ? "Close Preview" : $0 == .tasks ? "Close Tasks" : "Close File" } ?? (model.shownSplit == nil ? "Close Window" : "Close Pane")) {
             if model.sidePane != nil {
                 model.closeSidePane()
             } else if model.shownSplit != nil, let id = model.selected {

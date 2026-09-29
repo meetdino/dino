@@ -262,6 +262,67 @@ pub struct SessionInfo {
     /// The name the user gave it (`Rename`); `title` already shows it over the agent's.
     #[serde(default)]
     pub label: Option<String>,
+    /// What the agent tracks underneath: its task list, subagents and background commands.
+    #[serde(default)]
+    pub tasks: SessionTasks,
+}
+
+/// From the agent's hooks, so Claude only for now; empty for agents that don't report them.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct SessionTasks {
+    #[serde(default)]
+    pub todos: Vec<TodoInfo>,
+    #[serde(default)]
+    pub subagents: Vec<SubagentInfo>,
+    #[serde(default)]
+    pub background: Vec<BackgroundInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TodoInfo {
+    pub id: String,
+    pub subject: String,
+    /// "pending", "in_progress" or "completed".
+    pub status: String,
+    /// Shown while it's in progress ("Running the tests").
+    #[serde(default)]
+    pub active: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SubagentInfo {
+    pub id: String,
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    /// The task it was given.
+    #[serde(default)]
+    pub description: Option<String>,
+    pub running: bool,
+    /// Unix seconds; 0 when dino didn't see it start.
+    #[serde(default)]
+    pub started: u64,
+    #[serde(default)]
+    pub finished: Option<u64>,
+    /// Its own worktree, when it runs in one; symlinks resolved.
+    #[serde(default)]
+    pub worktree: Option<String>,
+}
+
+/// A shell command or monitor the agent runs in the background.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BackgroundInfo {
+    pub id: String,
+    /// "shell" or "monitor".
+    pub kind: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    pub running: bool,
+    #[serde(default)]
+    pub started: u64,
+    #[serde(default)]
+    pub finished: Option<u64>,
 }
 
 /// A stopped session kept to start again.

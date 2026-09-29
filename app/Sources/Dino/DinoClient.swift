@@ -40,11 +40,56 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var scheduled: String?
     /// The name the user gave it; `title` is this too while it's set.
     var label: String?
+    /// Its task list, subagents and background commands, from its hooks; nil from an older dinod.
+    var tasks: SessionTasks?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
         return String(a.dropFirst(6))
     }
+}
+
+/// What an agent tracks underneath its conversation (see crates/dino-core/src/ipc.rs).
+struct SessionTasks: Codable, Equatable {
+    var todos: [TodoItem]
+    var subagents: [SubagentItem]
+    var background: [BackgroundItem]
+
+    var isEmpty: Bool { todos.isEmpty && subagents.isEmpty && background.isEmpty }
+    /// Subagents and background commands still going.
+    var running: Int { subagents.filter(\.running).count + background.filter(\.running).count }
+}
+
+struct TodoItem: Codable, Equatable, Identifiable {
+    var id: String
+    var subject: String
+    /// "pending", "in_progress" or "completed".
+    var status: String
+    /// Shown while it's in progress ("Running the tests").
+    var active: String?
+}
+
+struct SubagentItem: Codable, Equatable, Identifiable {
+    var id: String
+    var agent_type: String?
+    var description: String?
+    var running: Bool
+    /// Unix seconds; 0 when dino didn't see it start.
+    var started: UInt64
+    var finished: UInt64?
+    /// Its own worktree, when it runs in one.
+    var worktree: String?
+}
+
+struct BackgroundItem: Codable, Equatable, Identifiable {
+    var id: String
+    /// "shell" or "monitor".
+    var kind: String
+    var description: String?
+    var command: String?
+    var running: Bool
+    var started: UInt64
+    var finished: UInt64?
 }
 
 /// A GitHub pull request, as `gh pr view` sees it (see crates/dino-core/src/pr.rs).
