@@ -21,6 +21,8 @@ use dino_core::{detect_agents, load_keys, pr, proxy_wiring, trust, user_shell, w
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
+mod schedule;
+
 /// Scrollback lines replayed to a newly attached client.
 const REPLAY_HISTORY: usize = 2000;
 
@@ -49,6 +51,8 @@ struct Session {
     controls: Controls,
     /// Asked for mid-turn: `restart` with these once the turn is over.
     pending: Mutex<Option<Controls>>,
+    /// The scheduled task that started it, by name.
+    scheduled: Option<String>,
 }
 
 impl Daemon {
@@ -99,6 +103,11 @@ struct Daemon {
     pr_poll: Mutex<()>,
     /// Sessions whose PR merged, to close once they have nothing to lose; since when.
     closing: Mutex<HashMap<String, Instant>>,
+    /// Subagents that run in a worktree of their own, and whose session started them.
+    subagents: Mutex<Vec<SubagentWorktree>>,
+    /// Worktree path → its git summary and when it was read; git is too slow for every tree poll.
+    summaries: Mutex<HashMap<String, (Instant, Option<worktree::Summary>)>>,
+    schedule: schedule::Scheduler,
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -128,6 +137,9 @@ pub fn run() -> anyhow::Result<()> {
         prs: Mutex::default(),
         pr_poll: Mutex::default(),
         closing: Mutex::default(),
+        subagents: Mutex::new(load_subagents()),
+        summaries: Mutex::default(),
+        schedule: schedule::Scheduler::load(),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
@@ -160,6 +172,7 @@ pub fn run() -> anyhow::Result<()> {
             }
         });
     }
+    schedule::start(&daemon);
     eprintln!("dinod listening on {}", path.display());
     for stream in listener.incoming().flatten() {
         let daemon = daemon.clone();
@@ -206,10 +219,28 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::SetSettings { settings } => match settings.save() {
                 Ok(()) => {
                     d.proxy.set_budget(settings.policies.session_token_budget);
+                    schedule::keep_awake(d);
                     Response::Ok
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::ScheduleList => Response::Schedule { tasks: schedule::list(d) },
+            Request::SchedulePut { task } => match schedule::put(d, task) {
+                Ok(_) => Response::Schedule { tasks: schedule::list(d) },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ScheduleDelete { id } => match schedule::delete(d, &id) {
+                Ok(()) => Response::Schedule { tasks: schedule::list(d) },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ScheduleRun { id } => match schedule::run_now(d, &id) {
+                Ok(id) => Response::Created { id },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ScheduleTick { now } => {
+                schedule::tick(d, now.unwrap_or_else(now_secs));
+                Response::Schedule { tasks: schedule::list(d) }
+            }
             Request::Keys => Response::Keys { keys: settings::key_status() },
             Request::SetKey { name, value } => match settings::set_key(&name, value.as_deref()) {
                 Ok(()) => {
@@ -367,6 +398,13 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::CleanWorktree { path } => match (real(Path::new(&path)), worktree::clean(Path::new(&path))) {
+                (key, Ok(_)) => {
+                    d.summaries.lock().unwrap().remove(&key);
+                    Response::Ok
+                }
+                (_, Err(e)) => Response::Error { message: format!("Couldn't clean up {path}: {e}") },
+            },
             Request::Shutdown => {
                 // Saved first: `dino stop` pauses sessions, the next dinod resumes them.
                 save(d);
@@ -395,6 +433,8 @@ struct Launch {
     prompt: Option<String>,
     /// For a new session; what's left open comes from Settings → Agents. A restored one keeps its own.
     controls: Controls,
+    /// The scheduled task starting it, by name.
+    scheduled: Option<String>,
 }
 
 impl Launch {
@@ -404,7 +444,7 @@ impl Launch {
 }
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls } = launch;
+    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls, scheduled } = launch;
     let launcher = launcher.as_str();
     // Sessions already running come back even if the policies changed since; new ones must be allowed.
     let l = match restore {
@@ -506,6 +546,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         auto: Mutex::new(restore.as_ref().map(|r| r.auto.clone()).unwrap_or_default()),
         controls,
         pending: Mutex::default(),
+        scheduled: restore.as_ref().map_or(scheduled, |r| r.scheduled.clone()),
     }));
     Ok(id)
 }
@@ -683,6 +724,7 @@ fn state(d: &Daemon) -> Response {
                 pending: s.pending.lock().unwrap().clone(),
                 context_tokens,
                 context_limit,
+                scheduled: s.scheduled.clone(),
             }
         })
         .collect();
@@ -713,6 +755,8 @@ struct SavedSession {
     auto: AutoState,
     #[serde(default)]
     controls: Controls,
+    #[serde(default)]
+    scheduled: Option<String>,
 }
 
 fn saved_path() -> PathBuf {
@@ -752,6 +796,7 @@ fn snapshot(s: &Session, claimed: &[String]) -> SavedSession {
         agent_session: agent_session.clone(),
         auto: s.auto.lock().unwrap().clone(),
         controls: s.controls.clone(),
+        scheduled: s.scheduled.clone(),
     }
 }
 
@@ -936,6 +981,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         auto: AutoState::default(),
         // It keeps whatever the conversation ran with.
         controls: Controls::default(),
+        scheduled: None,
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {
@@ -1102,6 +1148,9 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
     // A session's worktree stays after the session ends, until the user closes it.
     let made: Vec<String> = d.worktrees.lock().unwrap().iter().map(|w| real(&w.path)).collect();
     dirs.extend(made.iter().cloned());
+    let fanned: HashSet<String> =
+        d.groups.lock().unwrap().iter().flat_map(|g| g.members.iter().map(|m| real(&m.worktree))).collect();
+    let owners = subagent_owners(d);
     dirs.extend(folders.iter().map(|f| real(Path::new(f))));
     // Shallowest first, so a folder comes before the folders inside it.
     dirs.sort_by_key(|d| d.len());
@@ -1115,8 +1164,17 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
         }
         match worktree::list(Path::new(&dir)) {
             Ok(mut w) if !w.is_empty() => {
-                for w in &mut w {
-                    w.dino = made.contains(&real(Path::new(&w.path)));
+                // Compared with what the main checkout has out.
+                let base = w[0].branch.clone().unwrap_or_else(|| "HEAD".into());
+                let base = if base == "HEAD" { worktree::head(Path::new(&w[0].path)) } else { base };
+                for w in w.iter_mut().skip(1) {
+                    let path = real(Path::new(&w.path));
+                    w.dino = made.contains(&path);
+                    // Fan-out members show their own stat.
+                    if !fanned.contains(&path) {
+                        w.git = summary(d, &path, w.branch.as_deref(), &base);
+                        w.owner = owners.iter().find(|o| o.0 == path).map(|o| o.1.clone());
+                    }
                 }
                 let path = w[0].path.clone();
                 repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w });
@@ -1129,6 +1187,92 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
     repos.extend(plain.into_iter().map(|path| ipc::RepoInfo { name: base_name(&path), path, worktrees: Vec::new() }));
     repos.sort_by_key(|r| r.name.to_lowercase());
     repos
+}
+
+/// A worktree's git summary, read again when older than a few seconds.
+fn summary(d: &Daemon, path: &str, branch: Option<&str>, base: &str) -> Option<worktree::Summary> {
+    const FRESH: std::time::Duration = std::time::Duration::from_secs(8);
+    if let Some((at, s)) = d.summaries.lock().unwrap().get(path) {
+        if at.elapsed() < FRESH {
+            return s.clone();
+        }
+    }
+    let s = worktree::summary(Path::new(path), branch, base).ok();
+    d.summaries.lock().unwrap().insert(path.to_string(), (Instant::now(), s.clone()));
+    s
+}
+
+/// A subagent that runs in a worktree of its own: which session started it and for what.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+struct SubagentWorktree {
+    id: String,
+    session: String,
+    /// Symlinks resolved, as `tree` compares paths.
+    worktree: String,
+    description: Option<String>,
+    agent_type: Option<String>,
+    running: bool,
+}
+
+fn subagents_path() -> PathBuf {
+    dino_core::config_dir().join("subagents.json")
+}
+
+/// A restart stops every agent, so none is running any more; worktrees removed since are gone.
+fn load_subagents() -> Vec<SubagentWorktree> {
+    let all: Vec<SubagentWorktree> =
+        std::fs::read(subagents_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    all.into_iter().filter(|a| Path::new(&a.worktree).exists()).map(|a| SubagentWorktree { running: false, ..a }).collect()
+}
+
+fn save_subagents(all: &[SubagentWorktree]) {
+    let tmp = subagents_path().with_extension("json.tmp");
+    if std::fs::write(&tmp, serde_json::to_vec_pretty(all).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(tmp, subagents_path());
+    }
+}
+
+/// Worktree path → who made it: takes in what the sessions' hooks reported since last time.
+fn subagent_owners(d: &Daemon) -> Vec<(String, worktree::Owner)> {
+    let sessions: Vec<(String, bool)> = d.sessions.lock().unwrap().iter().map(|s| (s.id.clone(), !s.pane.is_exited())).collect();
+    let mut all = d.subagents.lock().unwrap();
+    let before = all.clone();
+    for (id, _) in &sessions {
+        for a in d.proxy.stats.session(id).subagents {
+            // Only ones in a worktree of their own matter here; others run in the session's.
+            let Some(cwd) = a.cwd.as_deref() else { continue };
+            let rec = SubagentWorktree {
+                id: a.id.clone(),
+                session: id.clone(),
+                worktree: real(Path::new(cwd)),
+                description: a.description,
+                agent_type: a.agent_type,
+                running: a.running,
+            };
+            match all.iter_mut().find(|o| o.id == rec.id) {
+                Some(o) => *o = rec,
+                None if Path::new(cwd).file_name().is_some_and(|n| n.to_string_lossy() == format!("agent-{}", rec.id)) => {
+                    all.push(rec)
+                }
+                None => {}
+            }
+        }
+    }
+    if *all != before {
+        save_subagents(&all);
+    }
+    all.iter()
+        .map(|a| {
+            let alive = sessions.iter().any(|(id, live)| *id == a.session && *live);
+            let owner = worktree::Owner {
+                session: a.session.clone(),
+                description: a.description.clone(),
+                agent_type: a.agent_type.clone(),
+                running: a.running && alive,
+            };
+            (a.worktree.clone(), owner)
+        })
+        .collect()
 }
 
 fn base_name(path: &str) -> String {

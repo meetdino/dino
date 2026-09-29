@@ -19,7 +19,11 @@ struct DinoSettings: Codable, Equatable {
             short == "shell" || allowed_agents.isEmpty || allowed_agents.contains(short)
         }
     }
-    struct Machine: Codable, Equatable { var onboarded: Bool }
+    struct Machine: Codable, Equatable {
+        var onboarded: Bool
+        /// Keep the Mac from idle-sleeping while tasks are scheduled; nil from an older dinod.
+        var keep_awake: Bool?
+    }
     struct Repo: Codable, Equatable { var env: [String: String] }
     var routing: Routing
     var policies: Policies
@@ -301,6 +305,7 @@ private struct StoreError: View {
 }
 
 private struct GeneralPane: View {
+    @EnvironmentObject var store: SettingsStore
     @AppStorage(QuitChoice.key) private var quitChoice = ""
 
     var body: some View {
@@ -313,6 +318,15 @@ private struct GeneralPane: View {
                 }
             } footer: {
                 Footnote("Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
+            }
+            Section {
+                Toggle("Keep your Mac awake while tasks are scheduled", isOn: Binding(
+                    get: { store.settings?.machine.keep_awake ?? false },
+                    set: { on in store.update { $0.machine.keep_awake = on } }
+                ))
+                .disabled(store.settings == nil)
+            } footer: {
+                Footnote("So scheduled tasks run on time. Closing the lid still sleeps it; missed tasks run once when it wakes.")
             }
             Section {
                 LabeledContent("Settings and keys") {
