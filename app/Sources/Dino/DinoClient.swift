@@ -49,6 +49,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var messaged_by: String?
     /// The SSH host it runs on (`cwd` is then a path there); nil for this Mac.
     var host: String?
+    /// A shell's: the agent someone started in it by hand, while it runs.
+    var inside: FoundSession?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
@@ -244,6 +246,9 @@ struct FoundSession: Codable, Identifiable, Equatable {
 
     var id: String { "\(source)-\(agent)-\(session_id)-\(pid ?? 0)" }
     var isBusy: Bool { status == "busy" }
+    /// Started by hand in a dino shell, and dino can continue it (it has a conversation to resume).
+    var continuable: Bool { ["claude", "codex"].contains(agent) && !session_id.isEmpty }
+    var agentName: String { ["claude": "Claude", "codex": "Codex", "gemini": "Gemini"][agent] ?? agent }
 }
 
 struct DiffStat: Codable, Equatable {
@@ -520,6 +525,11 @@ final class DinoConnection: @unchecked Sendable {
         var body: [String: Any] = ["type": "adopt", "session": encoded]
         if let cwd { body["cwd"] = cwd }
         return try request(body).id
+    }
+
+    /// Continue the agent started by hand in shell `session` as a dino session, in the shell's place.
+    func takeOver(session: String) throws {
+        _ = try send(["type": "take_over", "id": session])
     }
 
     /// One request/response exchange; throws dinod's error message as-is.
