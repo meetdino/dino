@@ -438,6 +438,13 @@ struct Sidebar: View {
         )
     }
 
+    /// Changes whenever the sidebar gains, loses or restructures rows.
+    private var rowsKey: String {
+        let tree = SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
+        return ([filter.rawValue] + tree.repos.map(\.shape) + model.sessions.map(\.id) + model.elsewhere.map(\.id))
+            .joined(separator: "\n")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             List(selection: Binding(get: { model.selected }, set: { tag in
@@ -455,7 +462,7 @@ struct Sidebar: View {
                     : SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups) { filter.passes(model.status(of: $0)) }
                 Section("Workspaces") {
                     ForEach(tree.repos) { node in
-                        RepoRows(node: node, filter: filter, collapsed: collapsed).id(node.shape)
+                        RepoRows(node: node, filter: filter, collapsed: collapsed)
                     }
                     ForEach(tree.unfiled) { s in
                         SessionRow(session: s, index: 0)
@@ -477,6 +484,9 @@ struct Sidebar: View {
                 }
             }
             .listStyle(.sidebar)
+            // macOS List diffs rows into an NSOutlineView and sometimes leaves stale rows drawn
+            // (a folder row twice, a section header at its old place). Rebuild it when rows come or go.
+            .id(rowsKey)
             UsagePanel()
         }
         .safeAreaInset(edge: .top) {

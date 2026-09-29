@@ -56,8 +56,8 @@ struct RepoNode: Identifiable, Equatable {
     /// One checkout and no fan-outs: list its sessions right under the repo.
     var flat: Bool { places.count == 1 && groups.isEmpty }
     var sessionCount: Int { places.reduce(0) { $0 + $1.sessions.count } }
-    /// Changes when rows switch between plain rows and disclosure groups. The sidebar keys
-    /// rows on it: macOS List leaves stale rows behind when that switch is diffed in place.
+    /// Changes when rows switch between plain rows and disclosure groups; part of the key
+    /// the sidebar rebuilds its List on (see `Sidebar.rowsKey`).
     var shape: String {
         ([repo.path, flat ? "flat" : "tree"] + places.map { "\($0.path)=\($0.sessions.isEmpty)" } + groups.map(\.id))
             .joined(separator: "|")
