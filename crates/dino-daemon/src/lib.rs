@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -21,6 +21,7 @@ use dino_core::{detect_agents, load_keys, pr, proxy_wiring, trust, user_shell, w
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
+mod lifecycle;
 mod preview;
 mod schedule;
 
@@ -56,6 +57,8 @@ struct Session {
     pending: Mutex<Option<Controls>>,
     /// The scheduled task that started it, by name.
     scheduled: Option<String>,
+    /// The name the user gave it, shown over the agent's title.
+    label: Mutex<Option<String>>,
 }
 
 impl Daemon {
@@ -113,6 +116,12 @@ struct Daemon {
     /// Worktree path → its git summary and when it was read; git is too slow for every tree poll.
     summaries: Mutex<HashMap<String, (Instant, Option<worktree::Summary>)>>,
     schedule: schedule::Scheduler,
+    /// Stopped sessions kept to start again, newest first.
+    archived: Mutex<Vec<lifecycle::Archived>>,
+    /// Worktree path → its size on disk and when it was measured.
+    sizes: Mutex<HashMap<String, (Instant, u64)>>,
+    /// A thread is measuring sizes.
+    measuring: AtomicBool,
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -146,9 +155,17 @@ pub fn run() -> anyhow::Result<()> {
         subagents: Mutex::new(load_subagents()),
         summaries: Mutex::default(),
         schedule: schedule::Scheduler::load(),
+        archived: Mutex::new(lifecycle::load_archived()),
+        sizes: Mutex::default(),
+        measuring: AtomicBool::new(false),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
+    {
+        // Archived ids stay theirs, so a new session never takes one.
+        let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
+        daemon.next_id.fetch_max(max_id + 1, Ordering::Relaxed);
+    }
     restore(&daemon, saved);
     {
         // Pick up late-discovered agent ids (Codex) and sessions that exited on their own.
@@ -432,6 +449,13 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 (_, Err(e)) => Response::Error { message: format!("Couldn't clean up {path}: {e}") },
             },
+            req @ (Request::Rename { .. }
+            | Request::Archive { .. }
+            | Request::Archived
+            | Request::Unarchive { .. }
+            | Request::DeleteArchived { .. }
+            | Request::Storage
+            | Request::RemoveStored { .. }) => lifecycle::serve(d, req),
             Request::Shutdown => {
                 // Saved first: `dino stop` pauses sessions, the next dinod resumes them.
                 save(d);
@@ -590,6 +614,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         controls,
         pending: Mutex::default(),
         scheduled: restore.as_ref().map_or(scheduled, |r| r.scheduled.clone()),
+        label: Mutex::new(restore.as_ref().and_then(|r| r.label.clone())),
     }));
     Ok(id)
 }
@@ -740,11 +765,12 @@ fn state(d: &Daemon) -> Response {
                 Some((model, used)) => (used, controls::context_limit(model).filter(|limit| used <= *limit)),
                 None => (0, None),
             };
+            let label = s.label.lock().unwrap().clone();
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 agent_id: s.agent_id.clone(),
-                title: s.pane.title(),
+                title: label.clone().or_else(|| s.pane.title()),
                 exited: s.pane.is_exited(),
                 output_ms_ago: s.last_output.lock().unwrap().map(|t| t.elapsed().as_millis() as u64),
                 bells: s.pane.shared.bells.load(Ordering::Relaxed),
@@ -771,6 +797,7 @@ fn state(d: &Daemon) -> Response {
                 context_tokens,
                 context_limit,
                 scheduled: s.scheduled.clone(),
+                label,
             }
         })
         .collect();
@@ -803,6 +830,8 @@ struct SavedSession {
     controls: Controls,
     #[serde(default)]
     scheduled: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
 }
 
 fn saved_path() -> PathBuf {
@@ -843,6 +872,7 @@ fn snapshot(s: &Session, claimed: &[String]) -> SavedSession {
         auto: s.auto.lock().unwrap().clone(),
         controls: s.controls.clone(),
         scheduled: s.scheduled.clone(),
+        label: s.label.lock().unwrap().clone(),
     }
 }
 
@@ -1028,6 +1058,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         // It keeps whatever the conversation ran with.
         controls: Controls::default(),
         scheduled: None,
+        label: None,
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {
@@ -1192,8 +1223,9 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
     let claude_trusted = carried_trust(&dir, &repo);
     let id = format!("{}-{}", session_name(prompt), &new_uuid()[..4]);
     let mut group = Group { id: id.clone(), prompt: prompt.into(), repo: repo.clone(), base: base.clone(), members: vec![] };
+    let prefix = Settings::load().worktrees.prefix();
     for l in picked {
-        let branch = format!("dino/{id}/{}", l.short);
+        let branch = format!("{prefix}{id}/{}", l.short);
         let wt = worktree::add(&repo, &format!("{id}/{}", l.short), &branch, &base)?;
         // Same folder inside the worktree as the user was in inside the repo.
         let cwd = wt.join(dir.strip_prefix(&repo).unwrap_or(std::path::Path::new("")));
@@ -1422,6 +1454,11 @@ fn review(d: &Daemon, id: &str) -> anyhow::Result<Vec<dino_core::review::Finding
     dino_core::review::run(id, &dir, &base)
 }
 
+/// The fan-out group session `id` belongs to.
+fn group_of(d: &Daemon, id: &str) -> Option<String> {
+    d.groups.lock().unwrap().iter().find(|g| g.members.iter().any(|m| m.session == id)).map(|g| g.id.clone())
+}
+
 /// The worktree dino made that `dir` is in: its commits count as changes too.
 fn session_worktree(d: &Daemon, dir: &Path) -> Option<SessionWorktree> {
     d.worktrees.lock().unwrap().iter().find(|w| dir.starts_with(&w.path)).cloned()
@@ -1592,8 +1629,8 @@ fn close_merged(d: &Daemon) {
             s.auto.lock().unwrap().pr.note = Some("Kept open after the merge: its worktree has work that isn't pushed".into());
             continue;
         }
-        if let Err(e) = remove_worktree(d, &target, false) {
-            s.auto.lock().unwrap().pr.note = Some(format!("Couldn't close after the merge: {e}"));
+        if let Err(e) = lifecycle::archive_merged(d, &target) {
+            s.auto.lock().unwrap().pr.note = Some(format!("Couldn't archive after the merge: {e}"));
         }
     }
 }
@@ -1697,7 +1734,7 @@ fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let dir = work_dir(launch.cwd.as_deref());
     let checkout = worktree::repo_root(&dir)?;
     let name = format!("{}-{}", l.short, &new_uuid()[..4]);
-    let branch = format!("dino/{name}");
+    let branch = format!("{}{name}", Settings::load().worktrees.prefix());
     let (wt, base) = worktree::start(&checkout, &name, &branch)?;
     let repo = worktree::list(&wt)?.into_iter().next().map_or_else(|| checkout.clone(), |w| PathBuf::from(w.path));
     carry_trust(&l, carried_trust(&dir, &checkout).as_deref(), &wt);

@@ -10,7 +10,7 @@ struct DinoSettings: Codable, Equatable {
         var worktree_trust: Bool
         /// 0 means no limit.
         var session_token_budget: UInt64
-        /// Close a session and its worktree after its PR merges; nil from an older dinod.
+        /// Archive a session after its PR merges; nil from an older dinod.
         var close_merged: Bool?
         /// Offer the mode that never asks; nil from an older dinod.
         var allow_bypass: Bool?
@@ -32,6 +32,7 @@ struct DinoSettings: Codable, Equatable {
     var agents: [String: Controls]?
     /// By the repo's main checkout.
     var repos: [String: Repo]?
+    var worktrees: Worktrees?
 }
 
 /// A provider key's name and where it comes from; dinod never sends values.
@@ -129,7 +130,7 @@ final class SettingsStore: ObservableObject {
 
 /// Settings' sections, in sidebar order.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case account, general, agents, policies, repos, routing, keys
+    case account, general, agents, policies, repos, worktrees, routing, keys
     var id: String { rawValue }
 
     var title: String {
@@ -139,6 +140,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .agents: "Agents"
         case .policies: "Policies"
         case .repos: "Repositories"
+        case .worktrees: "Worktrees"
         case .routing: "Routing"
         case .keys: "Keys"
         }
@@ -151,6 +153,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .agents: "cpu.fill"
         case .policies: "checkmark.shield.fill"
         case .repos: "folder.fill"
+        case .worktrees: "square.stack.3d.up.fill"
         case .routing: "arrow.triangle.branch"
         case .keys: "key.fill"
         }
@@ -163,6 +166,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .agents: .purple
         case .policies: .indigo
         case .repos: .teal
+        case .worktrees: .teal
         case .routing: .green
         case .keys: .orange
         }
@@ -204,6 +208,7 @@ struct SettingsView: View {
                 case .agents: AgentsPane()
                 case .policies: PoliciesPane()
                 case .repos: ReposPane()
+                case .worktrees: WorktreesPane()
                 case .routing: RoutingPane()
                 case .keys: KeysPane()
                 }
@@ -276,7 +281,7 @@ private struct AccountPane: View {
 }
 
 /// A section's explanation, left-aligned like System Settings'.
-private struct Footnote: View {
+struct Footnote: View {
     let text: String
     init(_ text: String) { self.text = text }
 
@@ -403,14 +408,14 @@ private struct PoliciesPane: View {
                 Footnote("Claude asks whether to trust each new folder, and every fan-out worktree is one. When you've trusted the repo, dino tells Claude its worktrees are trusted too, and forgets them when the fan-out closes. Codex does this on its own.")
             }
             Section {
-                Toggle("Close sessions after their PR merges", isOn: Binding(
+                Toggle("Archive sessions after their PR merges", isOn: Binding(
                     get: { policies?.close_merged ?? false },
                     set: { on in store.update { $0.policies.close_merged = on } }
                 ))
             } header: {
                 Text("Pull requests")
             } footer: {
-                Footnote("When a session's PR merges, dino stops the session once its agent is idle and removes the worktree dino made for it, with its branch. A worktree with changes or commits that aren't pushed is kept. Sessions outside a dino worktree stay open.")
+                Footnote("When a session's PR merges, dino archives it once its agent is idle: the session stops, and the worktree dino made for it is removed if nothing in it would be lost. Unarchive it to pick the conversation up again, worktree and all. Sessions outside a dino worktree stay open.")
             }
             Section {
                 Toggle("Allow bypass permissions mode", isOn: Binding(

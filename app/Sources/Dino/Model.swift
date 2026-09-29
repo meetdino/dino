@@ -69,6 +69,11 @@ final class DinoModel: ObservableObject {
     /// Scheduled runs that have been working, to say when they go quiet.
     private var scheduledBusy: Set<String> = []
 
+    /// Stopped sessions kept to start again, the name being edited, and the ⌘/ sheet.
+    @Published var archived: [ArchivedInfo] = []
+    @Published var renaming: Renaming?
+    @Published var showShortcuts = false
+
     /// The review panel beside the terminal, and the comments waiting to go to each session.
     @Published var showReview = false
     @Published var comments: [String: [ReviewComment]] = [:]
@@ -201,11 +206,11 @@ final class DinoModel: ObservableObject {
                 if s.activity == "done", wasBusy {
                     unseenDone.insert(s.id)
                     if s.scheduled == nil {
-                        Notifier.post(session: s, title: "\(s.name) finished", body: s.title ?? "Ready for your review")
+                        Notifier.post(session: s, title: "\(s.display) finished", body: s.title ?? "Ready for your review")
                     }
                 }
                 if let needs = s.needs, prev.needs == nil {
-                    Notifier.post(session: s, title: "\(s.name) needs you", body: needs)
+                    Notifier.post(session: s, title: "\(s.display) needs you", body: needs)
                 }
             }
             // Nobody watched a scheduled run start: say when it's done, even if it's in front of you.
@@ -303,9 +308,12 @@ final class DinoModel: ObservableObject {
     /// Ghostty handles its own shortcuts before the menu sees them (⌘D splits, ⌘W closes, ⌘K
     /// clears), so a focused pane would swallow dino's. Hand those keys back to the menu.
     static let terminals = TerminalController(configSource: .generated(
-        (["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p"]
+        ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p"]
             + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
-            .map { "keybind = super+\($0)=unbind" }.joined(separator: "\n")
+            .map { "super+\($0)" }
+            // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives.
+            + ["ctrl+tab", "ctrl+shift+tab", "super+slash", "super+shift+a"])
+            .map { "keybind = \($0)=unbind" }.joined(separator: "\n")
     ))
 
     func terminal(for id: String) -> TerminalViewState {
@@ -406,8 +414,10 @@ final class DinoModel: ObservableObject {
                 if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let list = try? conn.groups() {
                     let launchers = try? conn.request(["type": "launchers"]).launchers
                     let tasks = try? conn.scheduleList()
+                    let archived = try? conn.archived()
                     await MainActor.run {
                         if let tasks { self.applySchedule(tasks) }
+                        if let archived, archived != self.archived { self.archived = archived }
                         if let launchers, launchers != self.launchers { self.launchers = launchers }
                         if list != self.groups { self.groups = list }
                         if let want = self.pendingGroup, list.contains(where: { $0.id == want }) {

@@ -38,6 +38,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var context_limit: UInt64?
     /// The scheduled task that started it.
     var scheduled: String?
+    /// The name the user gave it; `title` is this too while it's set.
+    var label: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
