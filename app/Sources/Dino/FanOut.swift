@@ -16,7 +16,7 @@ struct FanoutSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Fan out", systemImage: "arrow.triangle.branch").font(.title2.weight(.semibold))
-            Text("One prompt, several agents. Each works in its own git worktree, starting from your current changes. Compare the results, then keep the best.")
+            Text("One prompt, several agents. Each works in its own git worktree, starting from your current changes (ignored files listed in .worktreeinclude, like .env, come along). Compare the results, then keep the best.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             TextEditor(text: $prompt)

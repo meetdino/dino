@@ -7,6 +7,8 @@ struct ReviewComment: Identifiable, Equatable {
     /// The line as it read when commented on, quoted to the agent.
     var code: String
     var text: String
+    /// Set when Claude's review found it rather than the user writing it.
+    var severity: String? = nil
 
     /// One message for the agent, in file order; any agent reads `path:line`.
     static func message(_ list: [ReviewComment]) -> String {
@@ -14,10 +16,18 @@ struct ReviewComment: Identifiable, Equatable {
             let code = c.code.trimmingCharacters(in: .whitespaces)
             let quote = code.isEmpty ? "" : " `\(code.prefix(100))`"
             let body = c.text.split(separator: "\n", omittingEmptySubsequences: false).joined(separator: "\n  ")
-            return "- \(c.at.path):\(c.at.line)\(c.at.removed ? " (removed line)" : "")\(quote): \(body)"
+            let found = c.severity.map { "[code review, \($0)] " } ?? ""
+            return "- \(c.at.path):\(c.at.line)\(c.at.removed ? " (removed line)" : "")\(quote): \(found)\(body)"
         }
         return (["Review comments on the current changes:"] + items).joined(separator: "\n")
     }
+}
+
+/// Where Claude's review of a session's changes stands.
+enum ReviewRun: Equatable {
+    case running
+    case done(found: Int)
+    case failed(String)
 }
 
 /// A line of a file: in the new version, or in the old one when it was removed.
@@ -54,10 +64,22 @@ struct ReviewPanel: View {
 
     private var comments: [ReviewComment] { model.comments[session.id] ?? [] }
 
+    private var run: ReviewRun? { model.reviews[session.id] }
+
+    /// Findings on lines the diff doesn't show: listed above the files.
+    private var offDiff: [ReviewComment] {
+        let shown = Set((changes?.files ?? []).flatMap { f in f.lines.compactMap { LineRef(path: f.path, $0) } })
+        return comments.filter { $0.severity != nil && !shown.contains($0.at) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            if let run, run != .running {
+                reviewBanner(run)
+                Divider()
+            }
             content.frame(maxWidth: .infinity, maxHeight: .infinity)
             if !comments.isEmpty {
                 Divider()
@@ -93,12 +115,62 @@ struct ReviewPanel: View {
                 ))
                 .font(.caption.monospacedDigit())
             }
+            reviewButton
             Button { model.showReview = false } label: { Image(systemName: "xmark") }
                 .buttonStyle(.borderless)
                 .help("Hide changes (⇧⌘D)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
+    }
+
+    private static let reviewHelp = "Claude reads these changes and comments only on likely bugs: code that won't compile, logic errors, security problems. The reviewer is always Claude, whichever agent made the changes."
+
+    @ViewBuilder
+    private var reviewButton: some View {
+        if run == .running {
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.mini)
+                Text("Reviewing…").font(.caption).foregroundStyle(.secondary)
+                Button { model.cancelReview(session.id) } label: { Image(systemName: "stop.circle") }
+                    .buttonStyle(.borderless)
+                    .help("Stop the review")
+            }
+            .help("Claude is reviewing the changes. This can take a few minutes.")
+        } else {
+            Button { model.review(session.id, changes: changes) } label: {
+                Label("Review", systemImage: "sparkle.magnifyingglass")
+            }
+            .controlSize(.small)
+            .disabled(changes?.files.isEmpty ?? true)
+            .help(Self.reviewHelp)
+        }
+    }
+
+    @ViewBuilder
+    private func reviewBanner(_ run: ReviewRun) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            switch run {
+            case let .failed(message):
+                ErrorLine(message: message)
+            case .done(found: 0):
+                Image(systemName: "checkmark.seal.fill").foregroundStyle(Brand.green)
+                Text("No issues found").font(.callout).fixedSize()
+                Text("· Claude reviewed these changes").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            case let .done(found: n):
+                ReviewBadge()
+                Text("Claude found \(n) issue\(n == 1 ? "" : "s")").font(.callout).fixedSize()
+                Text("· dismiss the ones you disagree with").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            case .running:
+                EmptyView()
+            }
+            Spacer(minLength: 4)
+            Button { model.reviews[session.id] = nil } label: { Image(systemName: "xmark.circle.fill") }
+                .buttonStyle(.borderless).foregroundStyle(.tertiary)
+                .help("Hide")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
     }
 
     @ViewBuilder
@@ -111,6 +183,13 @@ struct ReviewPanel: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        let off = offDiff
+                        if !off.isEmpty {
+                            Text("Not on a changed line").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .padding(.horizontal, 12).padding(.top, 8)
+                            ForEach(off) { c in CommentCard(comment: c, located: true) { remove(c) } }
+                            Divider().padding(.top, 4)
+                        }
                         ForEach(c.files) { f in
                             Section {
                                 if !collapsed.contains(f.path) { fileBody(f) }
@@ -152,7 +231,7 @@ struct ReviewPanel: View {
         }
         // Comments on lines that have since changed; they still go to the agent.
         let shown = Set(f.lines.compactMap { LineRef(path: f.path, $0) })
-        ForEach(comments.filter { $0.at.path == f.path && !shown.contains($0.at) }) { c in
+        ForEach(comments.filter { $0.at.path == f.path && $0.severity == nil && !shown.contains($0.at) }) { c in
             CommentCard(comment: c, stale: true) { remove(c) }
         }
     }
@@ -163,7 +242,7 @@ struct ReviewPanel: View {
                 ErrorLine(message: sendError)
             }
             HStack {
-                Text("\(comments.count) comment\(comments.count == 1 ? "" : "s")").font(.callout).foregroundStyle(.secondary)
+                Text(countText).font(.callout).foregroundStyle(.secondary)
                 Spacer()
                 Button("Clear") { model.comments[session.id] = nil }
                 Button {
@@ -188,6 +267,14 @@ struct ReviewPanel: View {
             }
         }
         .padding(12)
+    }
+
+    private var countText: String {
+        let found = comments.filter { $0.severity != nil }.count, own = comments.count - found
+        return [
+            own > 0 ? "\(own) comment\(own == 1 ? "" : "s")" : nil,
+            found > 0 ? "\(found) finding\(found == 1 ? "" : "s")" : nil,
+        ].compactMap { $0 }.joined(separator: " · ")
     }
 
     private func add(at ref: LineRef, code: String) {
@@ -334,28 +421,71 @@ private struct DiffRow: View {
     }
 }
 
+/// Marks what Claude's review found, apart from the user's own comments.
+private let reviewTint = Color(red: 0x8B / 255, green: 0x6C / 255, blue: 0xEF / 255)
+
+private struct ReviewBadge: View {
+    var body: some View {
+        Label("Review", systemImage: "sparkle.magnifyingglass")
+            .labelStyle(.titleAndIcon)
+            .font(.system(size: 9.5, weight: .semibold))
+            .padding(.horizontal, 5).padding(.vertical, 1.5)
+            .background(Capsule().fill(reviewTint.opacity(0.16)))
+            .foregroundStyle(reviewTint)
+    }
+}
+
 private struct CommentCard: View {
     let comment: ReviewComment
     var stale = false
+    /// Say which file and line: the card isn't under it.
+    var located = false
     let onDelete: () -> Void
+
+    private var tint: Color { comment.severity == nil ? Brand.green : reviewTint }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "text.bubble.fill").foregroundStyle(Brand.green).font(.caption)
-            VStack(alignment: .leading, spacing: 2) {
-                if stale {
+            if comment.severity == nil {
+                Image(systemName: "text.bubble.fill").foregroundStyle(Brand.green).font(.caption)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                if let severity = comment.severity {
+                    HStack(spacing: 6) {
+                        ReviewBadge()
+                        Text(severity.capitalized).font(.caption.weight(.medium)).foregroundStyle(severityColor(severity))
+                        if located {
+                            Text(comment.at.line > 0 ? "\(comment.at.path):\(comment.at.line)" : comment.at.path)
+                                .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                        }
+                    }
+                } else if stale {
                     Text("line \(comment.at.line), since changed").font(.caption).foregroundStyle(.tertiary)
                 }
                 Text(comment.text).font(.callout).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             }
-            Button(action: onDelete) { Image(systemName: "trash") }
-                .buttonStyle(.borderless).foregroundStyle(.secondary)
-                .help("Delete comment")
+            if comment.severity != nil {
+                Button("Dismiss", action: onDelete)
+                    .controlSize(.small)
+                    .help("Drop this finding: it won't be sent")
+            } else {
+                Button(action: onDelete) { Image(systemName: "trash") }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Delete comment")
+            }
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 7).fill(Color(nsColor: .controlBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Brand.green.opacity(0.35)))
+        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(tint.opacity(0.35)))
         .padding(.horizontal, 12).padding(.vertical, 4)
+    }
+
+    private func severityColor(_ s: String) -> Color {
+        switch s {
+        case "high": SessionStatus.exited.color
+        case "medium": SessionStatus.needsYou.color
+        default: .secondary
+        }
     }
 }
 

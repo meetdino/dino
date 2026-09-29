@@ -30,16 +30,29 @@ struct PRLook {
 /// "#12" in a session's sidebar row, tinted by its checks.
 struct PRChip: View {
     let pr: PrInfo
+    var auto: AutoPr?
 
     var body: some View {
         let look = PRLook(pr)
+        let automatic = pr.isOpen && auto?.any == true
         HStack(spacing: 3) {
             Image(systemName: look.icon)
             Text("#\(pr.number)").monospacedDigit()
+            if automatic {
+                Text("auto").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+            }
         }
         .font(.caption)
         .foregroundStyle(look.color)
-        .help("PR #\(pr.number): \(pr.title) · \(look.label)")
+        .help("PR #\(pr.number): \(pr.title) · \(look.label)" + (automatic ? " · \(Self.describe(auto!))" : ""))
+    }
+
+    static func describe(_ a: AutoPr) -> String {
+        switch (a.fix, a.merge) {
+        case (true, true): "fixes failing checks and merges when they pass"
+        case (true, false): "fixes failing checks"
+        default: "merges when checks pass"
+        }
     }
 }
 
@@ -102,6 +115,7 @@ struct PRPopover: View {
                     if let review = pr.review { reviewLine(review) }
                 }
                 .font(.callout)
+                automation
             }
             if let error {
                 Text(error).font(.callout).foregroundStyle(SessionStatus.exited.color).fixedSize(horizontal: false, vertical: true)
@@ -147,6 +161,46 @@ struct PRPopover: View {
         case "closed": "Closed"
         default: pr.draft ? "Draft" : "Open"
         }
+    }
+
+    /// Claude desktop's Auto-fix and Auto-merge: dinod acts on the next poll, whether or not the app is open.
+    @ViewBuilder
+    private var automation: some View {
+        let auto = session.auto
+        VStack(alignment: .leading, spacing: 6) {
+            if session.agent_id != "shell" {  // a shell has no one to read the logs
+                autoRow(
+                    "Auto-fix failing checks",
+                    detail: auto.flatMap { $0.fix && $0.fixes > 0 ? "\($0.fixes) of 3 asked" : nil },
+                    help: "When checks fail, paste their logs into \(session.name) and ask it to fix them: once per push, up to three times",
+                    isOn: Binding(get: { auto?.fix ?? false }, set: { on in run { try await model.setAutoPR(session.id, fix: on) } })
+                )
+            }
+            autoRow(
+                "Auto-merge when checks pass",
+                detail: nil,
+                help: "Squash-merge once every check passes, unless a reviewer asked for changes",
+                isOn: Binding(get: { auto?.merge ?? false }, set: { on in run { try await model.setAutoPR(session.id, merge: on) } })
+            )
+            if let note = auto?.note {
+                Label(note, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .disabled(auto == nil)  // an older dinod
+        .padding(.top, 2)
+    }
+
+    private func autoRow(_ title: String, detail: String?, help: String, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 6) {
+            Text(title).font(.callout)
+            if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
+            Spacer()
+            Toggle(title, isOn: isOn).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+        }
+        .help(help)
     }
 
     @ViewBuilder
