@@ -84,8 +84,15 @@ pub enum Request {
     /// Switch this connection to a live terminal stream for session `id`.
     Attach { id: String, cols: u16, rows: u16 },
     Shutdown,
-    /// Agent sessions outside dino that it can continue. `cloud` also asks providers (slower).
-    Found { cloud: bool },
+    /// Agent sessions outside dino that it can continue. `cloud` also asks providers (slower);
+    /// `running_only` leaves out finished conversations on disk.
+    Found {
+        cloud: bool,
+        #[serde(default)]
+        running_only: bool,
+    },
+    /// Read a found session's conversation (see `history::conversation`).
+    Conversation { agent: String, session_id: String, before: Option<u64> },
     /// Continue a found session in dino: running ones are handed off (waited on until idle,
     /// stopped, resumed here). `cwd` is where cloud sessions land.
     Adopt { session: crate::found::FoundSession, cwd: Option<String> },
@@ -187,6 +194,7 @@ pub enum Response {
     Launchers { launchers: Vec<LauncherInfo> },
     Created { id: String },
     Found { sessions: Vec<crate::found::FoundSession> },
+    Conversation { page: crate::history::Page },
     Groups { groups: Vec<GroupInfo> },
     Tree { repos: Vec<RepoInfo> },
     Diff { stat: DiffStat, text: String },

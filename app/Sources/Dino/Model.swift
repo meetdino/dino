@@ -44,6 +44,8 @@ final class DinoModel: ObservableObject {
     /// Agent sessions dino didn't start (running elsewhere, recent, cloud).
     @Published var found: [FoundSession] = []
     @Published var loadingCloud = false
+    /// Finished conversations on disk are in `found` (the browser has loaded them once).
+    @Published var loadedHistory = false
     /// A handoff in progress: the session being moved, and whether we're waiting on its turn.
     @Published var moving: FoundSession?
     @Published var showContinue = false
@@ -382,32 +384,43 @@ final class DinoModel: ObservableObject {
         UserDefaults.standard.set(Array(list.prefix(8)), forKey: "recentFolders.\(host)")
     }
 
-    /// Keep "On this Mac" fresh: sessions running in other terminals come and go.
+    /// Keep "On this Mac" fresh: sessions running in other terminals come and go. Only running
+    /// ones are polled; finished conversations load when the browser opens.
     private func watchElsewhere() {
         Task.detached {
             while true {
-                if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let list = try? conn.found(cloud: false) {
-                    await MainActor.run {
-                        // Keep cloud entries from the last full load.
-                        let cloud = self.found.filter { $0.source == "cloud" }
-                        if list + cloud != self.found { self.found = list + cloud }
+                if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let running = try? conn.found(cloud: false, runningOnly: true) {
+                    let ended = await MainActor.run { () -> Bool in
+                        let before = Set(self.elsewhere.map(\.session_id))
+                        let now = Set(running.map(\.session_id))
+                        let rest = self.found.filter { $0.source != "running" && !now.contains($0.session_id) }
+                        if running + rest != self.found { self.found = running + rest }
+                        // One that stopped is a finished conversation now.
+                        return self.showContinue && !before.subtracting(now).isEmpty
                     }
+                    if ended { await self.loadFound(cloud: false) }
                 }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
     }
 
-    /// Everything, including cloud (slower); for the Continue sheet.
+    /// Everything on this Mac, then cloud sessions (slower); for the session browser.
     func loadFound() {
         loadingCloud = true
-        Task.detached {
-            let list = (try? DinoConnection(path: DinoEnvironment.socketPath).found(cloud: true)) ?? []
-            await MainActor.run {
-                self.found = list
-                self.loadingCloud = false
-            }
+        Task {
+            await loadFound(cloud: false)
+            await loadFound(cloud: true)
+            loadingCloud = false
         }
+    }
+
+    private func loadFound(cloud: Bool) async {
+        guard let list = await Task.detached(operation: { try? DinoConnection(path: DinoEnvironment.socketPath).found(cloud: cloud) }).value else { return }
+        // Without cloud, keep the cloud entries already loaded.
+        let merged = cloud ? list : list + found.filter { $0.source == "cloud" }
+        if merged != found { found = merged }
+        loadedHistory = true
     }
 
     /// Move a found session into dino. A running one finishes its turn first, then continues here.
