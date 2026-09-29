@@ -95,9 +95,21 @@ pub struct SessionStats {
     pub todos: Vec<tasks::Todo>,
     /// Shell commands and monitors it runs in the background.
     pub background: Vec<tasks::Background>,
+    /// What the agent said still ran when its last turn ended (ids in `subagents` and
+    /// `background`): it isn't done while that work is.
+    pub(crate) waiting_on: Vec<String>,
 }
 
 impl SessionStats {
+    /// How many subagents and commands it ended its turn on still run. Monitors don't count:
+    /// they watch for something rather than work towards an end.
+    pub fn waiting(&self) -> (usize, usize) {
+        let on = |id: &str| self.waiting_on.iter().any(|w| w == id);
+        let agents = self.subagents.iter().filter(|a| a.running && on(&a.id)).count();
+        let commands = self.background.iter().filter(|b| b.running && b.kind != "monitor" && on(&b.id)).count();
+        (agents, commands)
+    }
+
     /// A model call failed: shown right away unless the agent reports its turns itself.
     fn call_failed(&mut self, msg: String) {
         if !self.hooked {
