@@ -5,6 +5,7 @@
 
 mod codex;
 mod free;
+pub mod tasks;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -80,6 +81,10 @@ pub struct SessionStats {
     pub subagents: Vec<Subagent>,
     /// Agent tool calls not answered yet: (tool_use_id, description, subagent_type).
     pending_agents: Vec<(String, Option<String>, Option<String>)>,
+    /// The agent's task list (Claude's TaskCreate/TaskUpdate, or the older TodoWrite).
+    pub todos: Vec<tasks::Todo>,
+    /// Shell commands and monitors it runs in the background.
+    pub background: Vec<tasks::Background>,
 }
 
 impl SessionStats {
@@ -98,6 +103,11 @@ pub struct Subagent {
     /// Where it runs: its own worktree when started with `isolation: "worktree"`.
     pub cwd: Option<String>,
     pub running: bool,
+    /// Unix seconds; 0 until it starts.
+    pub started: u64,
+    pub finished: Option<u64>,
+    /// Where a background agent's transcript goes, as the Agent tool said.
+    pub output: Option<String>,
 }
 
 /// One rolling subscription window, e.g. Claude's 5h or 7d.
@@ -408,6 +418,7 @@ async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Byt
     let event = v["hook_event_name"].as_str().unwrap_or_default();
     let tool = || v["tool_name"].as_str().unwrap_or("tool").to_string();
     record_subagent(&st.stats, &session, event, &v);
+    tasks::record(&st.stats, &session, event, &v);
     // A subagent's own tool calls: the parent's turn may be over (background agents), and the
     // subagent's model calls show as the session thinking anyway.
     let from_subagent = v["agent_id"].is_string();
@@ -474,9 +485,14 @@ fn record_subagent(stats: &Stats, session: &str, event: &str, v: &Value) {
         };
         let a = &mut s.subagents[i];
         match event {
-            "PostToolUse" => a.description = text(&v["tool_input"]["description"]).or(a.description.take()),
+            "PostToolUse" => {
+                a.description = text(&v["tool_input"]["description"]).or(a.description.take());
+                a.output = text(&v["tool_response"]["outputFile"]).or(a.output.take());
+            }
             "SubagentStart" => {
                 a.running = true;
+                a.started = tasks::now();
+                a.finished = None;
                 a.cwd = text(&v["cwd"]);
                 a.agent_type = text(&v["agent_type"]);
                 if a.description.is_none() {
@@ -486,7 +502,12 @@ fn record_subagent(stats: &Stats, session: &str, event: &str, v: &Value) {
                     }
                 }
             }
-            _ => a.running = false,
+            _ => {
+                if a.running {
+                    a.finished = Some(tasks::now());
+                }
+                a.running = false;
+            }
         }
     });
 }

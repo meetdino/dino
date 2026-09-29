@@ -84,6 +84,8 @@ final class DinoModel: ObservableObject {
 
     /// A file or the web preview, beside the terminals.
     @Published var sidePane: SidePane?
+    /// The session whose tasks the Tasks pane shows while a folder is selected (after "Show in Sidebar").
+    @Published var tasksFallback: String?
     /// Each session's browser, kept so switching sessions keeps its page ("" when opened without one).
     var webPages: [String: WebPage] = [:]
     /// The local address each session printed that the user has seen, opened or waved off.
@@ -308,7 +310,7 @@ final class DinoModel: ObservableObject {
     /// Ghostty handles its own shortcuts before the menu sees them (⌘D splits, ⌘W closes, ⌘K
     /// clears), so a focused pane would swallow dino's. Hand those keys back to the menu.
     static let terminals = TerminalController(configSource: .generated(
-        ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p"]
+        ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t"]
             + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
             .map { "super+\($0)" }
             // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives.
