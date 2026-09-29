@@ -105,7 +105,8 @@ struct DinoApp: App {
                     .disabled(model.selectedSession == nil)
                 Button("Archive") { if let id = model.selectedSession?.id { model.archive(id) } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
-                    .disabled(model.selectedSession == nil)
+                    .disabled(!model.canArchive(model.selectedSession?.id ?? ""))
+                Button("Show Archived") { model.showArchived() }
                 Button("Kill Session") { if let id = model.selected { model.kill(id) } }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
                     .disabled(model.selected == nil)
@@ -557,61 +558,64 @@ struct Sidebar: View {
                     model.select(tag)
                 }
             })) {
-                let tree = filter == .all
-                    ? SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
-                    : SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups) { filter.passes(model.status(of: $0)) }
-                Section("Workspaces") {
-                    ForEach(tree.repos) { node in
-                        RepoRows(node: node, filter: filter, collapsed: collapsed)
-                    }
-                    let remote = Dictionary(grouping: tree.unfiled.filter { $0.host != nil }) { $0.host ?? "" }
-                    ForEach(remote.keys.sorted(), id: \.self) { host in
-                        HostRows(host: host, sessions: remote[host] ?? [], collapsed: collapsed)
-                    }
-                    ForEach(tree.unfiled.filter { $0.host == nil }) { s in
-                        SessionRow(session: s, index: 0)
-                            .tag(s.id)
-                            .contextMenu { SessionMenu(session: s) }
-                    }
-                    if filter != .all, tree.repos.isEmpty, tree.unfiled.isEmpty {
-                        Text(filter == .needsYou ? "Nothing needs you" : "No \(filter.label.lowercased()) sessions")
-                            .font(.callout).foregroundStyle(.tertiary)
-                    }
-                }
-                if filter == .all {
-                    Section {
-                        ForEach(model.scheduled) { t in
-                            ScheduledRow(task: t).tag("task:\(t.id)")
+                if filter == .archived {
+                    ArchivedSection()
+                } else {
+                    let tree = filter == .all
+                        ? SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
+                        : SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups) { filter.passes(model.status(of: $0)) }
+                    Section("Workspaces") {
+                        ForEach(tree.repos) { node in
+                            RepoRows(node: node, filter: filter, collapsed: collapsed)
                         }
-                        if model.scheduled.isEmpty {
-                            Button { model.newTask() } label: {
-                                Label("Run a prompt on a schedule…", systemImage: "clock")
+                        let remote = Dictionary(grouping: tree.unfiled.filter { $0.host != nil }) { $0.host ?? "" }
+                        ForEach(remote.keys.sorted(), id: \.self) { host in
+                            HostRows(host: host, sessions: remote[host] ?? [], collapsed: collapsed)
+                        }
+                        ForEach(tree.unfiled.filter { $0.host == nil }) { s in
+                            SessionRow(session: s, index: 0)
+                                .tag(s.id)
+                                .contextMenu { SessionMenu(session: s) }
+                        }
+                        if filter != .all, tree.repos.isEmpty, tree.unfiled.isEmpty {
+                            Text(filter == .needsYou ? "Nothing needs you" : "No \(filter.label.lowercased()) sessions")
+                                .font(.callout).foregroundStyle(.tertiary)
+                        }
+                    }
+                    if filter == .all {
+                        Section {
+                            ForEach(model.scheduled) { t in
+                                ScheduledRow(task: t).tag("task:\(t.id)")
                             }
-                            .buttonStyle(.plain)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                            if model.scheduled.isEmpty {
+                                Button { model.newTask() } label: {
+                                    Label("Run a prompt on a schedule…", systemImage: "clock")
+                                }
+                                .buttonStyle(.plain)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            }
+                        } header: {
+                            HStack {
+                                Text("Scheduled")
+                                Spacer()
+                                if !model.scheduled.isEmpty {
+                                    Button { model.newTask() } label: { Image(systemName: "plus") }
+                                        .buttonStyle(.plain)
+                                        .help("New Scheduled Task")
+                                }
+                            }
                         }
-                    } header: {
-                        HStack {
-                            Text("Scheduled")
-                            Spacer()
-                            if !model.scheduled.isEmpty {
-                                Button { model.newTask() } label: { Image(systemName: "plus") }
-                                    .buttonStyle(.plain)
-                                    .help("New Scheduled Task")
+                    }
+                    // Other terminals' sessions aren't dino's to sort by status.
+                    if !model.elsewhere.isEmpty, filter == .all {
+                        Section("On this Mac") {
+                            ForEach(model.elsewhere) { f in
+                                ElsewhereRow(session: f).tag("move:\(f.id)")
                             }
                         }
                     }
                 }
-                // Other terminals' sessions aren't dino's to sort by status.
-                if !model.elsewhere.isEmpty, filter == .all {
-                    Section("On this Mac") {
-                        ForEach(model.elsewhere) { f in
-                            ElsewhereRow(session: f).tag("move:\(f.id)")
-                        }
-                    }
-                }
-                if filter == .all { ArchivedSection() }
             }
             .listStyle(.sidebar)
             // macOS List diffs rows into an NSOutlineView and sometimes leaves stale rows drawn
@@ -621,7 +625,11 @@ struct Sidebar: View {
         }
         .safeAreaInset(edge: .top) {
             VStack(alignment: .leading, spacing: 8) {
-                DinoMark(size: 15)
+                HStack {
+                    DinoMark(size: 15)
+                    Spacer()
+                    ArchiveToggle(filter: $filter)
+                }
                 if !model.sessions.isEmpty || filter != .all {
                     FilterBar(filter: $filter)
                 }
@@ -637,6 +645,7 @@ struct SessionRow: View {
     let session: SessionInfo
     let index: Int
     var stat: DiffStat?
+    @State private var hovering = false
 
     var body: some View {
         let status = model.status(of: session)
@@ -656,7 +665,13 @@ struct SessionRow: View {
                         .help("In a split with \(model.sessions.first { $0.id == split.other(session.id) }?.name ?? "another session")")
                 }
                 Spacer()
-                if status == .waiting, let on = session.waitingOn {
+                if hovering, model.canArchive(session.id) {
+                    // Where Claude desktop has it: on the row, under the pointer.
+                    Button { model.archive(session.id) } label: { Image(systemName: "archivebox") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Archive: stop it and keep it under Archived, to pick up again (⇧⌘A)")
+                } else if status == .waiting, let on = session.waitingOn {
                     Text("waiting on \(on)").font(.caption).foregroundStyle(status.color).lineLimit(1)
                         .help("Its turn ended while these still run; it carries on when they finish")
                 } else {
@@ -700,6 +715,7 @@ struct SessionRow: View {
             }
         }
         .padding(.vertical, 3)
+        .onHover { hovering = $0 }
     }
 }
 
