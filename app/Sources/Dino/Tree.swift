@@ -449,23 +449,22 @@ struct WorktreeRow: View {
                     Circle().fill(Color.orange).frame(width: 6, height: 6).help("In progress: uncommitted changes")
                 }
             }
-            if !status.isEmpty {
-                Text(status).font(.caption).foregroundStyle(place.owner?.running == true ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                    .fixedSize()
+            if place.owner?.running == true {
+                ProgressView().controlSize(.mini).help("Running")
+            } else if let (icon, tip) = statusIcon {
+                Image(systemName: icon).font(.caption).foregroundStyle(.secondary).help(tip)
             }
         }
         .help(help)
     }
 
-    /// The dirty dot already says "in progress", and the sidebar is narrow.
-    private var status: String {
-        if place.owner?.running == true { return "running" }
+    /// Icons, not words: the label needs the room in a narrow sidebar. The dirty dot already says "in progress".
+    private var statusIcon: (String, String)? {
         switch place.git?.state {
-        case "in_progress": return ""
-        case "ready": return "ready"
-        case "merged": return "merged"
-        case "empty": return place.owner == nil ? "empty" : "done"
-        default: return ""
+        case "ready": return ("checkmark.circle", "Ready: committed, not on the main branch yet")
+        case "merged": return ("arrow.triangle.merge", "Merged into the main branch")
+        case "empty": return place.owner == nil ? ("circle.dashed", "Empty: nothing changed") : ("checkmark", "Done: nothing changed")
+        default: return nil
         }
     }
 
