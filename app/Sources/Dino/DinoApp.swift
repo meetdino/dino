@@ -60,6 +60,7 @@ struct DinoApp: App {
                 }
                 Button("Fan Out…") { model.showFanout = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("New Scheduled Task…") { model.newTask() }
                 Button("Continue a Session…") {
                     model.loadFound()
                     model.showContinue = true
@@ -182,6 +183,17 @@ struct ContentView: View {
         }
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
+        .sheet(item: $model.editingTask) { ScheduleSheet(task: $0) }
+        .alert(
+            "Delete “\(model.deletingTask?.name ?? "")”?",
+            isPresented: Binding(get: { model.deletingTask != nil }, set: { if !$0 { model.deletingTask = nil } }),
+            presenting: model.deletingTask
+        ) { t in
+            Button("Delete", role: .destructive) { model.deleteTask(t) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("It won't run again. Sessions it already started keep running.")
+        }
         .sheet(isPresented: $model.showCreatePR) {
             if let s = model.selectedSession { CreatePRSheet(session: s) }
         }
@@ -468,7 +480,7 @@ struct Sidebar: View {
     /// Changes whenever the sidebar gains, loses or restructures rows.
     private var rowsKey: String {
         let tree = SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
-        return ([filter.rawValue] + tree.repos.map(\.shape) + model.sessions.map(\.id) + model.elsewhere.map(\.id))
+        return ([filter.rawValue] + tree.repos.map(\.shape) + model.sessions.map(\.id) + model.elsewhere.map(\.id) + model.scheduled.map(\.id))
             .joined(separator: "\n")
     }
 
@@ -480,6 +492,8 @@ struct Sidebar: View {
                 guard let tag else { return }
                 if tag.hasPrefix("move:") {
                     model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
+                } else if tag.hasPrefix("task:") {
+                    model.editingTask = model.scheduled.first { "task:\($0.id)" == tag }
                 } else {
                     model.select(tag)
                 }
@@ -499,6 +513,31 @@ struct Sidebar: View {
                     if filter != .all, tree.repos.isEmpty, tree.unfiled.isEmpty {
                         Text(filter == .needsYou ? "Nothing needs you" : "No \(filter.label.lowercased()) sessions")
                             .font(.callout).foregroundStyle(.tertiary)
+                    }
+                }
+                if filter == .all {
+                    Section {
+                        ForEach(model.scheduled) { t in
+                            ScheduledRow(task: t).tag("task:\(t.id)")
+                        }
+                        if model.scheduled.isEmpty {
+                            Button { model.newTask() } label: {
+                                Label("Run a prompt on a schedule…", systemImage: "clock.badge.plus")
+                            }
+                            .buttonStyle(.plain)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        }
+                    } header: {
+                        HStack {
+                            Text("Scheduled")
+                            Spacer()
+                            if !model.scheduled.isEmpty {
+                                Button { model.newTask() } label: { Image(systemName: "plus") }
+                                    .buttonStyle(.plain)
+                                    .help("New Scheduled Task")
+                            }
+                        }
                     }
                 }
                 // Other terminals' sessions aren't dino's to sort by status.
@@ -541,6 +580,11 @@ struct SessionRow: View {
             HStack(spacing: 8) {
                 StatusDot(status: status)
                 Text(session.name).font(.system(.body, design: .monospaced).weight(.medium))
+                if let task = session.scheduled {
+                    Image(systemName: "clock")
+                        .font(.caption).foregroundStyle(.tertiary)
+                        .help("Started by the scheduled task “\(task)”")
+                }
                 if let pr = model.pr(of: session) { PRChip(pr: pr, auto: session.auto) }
                 if let split = model.splits.first(where: { $0.contains(session.id) }) {
                     Image(systemName: split.vertical ? "rectangle.split.1x2" : "rectangle.split.2x1")

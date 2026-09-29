@@ -96,6 +96,9 @@ pub enum Request {
     /// Close a worktree dino made for a session: stop the sessions in it, remove it and its branch.
     /// `apply` first brings its changes into the checkout it came from, uncommitted.
     RemoveWorktree { path: String, apply: bool },
+    /// Remove a finished worktree and its merged branch, never forcing: refuses one with
+    /// uncommitted work, keeps a branch git doesn't see merged.
+    CleanWorktree { path: String },
     /// The settings document.
     Settings,
     /// Replace the settings document.
@@ -125,6 +128,15 @@ pub enum Request {
     PreviewStop { id: String, name: String },
     /// What the named dev server has printed (the tail).
     PreviewLog { id: String, name: String },
+    /// Scheduled tasks, with their history and next run.
+    ScheduleList,
+    /// Add a task (no `id`) or replace one; pausing and resuming is a put with `enabled` changed.
+    SchedulePut { task: crate::schedule::ScheduledTask },
+    ScheduleDelete { id: String },
+    /// Run a task now, whatever its schedule; answers with the session it started.
+    ScheduleRun { id: String },
+    /// Check for due tasks now, as if the time were `now` (seconds since the epoch) when given.
+    ScheduleTick { now: Option<u64> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -148,6 +160,7 @@ pub enum Response {
     /// A broken launch file lists nothing, and `error` says why.
     PreviewConfigs { configs: Vec<crate::preview::PreviewConfig>, error: Option<String> },
     PreviewLog { text: String },
+    Schedule { tasks: Vec<crate::schedule::ScheduledTask> },
     Ok,
     Error { message: String },
 }
@@ -201,6 +214,9 @@ pub struct SessionInfo {
     /// The last local web address the agent printed (a dev server it started), to offer a preview of.
     #[serde(default)]
     pub local_url: Option<String>,
+    /// The scheduled task that started it, by name.
+    #[serde(default)]
+    pub scheduled: Option<String>,
 }
 
 /// What dino does about a session's PR by itself. Kept with the session, so it survives dinod restarts.
