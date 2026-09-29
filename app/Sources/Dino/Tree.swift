@@ -6,7 +6,35 @@ struct Worktree: Codable, Equatable, Identifiable {
     var branch: String?
     /// dino made it for a session (see `ClosingWorktree`).
     var dino: Bool
+    /// What's in it next to the main checkout; nil for the main checkout.
+    var git: WorktreeGit?
+    /// The subagent that made it, when its agent's hooks said so.
+    var owner: WorktreeOwner?
     var id: String { path }
+}
+
+struct WorktreeGit: Codable, Equatable {
+    /// The latest commit subject not on the main branch, else a readable branch name.
+    var label: String
+    var added: UInt32
+    var removed: UInt32
+    /// Uncommitted or new files.
+    var dirty: Bool
+    var ahead: UInt32
+    /// "in_progress", "ready", "merged" or "empty".
+    var state: String
+}
+
+struct WorktreeOwner: Codable, Equatable {
+    var session: String
+    var description: String?
+    var agentType: String?
+    var running: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case session, description, running
+        case agentType = "agent_type"
+    }
 }
 
 struct ClosingWorktree: Equatable {
@@ -43,7 +71,15 @@ struct PlaceNode: Identifiable, Equatable {
     var sessions: [SessionInfo]
     /// A worktree dino made for a session, for the user to close.
     var dino = false
+    var git: WorktreeGit?
+    var owner: WorktreeOwner?
     var id: String { path }
+
+    /// Nothing in it would be lost by removing it: no uncommitted work, nobody in it.
+    var cleanable: Bool {
+        guard let git, !dino, sessions.isEmpty, owner?.running != true else { return false }
+        return !git.dirty
+    }
 }
 
 struct RepoNode: Identifiable, Equatable {
@@ -51,15 +87,23 @@ struct RepoNode: Identifiable, Equatable {
     /// The main checkout first, then other worktrees; fan-out worktrees are in `groups` instead.
     var places: [PlaceNode]
     var groups: [GroupInfo]
+    /// Session id → the worktrees its subagents made, shown under that session.
+    var subagents: [String: [PlaceNode]] = [:]
+    /// Worktrees nobody here made and nobody works in.
+    var others: [PlaceNode] = []
+    /// Worktrees whose work landed on the main branch, ready to clean up.
+    var merged: [PlaceNode] = []
     var id: String { repo.path }
     var isGit: Bool { !repo.worktrees.isEmpty }
     /// One checkout and no fan-outs: list its sessions right under the repo.
-    var flat: Bool { places.count == 1 && groups.isEmpty }
+    var flat: Bool { places.count == 1 && groups.isEmpty && others.isEmpty && merged.isEmpty }
     var sessionCount: Int { places.reduce(0) { $0 + $1.sessions.count } }
     /// Changes when rows switch between plain rows and disclosure groups; part of the key
     /// the sidebar rebuilds its List on (see `Sidebar.rowsKey`).
     var shape: String {
-        ([repo.path, flat ? "flat" : "tree"] + places.map { "\($0.path)=\($0.sessions.isEmpty)" } + groups.map(\.id))
+        ([repo.path, flat ? "flat" : "tree"] + places.map { "\($0.path)=\($0.sessions.isEmpty)" } + groups.map(\.id)
+            + subagents.keys.sorted().map { "\($0)>\(subagents[$0]!.map(\.path).joined(separator: ","))" }
+            + ["others=\(others.map(\.path).joined(separator: ","))", "merged=\(merged.map(\.path).joined(separator: ","))"])
             .joined(separator: "|")
     }
 }
@@ -67,6 +111,8 @@ struct RepoNode: Identifiable, Equatable {
 enum SessionTree {
     /// Each session goes under the deepest worktree or folder containing its cwd; fan-out
     /// members go under their group. Sessions the tree doesn't cover yet come back as `unfiled`.
+    /// Worktrees a session's subagents made go under that session; merged ones and ones nobody
+    /// here made fold away.
     static func build(repos: [RepoInfo], sessions: [SessionInfo], groups: [GroupInfo]) -> (repos: [RepoNode], unfiled: [SessionInfo]) {
         let inGroup = Set(groups.flatMap { $0.members.map(\.session) })
         let groupWorktrees = Set(groups.flatMap { $0.members.map(\.worktree) })
@@ -74,7 +120,11 @@ enum SessionTree {
             let places = r.worktrees.isEmpty
                 ? [PlaceNode(path: r.path, label: r.name, sessions: [])]
                 : r.worktrees.filter { !groupWorktrees.contains($0.path) }.map {
-                    PlaceNode(path: $0.path, label: $0.branch ?? URL(fileURLWithPath: $0.path).lastPathComponent, sessions: [], dino: $0.dino)
+                    PlaceNode(
+                        path: $0.path,
+                        label: $0.git?.label ?? $0.branch ?? URL(fileURLWithPath: $0.path).lastPathComponent,
+                        sessions: [], dino: $0.dino, git: $0.git, owner: $0.owner
+                    )
                 }
             return RepoNode(repo: r, places: places, groups: groups.filter { $0.repo == r.path })
         }
@@ -88,6 +138,26 @@ enum SessionTree {
             }
             if let best { nodes[best.repo].places[best.place].sessions.append(s) } else { unfiled.append(s) }
         }
+        let ids = Set(sessions.map(\.id))
+        for i in nodes.indices {
+            var kept: [PlaceNode] = []
+            for (pi, place) in nodes[i].places.enumerated() {
+                // The main checkout, dino's own and ones with sessions in them stay where they are.
+                if pi == 0 || place.dino || !place.sessions.isEmpty || place.git == nil {
+                    kept.append(place)
+                } else if let owner = place.owner, ids.contains(owner.session) {
+                    nodes[i].subagents[owner.session, default: []].append(place)
+                } else if place.git?.state == "merged", place.cleanable {
+                    nodes[i].merged.append(place)
+                } else if place.owner != nil {
+                    // Its session is gone: back under the repo.
+                    kept.append(place)
+                } else {
+                    nodes[i].others.append(place)
+                }
+            }
+            nodes[i].places = kept
+        }
         return (nodes, unfiled)
     }
 
@@ -100,6 +170,8 @@ enum SessionTree {
             var node = node
             node.places.removeAll { $0.sessions.isEmpty }
             node.groups = node.groups.filter { $0.members.contains { ids.contains($0.session) } }
+            node.others = []
+            node.merged = []
             return node.places.isEmpty && node.groups.isEmpty ? nil : node
         }
         return tree
@@ -198,31 +270,20 @@ struct RepoRows: View {
             if node.flat {
                 sessionRows(node.places[0].sessions)
             } else {
-                ForEach(node.places) { place in
+                ForEach(Array(node.places.enumerated()), id: \.element.id) { i, place in
                     Group {
                         if place.sessions.isEmpty {
-                            PlaceRow(icon: "arrow.triangle.branch", title: place.label, detail: nil)
+                            placeRow(place, main: i == 0)
                         } else {
                             DisclosureGroup(isExpanded: expanded(place.id)) {
                                 sessionRows(place.sessions)
                             } label: {
-                                PlaceRow(icon: "arrow.triangle.branch", title: place.label, detail: nil)
+                                placeRow(place, main: i == 0)
                             }
                         }
                     }
                     .tag("dir:\(place.path)")
-                    .contextMenu {
-                        if place.dino {
-                            Button("Apply Changes and Close Worktree…") {
-                                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: true)
-                            }
-                            Button("Discard Worktree…", role: .destructive) {
-                                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: false)
-                            }
-                            Divider()
-                        }
-                        Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: place.path) }
-                    }
+                    .contextMenu { placeMenu(place) }
                 }
                 ForEach(node.groups) { g in
                     DisclosureGroup(isExpanded: expanded("group:\(g.id)")) {
@@ -236,6 +297,27 @@ struct RepoRows: View {
                         GroupRow(group: g)
                     }
                     .tag("group:\(g.id)")
+                }
+                if !node.merged.isEmpty {
+                    DisclosureGroup(isExpanded: opened("merged:\(node.id)")) {
+                        worktreeRows(node.merged)
+                    } label: {
+                        PlaceRow(icon: "checkmark.circle", title: "Merged", detail: "\(node.merged.count)")
+                    }
+                    .tag("merged:\(node.id)")
+                    .contextMenu {
+                        Button("Clean Up \(node.merged.count == 1 ? "Worktree" : "All \(node.merged.count) Worktrees")") {
+                            model.cleanWorktrees(node.merged.map(\.path))
+                        }
+                    }
+                }
+                if !node.others.isEmpty {
+                    DisclosureGroup(isExpanded: opened("others:\(node.id)")) {
+                        worktreeRows(node.others)
+                    } label: {
+                        PlaceRow(icon: "square.stack.3d.up", title: "Other worktrees", detail: "\(node.others.count)")
+                    }
+                    .tag("others:\(node.id)")
                 }
             }
         } label: {
@@ -255,11 +337,57 @@ struct RepoRows: View {
         }
     }
 
+    @ViewBuilder
+    private func placeRow(_ place: PlaceNode, main: Bool) -> some View {
+        if main || place.git == nil {
+            PlaceRow(icon: "arrow.triangle.branch", title: place.label, detail: nil)
+        } else {
+            WorktreeRow(place: place)
+        }
+    }
+
+    @ViewBuilder
+    private func placeMenu(_ place: PlaceNode) -> some View {
+        if place.dino {
+            Button("Apply Changes and Close Worktree…") {
+                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: true)
+            }
+            Button("Discard Worktree…", role: .destructive) {
+                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: false)
+            }
+            Divider()
+        } else if place.cleanable {
+            Button("Clean Up Worktree") { model.cleanWorktrees([place.path]) }
+                .help("Removes the worktree, and its branch if it's merged. Never forced.")
+            Divider()
+        }
+        Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: place.path) }
+    }
+
+    private func worktreeRows(_ places: [PlaceNode]) -> some View {
+        ForEach(places) { place in
+            WorktreeRow(place: place)
+                .tag("dir:\(place.path)")
+                .contextMenu { placeMenu(place) }
+        }
+    }
+
+    /// A session's rows, each with the worktrees its subagents made under it.
     private func sessionRows(_ sessions: [SessionInfo]) -> some View {
         ForEach(sessions) { s in
-            SessionRow(session: s, index: 0)
+            if let children = node.subagents[s.id] {
+                DisclosureGroup(isExpanded: expanded("subagents:\(s.id)")) {
+                    worktreeRows(children)
+                } label: {
+                    SessionRow(session: s, index: 0)
+                }
                 .tag(s.id)
                 .contextMenu { SessionMenu(session: s) }
+            } else {
+                SessionRow(session: s, index: 0)
+                    .tag(s.id)
+                    .contextMenu { SessionMenu(session: s) }
+            }
         }
     }
 
@@ -268,6 +396,15 @@ struct RepoRows: View {
         Binding(
             get: { !collapsed.contains(id) },
             set: { open in if open { collapsed.remove(id) } else { collapsed.insert(id) } }
+        )
+    }
+
+    /// Nodes that start closed; the sidebar remembers the ones you open.
+    private func opened(_ id: String) -> Binding<Bool> {
+        let key = "open:\(id)"
+        return Binding(
+            get: { collapsed.contains(key) },
+            set: { open in if open { collapsed.insert(key) } else { collapsed.remove(key) } }
         )
     }
 }
@@ -286,5 +423,57 @@ struct PlaceRow: View {
                 Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         }
+    }
+}
+
+/// A worktree at a glance: what it's for, how much changed, and where it stands.
+/// "● Review code button   +312 −20   running"
+struct WorktreeRow: View {
+    let place: PlaceNode
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary).frame(width: 16)
+            Text(place.owner?.description ?? place.label).lineLimit(1).truncationMode(.tail).layoutPriority(1)
+            Spacer(minLength: 4)
+            if let git = place.git {
+                if git.added + git.removed > 0 {
+                    HStack(spacing: 3) {
+                        if git.added > 0 { Text("+\(git.added)").foregroundStyle(.green) }
+                        if git.removed > 0 { Text("−\(git.removed)").foregroundStyle(.red) }
+                    }
+                    .font(.caption.monospacedDigit())
+                    .fixedSize()
+                }
+                if git.dirty {
+                    Circle().fill(Color.orange).frame(width: 6, height: 6).help("In progress: uncommitted changes")
+                }
+            }
+            if !status.isEmpty {
+                Text(status).font(.caption).foregroundStyle(place.owner?.running == true ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                    .fixedSize()
+            }
+        }
+        .help(help)
+    }
+
+    /// The dirty dot already says "in progress", and the sidebar is narrow.
+    private var status: String {
+        if place.owner?.running == true { return "running" }
+        switch place.git?.state {
+        case "in_progress": return ""
+        case "ready": return "ready"
+        case "merged": return "merged"
+        case "empty": return place.owner == nil ? "empty" : "done"
+        default: return ""
+        }
+    }
+
+    private var help: String {
+        var lines = [place.path]
+        if let d = place.owner?.description, let label = place.git?.label, d != label { lines.insert(label, at: 0) }
+        if let t = place.owner?.agentType { lines.append("Made by a \(t) subagent") }
+        if let ahead = place.git?.ahead, ahead > 0 { lines.append("\(ahead) commit\(ahead == 1 ? "" : "s") not on the main branch") }
+        return lines.joined(separator: "\n")
     }
 }

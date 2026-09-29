@@ -127,7 +127,7 @@ fn codex_auth_mode() -> Option<String> {
 fn claude_hook_settings(url: &str) -> String {
     const EVENTS: &[&str] = &[
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-        "PermissionRequest", "Notification", "Stop", "StopFailure",
+        "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop",
     ];
     let entry = format!(r#"[{{"hooks":[{{"type":"http","url":"{url}","timeout":5}}]}}]"#);
     let hooks: Vec<String> = EVENTS.iter().map(|e| format!(r#""{e}":{entry}"#)).collect();
