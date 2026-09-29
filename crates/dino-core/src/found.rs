@@ -11,6 +11,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::procinfo;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -167,27 +169,18 @@ fn running_claude() -> Vec<FoundSession> {
     out
 }
 
-/// Codex keeps its rollout file open; `lsof` names the session and its cwd.
+/// Codex keeps its rollout file open; that names the session, the process's cwd the folder.
 fn running_codex() -> Vec<FoundSession> {
-    let Some(pids) = run("pgrep", &["-x", "codex"]) else { return vec![] };
+    let pids = procinfo::pids_named("codex");
+    if pids.is_empty() {
+        return vec![];
+    }
     let names = codex_names();
     let mut out = vec![];
-    for pid in pids.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
-        // One lsof: the open rollout names the session, the `cwd` entry the folder.
-        let Some(files) = run("lsof", &["-p", &pid.to_string(), "-Ffn"]) else { continue };
-        let (mut fd, mut rollout, mut cwd) = ("", None, None);
-        for l in files.lines() {
-            if let Some(f) = l.strip_prefix('f') {
-                fd = f;
-            } else if let Some(n) = l.strip_prefix('n') {
-                if fd == "cwd" && cwd.is_none() {
-                    cwd = Some(n.to_string());
-                } else if rollout.is_none() && n.contains("/.codex/sessions/") && n.ends_with(".jsonl") {
-                    rollout = Some(n);
-                }
-            }
-        }
-        let Some(rollout) = rollout else { continue };
+    for pid in pids {
+        let files = procinfo::open_files(pid);
+        let Some(rollout) = files.iter().find(|n| n.contains("/.codex/sessions/") && n.ends_with(".jsonl")) else { continue };
+        let cwd = procinfo::cwd_of(pid);
         let Some(sid) = rollout_id(Path::new(rollout)) else { continue };
         let (terminal, args) = terminal_and_flags("codex", pid);
         out.push(FoundSession {
