@@ -4,9 +4,11 @@
 //! copies of it in its own file tree; dino carries the repo's trust over (see `trust`). Settings →
 //! Worktrees can move them (`worktrees_dir`), inside the repo too, hidden via `.git/info/exclude`.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -116,19 +118,50 @@ pub fn state(dirty: bool, ahead: u32, had_commits: bool, same_as_base: bool) -> 
     }
 }
 
+/// What a summary reads from history alone, the same while HEAD and the base stay put.
+#[derive(Clone)]
+struct History {
+    tips: String,
+    mb: String,
+    ahead: u32,
+    had_commits: bool,
+    same_as_base: bool,
+    subject: Option<String>,
+    /// Lines added and removed since the merge base, when nothing was uncommitted.
+    clean: Option<(u32, u32)>,
+}
+
+/// By worktree, branch and base. Most looks find nothing committed since the last one, and every
+/// git call is a process.
+static HISTORY: Mutex<Option<HashMap<(PathBuf, Option<String>, String), History>>> = Mutex::new(None);
+
 /// `dir` at a glance next to `base` (a branch of its repo). Only reads: it may be another agent's
 /// worktree, so its index is left alone.
 pub fn summary(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<Summary> {
-    let tip = git(dir, &["rev-parse", "HEAD"])?.trim().to_string();
-    let mb = git(dir, &["merge-base", "HEAD", base])?.trim().to_string();
-    let ahead: u32 = git(dir, &["rev-list", "--count", &format!("{base}..HEAD")])?.trim().parse().unwrap_or(0);
+    let tips = git(dir, &["rev-parse", "HEAD", base])?;
+    let key = (dir.to_path_buf(), branch.map(String::from), base.to_string());
+    let known = HISTORY.lock().unwrap().get_or_insert_default().get(&key).filter(|h| h.tips == tips).cloned();
+    let mut h = match known {
+        Some(h) => h,
+        None => history(dir, branch, base, tips)?,
+    };
     let status = git(dir, &["status", "--porcelain", "-uall"])?;
     let dirty = !status.trim().is_empty();
-    let (mut added, mut removed) = (0, 0);
-    for line in git(dir, &["diff", "--numstat", &mb])?.lines() {
-        let mut parts = line.split('\t');
-        added += parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-        removed += parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    // With nothing uncommitted, the diff from the merge base is history's too.
+    let (mut added, removed) = match h.clean {
+        Some(n) if !dirty => n,
+        _ => {
+            let (mut added, mut removed) = (0, 0);
+            for line in git(dir, &["diff", "--numstat", &h.mb])?.lines() {
+                let mut parts = line.split('\t');
+                added += parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                removed += parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            }
+            (added, removed)
+        }
+    };
+    if !dirty {
+        h.clean = Some((added, removed));
     }
     // New files aren't in the diff without touching the index: count their lines.
     for path in status.lines().filter_map(|l| l.strip_prefix("?? ")) {
@@ -137,6 +170,16 @@ pub fn summary(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<S
             added += std::fs::read(&file).map_or(0, |b| b.iter().filter(|&&c| c == b'\n').count() as u32);
         }
     }
+    let label = h.subject.clone().filter(|s| !s.is_empty()).or_else(|| branch.map(readable_branch)).unwrap_or_else(|| base_name(dir));
+    let summary = Summary { label, added, removed, dirty, ahead: h.ahead, state: state(dirty, h.ahead, h.had_commits, h.same_as_base).into() };
+    HISTORY.lock().unwrap().get_or_insert_default().insert(key, h);
+    Ok(summary)
+}
+
+fn history(dir: &Path, branch: Option<&str>, base: &str, tips: String) -> anyhow::Result<History> {
+    let tip = tips.lines().next().unwrap_or_default().to_string();
+    let mb = git(dir, &["merge-base", "HEAD", base])?.trim().to_string();
+    let ahead: u32 = git(dir, &["rev-list", "--count", &format!("{base}..HEAD")])?.trim().parse().unwrap_or(0);
     // The oldest reflog entry is where the branch started; no reflog, then judge by the base.
     let start = branch
         .and_then(|b| git(dir, &["reflog", "show", "--format=%H", &format!("refs/heads/{b}")]).ok())
@@ -152,11 +195,7 @@ pub fn summary(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<S
         }
     };
     let subject = if ahead > 0 { git(dir, &["log", "-1", "--format=%s"]).ok().map(|s| s.trim().to_string()) } else { None };
-    let label = subject
-        .filter(|s| !s.is_empty())
-        .or_else(|| branch.map(readable_branch))
-        .unwrap_or_else(|| base_name(dir));
-    Ok(Summary { label, added, removed, dirty, ahead, state: state(dirty, ahead, had_commits, same_as_base).into() })
+    Ok(History { tips, mb, ahead, had_commits, same_as_base, subject, clean: None })
 }
 
 fn base_name(dir: &Path) -> String {
