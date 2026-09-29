@@ -218,7 +218,7 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .all: true
         case .needsYou: status == .needsYou || status == .done
         case .working: status == .thinking || status == .working
-        case .idle: status == .idle || status == .exited
+        case .idle: status == .idle || status == .ended || status == .exited
         }
     }
 

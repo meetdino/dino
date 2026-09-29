@@ -2,7 +2,9 @@
 //!
 //! Every message is a frame: `[kind: u8][len: u32 BE][payload]`. Control traffic is JSON
 //! request/response frames. After a successful `Attach`, the connection also carries raw
-//! terminal bytes (`Data`) both ways, client `Resize`s, and a final server `Exit`.
+//! terminal bytes (`Data`) both ways, client `Resize`s, and a final server `Exit`. The `Exit`'s
+//! payload, when there is one, says the session ended but is kept, and can be resumed (text to
+//! show the user); an empty one means it's gone.
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -81,8 +83,17 @@ pub enum Request {
     /// mid-turn, that waits until the turn is over. Each field replaces the session's, so `None`
     /// goes back to the agent's own default.
     SetControls { id: String, controls: Controls },
-    /// Switch this connection to a live terminal stream for session `id`.
-    Attach { id: String, cols: u16, rows: u16 },
+    /// Switch this connection to a live terminal stream for session `id`. `wait`: if its agent
+    /// has ended, wait until it runs again (see `Resume`) rather than answer right away.
+    Attach {
+        id: String,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        wait: bool,
+    },
+    /// Start the agent of a session that ended again, in place, continuing its conversation.
+    Resume { id: String },
     Shutdown,
     /// Agent sessions outside dino that it can continue. `cloud` also asks providers (slower).
     Found { cloud: bool },
@@ -239,6 +250,9 @@ pub struct SessionInfo {
     pub agent_id: String,
     pub title: Option<String>,
     pub exited: bool,
+    /// How its agent exited, when it has: 0 is a clean exit (the user quit it).
+    #[serde(default)]
+    pub exit_code: Option<u32>,
     /// Milliseconds since the agent last wrote to its terminal.
     pub output_ms_ago: Option<u64>,
     /// Monotonic bell count; a client notices increases.

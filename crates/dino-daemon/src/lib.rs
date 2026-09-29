@@ -70,6 +70,8 @@ struct Session {
     rollout: Mutex<Rollout>,
     /// A shell's: the agent someone started in it by hand.
     inside: Mutex<Inside>,
+    /// Once it has ended: its last screen is on disk (see `save`).
+    screen_saved: AtomicBool,
 }
 
 /// What a shell is running in the foreground, as last looked at.
@@ -179,30 +181,7 @@ pub fn run() -> anyhow::Result<()> {
     let free_tier = keys.contains_key("NVIDIA_API_KEY");
     let proxy = Proxy::start(keys)?;
     proxy.set_budget(Settings::load().policies.session_token_budget);
-    let daemon = Arc::new(Daemon {
-        proxy,
-        launchers: RwLock::new(launchers(free_tier)),
-        sessions: Mutex::default(),
-        groups: Mutex::new(load_groups()),
-        worktrees: Mutex::new(load_worktrees()),
-        prs: Mutex::default(),
-        pr_poll: Mutex::default(),
-        closing: Mutex::default(),
-        previews: Mutex::default(),
-        subagents: Mutex::new(load_subagents()),
-        summaries: Mutex::default(),
-        schedule: schedule::Scheduler::load(),
-        archived: Mutex::new(lifecycle::load_archived()),
-        sizes: Mutex::default(),
-        measuring: AtomicBool::new(false),
-        next_id: AtomicU64::new(1),
-        next_sub: AtomicU64::new(1),
-    });
-    {
-        // Archived ids stay theirs, so a new session never takes one.
-        let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
-        daemon.next_id.fetch_max(max_id + 1, Ordering::Relaxed);
-    }
+    let daemon = new_daemon(proxy, launchers(free_tier));
     restore(&daemon, saved);
     {
         // Pick up late-discovered agent ids (Codex) and sessions that exited on their own.
@@ -250,6 +229,33 @@ pub fn run() -> anyhow::Result<()> {
         });
     }
     Ok(())
+}
+
+/// The daemon's state, with what was saved of it (all but the sessions, see `restore`).
+fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
+    let daemon = Arc::new(Daemon {
+        proxy,
+        launchers: RwLock::new(launchers),
+        sessions: Mutex::default(),
+        groups: Mutex::new(load_groups()),
+        worktrees: Mutex::new(load_worktrees()),
+        prs: Mutex::default(),
+        pr_poll: Mutex::default(),
+        closing: Mutex::default(),
+        previews: Mutex::default(),
+        subagents: Mutex::new(load_subagents()),
+        summaries: Mutex::default(),
+        schedule: schedule::Scheduler::load(),
+        archived: Mutex::new(lifecycle::load_archived()),
+        sizes: Mutex::default(),
+        measuring: AtomicBool::new(false),
+        next_id: AtomicU64::new(1),
+        next_sub: AtomicU64::new(1),
+    });
+    // Archived ids stay theirs, so a new session never takes one.
+    let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
+    daemon.next_id.fetch_max(max_id + 1, Ordering::Relaxed);
+    daemon
 }
 
 fn launchers(free_tier: bool) -> Vec<LauncherInfo> {
@@ -348,13 +354,27 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     Response::Error { message: format!("no session {id}") }
                 }
             }
-            Request::Attach { id, cols, rows } => {
-                let session = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
+            Request::Attach { id, cols, rows, wait } => {
+                let session = loop {
+                    match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                        // Ended: wait for it to be resumed, from this client or any other.
+                        Some(s) if wait && s.pane.is_exited() => {}
+                        other => break other,
+                    }
+                    if client_gone(&stream) {
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                };
                 return match session {
                     Some(s) => attach(d, &s, stream, cols, rows),
                     None => ipc::write_json(&mut stream, &Response::Error { message: format!("no session {id}") }),
                 };
             }
+            Request::Resume { id } => match resume(d, &id) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::Found { cloud } => Response::Found { sessions: discover(d, cloud) },
             Request::TakeOver { id } => match take_over(d, &id) {
                 Ok(()) => Response::Ok,
@@ -606,14 +626,20 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
     };
     let mut agent_session = restore.as_ref().and_then(|r| r.agent_session.clone());
+    // Ended before dinod stopped: it comes back as it was, not running, until resumed.
+    let ended = restore.as_ref().filter(|r| r.ended);
     let (spec, cwd) = match &host {
+        _ if ended.is_some() => (None, PathBuf::from(ended.map(|r| r.cwd.clone()).unwrap_or_default())),
         Some(host) => {
             let folder = cwd.filter(|c| !c.is_empty()).or_else(|| settings.ssh.get(host).map(|h| h.folder.clone())).filter(|f| !f.is_empty());
             let folder = folder.unwrap_or_else(|| "~".into());
             let restoring = restore.is_some();
-            (remote_spec(d, &settings, &l, host, &folder, &id, &mut agent_session, restoring, &controls, &args, prompt)?, PathBuf::from(folder))
+            (Some(remote_spec(d, &settings, &l, host, &folder, &id, &mut agent_session, restoring, &controls, &args, prompt)?), PathBuf::from(folder))
         }
-        None => local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.is_some(), &controls, &args, prompt),
+        None => {
+            let (spec, cwd) = local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.is_some(), &controls, &args, prompt);
+            (Some(spec), cwd)
+        }
     };
 
     let subscribers: Arc<Mutex<Vec<(u64, Sender<Vec<u8>>)>>> = Arc::default();
@@ -623,7 +649,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let local_url: Arc<Mutex<Option<String>>> = Arc::default();
     let (subs, last, poke, write, url) = (subscribers.clone(), last_output.clone(), poked.clone(), last_write.clone(), local_url.clone());
     let mut tail = String::new();
-    let pane = Pane::spawn(spec, cols.max(20), rows.max(5), move |bytes| {
+    let tap = move |bytes: &[u8]| {
         if !bytes.is_empty() {
             *write.lock().unwrap() = Some(Instant::now());
         }
@@ -644,7 +670,11 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         }
         // An empty chunk means EOF; it's forwarded so clients learn the session ended.
         subs.lock().unwrap().retain(|(_, tx)| tx.send(bytes.to_vec()).is_ok());
-    })?;
+    };
+    let pane = match spec {
+        Some(spec) => Pane::spawn(spec, cols.max(20), rows.max(5), tap)?,
+        None => Pane::ended(&load_screen(&id), cols.max(20), rows.max(5), ended.and_then(|r| r.exit_code)),
+    };
 
     let mut sessions = d.sessions.lock().unwrap();
     let name = match (&restore, name) {
@@ -682,6 +712,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         host,
         rollout: Mutex::default(),
         inside: Mutex::default(),
+        screen_saved: AtomicBool::new(false),
     }));
     Ok(id)
 }
@@ -819,7 +850,8 @@ fn set_controls(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> 
         *s.pending.lock().unwrap() = None;
         return Ok(());
     }
-    if restartable(d, &s) {
+    // An ended session keeps them for when it's resumed: it doesn't start again on its own.
+    if restartable(d, &s) && !s.pane.is_exited() {
         *s.pending.lock().unwrap() = None;
         restart(d, id, controls)
     } else {
@@ -841,8 +873,37 @@ impl Session {
     }
 }
 
+/// Whether the client on `stream` hung up. Only for a client that sends nothing meanwhile.
+fn client_gone(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut b = 0u8;
+    // SAFETY: a one-byte peek into a live local.
+    let n = unsafe { libc::recv(stream.as_raw_fd(), (&raw mut b).cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+    n == 0 || (n < 0 && io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock)
+}
+
+/// What an attached client is told when `s`'s program ends: the line to show if the session is
+/// kept to be resumed, nothing if it's gone (killed, archived).
+fn ended_note(d: &Daemon, s: &Arc<Session>) -> Vec<u8> {
+    if !d.sessions.lock().unwrap().iter().any(|o| Arc::ptr_eq(o, s)) {
+        return vec![];
+    }
+    // The output ends a moment before the process is reaped.
+    let since = Instant::now();
+    while s.pane.exit_code().is_none() && since.elapsed() < std::time::Duration::from_secs(1) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let label = d.launcher(&s.launcher).map_or_else(|| s.launcher.clone(), |l| l.label);
+    let what = match s.pane.exit_code() {
+        Some(c) if c != 0 => format!("{label} exited with code {c}"),
+        _ => format!("{label} ended"),
+    };
+    let action = if s.agent_id == "shell" { "Enter starts a new one" } else { "Enter resumes" };
+    format!("{what} · {action}").into_bytes()
+}
+
 /// Stream a session to a client until it detaches or the session ends.
-fn attach(d: &Daemon, s: &Session, mut stream: UnixStream, cols: u16, rows: u16) -> io::Result<()> {
+fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, rows: u16) -> io::Result<()> {
     ipc::write_json(&mut stream, &Response::Ok)?;
     s.poke();
     // The most recent client decides the size, like tmux's "latest".
@@ -860,14 +921,18 @@ fn attach(d: &Daemon, s: &Session, mut stream: UnixStream, cols: u16, rows: u16)
     let mut out = stream.try_clone()?;
     ipc::write_frame(&mut out, ipc::DATA, &replay)?;
     let exited_already = s.pane.is_exited();
+    let (d2, s2) = (d.clone(), s.clone());
     let writer = std::thread::spawn(move || {
         if exited_already {
-            let _ = ipc::write_frame(&mut out, ipc::EXIT, &[]);
+            let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
             return;
         }
         while let Ok(bytes) = rx.recv() {
-            let kind = if bytes.is_empty() { ipc::EXIT } else { ipc::DATA };
-            if ipc::write_frame(&mut out, kind, &bytes).is_err() || kind == ipc::EXIT {
+            if bytes.is_empty() {
+                let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
+                break;
+            }
+            if ipc::write_frame(&mut out, ipc::DATA, &bytes).is_err() {
                 break;
             }
         }
@@ -990,6 +1055,7 @@ fn state(d: &Daemon) -> Response {
                 agent_id: s.agent_id.clone(),
                 title: label.clone().or_else(|| s.pane.title()),
                 exited: s.pane.is_exited(),
+                exit_code: s.pane.exit_code(),
                 output_ms_ago: s.last_output.lock().unwrap().map(|t| t.elapsed().as_millis() as u64),
                 bells: s.pane.shared.bells.load(Ordering::Relaxed),
                 requests: st.requests,
@@ -1061,6 +1127,11 @@ struct SavedSession {
     label: Option<String>,
     #[serde(default)]
     host: Option<String>,
+    /// Its program exited on its own: it comes back ended, its last screen up, until resumed.
+    #[serde(default)]
+    ended: bool,
+    #[serde(default)]
+    exit_code: Option<u32>,
 }
 
 fn saved_path() -> PathBuf {
@@ -1071,13 +1142,42 @@ fn load_saved() -> Vec<SavedSession> {
     std::fs::read(saved_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-/// Write live sessions to disk. Sessions whose agent exited on its own are dropped: the user
-/// ended them.
+/// Where an ended session's last screen is kept, to show it again after dinod restarts.
+fn screens_dir() -> PathBuf {
+    dino_core::config_dir().join("screens")
+}
+
+fn load_screen(id: &str) -> Vec<u8> {
+    std::fs::read(screens_dir().join(id)).unwrap_or_default()
+}
+
+/// Write the sessions to disk: running ones, and ended ones with their last screen, which stay
+/// until the user resumes or removes them.
 fn save(d: &Daemon) {
     let sessions = d.sessions.lock().unwrap().clone();
     // Snapshot first: a session's own lock must not be held while reading the others.
     let claimed: Vec<String> = sessions.iter().filter_map(|o| o.agent_session.lock().unwrap().clone()).collect();
-    let saved: Vec<SavedSession> = sessions.iter().filter(|s| !s.pane.is_exited()).map(|s| snapshot(s, &claimed)).collect();
+    let saved: Vec<SavedSession> = sessions.iter().map(|s| snapshot(s, &claimed)).collect();
+    let dir = screens_dir();
+    for s in sessions.iter().filter(|s| s.pane.is_exited() && !s.screen_saved.load(Ordering::Relaxed)) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::create_dir_all(&dir);
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(dir.join(&s.id))
+            .and_then(|mut f| io::Write::write_all(&mut f, &s.pane.replay(REPLAY_HISTORY)));
+        s.screen_saved.store(written.is_ok(), Ordering::Relaxed);
+    }
+    // A screen whose session was resumed or removed goes.
+    for f in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = f.file_name().to_string_lossy().into_owned();
+        if !sessions.iter().any(|s| s.id == name && s.pane.is_exited()) {
+            let _ = std::fs::remove_file(f.path());
+        }
+    }
     let tmp = saved_path().with_extension("json.tmp");
     if std::fs::write(&tmp, serde_json::to_vec_pretty(&saved).unwrap_or_default()).is_ok() {
         let _ = std::fs::rename(tmp, saved_path());
@@ -1105,6 +1205,8 @@ fn snapshot(s: &Session, claimed: &[String]) -> SavedSession {
         messaged_by: s.messaged_by.lock().unwrap().clone(),
         label: s.label.lock().unwrap().clone(),
         host: s.host.clone(),
+        ended: s.pane.is_exited(),
+        exit_code: s.pane.exit_code(),
     }
 }
 
@@ -1127,6 +1229,8 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
         d.proxy.stats.reset_context(id);
     }
     saved.controls = controls;
+    saved.ended = false;
+    saved.exit_code = None;
     let (cols, rows) = s.pane.size();
     let launch = Launch { cols, rows, restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) };
     let spawned = spawn(d, launch);
@@ -1147,6 +1251,15 @@ fn take_place(d: &Daemon, old: &Arc<Session>) {
     }
 }
 
+/// Start session `id`'s program again after it ended: the agent resumes its conversation, a
+/// shell starts afresh, in the same place and with any controls chosen meanwhile.
+fn resume(d: &Daemon, id: &str) -> anyhow::Result<()> {
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    anyhow::ensure!(s.pane.is_exited(), "{} is still running", s.name);
+    let controls = s.pending.lock().unwrap().take().unwrap_or_else(|| s.controls.clone());
+    restart(d, id, controls)
+}
+
 /// Apply controls asked for mid-turn, now that the turn is over.
 fn apply_pending(d: &Daemon) {
     let ready: Vec<(String, Controls)> = d
@@ -1155,7 +1268,7 @@ fn apply_pending(d: &Daemon) {
         .unwrap()
         .clone()
         .iter()
-        .filter(|s| s.pending.lock().unwrap().is_some() && restartable(d, s))
+        .filter(|s| !s.pane.is_exited() && s.pending.lock().unwrap().is_some() && restartable(d, s))
         .filter_map(|s| s.pending.lock().unwrap().take().map(|c| (s.id.clone(), c)))
         .collect();
     for (id, controls) in ready {
@@ -1302,6 +1415,8 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         messaged_by: None,
         label: None,
         host: None,
+        ended: false,
+        exit_code: None,
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {
@@ -1365,6 +1480,8 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
         messaged_by: s.messaged_by.lock().unwrap().clone(),
         label: s.label.lock().unwrap().clone(),
         host: None,
+        ended: false,
+        exit_code: None,
     };
     let (cols, rows) = s.pane.size();
     spawn(d, Launch { cols, rows, restore: Some(restore.clone()), ..Launch::new(&restore.launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
@@ -2144,4 +2261,79 @@ fn remove_worktree(d: &Daemon, path: &str, apply: bool) -> anyhow::Result<()> {
     worktrees.retain(|o| o.path != w.path);
     save_worktrees(&worktrees);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let since = Instant::now();
+        while !done() {
+            assert!(since.elapsed() < std::time::Duration::from_secs(10), "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn shell_daemon() -> Arc<Daemon> {
+        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default() };
+        new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![shell])
+    }
+
+    fn session(d: &Daemon, id: &str) -> Arc<Session> {
+        d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().unwrap()
+    }
+
+    /// A session whose program exits stays, ended, across a dinod restart, and resumes in place.
+    #[test]
+    fn ended_sessions_are_kept_and_resume() {
+        let home = std::env::temp_dir().join(format!("dino-resume-test-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: the only test in this crate that reads dino's config.
+        unsafe { std::env::set_var("DINO_HOME", &home) };
+
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        s.pane.write(b"echo last-words-$((6*7)); exit 3\r".to_vec());
+        wait_for("the shell to exit", || s.pane.is_exited() && s.pane.exit_code().is_some());
+        assert_eq!(s.pane.exit_code(), Some(3));
+        assert_eq!(String::from_utf8(ended_note(&d, &s)).unwrap(), "Shell (sh) exited with code 3 · Enter starts a new one");
+
+        // Controls chosen meanwhile wait for the resume: nothing starts on its own.
+        *s.pending.lock().unwrap() = Some(Controls::default());
+        apply_pending(&d);
+        assert!(Arc::ptr_eq(&session(&d, &id), &s));
+        assert!(s.pending.lock().unwrap().is_some());
+
+        save(&d);
+        let saved = load_saved();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].ended);
+        assert_eq!(saved[0].exit_code, Some(3));
+        assert!(screens_dir().join(&id).exists());
+
+        // dinod restarts: it comes back ended, its last screen up.
+        let d2 = shell_daemon();
+        restore(&d2, saved);
+        let back = session(&d2, &id);
+        assert!(back.pane.is_exited());
+        assert_eq!(back.pane.exit_code(), Some(3));
+        assert!(back.pane.text(100).contains("last-words-42"));
+
+        resume(&d2, &id).unwrap();
+        let live = session(&d2, &id);
+        assert!(!live.pane.is_exited());
+        assert_eq!(d2.sessions.lock().unwrap().len(), 1);
+        assert!(resume(&d2, &id).is_err(), "only an ended session resumes");
+        save(&d2);
+        assert!(!load_saved()[0].ended);
+        assert!(!screens_dir().join(&id).exists());
+
+        // Removed: attached clients are told it's gone, not that it ended.
+        kill(&d2, &id);
+        assert!(ended_note(&d2, &live).is_empty());
+        kill(&d, &id);
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
