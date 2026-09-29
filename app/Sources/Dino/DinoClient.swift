@@ -7,6 +7,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var agent_id: String
     var title: String?
     var exited: Bool
+    /// How its program exited, once it has; nil from an older dinod.
+    var exit_code: UInt32?
     var output_ms_ago: UInt64?
     var bells: UInt64
     var requests: UInt64
@@ -512,6 +514,11 @@ final class DinoConnection: @unchecked Sendable {
     /// Change mode, model or effort. The agent restarts, resuming its conversation; mid-turn, once the turn is over.
     func setControls(session: String, controls: Controls) throws {
         _ = try send(["type": "set_controls", "id": session, "controls": controls.json])
+    }
+
+    /// Start a session whose program ended again, in place: the agent resumes its conversation.
+    func resume(session: String) throws {
+        _ = try send(["type": "resume", "id": session])
     }
 
     /// Continue `session` in dino; returns the new dino session id.

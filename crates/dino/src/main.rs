@@ -763,7 +763,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
-       dino ls | new [--worktree] <agent> [args...] | attach <id> | kill <id> | ping | stop | daemon
+       dino ls | new [--worktree] <agent> [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
        dino found | continue <session-id prefix>
        dino mcp [--read-only]   (MCP server on stdio: agents list, read, message and start sessions)
        dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>";
@@ -805,6 +805,7 @@ fn main() -> anyhow::Result<()> {
             return print_response(client::request(&req)?);
         }
         Some("kill") => return print_response(client::request(&Request::Kill { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),
+        Some("resume") => return print_response(client::request(&Request::Resume { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),
         Some("stop") => {
             if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
                 println!("dinod is not running");

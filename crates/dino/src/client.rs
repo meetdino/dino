@@ -4,6 +4,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -83,11 +84,12 @@ impl Transport for SocketTransport {
 }
 
 fn start_attach(id: &str, cols: u16, rows: u16) -> io::Result<UnixStream> {
-    attach_on(connect()?, id, cols, rows)
+    attach_on(connect()?, id, cols, rows, false)
 }
 
-fn attach_on(mut s: UnixStream, id: &str, cols: u16, rows: u16) -> io::Result<UnixStream> {
-    ipc::write_json(&mut s, &Request::Attach { id: id.into(), cols, rows })?;
+/// `wait`: if the session has ended, answer once it's resumed.
+fn attach_on(mut s: UnixStream, id: &str, cols: u16, rows: u16, wait: bool) -> io::Result<UnixStream> {
+    ipc::write_json(&mut s, &Request::Attach { id: id.into(), cols, rows, wait })?;
     let (_, payload) = ipc::read_frame(&mut s)?;
     match serde_json::from_slice(&payload).map_err(io::Error::other)? {
         Response::Ok => Ok(s),
@@ -150,7 +152,8 @@ fn visible(bytes: &[u8]) -> bool {
     false
 }
 
-/// `dino attach <id>`: relay between this terminal and the session. Exits when the session ends.
+/// `dino attach <id>`: relay between this terminal and the session. When its program ends the
+/// last screen stays up, and Enter resumes it in place; exits once the session is removed.
 /// Meant to run inside a real terminal surface (Ghostty), which does all the rendering.
 pub fn attach_raw(id: &str) -> anyhow::Result<()> {
     let (cols, rows) = crossterm::terminal::size()?;
@@ -158,8 +161,10 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
     let mut reader = stream.try_clone()?;
     let writer = Arc::new(Mutex::new(stream));
     crossterm::terminal::enable_raw_mode()?;
+    // The session's program has ended: keys don't go to it, Enter resumes it.
+    let ended = Arc::new(AtomicBool::new(false));
 
-    let w = writer.clone();
+    let (w, end, sid) = (writer.clone(), ended.clone(), id.to_string());
     std::thread::spawn(move || {
         let mut stdin = io::stdin();
         let mut buf = [0u8; 8192];
@@ -172,6 +177,17 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
             };
             if n == 0 {
                 break;
+            }
+            if end.load(Ordering::Relaxed) {
+                if buf[..n].contains(&b'\r') && end.swap(false, Ordering::Relaxed) {
+                    // The reader below is already waiting for it to come back.
+                    if let Ok(Response::Error { message }) = request(&Request::Resume { id: sid.clone() }) {
+                        end.store(true, Ordering::Relaxed);
+                        let _ = write!(io::stdout(), "\r\n\x1b[2m{message}\x1b[0m\r\n");
+                        let _ = io::stdout().flush();
+                    }
+                }
+                continue;
             }
             // A failed write means the socket dropped; the reader below reconnects, so keep going.
             let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::DATA, &buf[..n]);
@@ -214,25 +230,43 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
                     }
                     stdout.flush()?;
                 }
-                ipc::EXIT => break 'session,
+                // Removed (killed, archived): nothing to come back to.
+                ipc::EXIT if payload.is_empty() => break 'session,
+                ipc::EXIT => {
+                    // Kept: leave its last screen up, say so, and wait for it to be resumed.
+                    ended.store(true, Ordering::Relaxed);
+                    let note = String::from_utf8_lossy(&payload);
+                    // What the program left on: mouse reporting, a hidden cursor, bracketed paste.
+                    stdout.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[<u\x1b[0m")?;
+                    write!(stdout, "\r\n\x1b[2m── {note} ──\x1b[0m\r\n")?;
+                    stdout.flush()?;
+                    break;
+                }
                 _ => {}
             }
         }
         // The socket dropped but the session may live on (seen across sleep/wake). Reattach
         // rather than leave a pane that ignores keys; stop once dinod no longer knows the session.
-        let started = Instant::now();
+        let mut started = Instant::now();
         let stream = loop {
             std::thread::sleep(Duration::from_millis(100));
             let (cols, rows) = crossterm::terminal::size().unwrap_or((cols, rows));
+            // Ended: this blocks until it's resumed, by Enter here or from anywhere else.
+            let wait = ended.load(Ordering::Relaxed);
+            let tried = Instant::now();
             // Only a running dinod: if it's gone, so is the session, and starting one here would be a surprise.
-            match UnixStream::connect(ipc::socket_path()).and_then(|s| attach_on(s, id, cols, rows)) {
+            match UnixStream::connect(ipc::socket_path()).and_then(|s| attach_on(s, id, cols, rows, wait)) {
                 Ok(s) => break s,
-                Err(e) if e.kind() == io::ErrorKind::Other || started.elapsed() > Duration::from_secs(5) => break 'session,
+                Err(e) if e.kind() == io::ErrorKind::Other => break 'session,
+                // Dropped after a long wait (dinod restarting): give it the full time again.
+                Err(_) if tried.elapsed() > Duration::from_secs(1) => started = Instant::now(),
+                Err(_) if started.elapsed() > Duration::from_secs(5) => break 'session,
                 Err(_) => {}
             }
         };
         reader = stream.try_clone()?;
         *writer.lock().unwrap() = stream;
+        ended.store(false, Ordering::Relaxed);
         held = Some((Vec::new(), Instant::now()));
     }
     crossterm::terminal::disable_raw_mode()?;

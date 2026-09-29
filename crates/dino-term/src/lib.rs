@@ -49,6 +49,8 @@ pub struct Shared {
     /// Total bells rung, for observers that poll.
     pub bells: AtomicU64,
     pub exited: AtomicBool,
+    /// The program's exit code, once it has exited (a signal counts as 1).
+    pub exit_code: Mutex<Option<u32>>,
     pub title: Mutex<Option<String>>,
     /// Answer the app's terminal queries (cursor position, colors). Turn off while a real
     /// terminal downstream receives the same bytes, or the app gets two answers.
@@ -138,6 +140,7 @@ impl Pane {
             bell: AtomicBool::new(false),
             bells: AtomicU64::new(0),
             exited: AtomicBool::new(false),
+            exit_code: Mutex::new(None),
             title: Mutex::new(None),
             answer_queries: AtomicBool::new(answer_queries),
             transport: OnceLock::new(),
@@ -191,7 +194,8 @@ impl Pane {
         })?;
         let shared = pane.shared.clone();
         std::thread::Builder::new().name("pty-wait".into()).spawn(move || {
-            let _ = child.wait();
+            let code = child.wait().map_or(1, |s| s.exit_code());
+            *shared.exit_code.lock().unwrap() = Some(code);
             shared.exited.store(true, Ordering::Relaxed);
             shared.dirty.store(true, Ordering::Relaxed);
         })?;
@@ -203,6 +207,20 @@ impl Pane {
         let pane = Arc::new(Self::emulator(cols, rows, true));
         let _ = pane.shared.transport.set(transport);
         pane
+    }
+
+    /// A program that has already exited, its last screen restored from `replay` bytes (see
+    /// [`Pane::replay`]). Input goes nowhere.
+    pub fn ended(replay: &[u8], cols: u16, rows: u16, exit_code: Option<u32>) -> Arc<Self> {
+        let pane = Arc::new(Self::emulator(cols, rows, false));
+        pane.feed(replay);
+        *pane.shared.exit_code.lock().unwrap() = exit_code;
+        pane.mark_exited();
+        pane
+    }
+
+    pub fn exit_code(&self) -> Option<u32> {
+        *self.shared.exit_code.lock().unwrap()
     }
 
     /// Process program output.
