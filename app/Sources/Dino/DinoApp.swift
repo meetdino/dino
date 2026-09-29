@@ -30,6 +30,9 @@ struct DinoApp: App {
                     .disabled(quitChoice.isEmpty)
                     .help("Show the keep-running question again when you quit")
             }
+            // One window: ⌘N starts a session rather than opening a second window.
+            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .saveItem) { CloseCommand().environmentObject(model) }
             CommandMenu("Session") {
                 Menu("New Session") {
                     // dinod lists the default agent first: ⌘N starts it.
@@ -50,6 +53,8 @@ struct DinoApp: App {
                 .keyboardShortcut("k")
                 Button("Choose Folder…") { model.chooseFolder() }
                     .keyboardShortcut("o")
+                Divider()
+                SplitMenuItems().environmentObject(model)
                 Divider()
                 Button("Jump to Session Needing You") { model.jumpToAttention() }
                     .keyboardShortcut("j")
@@ -189,6 +194,7 @@ struct ContentView: View {
 
 struct Terminals: View {
     @EnvironmentObject var model: DinoModel
+    static let space = "terminals"
 
     var body: some View {
         ZStack {
@@ -196,15 +202,41 @@ struct Terminals: View {
             if model.sessions.isEmpty || model.daemonDown || model.selected?.hasPrefix("dir:") == true {
                 EmptyState()
             }
-            // Every session stays mounted; only the selected one draws.
-            ForEach(model.sessions) { s in
-                let visible = s.id == model.selected
-                let state = model.terminal(for: s.id)
-                TerminalPane(state: state, visible: visible)
-                    // A new state (after reconnecting) must mean a new surface.
-                    .id(ObjectIdentifier(state))
-                    .opacity(visible ? 1 : 0)
-                    .allowsHitTesting(visible)
+            GeometryReader { geo in
+                let split = model.shownSplit
+                let layout = PaneLayout(split: split, selected: model.selected, size: geo.size)
+                ZStack(alignment: .topLeading) {
+                    // Every session stays mounted; only the selected one (and its split partner) draws.
+                    ForEach(model.sessions) { s in
+                        let rect = layout.surface(s.id)
+                        let state = model.terminal(for: s.id)
+                        TerminalPane(state: state, id: s.id, visible: rect != nil, focused: s.id == model.selected)
+                            // A new state (after reconnecting) must mean a new surface.
+                            .id(ObjectIdentifier(state))
+                            .overlay {
+                                // The other half of a split sits back a little, like Ghostty's.
+                                if split != nil, s.id != model.selected {
+                                    Color.black.opacity(0.18).allowsHitTesting(false)
+                                }
+                            }
+                            // Last: an offset moves only the drawing, so anything added after it would sit unmoved.
+                            .placed(rect ?? CGRect(origin: .zero, size: geo.size))
+                            .opacity(rect != nil ? 1 : 0)
+                            .allowsHitTesting(rect != nil)
+                    }
+                    if let split {
+                        ForEach([split.first, split.second], id: \.self) { id in
+                            if let s = model.sessions.first(where: { $0.id == id }), let f = layout.frame(id) {
+                                PaneHeader(session: s, split: split, focused: id == model.selected)
+                                    .placed(CGRect(x: f.minX, y: f.minY, width: f.width, height: PaneLayout.header))
+                            }
+                        }
+                        if let d = layout.divider {
+                            SplitDivider(split: split, size: geo.size).placed(d)
+                        }
+                    }
+                }
+                .coordinateSpace(name: Self.space)
             }
             if let g = model.groups.first(where: { "group:\($0.id)" == model.selected }) {
                 CompareView(group: g)
@@ -234,21 +266,33 @@ struct Terminals: View {
                 }
                 .help("One prompt to several agents, each in its own worktree (⇧⌘N)")
             }
+            ToolbarItem(placement: .primaryAction) {
+                Menu { SplitMenuItems(shortcuts: false) } label: {
+                    Label("Split", systemImage: "rectangle.split.2x1")
+                }
+                .help("A shell or another session next to this one (⌘D)")
+                .disabled(model.selectedSession == nil)
+            }
             ToolbarItem(placement: .primaryAction) { NewSessionMenu() }
         }
     }
 }
 
 struct TerminalPane: View {
+    @EnvironmentObject var model: DinoModel
     @ObservedObject var state: TerminalViewState
+    let id: String
     let visible: Bool
+    let focused: Bool
 
     var body: some View {
         TerminalSurfaceView(context: state)
             .onAppear { state.isSurfaceVisible = visible }
-            .onChange(of: visible) { _, v in
-                state.isSurfaceVisible = v
-                if v { state.requestFocus() }
+            .onChange(of: visible) { _, v in state.isSurfaceVisible = v }
+            .onChange(of: focused) { _, f in if f { state.requestFocus() } }
+            // Clicking into the other half of a split selects that session.
+            .onChange(of: state.isFocused) { _, f in
+                if f, visible, !focused, model.shownSplit?.contains(id) == true { model.select(id) }
             }
     }
 }
@@ -338,6 +382,7 @@ struct Sidebar: View {
     @EnvironmentObject var model: DinoModel
     /// Tree nodes the user closed, newline-joined (SceneStorage can't hold a Set).
     @SceneStorage("sidebar.collapsed") private var collapsedIDs = ""
+    @AppStorage("sidebar.filter") private var filter = SessionFilter.all
 
     private var collapsed: Binding<Set<String>> {
         Binding(
@@ -358,20 +403,25 @@ struct Sidebar: View {
                     model.select(tag)
                 }
             })) {
-                let tree = SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
+                let tree = filter == .all
+                    ? SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
+                    : SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups) { filter.passes(model.status(of: $0)) }
                 Section("Workspaces") {
                     ForEach(tree.repos) { node in
-                        RepoRows(node: node, collapsed: collapsed).id(node.shape)
+                        RepoRows(node: node, filter: filter, collapsed: collapsed).id(node.shape)
                     }
                     ForEach(tree.unfiled) { s in
                         SessionRow(session: s, index: 0)
                             .tag(s.id)
-                            .contextMenu {
-                                Button("Kill Session", role: .destructive) { model.kill(s.id) }
-                            }
+                            .contextMenu { SessionMenu(session: s) }
+                    }
+                    if filter != .all, tree.repos.isEmpty, tree.unfiled.isEmpty {
+                        Text(filter == .needsYou ? "Nothing needs you" : "No \(filter.label.lowercased()) sessions")
+                            .font(.callout).foregroundStyle(.tertiary)
                     }
                 }
-                if !model.elsewhere.isEmpty {
+                // Other terminals' sessions aren't dino's to sort by status.
+                if !model.elsewhere.isEmpty, filter == .all {
                     Section("On this Mac") {
                         ForEach(model.elsewhere) { f in
                             ElsewhereRow(session: f).tag("move:\(f.id)")
@@ -383,11 +433,13 @@ struct Sidebar: View {
             UsagePanel()
         }
         .safeAreaInset(edge: .top) {
-            HStack {
+            VStack(alignment: .leading, spacing: 8) {
                 DinoMark(size: 15)
-                Spacer()
+                if !model.sessions.isEmpty || filter != .all {
+                    FilterBar(filter: $filter)
+                }
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 14)
             .padding(.top, 6)
         }
     }
@@ -405,6 +457,11 @@ struct SessionRow: View {
             HStack(spacing: 8) {
                 StatusDot(status: status)
                 Text(session.name).font(.system(.body, design: .monospaced).weight(.medium))
+                if let split = model.splits.first(where: { $0.contains(session.id) }) {
+                    Image(systemName: split.vertical ? "rectangle.split.1x2" : "rectangle.split.2x1")
+                        .font(.caption).foregroundStyle(.tertiary)
+                        .help("In a split with \(model.sessions.first { $0.id == split.other(session.id) }?.name ?? "another session")")
+                }
                 Spacer()
                 Text(status.label).font(.caption).foregroundStyle(status.color)
             }
