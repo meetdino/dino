@@ -22,6 +22,25 @@ pub struct PrInfo {
     pub checks: Checks,
     /// "approved", "changes_requested" or "review_required"; None when no review is asked for.
     pub review: Option<String>,
+    /// The head commit, so an automatic fix is asked for once per push.
+    #[serde(default)]
+    pub head: String,
+}
+
+impl PrInfo {
+    pub fn is_open(&self) -> bool {
+        self.state == "open"
+    }
+
+    /// Checks have finished, and some failed.
+    pub fn failing(&self) -> bool {
+        self.is_open() && self.checks.pending == 0 && self.checks.failed > 0
+    }
+
+    /// Ready to merge on its own: open, not a draft, every check passed (or none), no changes asked for.
+    pub fn mergeable(&self) -> bool {
+        self.is_open() && !self.draft && self.checks.pending == 0 && self.checks.failed == 0 && self.review.as_deref() != Some("changes_requested")
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
@@ -49,7 +68,7 @@ pub struct PrDraft {
     pub note: Option<String>,
 }
 
-const VIEW_FIELDS: &str = "number,url,title,state,isDraft,reviewDecision,statusCheckRollup";
+const VIEW_FIELDS: &str = "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,headRefOid";
 
 fn gh(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
     let out = Command::new("gh")
@@ -195,6 +214,14 @@ pub fn merge(dir: &Path, branch: &str) -> anyhow::Result<PrInfo> {
     view(dir, branch)
 }
 
+/// Nothing in `dir` that removing it would lose: no changes, and every commit pushed.
+pub fn nothing_to_lose(dir: &Path) -> bool {
+    let clean = git(dir, &["status", "--porcelain", "--untracked-files=all"]).is_ok_and(|s| s.trim().is_empty());
+    // Without an upstream there's no telling what's pushed.
+    let pushed = git(dir, &["rev-list", "--count", "@{upstream}..HEAD"]).is_ok_and(|n| n.trim() == "0");
+    clean && pushed
+}
+
 /// What to tell an agent whose PR's checks failed: which ones, with the end of each failed
 /// GitHub Actions log.
 pub fn fix_message(dir: &Path, branch: &str) -> anyhow::Result<String> {
@@ -228,6 +255,8 @@ struct View {
     review_decision: Option<String>,
     #[serde(default)]
     status_check_rollup: Vec<Check>,
+    #[serde(default)]
+    head_ref_oid: String,
 }
 
 /// A GitHub Actions run (`CheckRun`: status, conclusion) or a commit status (`StatusContext`: state).
@@ -294,7 +323,7 @@ fn parse_view(json: &str) -> anyhow::Result<(PrInfo, Vec<(String, Option<String>
         }
     }
     let review = v.review_decision.map(|r| r.to_ascii_lowercase()).filter(|r| !r.is_empty());
-    let pr = PrInfo { number: v.number, url: v.url, title: v.title, state: v.state.to_ascii_lowercase(), draft: v.is_draft, checks, review };
+    let pr = PrInfo { number: v.number, url: v.url, title: v.title, state: v.state.to_ascii_lowercase(), draft: v.is_draft, checks, review, head: v.head_ref_oid };
     Ok((pr, failed))
 }
 
@@ -364,6 +393,26 @@ mod tests {
     }
 
     #[test]
+    fn ready_to_merge_or_fix() {
+        let pr = |state: &str, draft, passed, failed, pending, review: Option<&str>| PrInfo {
+            state: state.into(),
+            draft,
+            checks: Checks { passed, failed, pending, failing: vec![] },
+            review: review.map(String::from),
+            ..PrInfo::default()
+        };
+        assert!(pr("open", false, 2, 0, 0, None).mergeable());
+        assert!(pr("open", false, 0, 0, 0, Some("approved")).mergeable(), "no CI");
+        assert!(!pr("open", false, 2, 0, 1, None).mergeable(), "still running");
+        assert!(!pr("open", true, 2, 0, 0, None).mergeable(), "draft");
+        assert!(!pr("open", false, 2, 0, 0, Some("changes_requested")).mergeable());
+        assert!(!pr("merged", false, 2, 0, 0, None).mergeable());
+        assert!(pr("open", false, 1, 1, 0, None).failing());
+        assert!(!pr("open", false, 1, 1, 1, None).failing(), "not settled yet");
+        assert!(!pr("closed", false, 1, 1, 0, None).failing());
+    }
+
+    #[test]
     fn prefills() {
         let one = vec!["Fix the parser".to_string()];
         let two = vec!["Add tests".to_string(), "Fix the parser".to_string()];
@@ -405,6 +454,12 @@ mod tests {
         commit("Teach the parser commas");
         std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
         assert_eq!(subjects(&repo, "trunk"), vec!["Teach the parser commas".to_string()]);
+        assert!(!nothing_to_lose(&repo), "an untracked file, and no upstream");
+        std::fs::remove_file(repo.join("new.txt")).unwrap();
+        assert!(!nothing_to_lose(&repo), "a commit that isn't pushed");
+        git(&repo, &["push", "-q", "-u", "origin", "HEAD"]).unwrap();
+        assert!(nothing_to_lose(&repo));
+        std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
         // The branch notes come before any gh call, so these never reach GitHub.
         git(&repo, &["checkout", "-q", "trunk"]).unwrap();
         assert_eq!(draft(&repo, None, None).note.as_deref(), Some("On trunk: PRs need a branch — start the session in a worktree"));

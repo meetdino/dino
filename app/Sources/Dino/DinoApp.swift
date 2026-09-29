@@ -518,7 +518,7 @@ struct SessionRow: View {
             HStack(spacing: 8) {
                 StatusDot(status: status)
                 Text(session.name).font(.system(.body, design: .monospaced).weight(.medium))
-                if let pr = model.pr(of: session) { PRChip(pr: pr) }
+                if let pr = model.pr(of: session) { PRChip(pr: pr, auto: session.auto) }
                 if let split = model.splits.first(where: { $0.contains(session.id) }) {
                     Image(systemName: split.vertical ? "rectangle.split.1x2" : "rectangle.split.2x1")
                         .font(.caption).foregroundStyle(.tertiary)

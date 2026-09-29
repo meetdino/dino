@@ -10,6 +10,8 @@ struct DinoSettings: Codable, Equatable {
         var worktree_trust: Bool
         /// 0 means no limit.
         var session_token_budget: UInt64
+        /// Close a session and its worktree after its PR merges; nil from an older dinod.
+        var close_merged: Bool?
 
         func allows(_ short: String) -> Bool {
             short == "shell" || allowed_agents.isEmpty || allowed_agents.contains(short)
@@ -366,6 +368,16 @@ private struct PoliciesPane: View {
                 Text("Fan-out")
             } footer: {
                 Footnote("Claude asks whether to trust each new folder, and every fan-out worktree is one. When you've trusted the repo, dino tells Claude its worktrees are trusted too, and forgets them when the fan-out closes. Codex does this on its own.")
+            }
+            Section {
+                Toggle("Close sessions after their PR merges", isOn: Binding(
+                    get: { policies?.close_merged ?? false },
+                    set: { on in store.update { $0.policies.close_merged = on } }
+                ))
+            } header: {
+                Text("Pull requests")
+            } footer: {
+                Footnote("When a session's PR merges, dino stops the session once its agent is idle and removes the worktree dino made for it, with its branch. A worktree with changes or commits that aren't pushed is kept. Sessions outside a dino worktree stay open.")
             }
             Section {
                 Picker("Tokens per session", selection: Binding(
