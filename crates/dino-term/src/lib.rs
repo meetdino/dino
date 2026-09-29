@@ -7,9 +7,10 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::{Dimensions, Row, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::{Cell, Flags};
@@ -28,6 +29,13 @@ const DEFAULT_BG: Rgb = Rgb { r: 0x16, g: 0x16, b: 0x1a };
 
 /// Env markers from a parent agent session that would confuse a child agent.
 const STRIP_ENV: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT"];
+
+/// The ways a program switches back from the alternate screen (DECRST 1049, 1047, 47).
+const ALT_OFF: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"];
+
+/// A program that exits this soon after leaving the alternate screen (a fullscreen agent) ends on
+/// what it showed there, not on the main screen it switched back to on the way out.
+const KEEP_ALT_WITHIN: Duration = Duration::from_secs(10);
 
 pub struct SpawnSpec {
     pub program: String,
@@ -61,6 +69,11 @@ pub struct Shared {
     pub answer_queries: AtomicBool,
     transport: OnceLock<Arc<dyn Transport>>,
     size: Mutex<(u16, u16)>,
+    /// All output up to EOF has been processed.
+    drained: AtomicBool,
+    /// At exit the screen became the alternate screen as last seen (see [`KEEP_ALT_WITHIN`]),
+    /// so what clients streamed no longer matches it.
+    pub kept_alt: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -133,9 +146,28 @@ impl Transport for PtyTransport {
     }
 }
 
+/// The parser, and what it needs to notice the program leaving the alternate screen.
+struct Feed {
+    processor: Processor,
+    /// The end of the last chunk, for a switch back split across two.
+    carry: Vec<u8>,
+    left_alt: Option<LeftAlt>,
+}
+
+/// The alternate screen as it was when the program last left it.
+struct LeftAlt {
+    at: Instant,
+    /// Its rows, styled, without the blank ones at the bottom.
+    rows: Vec<String>,
+    /// The main screen's scrollback size and cursor line right after switching back: what the
+    /// program printed from there on came after the alternate screen.
+    history: usize,
+    line: i32,
+}
+
 pub struct Pane {
     term: Arc<FairMutex<Term<Listener>>>,
-    processor: Mutex<Processor>,
+    feed: Mutex<Feed>,
     pub shared: Arc<Shared>,
     killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
     /// The program's process, when it runs on a local PTY.
@@ -154,10 +186,12 @@ impl Pane {
             answer_queries: AtomicBool::new(answer_queries),
             transport: OnceLock::new(),
             size: Mutex::new((cols, rows)),
+            drained: AtomicBool::new(false),
+            kept_alt: AtomicBool::new(false),
         });
-        let config = Config { kitty_keyboard: true, ..Config::default() };
-        let term = Term::new(config, &TermSize { cols: cols as usize, rows: rows as usize }, Listener(shared.clone()));
-        Self { term: Arc::new(FairMutex::new(term)), processor: Mutex::new(Processor::new()), shared, killer: Mutex::new(None), pid: OnceLock::new() }
+        let term = new_term(&shared, cols, rows);
+        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None };
+        Self { term: Arc::new(FairMutex::new(term)), feed: Mutex::new(feed), shared, killer: Mutex::new(None), pid: OnceLock::new() }
     }
 
     /// Run a program on a local PTY. `tap` sees every chunk of raw output (dinod forwards it to
@@ -198,15 +232,26 @@ impl Pane {
                 }
                 let Some(pane) = weak.upgrade() else { break };
                 let mut term = pane.term.lock();
-                pane.processor.lock().unwrap().advance(&mut *term, &buf[..n]);
+                pane.advance(&mut term, &buf[..n]);
                 pane.shared.dirty.store(true, Ordering::Relaxed);
                 tap(&buf[..n]);
+            }
+            if let Some(pane) = weak.upgrade() {
+                let mut term = pane.term.lock();
+                pane.keep_alt(&mut term);
+                pane.shared.drained.store(true, Ordering::Relaxed);
             }
             tap(&[]);
         })?;
         let shared = pane.shared.clone();
         std::thread::Builder::new().name("pty-wait".into()).spawn(move || {
             let code = child.wait().map_or(1, |s| s.exit_code());
+            // The last screen is final once the output is read, unless something the program left
+            // behind keeps the terminal open.
+            let since = Instant::now();
+            while !shared.drained.load(Ordering::Relaxed) && since.elapsed() < Duration::from_secs(1) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             *shared.exit_code.lock().unwrap() = Some(code);
             shared.exited.store(true, Ordering::Relaxed);
             shared.dirty.store(true, Ordering::Relaxed);
@@ -238,8 +283,55 @@ impl Pane {
     /// Process program output.
     pub fn feed(&self, bytes: &[u8]) {
         let mut term = self.term.lock();
-        self.processor.lock().unwrap().advance(&mut *term, bytes);
+        self.advance(&mut term, bytes);
         self.shared.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Parse output, noting what the alternate screen showed each time the program leaves it.
+    fn advance(&self, term: &mut Term<Listener>, bytes: &[u8]) {
+        let mut guard = self.feed.lock().unwrap();
+        let feed = &mut *guard;
+        let mut rest = bytes;
+        while let Some((cut, end)) = alt_off(&feed.carry, rest) {
+            feed.processor.advance(term, &rest[..cut]);
+            let rows = term.mode().contains(TermMode::ALT_SCREEN).then(|| screen_rows(term));
+            feed.processor.advance(term, &rest[cut..end]);
+            if let Some(rows) = rows.filter(|_| !term.mode().contains(TermMode::ALT_SCREEN)) {
+                let grid = term.grid();
+                feed.left_alt = Some(LeftAlt { at: Instant::now(), rows, history: grid.history_size(), line: grid.cursor.point.line.0 });
+            }
+            feed.carry.clear();
+            rest = &rest[end..];
+        }
+        feed.processor.advance(term, rest);
+        let keep = ALT_OFF.iter().map(|p| p.len()).max().unwrap_or(1) - 1;
+        feed.carry.extend_from_slice(&rest[rest.len().saturating_sub(keep)..]);
+        let drop = feed.carry.len().saturating_sub(keep);
+        feed.carry.drain(..drop);
+    }
+
+    /// At exit: a program that left the alternate screen just before (a fullscreen agent quitting)
+    /// ends on that screen, followed by what it printed on the way out, instead of on the main
+    /// screen alone.
+    fn keep_alt(&self, term: &mut Term<Listener>) {
+        let Some(left) = self.feed.lock().unwrap().left_alt.take() else { return };
+        if left.at.elapsed() > KEEP_ALT_WITHIN || term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let grid = term.grid();
+        let history = grid.history_size() as i32;
+        let from = (left.line - (history - left.history as i32)).max(-history);
+        let mut after: Vec<String> = (from..grid.screen_lines() as i32).map(|line| styled_row(&grid[Line(line)], grid.columns())).collect();
+        while after.last().is_some_and(|r| r.is_empty()) {
+            after.pop();
+        }
+        let screen: Vec<String> = left.rows.into_iter().chain(after).map(|r| r + "\x1b[0m").collect();
+        let (cols, rows) = self.size();
+        *term = new_term(&self.shared, cols, rows);
+        let mut feed = self.feed.lock().unwrap();
+        feed.processor = Processor::new();
+        feed.processor.advance(term, screen.join("\r\n").as_bytes());
+        self.shared.kept_alt.store(true, Ordering::Relaxed);
     }
 
     pub fn mark_exited(&self) {
@@ -351,25 +443,7 @@ impl Pane {
             if n > 0 {
                 out.push_str("\r\n");
             }
-            let row = &grid[Line(line)];
-            // Skip trailing default blanks; a fresh terminal is already blank there.
-            let end = (0..cols).rev().find(|&c| !is_blank(&row[Column(c)])).map_or(0, |c| c + 1);
-            let mut last = String::new();
-            for c in 0..end {
-                let cell = &row[Column(c)];
-                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    continue;
-                }
-                let sgr = sgr(cell);
-                if sgr != last {
-                    out.push_str(&sgr);
-                    last = sgr;
-                }
-                out.push(cell.c);
-                if let Some(extra) = cell.zerowidth() {
-                    out.extend(extra);
-                }
-            }
+            out.push_str(&styled_row(&grid[Line(line)], cols));
             out.push_str("\x1b[0m");
         }
         let cursor = term.grid().cursor.point;
@@ -556,6 +630,52 @@ impl Drop for Pane {
     }
 }
 
+fn new_term(shared: &Arc<Shared>, cols: u16, rows: u16) -> Term<Listener> {
+    let config = Config { kitty_keyboard: true, ..Config::default() };
+    Term::new(config, &TermSize { cols: cols as usize, rows: rows as usize }, Listener(shared.clone()))
+}
+
+/// Where `bytes` switch back from the alternate screen, as the range to cut out; it starts at 0
+/// when the switch began at the end of the last chunk (`carry`).
+fn alt_off(carry: &[u8], bytes: &[u8]) -> Option<(usize, usize)> {
+    let split = ALT_OFF.iter().find_map(|p| (1..p.len()).find(|&k| carry.ends_with(&p[..k]) && bytes.starts_with(&p[k..])).map(|k| (0, p.len() - k)));
+    split.or_else(|| ALT_OFF.iter().filter_map(|p| bytes.windows(p.len()).position(|w| w == *p).map(|i| (i, i + p.len()))).min())
+}
+
+/// The screen's rows, styled, without the blank ones at the bottom.
+fn screen_rows(term: &Term<Listener>) -> Vec<String> {
+    let grid = term.grid();
+    let mut rows: Vec<String> = (0..grid.screen_lines() as i32).map(|line| styled_row(&grid[Line(line)], grid.columns())).collect();
+    while rows.last().is_some_and(|r| r.is_empty()) {
+        rows.pop();
+    }
+    rows
+}
+
+/// A row as text with its colors and attributes, without trailing default blanks (a fresh
+/// terminal is already blank there); empty when the row is blank.
+fn styled_row(row: &Row<Cell>, cols: usize) -> String {
+    let end = (0..cols).rev().find(|&c| !is_blank(&row[Column(c)])).map_or(0, |c| c + 1);
+    let mut out = String::new();
+    let mut last = String::new();
+    for c in 0..end {
+        let cell = &row[Column(c)];
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let sgr = sgr(cell);
+        if sgr != last {
+            out.push_str(&sgr);
+            last = sgr;
+        }
+        out.push(cell.c);
+        if let Some(extra) = cell.zerowidth() {
+            out.extend(extra);
+        }
+    }
+    out
+}
+
 fn window_size(cols: u16, rows: u16) -> WindowSize {
     WindowSize { num_cols: cols, num_lines: rows, cell_width: 8, cell_height: 16 }
 }
@@ -655,5 +775,86 @@ fn color(c: AColor) -> Color {
             NamedColor::BrightWhite => Color::White,
             _ => Color::Reset,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane() -> Pane {
+        Pane::emulator(40, 6, false)
+    }
+
+    fn exit(p: &Pane) {
+        let mut term = p.term.lock();
+        p.keep_alt(&mut term);
+    }
+
+    const FULLSCREEN: &[&[u8]] = &[b"before\r\n", b"\x1b[?1049h\x1b[Hconversation\r\nPELICAN", b"\x1b[?1049l", b"\r\nResume this session with:\r\n"];
+
+    #[test]
+    fn a_fullscreen_program_ends_on_its_last_screen() {
+        let p = pane();
+        for chunk in FULLSCREEN {
+            p.feed(chunk);
+        }
+        assert_eq!(p.text(100), "before\n\nResume this session with:");
+        exit(&p);
+        assert_eq!(p.text(100), "conversation\nPELICAN\n\nResume this session with:");
+        assert!(p.shared.kept_alt.load(Ordering::Relaxed));
+        // What a fresh attach, or a saved screen, brings back.
+        let again = Pane::ended(&p.replay(100), 40, 6, Some(0));
+        assert_eq!(again.text(100), "conversation\nPELICAN\n\nResume this session with:");
+    }
+
+    #[test]
+    fn the_switch_back_is_found_across_chunks() {
+        assert_eq!(alt_off(b"", b"ab\x1b[?1049lcd"), Some((2, 10)));
+        assert_eq!(alt_off(b"xx\x1b[?10", b"49lcd"), Some((0, 3)));
+        assert_eq!(alt_off(b"", b"\x1b[?47l"), Some((0, 6)));
+        assert_eq!(alt_off(b"", b"\x1b[?1049h"), None);
+        let p = pane();
+        p.feed(b"\x1b[?1049hPELICAN\x1b[?1");
+        p.feed(b"049l\r\nbye\r\n");
+        exit(&p);
+        assert_eq!(p.text(100), "PELICAN\n\nbye");
+    }
+
+    #[test]
+    fn a_long_exit_message_follows_the_screen() {
+        let p = pane();
+        p.feed(b"\x1b[?1049hPELICAN\x1b[?1049l");
+        for n in 0..10 {
+            p.feed(format!("line {n}\r\n").as_bytes());
+        }
+        exit(&p);
+        let text = p.text(100);
+        assert!(text.starts_with("PELICAN\nline 0\nline 1"), "{text}");
+        assert!(text.ends_with("line 9"), "{text}");
+    }
+
+    #[test]
+    fn otherwise_the_screen_is_left_alone() {
+        // Never on the alternate screen.
+        let p = pane();
+        p.feed(b"plain output\r\n");
+        exit(&p);
+        assert_eq!(p.text(100), "plain output");
+        assert!(!p.shared.kept_alt.load(Ordering::Relaxed));
+        // Still on it at exit: the replay puts the alternate screen back as it is.
+        let p = pane();
+        p.feed(b"\x1b[?1049hfullscreen");
+        exit(&p);
+        assert!(!p.shared.kept_alt.load(Ordering::Relaxed));
+        assert!(p.replay(100).starts_with(b"\x1b[?1049h"));
+        assert_eq!(p.text(100), "fullscreen");
+        // Left it long before exiting, like vim in a shell: the shell's screen stays.
+        let p = pane();
+        p.feed(b"$ vim\r\n\x1b[?1049hfile\x1b[?1049l$ exit\r\n");
+        p.feed.lock().unwrap().left_alt.as_mut().unwrap().at = Instant::now() - KEEP_ALT_WITHIN - Duration::from_secs(1);
+        exit(&p);
+        assert_eq!(p.text(100), "$ vim\n$ exit");
+        assert!(!p.shared.kept_alt.load(Ordering::Relaxed));
     }
 }
