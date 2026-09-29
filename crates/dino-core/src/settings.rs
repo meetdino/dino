@@ -99,7 +99,8 @@ pub struct Worktrees {
     pub branch_prefix: String,
 }
 
-pub const DEFAULT_WORKTREE_LOCATION: &str = ".dino/worktrees";
+/// Outside the repo, so its worktrees don't nest copies of it in its own file tree.
+pub const DEFAULT_WORKTREE_LOCATION: &str = "~/.dino/worktrees";
 pub const DEFAULT_BRANCH_PREFIX: &str = "dino/";
 
 impl Default for Worktrees {

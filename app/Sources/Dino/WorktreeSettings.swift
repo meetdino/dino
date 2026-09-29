@@ -8,7 +8,7 @@ extension DinoSettings {
         var location: String
         var branch_prefix: String
 
-        static let defaultLocation = ".dino/worktrees"
+        static let defaultLocation = "~/.dino/worktrees"
         static let defaultPrefix = "dino/"
     }
 }
