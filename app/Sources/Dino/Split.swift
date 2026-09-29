@@ -253,8 +253,10 @@ struct CloseCommand: View {
     @EnvironmentObject var model: DinoModel
 
     var body: some View {
-        Button(model.shownSplit == nil ? "Close Window" : "Close Pane") {
-            if model.shownSplit != nil, let id = model.selected {
+        Button(model.sidePane.map { $0 == .preview ? "Close Preview" : "Close File" } ?? (model.shownSplit == nil ? "Close Window" : "Close Pane")) {
+            if model.sidePane != nil {
+                model.closeSidePane()
+            } else if model.shownSplit != nil, let id = model.selected {
                 model.closePane(id)
             } else {
                 NSApp.keyWindow?.performClose(nil)
