@@ -45,6 +45,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     /// The session whose agent started it, and the one that last messaged it (through `dino mcp`).
     var started_by: String?
     var messaged_by: String?
+    /// The SSH host it runs on (`cwd` is then a path there); nil for this Mac.
+    var host: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }

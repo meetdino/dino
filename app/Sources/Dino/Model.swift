@@ -337,22 +337,40 @@ final class DinoModel: ObservableObject {
 
     /// `worktree`: in a new worktree and branch of the repo, so its edits stay off your checkout.
     /// `controls`: mode, model and effort; what's left open comes from Settings → Agents.
-    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls()) {
+    /// `host`: over SSH on that host, in `remoteFolder` there (empty: the host's default folder).
+    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "") {
         guard let conn = connection else { return }
-        let cwd = folder.path
+        var body: [String: Any] = [
+            "type": "new", "launcher": launcher.short, "args": [], "cwd": folder.path, "cols": 120, "rows": 40,
+            "worktree": worktree, "controls": controls.json,
+        ]
+        if let host {
+            body["host"] = host
+            body["cwd"] = remoteFolder.isEmpty ? nil : remoteFolder
+        }
+        let request = body
         Task.detached {
             do {
-                let resp = try conn.request([
-                    "type": "new", "launcher": launcher.short, "args": [], "cwd": cwd, "cols": 120, "rows": 40,
-                    "worktree": worktree, "controls": controls.json,
-                ])
+                let resp = try conn.request(request)
                 await MainActor.run {
+                    if let host, !remoteFolder.isEmpty { self.rememberFolder(remoteFolder, on: host) }
                     if let id = resp.id { self.select(id) }
                 }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
             }
         }
+    }
+
+    /// Folders sessions recently started in on `host`, newest first. Kept by the app, not in
+    /// settings.toml: they're history, not configuration.
+    func recentFolders(on host: String) -> [String] {
+        UserDefaults.standard.stringArray(forKey: "recentFolders.\(host)") ?? []
+    }
+
+    private func rememberFolder(_ folder: String, on host: String) {
+        let list = [folder] + recentFolders(on: host).filter { $0 != folder }
+        UserDefaults.standard.set(Array(list.prefix(8)), forKey: "recentFolders.\(host)")
     }
 
     /// Keep "On this Mac" fresh: sessions running in other terminals come and go.

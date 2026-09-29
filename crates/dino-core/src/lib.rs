@@ -13,6 +13,7 @@ pub mod preview;
 pub mod review;
 pub mod schedule;
 pub mod settings;
+pub mod ssh;
 pub mod transcript;
 pub mod trust;
 pub mod worktree;
@@ -130,7 +131,7 @@ fn codex_auth_mode() -> Option<String> {
 
 /// Per-session settings layered on top of the user's own: HTTP hooks that report lifecycle events
 /// to dino. Hook entries merge with existing ones, and an unreachable URL never blocks Claude.
-fn claude_hook_settings(url: &str) -> String {
+pub fn claude_hook_settings(url: &str) -> String {
     const EVENTS: &[&str] = &[
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
         "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop",

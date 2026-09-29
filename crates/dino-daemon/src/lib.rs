@@ -17,7 +17,7 @@ use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
 use dino_core::controls::{self, Controls};
 use dino_core::settings::{self, Settings};
-use dino_core::{detect_agents, load_keys, pr, proxy_wiring, trust, user_shell, worktree};
+use dino_core::{detect_agents, load_keys, pr, proxy_wiring, ssh, trust, user_shell, worktree};
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
@@ -64,6 +64,8 @@ struct Session {
     messaged_by: Mutex<Option<String>>,
     /// The name the user gave it, shown over the agent's title.
     label: Mutex<Option<String>>,
+    /// The SSH host it runs on; `cwd` is then a path there, and nothing local applies to it.
+    host: Option<String>,
 }
 
 impl Daemon {
@@ -244,7 +246,11 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::Launchers => Response::Launchers { launchers: d.offered() },
             Request::AllLaunchers => Response::Launchers { launchers: d.all_launchers() },
             Request::Settings => {
-                Response::Settings { settings: Settings::load(), locked: dino_core::settings::Managed::load().locked_paths() }
+                Response::Settings {
+                    settings: Settings::load(),
+                    locked: dino_core::settings::Managed::load().locked_paths(),
+                    ssh_config_hosts: ssh::config_hosts(),
+                }
             }
             Request::SetSettings { settings } => match settings.save() {
                 Ok(()) => {
@@ -281,8 +287,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::New { launcher, args, cwd, cols, rows, worktree, controls } => {
-                let launch = Launch { cols, rows, controls, ..Launch::new(&launcher, args, cwd) };
+            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host } => {
+                let launch = Launch { cols, rows, controls, host, ..Launch::new(&launcher, args, cwd) };
                 match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {
                     Ok(id) => {
                         save(d);
@@ -515,6 +521,8 @@ struct Launch {
     scheduled: Option<String>,
     /// The session whose agent is starting it, by id.
     started_by: Option<String>,
+    /// Over SSH, on this host; a restored session keeps its own.
+    host: Option<String>,
 }
 
 impl Launch {
@@ -524,7 +532,8 @@ impl Launch {
 }
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls, scheduled, started_by } = launch;
+    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls, scheduled, started_by, host } = launch;
+    let host = restore.as_ref().map_or(host, |r| r.host.clone());
     let launcher = launcher.as_str();
     // Sessions already running come back even if the policies changed since; new ones must be allowed.
     let l = match restore {
@@ -548,42 +557,16 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         Some(r) => r.id.clone(),
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
     };
-    let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-    let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy, &|provider| d.proxy.base_url(&id, provider));
-    // The repo's environment first: dino's own wiring must win, or metering and hooks break.
-    let mut env: HashMap<String, String> = repo_env(&settings, &cwd).into_iter().collect();
-    env.extend(wiring_env);
-    // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
-    env.insert("DINO_SESSION".into(), id.clone());
-    if l.agent_id.starts_with("claude") && settings.policies.session_tools {
-        peers::wire_claude(&id, &mut wired_args);
-    }
-
-    // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
     let mut agent_session = restore.as_ref().and_then(|r| r.agent_session.clone());
-    match l.agent_id.as_str() {
-        "claude" | "claude-free" => {
-            let uuid = agent_session.get_or_insert_with(new_uuid).clone();
-            // Claude only saves a transcript after the first prompt; resuming an unused id fails.
-            if restore.is_some() && claude_transcript_exists(&uuid) {
-                wired_args.extend(["--resume".into(), uuid]);
-            } else {
-                wired_args.extend(["--session-id".into(), uuid]);
-            }
+    let (spec, cwd) = match &host {
+        Some(host) => {
+            let folder = cwd.filter(|c| !c.is_empty()).or_else(|| settings.ssh.get(host).map(|h| h.folder.clone())).filter(|f| !f.is_empty());
+            let folder = folder.unwrap_or_else(|| "~".into());
+            let restoring = restore.is_some();
+            (remote_spec(d, &settings, &l, host, &folder, &id, &mut agent_session, restoring, &controls, &args, prompt)?, PathBuf::from(folder))
         }
-        "codex" => {
-            if let Some(sid) = &agent_session {
-                wired_args.insert(0, "resume".into());
-                wired_args.push(sid.clone());
-            }
-        }
-        _ => {}
-    }
-    wired_args.extend(controls::args(&l.agent_id, &controls));
-    wired_args.extend(args.iter().cloned());
-    // Claude and Codex both take an opening prompt as their last argument.
-    wired_args.extend(prompt);
-    let spec = SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env };
+        None => local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.is_some(), &controls, &args, prompt),
+    };
 
     let subscribers: Arc<Mutex<Vec<(u64, Sender<Vec<u8>>)>>> = Arc::default();
     let last_output: Arc<Mutex<Option<Instant>>> = Arc::default();
@@ -648,8 +631,104 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         started_by: restore.as_ref().map_or(started_by, |r| r.started_by.clone()),
         messaged_by: Mutex::new(restore.as_ref().and_then(|r| r.messaged_by.clone())),
         label: Mutex::new(restore.as_ref().and_then(|r| r.label.clone())),
+        host,
     }));
     Ok(id)
+}
+
+/// Session `id` on this Mac: the agent itself, wired to dino's proxy and hooks, in `cwd`.
+#[allow(clippy::too_many_arguments)]
+fn local_spec(
+    d: &Daemon,
+    settings: &Settings,
+    l: &LauncherInfo,
+    cwd: Option<String>,
+    id: &str,
+    agent_session: &mut Option<String>,
+    restoring: bool,
+    controls: &Controls,
+    args: &[String],
+    prompt: Option<String>,
+) -> (SpawnSpec, PathBuf) {
+    let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy, &|provider| d.proxy.base_url(id, provider));
+    // The repo's environment first: dino's own wiring must win, or metering and hooks break.
+    let mut env: HashMap<String, String> = repo_env(settings, &cwd).into_iter().collect();
+    env.extend(wiring_env);
+    // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
+    env.insert("DINO_SESSION".into(), id.to_string());
+    if l.agent_id.starts_with("claude") && settings.policies.session_tools {
+        peers::wire_claude(id, &mut wired_args);
+    }
+
+    // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
+    match l.agent_id.as_str() {
+        "claude" | "claude-free" => {
+            let uuid = agent_session.get_or_insert_with(new_uuid).clone();
+            // Claude only saves a transcript after the first prompt; resuming an unused id fails.
+            if restoring && claude_transcript_exists(&uuid) {
+                wired_args.extend(["--resume".into(), uuid]);
+            } else {
+                wired_args.extend(["--session-id".into(), uuid]);
+            }
+        }
+        "codex" => {
+            if let Some(sid) = agent_session {
+                wired_args.insert(0, "resume".into());
+                wired_args.push(sid.clone());
+            }
+        }
+        _ => {}
+    }
+    wired_args.extend(controls::args(&l.agent_id, controls));
+    wired_args.extend(args.iter().cloned());
+    // Claude and Codex both take an opening prompt as their last argument.
+    wired_args.extend(prompt);
+    (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd)
+}
+
+/// Session `id` on `host`: `ssh` in the terminal, the agent in `folder` there. Only Claude's
+/// status hooks come back, through a tunnel to a hooks-only port (see `dino_core::ssh`); API
+/// traffic goes direct from the host, since routing it here would put dino's proxy, and the keys
+/// behind it, within reach of everyone on that machine.
+#[allow(clippy::too_many_arguments)]
+fn remote_spec(
+    d: &Daemon,
+    settings: &Settings,
+    l: &LauncherInfo,
+    host: &str,
+    folder: &str,
+    id: &str,
+    agent_session: &mut Option<String>,
+    restoring: bool,
+    controls: &Controls,
+    args: &[String],
+    prompt: Option<String>,
+) -> anyhow::Result<SpawnSpec> {
+    anyhow::ensure!(settings.ssh.contains_key(host), "{host} isn't one of your environments (Settings → Environments)");
+    let mut wired: Vec<String> = vec![];
+    let mut tunnel = None;
+    let bin = Path::new(&l.program).file_name().map_or_else(|| l.program.clone(), |n| n.to_string_lossy().into_owned());
+    let program = match l.agent_id.as_str() {
+        "claude" => {
+            let port = ssh::pick_port();
+            tunnel = Some((port, d.proxy.remote_port));
+            wired.extend(["--settings".into(), dino_core::claude_hook_settings(&d.proxy.remote_hook_url(id, &new_uuid(), port))]);
+            ssh::Program::Claude { session: agent_session.get_or_insert_with(new_uuid), resume: restoring }
+        }
+        "claude-free" => anyhow::bail!("{} runs through dino on this Mac; start it here instead", l.label),
+        "shell" => ssh::Program::Shell,
+        _ => ssh::Program::Agent { bin: &bin, name: &l.label },
+    };
+    wired.extend(controls::args(&l.agent_id, controls));
+    wired.extend(args.iter().cloned());
+    wired.extend(prompt);
+    let command = ssh::remote_command(host, folder, &program, &wired);
+    let dir = ssh::control_dir();
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    let env = HashMap::from([("DINO_SESSION".to_string(), id.to_string())]);
+    Ok(SpawnSpec { program: "ssh".into(), args: ssh::ssh_args(host, tunnel, &command), cwd: Some(home()), env })
 }
 
 /// The mode that never asks is refused unless the policies allow it.
@@ -821,7 +900,8 @@ fn state(d: &Daemon) -> Response {
                 }),
                 group: group_of(&s.id),
                 error: st.last_error,
-                cwd: real(&s.cwd),
+                cwd: if s.host.is_some() { s.cwd.display().to_string() } else { real(&s.cwd) },
+                host: s.host.clone(),
                 pr: prs.get(&s.id).cloned(),
                 auto: s.auto.lock().unwrap().pr.clone(),
                 previews: previews.iter().filter(|p| p.session == s.id).map(|p| p.info()).collect(),
@@ -872,6 +952,8 @@ struct SavedSession {
     #[serde(default)]
     messaged_by: Option<String>,
     label: Option<String>,
+    #[serde(default)]
+    host: Option<String>,
 }
 
 fn saved_path() -> PathBuf {
@@ -898,7 +980,7 @@ fn save(d: &Daemon) {
 /// What it takes to bring `s` back. `claimed`: Codex conversations other sessions already own.
 fn snapshot(s: &Session, claimed: &[String]) -> SavedSession {
     let mut agent_session = s.agent_session.lock().unwrap();
-    if agent_session.is_none() && s.agent_id == "codex" {
+    if agent_session.is_none() && s.agent_id == "codex" && s.host.is_none() {
         *agent_session = find_codex_session(&s.cwd, s.started_at, claimed);
     }
     SavedSession {
@@ -915,6 +997,7 @@ fn snapshot(s: &Session, claimed: &[String]) -> SavedSession {
         started_by: s.started_by.clone(),
         messaged_by: s.messaged_by.lock().unwrap().clone(),
         label: s.label.lock().unwrap().clone(),
+        host: s.host.clone(),
     }
 }
 
@@ -1103,6 +1186,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         started_by: None,
         messaged_by: None,
         label: None,
+        host: None,
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {
@@ -1175,6 +1259,7 @@ fn session_name(title: &str) -> String {
 }
 
 fn kill(d: &Daemon, id: &str) -> bool {
+    d.proxy.forget_remote(id);
     let mut sessions = d.sessions.lock().unwrap();
     match sessions.iter().position(|s| s.id == id) {
         Some(i) => {
@@ -1192,7 +1277,17 @@ fn kill(d: &Daemon, id: &str) -> bool {
 }
 
 fn session_cwd(d: &Daemon, id: &str) -> anyhow::Result<PathBuf> {
-    d.sessions.lock().unwrap().iter().find(|s| s.id == id).map(|s| s.cwd.clone()).ok_or_else(|| anyhow::anyhow!("no session {id}"))
+    Ok(local_session(d, id)?.cwd.clone())
+}
+
+/// Session `id`, if it runs on this Mac: what needs its checkout (changes, PRs, previews) doesn't
+/// work over SSH.
+fn local_session(d: &Daemon, id: &str) -> anyhow::Result<Arc<Session>> {
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    if let Some(host) = &s.host {
+        anyhow::bail!("Not available for sessions on {host}");
+    }
+    Ok(s)
 }
 
 /// Start (or restart) one of the session's dev servers. One run of each name per session.
@@ -1293,7 +1388,7 @@ fn real(p: &Path) -> String {
 
 /// Every repo a session runs in (or a fan-out came from), and each extra folder, once.
 fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
-    let mut dirs: Vec<String> = d.sessions.lock().unwrap().iter().map(|s| real(&s.cwd)).collect();
+    let mut dirs: Vec<String> = d.sessions.lock().unwrap().iter().filter(|s| s.host.is_none()).map(|s| real(&s.cwd)).collect();
     dirs.extend(d.groups.lock().unwrap().iter().map(|g| real(Path::new(&g.repo))));
     // A session's worktree stays after the session ends, until the user closes it.
     let made: Vec<String> = d.worktrees.lock().unwrap().iter().map(|w| real(&w.path)).collect();
@@ -1515,8 +1610,7 @@ fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
 /// Where `id`'s changes are and what they're compared with: (checkout, base, base in words).
 /// Not in a repo: its cwd and why.
 fn changes_base(d: &Daemon, id: &str) -> anyhow::Result<Result<(PathBuf, String, String), (PathBuf, String)>> {
-    let cwd = d.sessions.lock().unwrap().iter().find(|s| s.id == id).map(|s| s.cwd.clone());
-    let cwd = cwd.ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    let cwd = local_session(d, id)?.cwd.clone();
     Ok(match (find_member(d, id), session_worktree(d, &cwd)) {
         (Ok((g, m)), _) => Ok((m.worktree, g.base, "where the fan-out started".to_string())),
         (Err(_), Some(w)) => Ok((w.path, w.base, "where the worktree started".to_string())),
@@ -1549,7 +1643,7 @@ fn session_worktree(d: &Daemon, dir: &Path) -> Option<SessionWorktree> {
 // ---- Pull requests: one per session branch, found by polling gh. ----
 
 fn pr_session(d: &Daemon, id: &str) -> anyhow::Result<Arc<Session>> {
-    d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))
+    local_session(d, id)
 }
 
 /// Ask the agent to fix its PR's failed checks, with their logs.
@@ -1593,7 +1687,7 @@ fn refresh_prs(d: &Daemon) {
         d.prs.lock().unwrap().clear();
         return;
     }
-    let live: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| !s.pane.is_exited()).cloned().collect();
+    let live: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| !s.pane.is_exited() && s.host.is_none()).cloned().collect();
     let mut looked_up: HashMap<(PathBuf, String), Option<ipc::PrInfo>> = HashMap::new();
     let mut found = HashMap::new();
     let mut with_pr = vec![];
@@ -1812,6 +1906,7 @@ fn save_worktrees(worktrees: &[SessionWorktree]) {
 }
 
 fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
+    anyhow::ensure!(launch.host.is_none(), "Worktrees are made on this Mac; for a session on {}, start one in a folder there", launch.host.as_deref().unwrap_or_default());
     let l = d.allowed_launcher(&launch.launcher)?;
     let dir = work_dir(launch.cwd.as_deref());
     let checkout = worktree::repo_root(&dir)?;
@@ -1840,6 +1935,9 @@ fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
 /// The sessions running in `dir` (a resolved path) or a folder inside it.
 fn sessions_in(d: &Daemon, dir: &str) -> Vec<Arc<Session>> {
     let inside = |s: &Session| {
+        if s.host.is_some() {
+            return false;
+        }
         let cwd = real(&s.cwd);
         cwd == dir || cwd.starts_with(&format!("{dir}/"))
     };

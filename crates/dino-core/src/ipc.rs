@@ -72,6 +72,9 @@ pub enum Request {
         /// Mode, model and effort; what's left open comes from Settings → Agents.
         #[serde(default)]
         controls: Controls,
+        /// Run it over SSH on this host (one from Settings → Environments); `cwd` is then a path there.
+        #[serde(default)]
+        host: Option<String>,
     },
     Kill { id: String },
     /// Change a session's mode, model or effort. The agent restarts, resuming its conversation;
@@ -195,6 +198,9 @@ pub enum Response {
         settings: crate::settings::Settings,
         #[serde(default)]
         locked: Vec<String>,
+        /// Hosts in `~/.ssh/config`, to suggest in Settings → Environments.
+        #[serde(default)]
+        ssh_config_hosts: Vec<String>,
     },
     Keys { keys: Vec<crate::settings::KeyInfo> },
     PrDraft { draft: PrDraft },
@@ -251,6 +257,9 @@ pub struct SessionInfo {
     /// Where the agent runs, symlinks resolved so it matches git's worktree paths.
     #[serde(default)]
     pub cwd: String,
+    /// The SSH host it runs on (`cwd` is then a path there); none for this Mac.
+    #[serde(default)]
+    pub host: Option<String>,
     /// The PR from the session's branch, as of the last poll.
     #[serde(default)]
     pub pr: Option<PrInfo>,

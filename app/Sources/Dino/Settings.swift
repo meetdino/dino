@@ -27,6 +27,7 @@ struct DinoSettings: Codable, Equatable {
         var keep_awake: Bool?
     }
     struct Repo: Codable, Equatable { var env: [String: String] }
+    struct SshHost: Codable, Equatable { var folder: String }
     var routing: Routing
     var policies: Policies
     var machine: Machine
@@ -35,6 +36,8 @@ struct DinoSettings: Codable, Equatable {
     /// By the repo's main checkout.
     var repos: [String: Repo]?
     var worktrees: Worktrees?
+    /// Machines to run sessions on over SSH, by host; nil from an older dinod.
+    var ssh: [String: SshHost]?
 }
 
 /// A provider key's name and where it comes from; dinod never sends values.
@@ -50,6 +53,8 @@ private struct SettingsResponse: Decodable {
     let settings: DinoSettings
     /// Key paths an organization sets, like "policies.allow_bypass"; nil from an older dinod.
     let locked: [String]?
+    /// Hosts in ~/.ssh/config, to suggest; nil from an older dinod.
+    let ssh_config_hosts: [String]?
 }
 private struct KeysResponse: Decodable { let keys: [KeyInfo] }
 
@@ -92,12 +97,15 @@ final class SettingsStore: ObservableObject {
     @Published var locked: [String] = []
     @Published var keys: [KeyInfo] = []
     @Published var agents: [LauncherInfo] = []
+    /// Hosts in ~/.ssh/config.
+    @Published var configHosts: [String] = []
     @Published var error: String?
 
     func load() {
         run { c in (try c.settingsAndLocks(), try c.keys(), try c.allLaunchers()) } done: {
             self.settings = $0.0.settings
             self.locked = $0.0.locked ?? []
+            self.configHosts = $0.0.ssh_config_hosts ?? []
             self.keys = $0.1
             self.agents = $0.2
         }
@@ -148,7 +156,7 @@ final class SettingsStore: ObservableObject {
 
 /// Settings' sections, in sidebar order.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case account, general, agents, policies, repos, worktrees, routing, keys
+    case account, general, agents, policies, repos, worktrees, environments, routing, keys
     var id: String { rawValue }
 
     var title: String {
@@ -159,6 +167,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .policies: "Policies"
         case .repos: "Repositories"
         case .worktrees: "Worktrees"
+        case .environments: "Environments"
         case .routing: "Routing"
         case .keys: "Keys"
         }
@@ -172,6 +181,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .policies: "checkmark.shield.fill"
         case .repos: "folder.fill"
         case .worktrees: "square.stack.3d.up.fill"
+        case .environments: "server.rack"
         case .routing: "arrow.triangle.branch"
         case .keys: "key.fill"
         }
@@ -185,6 +195,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .policies: .indigo
         case .repos: .teal
         case .worktrees: .teal
+        case .environments: .blue
         case .routing: .green
         case .keys: .orange
         }
@@ -227,6 +238,7 @@ struct SettingsView: View {
                 case .policies: PoliciesPane()
                 case .repos: ReposPane()
                 case .worktrees: WorktreesPane()
+                case .environments: EnvironmentsPane()
                 case .routing: RoutingPane()
                 case .keys: KeysPane()
                 }
@@ -789,6 +801,108 @@ private struct ReposPane: View {
             known = await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).tree(folders: [])) ?? [] }.value
                 .filter { !$0.worktrees.isEmpty }
         }
+    }
+}
+
+/// Machines to run sessions on over SSH. Hosts are as `ssh` takes them, so everything else
+/// (user, port, keys, jump hosts) stays in ~/.ssh/config, which dino never changes.
+private struct EnvironmentsPane: View {
+    @EnvironmentObject var store: SettingsStore
+    @State private var entering = false
+    @State private var draft = ""
+
+    private var hosts: [String: DinoSettings.SshHost] { store.settings?.ssh ?? [:] }
+    private var suggested: [String] { store.configHosts.filter { hosts[$0] == nil } }
+
+    private func add(_ host: String) {
+        let host = host.trimmingCharacters(in: .whitespaces)
+        guard !host.isEmpty, !host.hasPrefix("-"), !host.contains(" "), hosts[host] == nil else { return }
+        store.update { $0.ssh = ($0.ssh ?? [:]).merging([host: .init(folder: "")]) { a, _ in a } }
+        draft = ""
+        entering = false
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(hosts.keys.sorted(), id: \.self) { host in
+                    HStack(spacing: 10) {
+                        Image(systemName: "server.rack").foregroundStyle(.secondary)
+                        Text(host).lineLimit(1)
+                        Spacer()
+                        HostFolderField(folder: hosts[host]?.folder ?? "") { folder in
+                            store.update { $0.ssh?[host] = .init(folder: folder) }
+                        }
+                        Button {
+                            store.update { $0.ssh?[host] = nil }
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove \(host)")
+                    }
+                    .orgLocked("ssh.\(host)")
+                }
+                if entering {
+                    HStack {
+                        TextField("Host", text: $draft, prompt: Text("devbox or user@host"))
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { add(draft) }
+                        Button("Add") { add(draft) }.disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Button("Cancel") {
+                            entering = false
+                            draft = ""
+                        }
+                    }
+                }
+                if hosts.isEmpty && !entering {
+                    Text("No hosts yet.").foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("SSH Hosts")
+            } footer: {
+                Footnote("New sessions can run on these machines: dino connects with ssh, as you would in Terminal, and starts the agent there. It must be installed on the host. Logins, keys and ports come from ~/.ssh/config. The folder is where sessions start when you don't choose one; empty means the home folder.")
+            }
+            Section {
+                Menu("Add Host") {
+                    ForEach(suggested, id: \.self) { h in
+                        Button(h) { add(h) }
+                    }
+                    if !suggested.isEmpty { Divider() }
+                    Button("Enter Host…") { entering = true }
+                }
+                .fixedSize()
+            } footer: {
+                if store.configHosts.isEmpty {
+                    Footnote("Hosts in ~/.ssh/config show up here to pick from.")
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+    }
+}
+
+/// A host's default folder, saved on Return or when the field loses focus.
+private struct HostFolderField: View {
+    let folder: String
+    let save: (String) -> Void
+    @State private var draft: String?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("Folder", text: Binding(get: { draft ?? folder }, set: { draft = $0 }), prompt: Text("~"))
+            .textFieldStyle(.roundedBorder)
+            .font(.body.monospaced())
+            .frame(width: 220)
+            .focused($focused)
+            .onSubmit(commit)
+            .onChange(of: focused) { _, now in if !now { commit() } }
+    }
+
+    private func commit() {
+        if let d = draft?.trimmingCharacters(in: .whitespaces), d != folder { save(d) }
+        draft = nil
     }
 }
 
