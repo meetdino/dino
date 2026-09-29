@@ -6,6 +6,7 @@ pub mod ask;
 pub mod controls;
 pub mod discover;
 pub mod found;
+pub mod history;
 pub mod ipc;
 pub mod mcp;
 pub mod pr;

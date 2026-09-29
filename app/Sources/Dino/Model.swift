@@ -4,7 +4,8 @@ import SwiftUI
 import UserNotifications
 
 enum SessionStatus {
-    case thinking, working, idle, done, needsYou, exited
+    /// `ended`: its program exited cleanly and can be resumed; `exited`: it failed.
+    case thinking, working, idle, done, needsYou, ended, exited
 
     var label: String {
         switch self {
@@ -13,6 +14,7 @@ enum SessionStatus {
         case .idle: "idle"
         case .done: "done"
         case .needsYou: "needs you"
+        case .ended: "ended"
         case .exited: "exited"
         }
     }
@@ -24,6 +26,7 @@ enum SessionStatus {
         case .idle: .secondary
         case .done: Color(red: 0.45, green: 0.82, blue: 0.95)
         case .needsYou: Color(red: 1.0, green: 0.78, blue: 0.2)
+        case .ended: .secondary
         case .exited: Color(red: 0.95, green: 0.35, blue: 0.3)
         }
     }
@@ -44,6 +47,8 @@ final class DinoModel: ObservableObject {
     /// Agent sessions dino didn't start (running elsewhere, recent, cloud).
     @Published var found: [FoundSession] = []
     @Published var loadingCloud = false
+    /// Finished conversations on disk are in `found` (the browser has loaded them once).
+    @Published var loadedHistory = false
     /// A handoff in progress: the session being moved, and whether we're waiting on its turn.
     @Published var moving: FoundSession?
     @Published var showContinue = false
@@ -274,7 +279,8 @@ final class DinoModel: ObservableObject {
         }
         let groupSelected = selected.map { id in groups.contains { "group:\($0.id)" == id } } ?? false
         let folderSelected = selected?.hasPrefix("dir:") ?? false
-        if !groupSelected, !folderSelected, selected == nil || !live.contains(selected!) {
+        let subagentSelected = selected?.hasPrefix("agent:") ?? false
+        if !groupSelected, !folderSelected, !subagentSelected, selected == nil || !live.contains(selected!) {
             // Through select(), so the terminal also takes keyboard focus on launch.
             select(next.first?.id)
         }
@@ -283,8 +289,13 @@ final class DinoModel: ObservableObject {
     }
 
     func status(of s: SessionInfo) -> SessionStatus {
-        if s.exited { return .exited }
+        if s.exited { return (s.exit_code ?? 0) == 0 ? .ended : .exited }
         if attention.contains(s.id) || s.needs != nil { return .needsYou }
+        // An agent run by hand in a shell says whether it's busy; its shell has no hooks.
+        if let f = s.inside, let st = f.status {
+            if st == "busy" { return s.in_flight > 0 ? .thinking : .working }
+            return unseenDone.contains(s.id) ? .done : .idle
+        }
         // Agents with hooks (Claude) say when a turn starts and ends. Between turns, their side
         // calls and their redraws when you focus or resize the pane aren't work.
         if let a = s.activity, a != "working" { return unseenDone.contains(s.id) ? .done : .idle }
@@ -382,32 +393,43 @@ final class DinoModel: ObservableObject {
         UserDefaults.standard.set(Array(list.prefix(8)), forKey: "recentFolders.\(host)")
     }
 
-    /// Keep "On this Mac" fresh: sessions running in other terminals come and go.
+    /// Keep "On this Mac" fresh: sessions running in other terminals come and go. Only running
+    /// ones are polled; finished conversations load when the browser opens.
     private func watchElsewhere() {
         Task.detached {
             while true {
-                if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let list = try? conn.found(cloud: false) {
-                    await MainActor.run {
-                        // Keep cloud entries from the last full load.
-                        let cloud = self.found.filter { $0.source == "cloud" }
-                        if list + cloud != self.found { self.found = list + cloud }
+                if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let running = try? conn.found(cloud: false, runningOnly: true) {
+                    let ended = await MainActor.run { () -> Bool in
+                        let before = Set(self.elsewhere.map(\.session_id))
+                        let now = Set(running.map(\.session_id))
+                        let rest = self.found.filter { $0.source != "running" && !now.contains($0.session_id) }
+                        if running + rest != self.found { self.found = running + rest }
+                        // One that stopped is a finished conversation now.
+                        return self.showContinue && !before.subtracting(now).isEmpty
                     }
+                    if ended { await self.loadFound(cloud: false) }
                 }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
     }
 
-    /// Everything, including cloud (slower); for the Continue sheet.
+    /// Everything on this Mac, then cloud sessions (slower); for the session browser.
     func loadFound() {
         loadingCloud = true
-        Task.detached {
-            let list = (try? DinoConnection(path: DinoEnvironment.socketPath).found(cloud: true)) ?? []
-            await MainActor.run {
-                self.found = list
-                self.loadingCloud = false
-            }
+        Task {
+            await loadFound(cloud: false)
+            await loadFound(cloud: true)
+            loadingCloud = false
         }
+    }
+
+    private func loadFound(cloud: Bool) async {
+        guard let list = await Task.detached(operation: { try? DinoConnection(path: DinoEnvironment.socketPath).found(cloud: cloud) }).value else { return }
+        // Without cloud, keep the cloud entries already loaded.
+        let merged = cloud ? list : list + found.filter { $0.source == "cloud" }
+        if merged != found { found = merged }
+        loadedHistory = true
     }
 
     /// Move a found session into dino. A running one finishes its turn first, then continues here.
@@ -436,6 +458,25 @@ final class DinoModel: ObservableObject {
     }
 
     var pendingSelect: String?
+
+    /// Continue the agent started by hand in shell `s` as a dino session, in the same row.
+    func takeOver(_ s: SessionInfo) {
+        guard let f = s.inside else { return }
+        moving = f
+        let id = s.id
+        Task.detached {
+            do {
+                // Own connection: it waits for the agent's turn to end.
+                try DinoConnection(path: DinoEnvironment.socketPath).takeOver(session: id)
+                await MainActor.run { self.moving = nil }
+            } catch {
+                await MainActor.run {
+                    self.moving = nil
+                    self.error = error.localizedDescription
+                }
+            }
+        }
+    }
 
     /// Diff sizes need git, so these refresh slower than session state. Launchers too: keys and
     /// policies change which agents can start.
@@ -750,5 +791,17 @@ final class DinoModel: ObservableObject {
     func kill(_ id: String) {
         guard let conn = connection else { return }
         Task.detached { _ = try? conn.request(["type": "kill", "id": id]) }
+    }
+
+    /// Start an ended session again in place; its pane picks it up (see `dino attach`).
+    func resume(_ id: String) {
+        guard let conn = connection else { return }
+        Task.detached {
+            do {
+                try conn.resume(session: id)
+            } catch {
+                await MainActor.run { self.error = error.localizedDescription }
+            }
+        }
     }
 }

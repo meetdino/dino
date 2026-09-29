@@ -104,6 +104,8 @@ pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
         started_by: s.started_by.clone(),
         messaged_by: s.messaged_by.lock().unwrap().clone(),
         host: s.host.clone(),
+        ended: false,
+        exit_code: None,
     };
     let w = if s.host.is_some() { None } else { session_worktree(d, &s.cwd) };
     kill(d, id);
