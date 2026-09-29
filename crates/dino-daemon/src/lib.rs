@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
+use dino_core::controls::{self, Controls};
 use dino_core::settings::{self, Settings};
 use dino_core::{detect_agents, load_keys, pr, proxy_wiring, trust, user_shell, worktree};
 use dino_proxy::{Activity, Proxy, SessionStats};
@@ -44,6 +45,10 @@ struct Session {
     poked: Arc<Mutex<Option<Instant>>>,
     attached: AtomicUsize,
     auto: Mutex<AutoState>,
+    /// Mode, model and effort it was started with.
+    controls: Controls,
+    /// Asked for mid-turn: `restart` with these once the turn is over.
+    pending: Mutex<Option<Controls>>,
 }
 
 impl Daemon {
@@ -58,10 +63,20 @@ impl Daemon {
         Ok(l)
     }
 
+    /// Every launcher, with the controls the policies let it offer.
+    fn all_launchers(&self) -> Vec<LauncherInfo> {
+        let allow_bypass = Settings::load().policies.allow_bypass;
+        let mut out = self.launchers.read().unwrap().clone();
+        for l in &mut out {
+            l.knobs = controls::knobs(&l.agent_id, allow_bypass);
+        }
+        out
+    }
+
     /// The launchers to offer: the allowed ones, the default (Claude Code unless set) first.
     fn offered(&self) -> Vec<LauncherInfo> {
         let p = Settings::load().policies;
-        let mut out: Vec<LauncherInfo> = self.launchers.read().unwrap().iter().filter(|l| p.allows(&l.short)).cloned().collect();
+        let mut out: Vec<LauncherInfo> = self.all_launchers().into_iter().filter(|l| p.allows(&l.short)).collect();
         let default = p.default_agent.unwrap_or_else(|| "claude".into());
         if let Some(i) = out.iter().position(|l| l.short == default) {
             let l = out.remove(i);
@@ -131,6 +146,15 @@ pub fn run() -> anyhow::Result<()> {
         let d = daemon.clone();
         std::thread::spawn(move || {
             loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                apply_pending(&d);
+            }
+        });
+    }
+    {
+        let d = daemon.clone();
+        std::thread::spawn(move || {
+            loop {
                 refresh_prs(&d);
                 std::thread::sleep(std::time::Duration::from_secs(30));
             }
@@ -151,13 +175,13 @@ fn launchers(free_tier: bool) -> Vec<LauncherInfo> {
     for d in detect_agents() {
         let program: String = d.path.to_string_lossy().into();
         if d.kind.id == "claude" && free_tier {
-            out.push(LauncherInfo { short: "free".into(), agent_id: "claude-free".into(), label: "Claude Code · free models".into(), program: program.clone() });
+            out.push(LauncherInfo { short: "free".into(), agent_id: "claude-free".into(), label: "Claude Code · free models".into(), program: program.clone(), knobs: Default::default() });
         }
-        out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program });
+        out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program, knobs: Default::default() });
     }
     let shell = user_shell();
     let shell_name = shell.rsplit('/').next().unwrap_or("shell").to_string();
-    out.push(LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell });
+    out.push(LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell, knobs: Default::default() });
     out
 }
 
@@ -177,7 +201,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
         let resp = match req {
             Request::State => state(d),
             Request::Launchers => Response::Launchers { launchers: d.offered() },
-            Request::AllLaunchers => Response::Launchers { launchers: d.launchers.read().unwrap().clone() },
+            Request::AllLaunchers => Response::Launchers { launchers: d.all_launchers() },
             Request::Settings => Response::Settings { settings: Settings::load() },
             Request::SetSettings { settings } => match settings.save() {
                 Ok(()) => {
@@ -196,8 +220,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::New { launcher, args, cwd, cols, rows, worktree } => {
-                let launch = Launch { cols, rows, ..Launch::new(&launcher, args, cwd) };
+            Request::New { launcher, args, cwd, cols, rows, worktree, controls } => {
+                let launch = Launch { cols, rows, controls, ..Launch::new(&launcher, args, cwd) };
                 match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {
                     Ok(id) => {
                         save(d);
@@ -206,6 +230,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     Err(e) => Response::Error { message: e.to_string() },
                 }
             }
+            Request::SetControls { id, controls } => match set_controls(d, &id, controls) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::Kill { id } => {
                 if kill(d, &id) {
                     save(d);
@@ -365,6 +393,8 @@ struct Launch {
     restore: Option<SavedSession>,
     name: Option<String>,
     prompt: Option<String>,
+    /// For a new session; what's left open comes from Settings → Agents. A restored one keeps its own.
+    controls: Controls,
 }
 
 impl Launch {
@@ -374,19 +404,35 @@ impl Launch {
 }
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt } = launch;
+    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls } = launch;
     let launcher = launcher.as_str();
     // Sessions already running come back even if the policies changed since; new ones must be allowed.
     let l = match restore {
         Some(_) => d.launcher(launcher).ok_or_else(|| anyhow::anyhow!("unknown agent {launcher}"))?,
         None => d.allowed_launcher(launcher)?,
     };
+    let settings = Settings::load();
+    let controls = match &restore {
+        Some(r) => r.controls.clone(),
+        None => {
+            check_bypass(&controls, &settings)?;
+            // A default saved while bypass was allowed falls back to the agent's own mode.
+            let mut defaults = settings.agent_defaults(&l.agent_id);
+            if check_bypass(&defaults, &settings).is_err() {
+                defaults.mode = None;
+            }
+            controls.or(&defaults)
+        }
+    };
     let id = match &restore {
         Some(r) => r.id.clone(),
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
     };
     let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-    let (env, mut wired_args) = proxy_wiring(&l.agent_id, Settings::load().routing.proxy, &|provider| d.proxy.base_url(&id, provider));
+    let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy, &|provider| d.proxy.base_url(&id, provider));
+    // The repo's environment first: dino's own wiring must win, or metering and hooks break.
+    let mut env: HashMap<String, String> = repo_env(&settings, &cwd).into_iter().collect();
+    env.extend(wiring_env);
 
     // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
     let mut agent_session = restore.as_ref().and_then(|r| r.agent_session.clone());
@@ -408,15 +454,11 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         }
         _ => {}
     }
+    wired_args.extend(controls::args(&l.agent_id, &controls));
     wired_args.extend(args.iter().cloned());
     // Claude and Codex both take an opening prompt as their last argument.
     wired_args.extend(prompt);
-    let spec = SpawnSpec {
-        program: l.program.clone(),
-        args: wired_args,
-        cwd: Some(cwd.clone()),
-        env: env.into_iter().collect::<HashMap<_, _>>(),
-    };
+    let spec = SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env };
 
     let subscribers: Arc<Mutex<Vec<(u64, Sender<Vec<u8>>)>>> = Arc::default();
     let last_output: Arc<Mutex<Option<Instant>>> = Arc::default();
@@ -462,8 +504,49 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         poked,
         attached: AtomicUsize::new(0),
         auto: Mutex::new(restore.as_ref().map(|r| r.auto.clone()).unwrap_or_default()),
+        controls,
+        pending: Mutex::default(),
     }));
     Ok(id)
+}
+
+/// The mode that never asks is refused unless the policies allow it.
+fn check_bypass(c: &Controls, settings: &Settings) -> anyhow::Result<()> {
+    anyhow::ensure!(c.mode.as_deref() != Some("bypass") || settings.policies.allow_bypass, "bypass mode isn't allowed by your policies (Settings → Policies)");
+    Ok(())
+}
+
+/// Settings → Repositories' environment for sessions in `dir`: its repo's, found by the main
+/// checkout so that worktrees share it.
+fn repo_env(settings: &Settings, dir: &Path) -> Vec<(String, String)> {
+    if settings.repos.values().all(|r| r.env.is_empty()) {
+        return vec![];
+    }
+    // Keys are main checkouts, but one chosen by hand may be a worktree or a folder inside the repo.
+    let main_of = |p: &Path| worktree::list(p).ok().and_then(|w| w.into_iter().next()).map(|w| real(Path::new(&w.path)));
+    let Some(main) = main_of(dir) else { return vec![] };
+    let repo = |k: &String| real(Path::new(k)) == main || main_of(Path::new(k)).as_ref() == Some(&main);
+    settings.repos.iter().filter(|(k, r)| !r.env.is_empty() && repo(k)).flat_map(|(_, r)| r.env.clone()).collect()
+}
+
+/// Change session `id`'s controls: now if it's between turns, else once its turn is over.
+fn set_controls(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
+    let settings = Settings::load();
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    if s.controls.mode != controls.mode {
+        check_bypass(&controls, &settings)?;
+    }
+    if controls == s.controls {
+        *s.pending.lock().unwrap() = None;
+        return Ok(());
+    }
+    if s.pane.is_exited() || idle(d, &s) {
+        *s.pending.lock().unwrap() = None;
+        restart(d, id, controls)
+    } else {
+        *s.pending.lock().unwrap() = Some(controls);
+        Ok(())
+    }
 }
 
 /// See `state`: how long a working agent can be silent before its turn counts as over.
@@ -567,6 +650,11 @@ fn state(d: &Daemon) -> Response {
         .iter()
         .map(|s| {
             let st = stats(d, s);
+            let (context_tokens, context_limit) = match st.context() {
+                // Past the window we know: the model has a bigger one than the table says; don't guess.
+                Some((model, used)) => (used, controls::context_limit(model).filter(|limit| used <= *limit)),
+                None => (0, None),
+            };
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -591,6 +679,10 @@ fn state(d: &Daemon) -> Response {
                 cwd: real(&s.cwd),
                 pr: prs.get(&s.id).cloned(),
                 auto: s.auto.lock().unwrap().pr.clone(),
+                controls: s.controls.clone(),
+                pending: s.pending.lock().unwrap().clone(),
+                context_tokens,
+                context_limit,
             }
         })
         .collect();
@@ -619,6 +711,8 @@ struct SavedSession {
     agent_session: Option<String>,
     #[serde(default)]
     auto: AutoState,
+    #[serde(default)]
+    controls: Controls,
 }
 
 fn saved_path() -> PathBuf {
@@ -635,29 +729,82 @@ fn save(d: &Daemon) {
     let sessions = d.sessions.lock().unwrap().clone();
     // Snapshot first: a session's own lock must not be held while reading the others.
     let claimed: Vec<String> = sessions.iter().filter_map(|o| o.agent_session.lock().unwrap().clone()).collect();
-    let saved: Vec<SavedSession> = sessions
-        .iter()
-        .filter(|s| !s.pane.is_exited())
-        .map(|s| {
-            let mut agent_session = s.agent_session.lock().unwrap();
-            if agent_session.is_none() && s.agent_id == "codex" {
-                *agent_session = find_codex_session(&s.cwd, s.started_at, &claimed);
-            }
-            SavedSession {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                launcher: s.launcher.clone(),
-                args: s.args.clone(),
-                cwd: s.cwd.display().to_string(),
-                started_at: s.started_at,
-                agent_session: agent_session.clone(),
-                auto: s.auto.lock().unwrap().clone(),
-            }
-        })
-        .collect();
+    let saved: Vec<SavedSession> = sessions.iter().filter(|s| !s.pane.is_exited()).map(|s| snapshot(s, &claimed)).collect();
     let tmp = saved_path().with_extension("json.tmp");
     if std::fs::write(&tmp, serde_json::to_vec_pretty(&saved).unwrap_or_default()).is_ok() {
         let _ = std::fs::rename(tmp, saved_path());
+    }
+}
+
+/// What it takes to bring `s` back. `claimed`: Codex conversations other sessions already own.
+fn snapshot(s: &Session, claimed: &[String]) -> SavedSession {
+    let mut agent_session = s.agent_session.lock().unwrap();
+    if agent_session.is_none() && s.agent_id == "codex" {
+        *agent_session = find_codex_session(&s.cwd, s.started_at, claimed);
+    }
+    SavedSession {
+        id: s.id.clone(),
+        name: s.name.clone(),
+        launcher: s.launcher.clone(),
+        args: s.args.clone(),
+        cwd: s.cwd.display().to_string(),
+        started_at: s.started_at,
+        agent_session: agent_session.clone(),
+        auto: s.auto.lock().unwrap().clone(),
+        controls: s.controls.clone(),
+    }
+}
+
+/// Run session `id` with `controls` from now on: stop its agent and resume the conversation
+/// with them, under the same id. Attached clients see the socket drop without an exit and
+/// reattach (see `dino attach`), so the terminal carries on.
+fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
+    let (s, mut saved) = {
+        let sessions = d.sessions.lock().unwrap();
+        let s = sessions.iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+        let claimed: Vec<String> = sessions.iter().filter(|o| o.id != id).filter_map(|o| o.agent_session.lock().unwrap().clone()).collect();
+        let saved = snapshot(&s, &claimed);
+        (s, saved)
+    };
+    // Dropping the subscribers ends each client's stream without the exit the dying agent would send.
+    s.subscribers.lock().unwrap().clear();
+    s.pane.kill();
+    if saved.controls.model != controls.model {
+        d.proxy.stats.reset_context(id);
+    }
+    saved.controls = controls;
+    let (cols, rows) = s.pane.size();
+    let launch = Launch { cols, rows, restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) };
+    let spawned = spawn(d, launch);
+    {
+        // The new one takes the old one's place, so the session never drops out of the list.
+        let mut sessions = d.sessions.lock().unwrap();
+        let i = sessions.iter().position(|o| Arc::ptr_eq(o, &s));
+        let j = sessions.iter().rposition(|o| o.id == id && !Arc::ptr_eq(o, &s));
+        if let (Some(i), Some(j)) = (i, j) {
+            let new = sessions.remove(j);
+            sessions[if j < i { i - 1 } else { i }] = new;
+        }
+    }
+    save(d);
+    spawned.map(|_| ())
+}
+
+/// Apply controls asked for mid-turn, now that the turn is over.
+fn apply_pending(d: &Daemon) {
+    let ready: Vec<(String, Controls)> = d
+        .sessions
+        .lock()
+        .unwrap()
+        .clone()
+        .iter()
+        .filter(|s| s.pending.lock().unwrap().is_some() && (s.pane.is_exited() || idle(d, s)))
+        .filter_map(|s| s.pending.lock().unwrap().take().map(|c| (s.id.clone(), c)))
+        .collect();
+    for (id, controls) in ready {
+        if let Err(e) = restart(d, &id, controls) {
+            eprintln!("restart {id}: {e}");
+        }
     }
 }
 
@@ -787,6 +934,8 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         started_at: now_secs(),
         agent_session: Some(f.session_id.clone()),
         auto: AutoState::default(),
+        // It keeps whatever the conversation ran with.
+        controls: Controls::default(),
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {

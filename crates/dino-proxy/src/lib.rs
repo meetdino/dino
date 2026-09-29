@@ -73,6 +73,16 @@ pub struct SessionStats {
     /// Which classifier made the last routing decision ("jev" or "llm").
     pub classifier: Option<String>,
     pub last_request: Option<Instant>,
+    /// Per model, what its last call read (cached tokens included): how full its context is.
+    /// Per model because agents make small side calls (titles, summaries) on other models.
+    pub context: HashMap<String, u64>,
+}
+
+impl SessionStats {
+    /// The conversation's context use: the biggest per-model one, since side calls are small.
+    pub fn context(&self) -> Option<(&str, u64)> {
+        self.context.iter().max_by_key(|(_, n)| **n).map(|(m, n)| (m.as_str(), *n))
+    }
 }
 
 /// One rolling subscription window, e.g. Claude's 5h or 7d.
@@ -114,6 +124,11 @@ impl Stats {
                 s.activity = Some(Activity::Done);
             }
         });
+    }
+
+    /// Forget context use, e.g. when the agent restarts on another model.
+    pub fn reset_context(&self, id: &str) {
+        self.update(id, |s| s.context.clear());
     }
 
     pub fn quota(&self, provider: &str) -> Option<Quota> {
@@ -357,6 +372,9 @@ impl Drop for Tap {
         self.stats.update(&self.session, |s| {
             if let Some(u) = self.meter.seen.take() {
                 s.usage.add(&u);
+                if let Some(model) = self.meter.model.take().or_else(|| s.last_model.clone()) {
+                    s.context.insert(model, u.total_input());
+                }
             }
             // The agent hung up mid-answer with nothing else in flight: the user interrupted the
             // turn (Esc). Claude Code fires no hook for that, so the turn would look busy forever.
@@ -511,6 +529,8 @@ struct Meter {
     body: Vec<u8>,
     sse: Option<bool>,
     seen: Option<Usage>,
+    /// The model that answered, as the response says.
+    model: Option<String>,
     /// The whole answer came through. Agents hang up once they have it, so the body running
     /// out can't tell a finished answer from an interrupted one; its last event can.
     complete: bool,
@@ -548,6 +568,9 @@ impl Meter {
     }
 
     fn observe(&mut self, v: &Value) {
+        if self.model.is_none() {
+            self.model = [&v["message"]["model"], &v["response"]["model"], &v["model"]].iter().find_map(|m| m.as_str()).map(String::from);
+        }
         for u in [&v["usage"], &v["message"]["usage"], &v["response"]["usage"]] {
             if !u.is_object() {
                 continue;
@@ -566,5 +589,30 @@ impl Meter {
             seen.cache_read = seen.cache_read.max(next.cache_read);
             seen.cache_write = seen.cache_write.max(next.cache_write);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_from_the_last_call_per_model() {
+        let stats = Arc::new(Stats::default());
+        let call = |events: String| {
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), _in_flight: None };
+            tap.meter.feed(&Bytes::from(events));
+        };
+        let start = |model: &str, input: u64, cached: u64| {
+            format!("event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"model\":\"{model}\",\"usage\":{{\"input_tokens\":{input},\"cache_read_input_tokens\":{cached},\"output_tokens\":1}}}}}}\n\n")
+        };
+        call(start("claude-opus-5-5", 10, 50_000));
+        call(start("claude-haiku-4-5", 300, 0));
+        call(start("claude-opus-5-5", 20, 60_000));
+        let s = stats.session("1");
+        assert_eq!(s.context(), Some(("claude-opus-5-5", 60_020)), "the conversation, not the side call");
+        assert_eq!(s.usage.total_input(), 110_330);
+        stats.reset_context("1");
+        assert_eq!(stats.session("1").context(), None);
     }
 }

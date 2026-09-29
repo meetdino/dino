@@ -53,6 +53,8 @@ struct DinoApp: App {
                         }
                     }
                 }
+                Button("New Session…") { model.showNewSession = true }
+                    .keyboardShortcut("n", modifiers: [.command, .control])
                 Button("Fan Out…") { model.showFanout = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Continue a Session…") {
@@ -69,6 +71,9 @@ struct DinoApp: App {
                     .keyboardShortcut("j")
                 Button(model.showReview ? "Hide Changes" : "Review Changes") { model.showReview.toggle() }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
+                Divider()
+                ControlMenuItems().environmentObject(model)
+                Divider()
                 ForEach(Array(model.sessions.prefix(9).enumerated()), id: \.element.id) { i, s in
                     Button("\(i + 1)  \(s.name)") { model.select(s.id) }
                         .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
@@ -171,6 +176,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
+        .sheet(isPresented: $model.showNewSession) { NewSessionSheet() }
         .sheet(isPresented: $model.showCreatePR) {
             if let s = model.selectedSession { CreatePRSheet(session: s) }
         }
@@ -285,6 +291,7 @@ struct Terminals: View {
                     HStack(spacing: 8) {
                         Text(s.name).font(.system(.body, design: .monospaced).weight(.semibold)).foregroundStyle(Brand.green)
                         if let t = s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
+                        if !s.exited { SessionControlsBar(session: s).padding(.leading, 4) }
                     }
                 }
             }
@@ -357,6 +364,8 @@ struct NewSessionMenu: View {
             }
             .help("Its own worktree and branch: its edits stay off your checkout until you apply them. Ignored files listed in .worktreeinclude, like .env, are copied in")
             Divider()
+            Button("New Session…") { model.showNewSession = true }
+                .help("Choose the agent, folder, permission mode, model and effort (⌃⌘N)")
             Button("In \(model.folder.lastPathComponent)…") { model.chooseFolder() }
         } label: {
             Label("New Session", systemImage: "plus")
@@ -545,6 +554,9 @@ struct SessionRow: View {
                         Text(shortModel(session.last_model))
                     }
                     Spacer()
+                    if let ctx = session.contextUse {
+                        ContextRing(used: ctx.used, limit: ctx.limit, size: 10)
+                    }
                     Text("↑\(tokens(session.input_tokens)) ↓\(tokens(session.output_tokens))")
                 }
                 .font(.caption.monospacedDigit())
