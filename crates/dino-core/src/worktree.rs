@@ -186,6 +186,11 @@ pub fn head(dir: &Path) -> String {
 /// Everything changed in the checkout containing `dir` since `base`, new files included, per file.
 /// Reads through a copy of the index, so the user's staging area stays exactly as it was.
 pub fn changes(dir: &Path, base: &str) -> anyhow::Result<Vec<FileDiff>> {
+    Ok(parse_diff(&changes_patch(dir, base)?))
+}
+
+/// `changes` as one unified diff, as git prints it.
+pub fn changes_patch(dir: &Path, base: &str) -> anyhow::Result<String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let index = PathBuf::from(git(dir, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?.trim());
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -201,7 +206,7 @@ pub fn changes(dir: &Path, base: &str) -> anyhow::Result<Vec<FileDiff>> {
     let text = run(&["add", "--all", "--intent-to-add"])
         .and_then(|_| run(&["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--find-renames", base]));
     let _ = std::fs::remove_file(&tmp);
-    Ok(parse_diff(&text?))
+    text
 }
 
 fn parse_diff(text: &str) -> Vec<FileDiff> {
