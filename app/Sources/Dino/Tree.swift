@@ -129,7 +129,12 @@ enum SessionTree {
             return RepoNode(repo: r, places: places, groups: groups.filter { $0.repo == r.path })
         }
         var unfiled: [SessionInfo] = []
+        // A session on an SSH host is in a folder there, never in one of these.
         for s in sessions where !inGroup.contains(s.id) {
+            if s.host != nil {
+                unfiled.append(s)
+                continue
+            }
             var best: (repo: Int, place: Int, depth: Int)?
             for (ri, node) in nodes.enumerated() {
                 for (pi, place) in node.places.enumerated() where contains(place.path, s.cwd ?? "") {
@@ -406,6 +411,50 @@ struct RepoRows: View {
             get: { collapsed.contains(key) },
             set: { open in if open { collapsed.insert(key) } else { collapsed.remove(key) } }
         )
+    }
+}
+
+extension SessionInfo {
+    /// Why features that need the session's folder on this Mac are off, for a session on an SSH host.
+    var remoteReason: String? { host.map { "Not available for sessions on \($0): the folder is there, not on this Mac" } }
+}
+
+/// The SSH host a session runs on, beside its name in the toolbar.
+struct HostChip: View {
+    let host: String
+
+    var body: some View {
+        Label(host, systemImage: "server.rack")
+            .labelStyle(.titleAndIcon)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.quaternary, in: Capsule())
+            .help("Running on \(host) over SSH")
+    }
+}
+
+/// The sessions on one SSH host, under the host's name.
+struct HostRows: View {
+    let host: String
+    let sessions: [SessionInfo]
+    @Binding var collapsed: Set<String>
+
+    var body: some View {
+        DisclosureGroup(isExpanded: Binding(
+            get: { !collapsed.contains("host:\(host)") },
+            set: { open in if open { collapsed.remove("host:\(host)") } else { collapsed.insert("host:\(host)") } }
+        )) {
+            ForEach(sessions) { s in
+                SessionRow(session: s, index: 0)
+                    .tag(s.id)
+                    .contextMenu { SessionMenu(session: s) }
+            }
+        } label: {
+            PlaceRow(icon: "server.rack", title: host, detail: "SSH")
+                .help("Sessions running on \(host) over SSH")
+        }
     }
 }
 

@@ -372,16 +372,24 @@ struct ControlMenuItems: View {
     }
 }
 
-/// New Session with everything: agent, where, mode, model and effort.
+/// New Session with everything: agent, where (this Mac or an SSH host), mode, model and effort.
 struct NewSessionSheet: View {
     @EnvironmentObject var model: DinoModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openWindow) private var openWindow
     @State private var agent = ""
     @State private var worktree = false
     @State private var controls = Controls()
     @State private var defaults: [String: Controls] = [:]
+    /// Settings → Environments' hosts; an empty `host` is this Mac.
+    @State private var hosts: [String: DinoSettings.SshHost] = [:]
+    @State private var host = ""
+    @State private var remoteFolder = ""
 
-    private var launcher: LauncherInfo? { model.launchers.first { $0.short == agent } ?? model.launchers.first }
+    private static let addHost = "\u{0}add"
+    /// Claude Code on the free pool goes through dino on this Mac, so it doesn't run over SSH.
+    private var launchers: [LauncherInfo] { host.isEmpty ? model.launchers : model.launchers.filter { $0.agent_id != "claude-free" } }
+    private var launcher: LauncherInfo? { launchers.first { $0.short == agent } ?? launchers.first }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -389,19 +397,52 @@ struct NewSessionSheet: View {
             Form {
                 Section {
                     Picker("Agent", selection: Binding(get: { launcher?.short ?? "" }, set: { agent = $0 })) {
-                        ForEach(model.launchers) { l in Text(l.label).tag(l.short) }
+                        ForEach(launchers) { l in Text(l.label).tag(l.short) }
                     }
-                    LabeledContent("Folder") {
-                        HStack {
-                            Text((model.folder.path as NSString).abbreviatingWithTildeInPath)
-                                .lineLimit(1)
-                                .truncationMode(.head)
-                                .foregroundStyle(.secondary)
-                            Button("Choose…") { model.chooseFolder() }
+                    Picker("Runs on", selection: Binding(get: { host }, set: pickHost)) {
+                        Label("This Mac", systemImage: "laptopcomputer").tag("")
+                        ForEach(hosts.keys.sorted(), id: \.self) { h in Label(h, systemImage: "server.rack").tag(h) }
+                        Divider()
+                        Text("Add SSH Host…").tag(Self.addHost)
+                    }
+                    if host.isEmpty {
+                        LabeledContent("Folder") {
+                            HStack {
+                                Text((model.folder.path as NSString).abbreviatingWithTildeInPath)
+                                    .lineLimit(1)
+                                    .truncationMode(.head)
+                                    .foregroundStyle(.secondary)
+                                Button("Choose…") { model.chooseFolder() }
+                            }
+                        }
+                        Toggle("In a new worktree", isOn: $worktree)
+                            .help("Its own worktree and branch: its edits stay off your checkout until you apply them")
+                    } else {
+                        LabeledContent("Folder") {
+                            HStack(spacing: 4) {
+                                TextField("Folder", text: $remoteFolder, prompt: Text(hostDefault))
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.body.monospaced())
+                                    .labelsHidden()
+                                let recent = model.recentFolders(on: host)
+                                Menu {
+                                    ForEach(recent, id: \.self) { f in Button(f) { remoteFolder = f } }
+                                } label: {
+                                    Image(systemName: "clock")
+                                }
+                                .menuStyle(.borderlessButton)
+                                .fixedSize()
+                                .disabled(recent.isEmpty)
+                                .help(recent.isEmpty ? "No recent folders on \(host)" : "Recent folders on \(host)")
+                            }
                         }
                     }
-                    Toggle("In a new worktree", isOn: $worktree)
-                        .help("Its own worktree and branch: its edits stay off your checkout until you apply them")
+                } footer: {
+                    if !host.isEmpty {
+                        Text("A path on \(host); ~ is your home folder there. The agent must be installed on \(host).")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 if let l = launcher, let k = l.knobs, k.any {
                     Section {
@@ -419,7 +460,13 @@ struct NewSessionSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Start") {
-                    if let l = launcher { model.newSession(l, worktree: worktree, controls: controls) }
+                    if let l = launcher {
+                        if host.isEmpty {
+                            model.newSession(l, worktree: worktree, controls: controls)
+                        } else {
+                            model.newSession(l, controls: controls, host: host, remoteFolder: remoteFolder.trimmingCharacters(in: .whitespaces))
+                        }
+                    }
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -432,6 +479,24 @@ struct NewSessionSheet: View {
         .task {
             let s = await Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).settings() }.value
             defaults = s?.agents ?? [:]
+            hosts = s?.ssh ?? [:]
         }
+    }
+
+    private var hostDefault: String {
+        let f = hosts[host]?.folder ?? ""
+        return f.isEmpty ? "~" : f
+    }
+
+    /// "Add SSH Host…" opens Settings → Environments instead of choosing.
+    private func pickHost(_ picked: String) {
+        guard picked != Self.addHost else {
+            UserDefaults.standard.set(SettingsPane.environments.rawValue, forKey: "settingsTab")
+            openWindow(id: SettingsView.windowID)
+            dismiss()
+            return
+        }
+        host = picked
+        remoteFolder = ""
     }
 }

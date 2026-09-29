@@ -136,8 +136,11 @@ enum LinkTarget: Equatable {
 extension DinoModel {
     /// A link ⌘-clicked in session `id`'s terminal.
     func openLink(_ link: String, from id: String) {
-        let cwd = sessions.first { $0.id == id }?.cwd
-        switch LinkTarget.resolve(link, cwd: cwd) {
+        let session = sessions.first { $0.id == id }
+        switch LinkTarget.resolve(link, cwd: session?.cwd) {
+        case .file where session?.host != nil:
+            // The path is on the SSH host, not on this Mac.
+            NSSound.beep()
         case let .file(path, line):
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
