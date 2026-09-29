@@ -104,6 +104,14 @@ pub enum Request {
     Keys,
     /// Store a key in dino's key store, or remove it with no `value`. Takes effect at once.
     SetKey { name: String, value: Option<String> },
+    /// What a PR from the session's branch would hold, to fill the Create PR form.
+    PrDraft { id: String },
+    /// Commit what's uncommitted as `title`, push the session's branch, and open a PR into `base`.
+    PrCreate { id: String, title: String, body: String, base: String, draft: bool },
+    /// Tell the session's agent which checks failed on its PR, with their logs, to fix and push.
+    PrFix { id: String },
+    /// Squash-merge the session's PR.
+    PrMerge { id: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -121,6 +129,8 @@ pub enum Response {
     Changes { root: String, base: String, files: Vec<FileDiff>, note: Option<String> },
     Settings { settings: crate::settings::Settings },
     Keys { keys: Vec<crate::settings::KeyInfo> },
+    PrDraft { draft: PrDraft },
+    Pr { pr: PrInfo },
     Ok,
     Error { message: String },
 }
@@ -162,8 +172,12 @@ pub struct SessionInfo {
     /// Where the agent runs, symlinks resolved so it matches git's worktree paths.
     #[serde(default)]
     pub cwd: String,
+    /// The PR from the session's branch, as of the last poll.
+    #[serde(default)]
+    pub pr: Option<PrInfo>,
 }
 
+pub use crate::pr::{Checks, PrDraft, PrInfo};
 pub use crate::worktree::Worktree;
 
 /// A git repo, or a plain folder (no worktrees) where sessions run.

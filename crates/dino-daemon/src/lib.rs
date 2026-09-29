@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
 use dino_core::settings::{self, Settings};
-use dino_core::{detect_agents, load_keys, proxy_wiring, trust, user_shell, worktree};
+use dino_core::{detect_agents, load_keys, pr, proxy_wiring, trust, user_shell, worktree};
 use dino_proxy::{Activity, Proxy};
 use dino_term::{Pane, SpawnSpec};
 
@@ -72,6 +72,8 @@ struct Daemon {
     sessions: Mutex<Vec<Arc<Session>>>,
     groups: Mutex<Vec<Group>>,
     worktrees: Mutex<Vec<SessionWorktree>>,
+    /// Session id → the PR from its branch, as of the last poll.
+    prs: Mutex<HashMap<String, ipc::PrInfo>>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -98,6 +100,7 @@ pub fn run() -> anyhow::Result<()> {
         sessions: Mutex::default(),
         groups: Mutex::new(load_groups()),
         worktrees: Mutex::new(load_worktrees()),
+        prs: Mutex::default(),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
@@ -109,6 +112,15 @@ pub fn run() -> anyhow::Result<()> {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 save(&d);
+            }
+        });
+    }
+    {
+        let d = daemon.clone();
+        std::thread::spawn(move || {
+            loop {
+                refresh_prs(&d);
+                std::thread::sleep(std::time::Duration::from_secs(30));
             }
         });
     }
@@ -228,6 +240,44 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     }
                     Some(_) => Response::Error { message: format!("{id} has exited") },
                     None => Response::Error { message: format!("no session {id}") },
+                }
+            }
+            Request::PrDraft { id } => match pr_session(d, &id) {
+                Ok(s) => {
+                    let came_from = session_worktree(d, &s.cwd).and_then(|w| pr::branch(&w.checkout));
+                    Response::PrDraft { draft: pr::draft(&s.cwd, came_from.as_deref(), s.pane.title().as_deref()) }
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::PrCreate { id, title, body, base, draft } => {
+                match pr_session(d, &id).and_then(|s| pr::create(&s.cwd, &title, &body, &base, draft)) {
+                    Ok(pr) => {
+                        d.prs.lock().unwrap().insert(id, pr.clone());
+                        refresh_prs_soon(d);
+                        Response::Pr { pr }
+                    }
+                    Err(e) => Response::Error { message: e.to_string() },
+                }
+            }
+            Request::PrFix { id } => match pr_fix(d, &id) {
+                Ok(()) => {
+                    refresh_prs_soon(d);
+                    Response::Ok
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::PrMerge { id } => {
+                let merged = pr_session(d, &id).and_then(|s| {
+                    let branch = pr::branch(&s.cwd).ok_or_else(|| anyhow::anyhow!("Not on a branch"))?;
+                    pr::merge(&s.cwd, &branch)
+                });
+                match merged {
+                    Ok(pr) => {
+                        d.prs.lock().unwrap().insert(id, pr.clone());
+                        refresh_prs_soon(d);
+                        Response::Pr { pr }
+                    }
+                    Err(e) => Response::Error { message: e.to_string() },
                 }
             }
             Request::Keep { session } => match keep(d, &session) {
@@ -412,6 +462,7 @@ fn attach(d: &Daemon, s: &Session, mut stream: UnixStream, cols: u16, rows: u16)
 
 fn state(d: &Daemon) -> Response {
     let groups = d.groups.lock().unwrap().clone();
+    let prs = d.prs.lock().unwrap().clone();
     let group_of = |id: &str| groups.iter().find(|g| g.members.iter().any(|m| m.session == id)).map(|g| g.id.clone());
     let sessions = d
         .sessions
@@ -442,6 +493,7 @@ fn state(d: &Daemon) -> Response {
                 group: group_of(&s.id),
                 error: st.last_error,
                 cwd: real(&s.cwd),
+                pr: prs.get(&s.id).cloned(),
             }
         })
         .collect();
@@ -891,6 +943,51 @@ fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
 /// The worktree dino made that `dir` is in: its commits count as changes too.
 fn session_worktree(d: &Daemon, dir: &Path) -> Option<SessionWorktree> {
     d.worktrees.lock().unwrap().iter().find(|w| dir.starts_with(&w.path)).cloned()
+}
+
+// ---- Pull requests: one per session branch, found by polling gh. ----
+
+fn pr_session(d: &Daemon, id: &str) -> anyhow::Result<Arc<Session>> {
+    d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))
+}
+
+/// Ask the agent to fix its PR's failed checks, with their logs.
+fn pr_fix(d: &Daemon, id: &str) -> anyhow::Result<()> {
+    let s = pr_session(d, id)?;
+    anyhow::ensure!(!s.pane.is_exited(), "{id} has exited");
+    let branch = pr::branch(&s.cwd).ok_or_else(|| anyhow::anyhow!("Not on a branch"))?;
+    let msg = pr::fix_message(&s.cwd, &branch)?;
+    send_input(&s, &msg, true);
+    Ok(())
+}
+
+/// Look up the PR from each live session's branch. Sessions on the same branch share one lookup;
+/// on the default branch, detached, or without gh there's none. Failures just mean no PR.
+fn refresh_prs(d: &Daemon) {
+    if dino_core::which("gh").is_none() {
+        d.prs.lock().unwrap().clear();
+        return;
+    }
+    let live: Vec<(String, PathBuf)> = d.sessions.lock().unwrap().iter().filter(|s| !s.pane.is_exited()).map(|s| (s.id.clone(), s.cwd.clone())).collect();
+    let mut looked_up: HashMap<(PathBuf, String), Option<ipc::PrInfo>> = HashMap::new();
+    let mut found = HashMap::new();
+    for (id, cwd) in live {
+        let Ok(root) = worktree::repo_root(&cwd) else { continue };
+        let Some(branch) = pr::branch(&root) else { continue };
+        let pr = looked_up
+            .entry((root.clone(), branch.clone()))
+            .or_insert_with(|| (branch != pr::default_branch(&root)).then(|| pr::view(&root, &branch).ok()).flatten());
+        if let Some(pr) = pr {
+            found.insert(id, pr.clone());
+        }
+    }
+    *d.prs.lock().unwrap() = found;
+}
+
+/// After a PR action, off the request: other sessions on the same branch see it without waiting for the poll.
+fn refresh_prs_soon(d: &Arc<Daemon>) {
+    let d = d.clone();
+    std::thread::spawn(move || refresh_prs(&d));
 }
 
 /// A paste, then Return a moment later: sent together, some agents take the Return as part of it.

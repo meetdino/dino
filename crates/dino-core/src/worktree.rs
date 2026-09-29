@@ -16,7 +16,7 @@ pub struct DiffStat {
     pub removed: u32,
 }
 
-fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
     git_in(dir, args, None)
 }
 
