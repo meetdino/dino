@@ -221,6 +221,9 @@ struct SessionMenu: View {
         if model.splits.contains(where: { $0.contains(session.id) }) {
             Button("Close Pane") { model.closePane(session.id) }
         }
+        if session.exited {
+            Button(session.agent_id == "shell" ? "Restart" : "Resume") { model.resume(session.id) }
+        }
         Divider()
         Button("Rename…") { model.renaming = Renaming(id: session.id, place: .sidebar) }
         // A fan-out member goes with its fan-out: keep or discard that instead.

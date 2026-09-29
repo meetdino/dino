@@ -342,7 +342,11 @@ struct Terminals: View {
                         SessionName(session: s, place: .toolbar, font: .system(.body, design: .monospaced).weight(.semibold), color: Brand.green)
                         if s.label == nil, let t = s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
                         if let host = s.host { HostChip(host: host) }
-                        if !s.exited { SessionControlsBar(session: s).padding(.leading, 4) }
+                        if !s.exited {
+                            SessionControlsBar(session: s).padding(.leading, 4)
+                        } else {
+                            ResumeButton(session: s).padding(.leading, 4)
+                        }
                     }
                 }
             }
@@ -678,6 +682,22 @@ struct SessionRow: View {
     }
 }
 
+/// For a session whose program ended: start it again in place (Enter in its pane does the same).
+struct ResumeButton: View {
+    @EnvironmentObject var model: DinoModel
+    let session: SessionInfo
+
+    var body: some View {
+        let shell = session.agent_id == "shell"
+        Button { model.resume(session.id) } label: {
+            Label(shell ? "Restart" : "Resume", systemImage: "play.fill")
+        }
+        .labelStyle(.titleAndIcon)
+        .controlSize(.small)
+        .help(shell ? "Start a new shell in the same folder (Enter in the pane)" : "Resume the conversation where it left off (Enter in the pane)")
+    }
+}
+
 struct StatusDot: View {
     let status: SessionStatus
     @State private var pulse = false
@@ -691,6 +711,8 @@ struct StatusDot: View {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(status.color)
             case .exited:
                 Image(systemName: "xmark.circle").foregroundStyle(status.color)
+            case .ended:
+                Image(systemName: "stop.circle").foregroundStyle(status.color)
             case .idle:
                 Circle().strokeBorder(.secondary, lineWidth: 1.5).frame(width: 10, height: 10)
             case .thinking, .working:
