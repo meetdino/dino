@@ -1471,8 +1471,9 @@ fn watch_shells(d: &Daemon) {
                 if i.found.is_some() {
                     *s.pane.shared.title.lock().unwrap() = i.before.clone().flatten();
                 }
-                *i = Inside::default();
-            } else if i.fg.is_none() {
+                // Taken at the prompt: an agent can retitle before a poll sees it start.
+                *i = Inside { before: Some(s.pane.title()), ..Inside::default() };
+            } else if i.before.is_none() {
                 i.before = Some(s.pane.title());
             }
             fg.is_some() && (i.fg != fg || i.checked.is_none_or(|t| t.elapsed() >= INSIDE_RECHECK))
