@@ -125,6 +125,123 @@ fn track_new_files(dir: &Path) -> anyhow::Result<()> {
     git(dir, &["add", "--all", "--intent-to-add"]).map(drop)
 }
 
+/// A file's changes, parsed for review.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    /// Relative to the repo root; the new name when renamed.
+    pub path: String,
+    pub old_path: Option<String>,
+    /// "added", "deleted", "renamed" or "modified".
+    pub status: String,
+    pub added: u32,
+    pub removed: u32,
+    pub binary: bool,
+    pub lines: Vec<DiffLine>,
+    /// Lines past `MAX_LINES` were left out.
+    pub truncated: bool,
+}
+
+/// One line of a hunk. `kind` is "hunk" (the `@@` header), "add", "del" or "ctx".
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DiffLine {
+    pub kind: String,
+    pub old: Option<u32>,
+    pub new: Option<u32>,
+    pub text: String,
+}
+
+/// Per file, so a lockfile rewrite doesn't drown the rest.
+const MAX_LINES: usize = 4000;
+
+/// git's empty tree: the base in a repo with no commits yet.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// The last commit of the checkout containing `dir`.
+pub fn head(dir: &Path) -> String {
+    git(dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).map(|s| s.trim().to_string()).unwrap_or_else(|_| EMPTY_TREE.into())
+}
+
+/// Everything changed in the checkout containing `dir` since `base`, new files included, per file.
+/// Reads through a copy of the index, so the user's staging area stays exactly as it was.
+pub fn changes(dir: &Path, base: &str) -> anyhow::Result<Vec<FileDiff>> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let index = PathBuf::from(git(dir, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?.trim());
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("dino-index-{}-{n}", std::process::id()));
+    if index.exists() {
+        std::fs::copy(&index, &tmp)?;
+    }
+    let run = |args: &[&str]| -> anyhow::Result<String> {
+        let out = Command::new("git").arg("-C").arg(dir).args(args).env("GIT_INDEX_FILE", &tmp).stdin(Stdio::null()).output()?;
+        anyhow::ensure!(out.status.success(), "git {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let text = run(&["add", "--all", "--intent-to-add"])
+        .and_then(|_| run(&["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--find-renames", base]));
+    let _ = std::fs::remove_file(&tmp);
+    Ok(parse_diff(&text?))
+}
+
+fn parse_diff(text: &str) -> Vec<FileDiff> {
+    let mut files: Vec<FileDiff> = Vec::new();
+    let (mut old, mut new, mut in_hunk) = (0u32, 0u32, false);
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            // `a/x b/x`; the `+++` line names it exactly, unless the file is gone or binary.
+            let path = rest.rsplit_once(" b/").map_or(rest, |(_, b)| b).to_string();
+            files.push(FileDiff { path, old_path: None, status: "modified".into(), added: 0, removed: 0, binary: false, lines: vec![], truncated: false });
+            in_hunk = false;
+            continue;
+        }
+        let Some(f) = files.last_mut() else { continue };
+        if let Some(h) = line.strip_prefix("@@ ") {
+            // `@@ -old[,n] +new[,n] @@ context`
+            let mut nums = h.split(' ').take(2).map(|r| r.get(1..).and_then(|r| r.split(',').next()?.parse().ok()).unwrap_or(0));
+            (old, new, in_hunk) = (nums.next().unwrap_or(0), nums.next().unwrap_or(0), true);
+            push(f, DiffLine { kind: "hunk".into(), old: None, new: None, text: line.into() });
+            continue;
+        }
+        if !in_hunk {
+            if line.starts_with("new file mode") {
+                f.status = "added".into();
+            } else if line.starts_with("deleted file mode") {
+                f.status = "deleted".into();
+            } else if let Some(p) = line.strip_prefix("rename from ") {
+                f.status = "renamed".into();
+                f.old_path = Some(p.into());
+            } else if let Some(p) = line.strip_prefix("rename to ").or_else(|| line.strip_prefix("+++ b/")) {
+                // git ends a name with spaces in it with a tab here.
+                f.path = p.trim_end_matches('\t').into();
+            } else if line.starts_with("Binary files ") {
+                f.binary = true;
+            }
+            continue;
+        }
+        let (kind, o, n) = match line.chars().next() {
+            Some('+') => ("add", None, Some(new)),
+            Some('-') => ("del", Some(old), None),
+            Some(' ') | None => ("ctx", Some(old), Some(new)),
+            // "\ No newline at end of file"
+            _ => continue,
+        };
+        match kind {
+            "add" => (f.added, new) = (f.added + 1, new + 1),
+            "del" => (f.removed, old) = (f.removed + 1, old + 1),
+            _ => (old, new) = (old + 1, new + 1),
+        }
+        push(f, DiffLine { kind: kind.into(), old: o, new: n, text: line.get(1..).unwrap_or("").into() });
+    }
+    files
+}
+
+fn push(f: &mut FileDiff, line: DiffLine) {
+    if f.lines.len() < MAX_LINES {
+        f.lines.push(line);
+    } else {
+        f.truncated = true;
+    }
+}
+
 /// Bring the agent's changes from worktree `dir` into the user's checkout `repo`, uncommitted,
 /// for them to review and commit.
 pub fn apply(dir: &Path, base: &str, repo: &Path) -> anyhow::Result<DiffStat> {
@@ -152,6 +269,44 @@ pub fn remove(repo: &Path, dir: &Path, branch: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changes_leave_the_index_alone() {
+        let tmp = std::env::temp_dir().join(format!("dino-changes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let repo = tmp.as_path();
+        git(repo, &["init", "-q", "-b", "main"]).unwrap();
+        assert_eq!(head(repo), EMPTY_TREE);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(repo.join("gone.txt"), "bye\n").unwrap();
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n2\nthree\nfour\n").unwrap();
+        std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("sub/new file.txt"), "hi\n").unwrap();
+        let status = git(repo, &["status", "--porcelain"]).unwrap();
+
+        let files = changes(&repo.join("sub"), &head(repo)).unwrap();
+        let by = |p: &str| files.iter().find(|f| f.path == p).unwrap_or_else(|| panic!("{p} in {files:?}"));
+        let a = by("a.txt");
+        assert_eq!((a.status.as_str(), a.added, a.removed), ("modified", 2, 1));
+        let lines: Vec<_> = a.lines.iter().map(|l| (l.kind.as_str(), l.old, l.new, l.text.as_str())).collect();
+        assert_eq!(lines, vec![
+            ("hunk", None, None, "@@ -1,3 +1,4 @@"),
+            ("ctx", Some(1), Some(1), "one"),
+            ("del", Some(2), None, "two"),
+            ("add", None, Some(2), "2"),
+            ("ctx", Some(3), Some(3), "three"),
+            ("add", None, Some(4), "four"),
+        ]);
+        assert_eq!(by("gone.txt").status, "deleted");
+        let new = by("sub/new file.txt");
+        assert_eq!((new.status.as_str(), new.added), ("added", 1));
+        assert_eq!(git(repo, &["status", "--porcelain"]).unwrap(), status, "the user's index is untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn fan_out_round_trip() {

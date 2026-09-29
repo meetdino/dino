@@ -88,6 +88,36 @@ struct MemberInfo: Codable, Identifiable, Equatable {
     var id: String { session }
 }
 
+/// A session's changes, per file (see worktree::changes).
+struct Changes: Codable, Equatable {
+    /// The checkout the paths are in, and what they're compared with, in words.
+    var root: String
+    var base: String
+    var files: [FileDiff]
+    /// Why there's nothing to show (not a git repo).
+    var note: String?
+}
+
+struct FileDiff: Codable, Equatable, Identifiable {
+    var path: String
+    var old_path: String?
+    var status: String
+    var added: UInt32
+    var removed: UInt32
+    var binary: Bool
+    var lines: [DiffLine]
+    var truncated: Bool
+    var id: String { path }
+}
+
+struct DiffLine: Codable, Equatable {
+    /// "hunk", "add", "del" or "ctx".
+    var kind: String
+    var old: UInt32?
+    var new: UInt32?
+    var text: String
+}
+
 private struct GroupsResponse: Decodable {
     var groups: [GroupInfo]
 }
@@ -174,6 +204,15 @@ final class DinoConnection: @unchecked Sendable {
 
     func diff(session: String) throws -> String {
         try JSONDecoder().decode(DiffResponse.self, from: send(["type": "diff", "session": session])).text
+    }
+
+    func changes(session: String) throws -> Changes {
+        try JSONDecoder().decode(Changes.self, from: send(["type": "changes", "id": session]))
+    }
+
+    /// Type `text` into a session as a paste; `submit` presses Return after it.
+    func sendInput(session: String, text: String, submit: Bool) throws {
+        _ = try send(["type": "send_input", "id": session, "text": text, "submit": submit])
     }
 
     /// Continue `session` in dino; returns the new dino session id.

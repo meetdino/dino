@@ -213,6 +213,18 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok((stat, text)) => Response::Diff { stat, text },
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::Changes { id } => changes(d, &id).unwrap_or_else(|e| Response::Error { message: e.to_string() }),
+            Request::SendInput { id, text, submit } => {
+                let session = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
+                match session {
+                    Some(s) if !s.pane.is_exited() => {
+                        send_input(&s, &text, submit);
+                        Response::Ok
+                    }
+                    Some(_) => Response::Error { message: format!("{id} has exited") },
+                    None => Response::Error { message: format!("no session {id}") },
+                }
+            }
             Request::Keep { session } => match keep(d, &session) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
@@ -846,6 +858,33 @@ fn find_member(d: &Daemon, session: &str) -> anyhow::Result<(Group, Member)> {
 fn member_diff(d: &Daemon, session: &str) -> anyhow::Result<(ipc::DiffStat, String)> {
     let (g, m) = find_member(d, session)?;
     Ok((dino_core::worktree::stat(&m.worktree, &g.base)?, dino_core::worktree::diff(&m.worktree, &g.base)?))
+}
+
+/// What `id` changed: a fan-out member since its fan-out began (edits it committed included),
+/// any other session since the last commit of the checkout it runs in.
+fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
+    let cwd = d.sessions.lock().unwrap().iter().find(|s| s.id == id).map(|s| s.cwd.clone());
+    let cwd = cwd.ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    let (dir, base, label) = match find_member(d, id) {
+        Ok((g, m)) => (m.worktree, g.base, "where the fan-out started".to_string()),
+        Err(_) => match worktree::repo_root(&cwd) {
+            Ok(root) => {
+                let head = worktree::head(&root);
+                (root, head, "the last commit".to_string())
+            }
+            Err(e) => return Ok(Response::Changes { root: real(&cwd), base: String::new(), files: vec![], note: Some(e.to_string()) }),
+        },
+    };
+    Ok(Response::Changes { root: real(&dir), files: worktree::changes(&dir, &base)?, base: label, note: None })
+}
+
+/// A paste, then Return a moment later: sent together, some agents take the Return as part of it.
+fn send_input(s: &Session, text: &str, submit: bool) {
+    s.pane.paste(text);
+    if submit {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        s.pane.write(b"\r".to_vec());
+    }
 }
 
 /// The winner's changes land in the user's checkout, uncommitted; the whole group closes.

@@ -75,6 +75,11 @@ pub enum Request {
     Tree { folders: Vec<String> },
     /// A fan-out member's changes as a patch.
     Diff { session: String },
+    /// Any session's changes, per file, for review: a fan-out member's since its fan-out began,
+    /// any other since its checkout's last commit.
+    Changes { id: String },
+    /// Type `text` into a session, as a paste; `submit` presses Return after it.
+    SendInput { id: String, text: String, submit: bool },
     /// Apply this member's changes to the user's checkout and close its group.
     Keep { session: String },
     /// Close a fan-out group: stop its agents, remove their worktrees and branches.
@@ -99,6 +104,9 @@ pub enum Response {
     Groups { groups: Vec<GroupInfo> },
     Tree { repos: Vec<RepoInfo> },
     Diff { stat: DiffStat, text: String },
+    /// `root` is the checkout the paths are in, `base` what they're compared with (for people).
+    /// No repo: no files, and `note` says why.
+    Changes { root: String, base: String, files: Vec<FileDiff>, note: Option<String> },
     Settings { settings: crate::settings::Settings },
     Keys { keys: Vec<crate::settings::KeyInfo> },
     Ok,
@@ -155,7 +163,7 @@ pub struct RepoInfo {
     pub worktrees: Vec<Worktree>,
 }
 
-pub use crate::worktree::DiffStat;
+pub use crate::worktree::{DiffLine, DiffStat, FileDiff};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GroupInfo {

@@ -53,6 +53,8 @@ struct DinoApp: App {
                 Divider()
                 Button("Jump to Session Needing You") { model.jumpToAttention() }
                     .keyboardShortcut("j")
+                Button(model.showReview ? "Hide Changes" : "Review Changes") { model.showReview.toggle() }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
                 ForEach(Array(model.sessions.prefix(9).enumerated()), id: \.element.id) { i, s in
                     Button("\(i + 1)  \(s.name)") { model.select(s.id) }
                         .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
@@ -145,7 +147,13 @@ struct ContentView: View {
             Sidebar()
                 .navigationSplitViewColumnWidth(min: 230, ideal: 260, max: 340)
         } detail: {
-            Terminals()
+            HSplitView {
+                Terminals()
+                if model.showReview, let s = model.sessions.first(where: { $0.id == model.selected }) {
+                    ReviewPanel(session: s)
+                        .frame(minWidth: 340, idealWidth: 480, maxWidth: 900)
+                }
+            }
         }
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
@@ -235,6 +243,13 @@ struct Terminals: View {
                 .help("One prompt to several agents, each in its own worktree (⇧⌘N)")
             }
             ToolbarItem(placement: .primaryAction) { NewSessionMenu() }
+            ToolbarItem(placement: .primaryAction) {
+                Button { model.showReview.toggle() } label: {
+                    Label("Changes", systemImage: model.showReview ? "plusminus.circle.fill" : "plusminus.circle")
+                }
+                .help("Review this session's changes; click a line to comment for the agent (⇧⌘D)")
+                .disabled(!model.sessions.contains { $0.id == model.selected })
+            }
         }
     }
 }
