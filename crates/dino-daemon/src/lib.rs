@@ -874,9 +874,10 @@ fn member_diff(d: &Daemon, session: &str) -> anyhow::Result<(ipc::DiffStat, Stri
 fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
     let cwd = d.sessions.lock().unwrap().iter().find(|s| s.id == id).map(|s| s.cwd.clone());
     let cwd = cwd.ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-    let (dir, base, label) = match find_member(d, id) {
-        Ok((g, m)) => (m.worktree, g.base, "where the fan-out started".to_string()),
-        Err(_) => match worktree::repo_root(&cwd) {
+    let (dir, base, label) = match (find_member(d, id), session_worktree(d, &cwd)) {
+        (Ok((g, m)), _) => (m.worktree, g.base, "where the fan-out started".to_string()),
+        (Err(_), Some(w)) => (w.path, w.base, "where the worktree started".to_string()),
+        (Err(_), None) => match worktree::repo_root(&cwd) {
             Ok(root) => {
                 let head = worktree::head(&root);
                 (root, head, "the last commit".to_string())
@@ -885,6 +886,11 @@ fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
         },
     };
     Ok(Response::Changes { root: real(&dir), files: worktree::changes(&dir, &base)?, base: label, note: None })
+}
+
+/// The worktree dino made that `dir` is in: its commits count as changes too.
+fn session_worktree(d: &Daemon, dir: &Path) -> Option<SessionWorktree> {
+    d.worktrees.lock().unwrap().iter().find(|w| dir.starts_with(&w.path)).cloned()
 }
 
 /// A paste, then Return a moment later: sent together, some agents take the Return as part of it.
