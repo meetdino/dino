@@ -86,6 +86,20 @@ extension DinoModel {
         select(s.other(id))
     }
 
+    /// ⌘\ (Claude desktop's key): the pane with focus goes, a split's or else the side pane, never the window.
+    func closeFocusedPane() {
+        if let split = shownSplit, sidePane == nil || split.contains(focusedTerminal) {
+            if let id = selected { closePane(id) }
+        } else if sidePane != nil {
+            closeSidePane()
+        }
+    }
+
+    /// ⌃` (Claude desktop's terminal toggle): a shell below the session, or its shell gone again.
+    func toggleTerminal() {
+        if let shell = shownSplit?.helper { closePane(shell) } else { splitWithShell(vertical: true) }
+    }
+
     func updateSplit(_ s: Split, _ change: (inout Split) -> Void) {
         guard let i = splits.firstIndex(of: s) else { return }
         change(&splits[i])
@@ -256,8 +270,12 @@ struct SplitMenuItems: View {
             }
         }
         .disabled(session == nil || model.sessions.count < 2)
-        Button("Close Pane") { if let id = model.selected { model.closePane(id) } }
-            .disabled(model.shownSplit == nil)
+        Button(model.shownSplit?.helper == nil ? "Show Terminal" : "Hide Terminal") { model.toggleTerminal() }
+            .keyboardShortcut(shortcuts ? KeyboardShortcut("`", modifiers: .control) : nil)
+            .disabled(session == nil)
+        Button("Close Pane") { model.closeFocusedPane() }
+            .keyboardShortcut(shortcuts ? KeyboardShortcut("\\") : nil)
+            .disabled(model.shownSplit == nil && model.sidePane == nil)
     }
 }
 
