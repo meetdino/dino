@@ -40,6 +40,9 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var scheduled: String?
     /// The name the user gave it; `title` is this too while it's set.
     var label: String?
+    /// The session whose agent started it, and the one that last messaged it (through `dino mcp`).
+    var started_by: String?
+    var messaged_by: String?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
@@ -292,6 +295,10 @@ private struct ReviewResponse: Decodable {
     var findings: [Finding]
 }
 
+private struct TextResponse: Decodable {
+    var text: String
+}
+
 private struct GroupsResponse: Decodable {
     var groups: [GroupInfo]
 }
@@ -391,6 +398,15 @@ final class DinoConnection: @unchecked Sendable {
 
     func cancelReview(session: String) throws {
         _ = try send(["type": "review_cancel", "id": session])
+    }
+
+    /// Claude's answer to a question about a session (side chat). Blocks for as long as it takes.
+    func ask(session: String, question: String) throws -> String {
+        try JSONDecoder().decode(TextResponse.self, from: send(["type": "ask", "id": session, "question": question])).text
+    }
+
+    func cancelAsk(session: String) throws {
+        _ = try send(["type": "ask_cancel", "id": session])
     }
 
     /// Type `text` into a session as a paste; `submit` presses Return after it.

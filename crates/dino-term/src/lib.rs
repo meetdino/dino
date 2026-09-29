@@ -265,6 +265,36 @@ impl Pane {
         f(bytes)
     }
 
+    /// What the screen shows as plain text, with up to `history` lines of scrollback above it;
+    /// trailing blanks and blank lines at the end left out.
+    pub fn text(&self, history: usize) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let alt = term.mode().contains(TermMode::ALT_SCREEN);
+        let hist = if alt { 0 } else { grid.history_size().min(history) as i32 };
+        let cols = grid.columns();
+        let mut lines: Vec<String> = Vec::new();
+        for line in -hist..grid.screen_lines() as i32 {
+            let row = &grid[Line(line)];
+            let mut text = String::new();
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
+                if let Some(extra) = cell.zerowidth() {
+                    text.extend(extra);
+                }
+            }
+            lines.push(text.trim_end().to_string());
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
     fn replay_of(&self, term: &Term<Listener>, history: usize) -> Vec<u8> {
         let grid = term.grid();
         let mode = *term.mode();

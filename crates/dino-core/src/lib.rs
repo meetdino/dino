@@ -2,15 +2,18 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod ask;
 pub mod controls;
 pub mod discover;
 pub mod found;
 pub mod ipc;
+pub mod mcp;
 pub mod pr;
 pub mod preview;
 pub mod review;
 pub mod schedule;
 pub mod settings;
+pub mod transcript;
 pub mod trust;
 pub mod worktree;
 

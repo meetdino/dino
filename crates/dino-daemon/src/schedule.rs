@@ -3,12 +3,13 @@
 //! wasn't running is caught up once, when it's back: only the latest one, and only if it's under a
 //! week old (the latest always is: every frequency comes round within a week).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dino_core::schedule::{Frequency, MAX_HISTORY, ScheduledRun, ScheduledTask, split_args};
+use dino_core::ipc::LauncherInfo;
 use dino_core::settings::Settings;
 use dino_core::{trust, worktree};
 
@@ -196,18 +197,7 @@ fn fire(d: &Daemon, t: &ScheduledTask) -> anyhow::Result<String> {
     let l = d.allowed_launcher(&t.launcher)?;
     let dir = work_dir(Some(&t.cwd));
     anyhow::ensure!(dir.is_dir(), "{} doesn't exist any more", t.cwd);
-    if l.agent_id.starts_with("claude") {
-        let root = worktree::repo_root(&dir).unwrap_or_else(|_| dir.clone());
-        anyhow::ensure!(
-            trust::claude_trusted_in(&dir, &root).is_some(),
-            "Claude doesn't trust {} yet. Start Claude there once and accept its trust prompt",
-            dir.display()
-        );
-        anyhow::ensure!(
-            !t.worktree || Settings::load().policies.worktree_trust,
-            "Claude would ask to trust the new worktree. Turn on worktree trust in Settings → Policies, or run without a worktree"
-        );
-    }
+    check_trust(&l, &dir, t.worktree)?;
     let name = {
         let sessions = d.sessions.lock().unwrap();
         let taken = |n: &str| sessions.iter().any(|s| s.name == n);
@@ -230,8 +220,25 @@ fn fire(d: &Daemon, t: &ScheduledTask) -> anyhow::Result<String> {
     Ok(id)
 }
 
+/// Claude asks whether to trust a folder it hasn't seen; with nobody there to answer, refuse up front.
+pub(crate) fn check_trust(l: &LauncherInfo, dir: &Path, worktree: bool) -> anyhow::Result<()> {
+    if l.agent_id.starts_with("claude") {
+        let root = worktree::repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
+        anyhow::ensure!(
+            trust::claude_trusted_in(dir, &root).is_some(),
+            "Claude doesn't trust {} yet. Start Claude there once and accept its trust prompt",
+            dir.display()
+        );
+        anyhow::ensure!(
+            !worktree || Settings::load().policies.worktree_trust,
+            "Claude would ask to trust the new worktree. Turn on worktree trust in Settings → Policies, or run without a worktree"
+        );
+    }
+    Ok(())
+}
+
 /// Type `text` into a new session once it has drawn its prompt and gone quiet.
-fn type_when_ready(d: &Daemon, id: &str, text: &str) {
+pub(crate) fn type_when_ready(d: &Daemon, id: &str, text: &str) {
     let Some(s) = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() else { return };
     let text = text.to_string();
     std::thread::spawn(move || {

@@ -25,7 +25,7 @@ pub struct Finding {
 
 const MODEL: &str = "sonnet";
 /// Nothing the reviewer runs may change the checkout or leave it.
-const DISALLOWED: &str = "Write,Edit,MultiEdit,NotebookEdit,Bash,Artifact,WebFetch,WebSearch";
+pub(crate) const DISALLOWED: &str = "Write,Edit,MultiEdit,NotebookEdit,Bash,Artifact,WebFetch,WebSearch";
 /// Past this, the patch is cut and the reviewer reads the rest from the files.
 const MAX_PATCH: usize = 300_000;
 const TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -83,13 +83,35 @@ Reply with ONLY a JSON array, no prose and no code fence:
 pub fn run(key: &str, dir: &Path, base: &str) -> anyhow::Result<Vec<Finding>> {
     let patch = crate::worktree::changes_patch(dir, base)?;
     anyhow::ensure!(!patch.trim().is_empty(), "Nothing has changed, so there's nothing to review");
+    // No MCP servers.
+    let args = ["--model", MODEL, "--disallowedTools", DISALLOWED, "--strict-mcp-config"].map(String::from);
+    let out = headless(key, dir, &args, prompt(&patch), TIMEOUT, "review")?;
+    let mut findings = parse_findings(&out)?;
+    // Paths as the diff has them, should the model answer with absolute ones.
+    let root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    for f in findings.iter_mut().filter(|f| f.file.starts_with('/')) {
+        // Through symlinks (/tmp is /private/tmp), and for files since deleted, their folder.
+        let p = Path::new(&f.file);
+        let real = p.canonicalize().ok().or_else(|| Some(p.parent()?.canonicalize().ok()?.join(p.file_name()?)));
+        if let Some(rel) = real.as_deref().and_then(|p| p.strip_prefix(&root).ok()) {
+            f.file = rel.to_string_lossy().into_owned();
+        }
+    }
+    Ok(findings)
+}
+
+/// Run `claude -p` in `dir` with `args` and `input` on stdin, and answer with its reply. Blocks
+/// until Claude answers, `cancel` is called for `key`, or `timeout` passes. `what` names the job
+/// in errors ("review").
+pub(crate) fn headless(key: &str, dir: &Path, args: &[String], input: String, timeout: Duration, what: &str) -> anyhow::Result<String> {
     let claude = crate::which("claude").ok_or_else(|| {
-        anyhow::anyhow!("Review needs Claude Code, and `claude` isn't installed. Install it (npm install -g @anthropic-ai/claude-code), then try again.")
+        anyhow::anyhow!("This needs Claude Code, and `claude` isn't installed. Install it (npm install -g @anthropic-ai/claude-code), then try again.")
     })?;
     let mut child = Command::new(claude)
-        .args(["-p", "--output-format", "json", "--model", MODEL, "--disallowedTools", DISALLOWED])
-        // No MCP servers, and no entry in the user's resumable sessions.
-        .args(["--strict-mcp-config", "--no-session-persistence"])
+        .args(["-p", "--output-format", "json"])
+        .args(args)
+        // No entry in the user's resumable sessions.
+        .arg("--no-session-persistence")
         .current_dir(dir)
         .env("NO_COLOR", "1")
         .stdin(Stdio::piped())
@@ -104,7 +126,6 @@ pub fn run(key: &str, dir: &Path, base: &str) -> anyhow::Result<Vec<Finding>> {
             kill_group(old);
         }
     }
-    let input = prompt(&patch);
     let mut stdin = child.stdin.take().unwrap();
     std::thread::spawn(move || {
         let _ = stdin.write_all(input.as_bytes());
@@ -126,7 +147,7 @@ pub fn run(key: &str, dir: &Path, base: &str) -> anyhow::Result<Vec<Finding>> {
         if let Some(st) = child.try_wait()? {
             break Some(st);
         }
-        if start.elapsed() > TIMEOUT {
+        if start.elapsed() > timeout {
             kill_group(pid);
             let _ = child.wait();
             break None;
@@ -136,7 +157,7 @@ pub fn run(key: &str, dir: &Path, base: &str) -> anyhow::Result<Vec<Finding>> {
     let cancelled = {
         let mut running = RUNNING.lock().unwrap();
         let map = running.get_or_insert_with(HashMap::new);
-        // Gone, or replaced by a newer review: someone cancelled this one.
+        // Gone, or replaced by a newer run: someone cancelled this one.
         let ours = map.get(key) == Some(&pid);
         if ours {
             map.remove(key);
@@ -144,23 +165,12 @@ pub fn run(key: &str, dir: &Path, base: &str) -> anyhow::Result<Vec<Finding>> {
         !ours
     };
     let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
-    anyhow::ensure!(!cancelled, "Review cancelled");
-    let status = status.ok_or_else(|| anyhow::anyhow!("The review took longer than {} minutes and was stopped", TIMEOUT.as_secs() / 60))?;
-    let mut findings = parse_output(&out).map_err(|e| if status.success() || err.trim().is_empty() { e } else { anyhow::anyhow!("claude: {}", last_line(&err)) })?;
-    // Paths as the diff has them, should the model answer with absolute ones.
-    let root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    for f in findings.iter_mut().filter(|f| f.file.starts_with('/')) {
-        // Through symlinks (/tmp is /private/tmp), and for files since deleted, their folder.
-        let p = Path::new(&f.file);
-        let real = p.canonicalize().ok().or_else(|| Some(p.parent()?.canonicalize().ok()?.join(p.file_name()?)));
-        if let Some(rel) = real.as_deref().and_then(|p| p.strip_prefix(&root).ok()) {
-            f.file = rel.to_string_lossy().into_owned();
-        }
-    }
-    Ok(findings)
+    anyhow::ensure!(!cancelled, "Cancelled");
+    let status = status.ok_or_else(|| anyhow::anyhow!("The {what} took longer than {} minutes and was stopped", timeout.as_secs() / 60))?;
+    result_text(&out, what).map_err(|e| if status.success() || err.trim().is_empty() { e } else { anyhow::anyhow!("claude: {}", last_line(&err)) })
 }
 
-/// Stop the review running for `key`, if any.
+/// Stop the review (or other headless run) going for `key`, if any.
 pub fn cancel(key: &str) -> bool {
     let pid = RUNNING.lock().unwrap().get_or_insert_with(HashMap::new).remove(key);
     if let Some(pid) = pid {
@@ -178,7 +188,7 @@ fn last_line(s: &str) -> &str {
 }
 
 /// `claude -p --output-format json` prints one result object; its `result` holds the answer text.
-fn parse_output(out: &str) -> anyhow::Result<Vec<Finding>> {
+fn result_text(out: &str, what: &str) -> anyhow::Result<String> {
     #[derive(Deserialize)]
     struct Result {
         #[serde(default)]
@@ -187,8 +197,13 @@ fn parse_output(out: &str) -> anyhow::Result<Vec<Finding>> {
         result: String,
     }
     let r: Result = serde_json::from_str(out.trim()).map_err(|_| anyhow::anyhow!("Claude's answer wasn't readable: {}", last_line(out)))?;
-    anyhow::ensure!(!r.is_error, "Claude couldn't review: {}", if r.result.is_empty() { "unknown error" } else { r.result.trim() });
-    parse_findings(&r.result)
+    anyhow::ensure!(!r.is_error, "Claude couldn't {what}: {}", if r.result.is_empty() { "unknown error" } else { r.result.trim() });
+    Ok(r.result)
+}
+
+#[cfg(test)]
+fn parse_output(out: &str) -> anyhow::Result<Vec<Finding>> {
+    parse_findings(&result_text(out, "review")?)
 }
 
 /// The JSON array in the answer, even if the model wrapped it in a fence or a sentence.

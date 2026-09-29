@@ -1,4 +1,5 @@
 mod client;
+mod mcp;
 
 use std::io;
 use std::sync::atomic::Ordering;
@@ -763,6 +764,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
        dino ls | new [--worktree] <agent> [args...] | attach <id> | kill <id> | ping | stop | daemon
        dino found | continue <session-id prefix>
+       dino mcp [--read-only]   (MCP server on stdio: agents list, read, message and start sessions)
        dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>";
 
 fn main() -> anyhow::Result<()> {
@@ -771,6 +773,7 @@ fn main() -> anyhow::Result<()> {
         Some("daemon") => return dino_daemon::run(),
         Some("attach") => return client::attach_raw(cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?),
         Some("ls") => return cmd_ls(),
+        Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
         Some("found") => return cmd_found(),
         Some("fan") => return cmd_fan(&cli[1..]),
         Some("groups") => return cmd_groups(),
