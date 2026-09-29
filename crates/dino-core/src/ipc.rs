@@ -177,7 +177,12 @@ pub enum Response {
     /// `root` is the checkout the paths are in, `base` what they're compared with (for people).
     /// No repo: no files, and `note` says why.
     Changes { root: String, base: String, files: Vec<FileDiff>, note: Option<String> },
-    Settings { settings: crate::settings::Settings },
+    /// `settings` is what's in effect; `locked` the key paths an organization sets ("policies.allow_bypass").
+    Settings {
+        settings: crate::settings::Settings,
+        #[serde(default)]
+        locked: Vec<String>,
+    },
     Keys { keys: Vec<crate::settings::KeyInfo> },
     PrDraft { draft: PrDraft },
     Pr { pr: PrInfo },

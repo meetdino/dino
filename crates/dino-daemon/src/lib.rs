@@ -238,10 +238,12 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::State => state(d),
             Request::Launchers => Response::Launchers { launchers: d.offered() },
             Request::AllLaunchers => Response::Launchers { launchers: d.all_launchers() },
-            Request::Settings => Response::Settings { settings: Settings::load() },
+            Request::Settings => {
+                Response::Settings { settings: Settings::load(), locked: dino_core::settings::Managed::load().locked_paths() }
+            }
             Request::SetSettings { settings } => match settings.save() {
                 Ok(()) => {
-                    d.proxy.set_budget(settings.policies.session_token_budget);
+                    d.proxy.set_budget(Settings::load().policies.session_token_budget);
                     schedule::keep_awake(d);
                     Response::Ok
                 }

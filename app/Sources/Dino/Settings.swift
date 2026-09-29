@@ -44,12 +44,20 @@ struct KeyInfo: Codable, Identifiable, Equatable {
     var id: String { name }
 }
 
-private struct SettingsResponse: Decodable { let settings: DinoSettings }
+private struct SettingsResponse: Decodable {
+    let settings: DinoSettings
+    /// Key paths an organization sets, like "policies.allow_bypass"; nil from an older dinod.
+    let locked: [String]?
+}
 private struct KeysResponse: Decodable { let keys: [KeyInfo] }
 
 extension DinoConnection {
     func settings() throws -> DinoSettings {
-        try JSONDecoder().decode(SettingsResponse.self, from: send(["type": "settings"])).settings
+        try settingsAndLocks().settings
+    }
+
+    fileprivate func settingsAndLocks() throws -> SettingsResponse {
+        try JSONDecoder().decode(SettingsResponse.self, from: send(["type": "settings"]))
     }
 
     func setSettings(_ settings: DinoSettings) throws {
@@ -78,16 +86,24 @@ extension DinoConnection {
 @MainActor
 final class SettingsStore: ObservableObject {
     @Published var settings: DinoSettings?
+    /// What the organization sets (managed-settings.json), by key path.
+    @Published var locked: [String] = []
     @Published var keys: [KeyInfo] = []
     @Published var agents: [LauncherInfo] = []
     @Published var error: String?
 
     func load() {
-        run { c in (try c.settings(), try c.keys(), try c.allLaunchers()) } done: {
-            self.settings = $0.0
+        run { c in (try c.settingsAndLocks(), try c.keys(), try c.allLaunchers()) } done: {
+            self.settings = $0.0.settings
+            self.locked = $0.0.locked ?? []
             self.keys = $0.1
             self.agents = $0.2
         }
+    }
+
+    /// `path` ("policies.allow_bypass", "agents.claude") or something in it is set by the organization.
+    func isLocked(_ path: String) -> Bool {
+        locked.contains { $0 == path || $0.hasPrefix(path + ".") || path.hasPrefix($0 + ".") }
     }
 
     func update(_ change: (inout DinoSettings) -> Void) {
@@ -295,6 +311,38 @@ struct Footnote: View {
     }
 }
 
+/// Marks a setting the organization sets; hover says so.
+struct OrgLock: View {
+    var body: some View {
+        Image(systemName: "lock.fill")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .help("Set by your organization")
+    }
+}
+
+/// A setting row that's locked when the organization sets `path`: disabled, with the lock before it.
+private struct OrgLocked: ViewModifier {
+    @EnvironmentObject var store: SettingsStore
+    let path: String
+
+    func body(content: Content) -> some View {
+        if store.isLocked(path) {
+            HStack(spacing: 6) {
+                OrgLock()
+                content.disabled(true)
+            }
+            .help("Set by your organization")
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func orgLocked(_ path: String) -> some View { modifier(OrgLocked(path: path)) }
+}
+
 /// Shown under a pane when dinod refused or couldn't be reached.
 private struct StoreError: View {
     @EnvironmentObject var store: SettingsStore
@@ -330,6 +378,7 @@ private struct GeneralPane: View {
                     set: { on in store.update { $0.machine.keep_awake = on } }
                 ))
                 .disabled(store.settings == nil)
+                .orgLocked("machine.keep_awake")
             } footer: {
                 Footnote("So scheduled tasks run on time. Closing the lid still sleeps it; missed tasks run once when it wakes.")
             }
@@ -379,6 +428,7 @@ private struct PoliciesPane: View {
             Section {
                 ForEach(agents) { l in
                     Toggle(l.label, isOn: allowed(l))
+                        .orgLocked("policies.allowed_agents")
                 }
                 Picker("⌘N starts", selection: Binding(
                     get: {
@@ -392,6 +442,7 @@ private struct PoliciesPane: View {
                         Text(l.label).tag(l.short)
                     }
                 }
+                .orgLocked("policies.default_agent")
             } header: {
                 Text("Agents")
             } footer: {
@@ -402,6 +453,7 @@ private struct PoliciesPane: View {
                     get: { policies?.worktree_trust ?? true },
                     set: { on in store.update { $0.policies.worktree_trust = on } }
                 ))
+                .orgLocked("policies.worktree_trust")
             } header: {
                 Text("Fan-out")
             } footer: {
@@ -412,6 +464,7 @@ private struct PoliciesPane: View {
                     get: { policies?.close_merged ?? false },
                     set: { on in store.update { $0.policies.close_merged = on } }
                 ))
+                .orgLocked("policies.close_merged")
             } header: {
                 Text("Pull requests")
             } footer: {
@@ -434,6 +487,7 @@ private struct PoliciesPane: View {
                         }
                     }
                 ))
+                .orgLocked("policies.allow_bypass")
             } header: {
                 Text("Permissions")
             } footer: {
@@ -448,6 +502,7 @@ private struct PoliciesPane: View {
                         Text(n == 0 ? "No limit" : Self.format(n)).tag(n)
                     }
                 }
+                .orgLocked("policies.session_token_budget")
             } header: {
                 Text("Budget")
             } footer: {
@@ -485,6 +540,7 @@ private struct RoutingPane: View {
                         set: { on in store.update { $0.routing.proxy = on } }
                     ))
                     .disabled(store.settings == nil)
+                    .orgLocked("routing.proxy")
                 } footer: {
                     Footnote("dino's local proxy counts tokens per session and serves the free tier. Off, agents talk to their providers directly. Applies to sessions you start from now on.")
                 }
@@ -615,10 +671,15 @@ private struct AgentsPane: View {
                 }
             }
             ForEach(agents) { l in
+                let locked = store.isLocked("agents.\(l.agent_id)")
                 Section {
                     ControlFields(knobs: l.knobs!, controls: controls(l.agent_id))
+                        .disabled(locked)
                 } header: {
-                    Text(l.label)
+                    HStack(spacing: 6) {
+                        Text(l.label)
+                        if locked { OrgLock() }
+                    }
                 }
             }
             Section {} footer: {
@@ -661,6 +722,7 @@ private struct ReposPane: View {
             }
             ForEach(shown, id: \.self) { path in
                 let env = repos[path]?.env ?? [:]
+                let locked = store.isLocked("repos.\(path)")
                 Section {
                     ForEach(env.keys.sorted(), id: \.self) { key in
                         EnvRow(key: key, value: env[key] ?? "") { value in
@@ -668,6 +730,7 @@ private struct ReposPane: View {
                         } remove: {
                             setEnv(path) { $0[key] = nil }
                         }
+                        .orgLocked("repos.\(path).env.\(key)")
                     }
                     NewEnvRow(taken: Set(env.keys)) { key, value in
                         setEnv(path) { $0[key] = value }
@@ -677,6 +740,7 @@ private struct ReposPane: View {
                     HStack {
                         Text((path as NSString).lastPathComponent)
                         Text((path as NSString).abbreviatingWithTildeInPath).foregroundStyle(.secondary).fontWeight(.regular)
+                        if locked { OrgLock() }
                         Spacer()
                         Button("Remove") {
                             setEnv(path) { $0 = [:] }
@@ -685,6 +749,7 @@ private struct ReposPane: View {
                         .buttonStyle(.link)
                         .font(.callout)
                         .help("Remove this repo's variables")
+                        .disabled(locked)
                     }
                 }
             }
