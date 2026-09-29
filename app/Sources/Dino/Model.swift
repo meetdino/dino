@@ -70,9 +70,16 @@ final class DinoModel: ObservableObject {
     @Published private(set) var attention: Set<String> = []
     @Published private(set) var unseenDone: Set<String> = []
 
+    /// Sessions shown side by side; selecting either one shows both.
+    @Published var splits: [Split] = Split.saved() {
+        didSet { if splits != oldValue { Split.save(splits) } }
+    }
+    /// Split partners dinod has started that no poll has listed yet.
+    var awaited: Set<String> = []
+
     /// One live Ghostty surface per session, kept mounted so switching is instant.
     private(set) var terminals: [String: TerminalViewState] = [:]
-    private var connection: DinoConnection?
+    private(set) var connection: DinoConnection?
     private var polling = false
 
     func start() {
@@ -172,6 +179,10 @@ final class DinoModel: ObservableObject {
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
         terminals = terminals.filter { live.contains($0.key) }
+        // A pane whose session ended closes, as it would in a terminal.
+        awaited.subtract(live)
+        let kept = splits.filter { [$0.first, $0.second].allSatisfy { live.contains($0) || awaited.contains($0) } }
+        if kept != splits { splits = kept }
         if let want = pendingSelect, live.contains(want) {
             pendingSelect = nil
             select(want)
@@ -219,9 +230,17 @@ final class DinoModel: ObservableObject {
         if let pick { select(pick) }
     }
 
+    /// Ghostty handles its own shortcuts before the menu sees them (⌘D splits, ⌘W closes, ⌘K
+    /// clears), so a focused pane would swallow dino's. Hand those keys back to the menu.
+    static let terminals = TerminalController(configSource: .generated(
+        (["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace"]
+            + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
+            .map { "keybind = super+\($0)=unbind" }.joined(separator: "\n")
+    ))
+
     func terminal(for id: String) -> TerminalViewState {
         if let t = terminals[id] { return t }
-        let t = TerminalViewState()
+        let t = TerminalViewState(controller: Self.terminals)
         t.configuration = TerminalSurfaceOptions(
             backend: .exec,
             envVars: ["PATH": DinoEnvironment.loginPath, "DINO_HOME": DinoEnvironment.home],
@@ -300,7 +319,7 @@ final class DinoModel: ObservableObject {
         }
     }
 
-    private var pendingSelect: String?
+    var pendingSelect: String?
 
     /// Diff sizes need git, so these refresh slower than session state. Launchers too: keys and
     /// policies change which agents can start.
