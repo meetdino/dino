@@ -1920,7 +1920,8 @@ fn read_subagent(d: &Daemon, session: &str, id: &str) -> Option<ipc::SubagentVie
                 agent_type: a.agent_type,
                 description: a.description,
                 running: a.running,
-                turns: None,
+                task: None,
+                conversation: None,
             },
             output,
         ),
@@ -1933,7 +1934,8 @@ fn read_subagent(d: &Daemon, session: &str, id: &str) -> Option<ipc::SubagentVie
                 agent_type: a.agent_type,
                 description: a.description,
                 running: false,
-                turns: None,
+                task: None,
+                conversation: None,
             };
             (view, None)
         }
@@ -1945,7 +1947,9 @@ fn read_subagent(d: &Daemon, session: &str, id: &str) -> Option<ipc::SubagentVie
         .filter(|p| p.extension().is_some_and(|e| e == "jsonl") && p.exists())
         .or_else(|| parent.as_deref().and_then(|p| dino_core::transcript::claude_subagent_path(Some(p), id)))
         .or_else(|| dino_core::transcript::claude_subagent_path(None, id));
-    Some(ipc::SubagentView { turns: transcript.and_then(|p| dino_core::transcript::claude_turns(&p)), ..view })
+    let Some(transcript) = transcript else { return Some(view) };
+    let conversation = dino_core::history::page(&transcript, None);
+    Some(ipc::SubagentView { task: dino_core::history::subagent_task(&transcript), conversation, ..view })
 }
 
 fn base_name(path: &str) -> String {

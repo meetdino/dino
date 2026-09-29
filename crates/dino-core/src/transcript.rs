@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::ipc::TurnInfo;
-
 /// How much of the end of a transcript file is read; enough for the last several turns.
 const READ_TAIL: u64 = 2 << 20;
 
@@ -87,107 +85,6 @@ pub fn claude_subagent_path(parent: Option<&str>, id: &str) -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
-/// Characters of a conversation `claude_turns` gives, the newest kept.
-const TURNS_BUDGET: usize = 200_000;
-/// How much of the end of a transcript is read: screenshots take most of the bytes.
-const TURNS_TAIL: u64 = 8 << 20;
-/// Longer lines are tool results carrying images or files, never something shown.
-const LONGEST_SHOWN_LINE: usize = 256 << 10;
-
-/// A Claude conversation (a session's or a subagent's), oldest first: its task (from the start
-/// of the file, however long it got), then as much of the end as fits.
-pub fn claude_turns(path: &Path) -> Option<Vec<TurnInfo>> {
-    let whole = std::fs::metadata(path).ok()?.len() <= TURNS_TAIL;
-    let mut all = turns(&read_last(path, TURNS_TAIL)?, whole);
-    let task = if whole {
-        all.first().is_some_and(|t| t.role == "task").then(|| all.remove(0))
-    } else {
-        turns(&read_first(path, 1 << 20).unwrap_or_default(), true).into_iter().find(|t| t.role == "task")
-    };
-    Some(fit(task, all, !whole, TURNS_BUDGET))
-}
-
-/// The task, then the newest of `rest` that fit in `budget` characters. `cut`: turns before
-/// `rest` were already left out.
-fn fit(task: Option<TurnInfo>, rest: Vec<TurnInfo>, cut: bool, budget: usize) -> Vec<TurnInfo> {
-    let mut used = 0;
-    let kept = rest.iter().rev().take_while(|t| {
-        used += t.text.len();
-        used <= budget
-    });
-    let from = rest.len() - kept.count();
-    let gap = (cut || from > 0).then(|| TurnInfo { role: "note".into(), text: "Earlier turns left out".into() });
-    task.into_iter().chain(gap).chain(rest.into_iter().skip(from)).collect()
-}
-
-/// The whole lines in the first `bytes` of `p`.
-fn read_first(p: &Path, bytes: u64) -> Option<String> {
-    let mut buf = Vec::new();
-    std::fs::File::open(p).ok()?.take(bytes).read_to_end(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    Some(text.rsplit_once('\n').map_or(String::new(), |(whole, _)| whole.to_string()))
-}
-
-/// A subagent's transcript as turns. Its first message is its task (a fork's comes after the
-/// boilerplate that says it's a fork); what Claude Code adds on its side (reminders, notes about
-/// its setup, screenshots' captions, tool results) is left out. `from_start`: `jsonl` is where
-/// the file begins, not somewhere past the task.
-fn turns(jsonl: &str, from_start: bool) -> Vec<TurnInfo> {
-    let mut out: Vec<TurnInfo> = Vec::new();
-    let mut tasked = !from_start;
-    let turn = |role: &str, text: &str| TurnInfo { role: role.into(), text: text.trim().to_string() };
-    for line in jsonl.lines().filter(|l| l.len() <= LONGEST_SHOWN_LINE) {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if v["isMeta"] == true {
-            continue;
-        }
-        let content = &v["message"]["content"];
-        match v["type"].as_str() {
-            Some("user") => {
-                let blocks = content.as_array().into_iter().flatten().filter(|b| b["type"] == "text");
-                for text in content.as_str().into_iter().chain(blocks.filter_map(|b| b["text"].as_str())) {
-                    let text = text.trim();
-                    if let Some((_, rest)) = text.split_once("</fork-boilerplate>") {
-                        let rest = rest.trim();
-                        out.push(turn("task", rest.strip_prefix("Your directive:").unwrap_or(rest)));
-                        tasked = true;
-                    } else if text.starts_with("This session is being continued") {
-                        out.push(turn("note", "Its context was compacted"));
-                    } else if text.starts_with("[Request interrupted") {
-                        out.push(turn("note", "Interrupted"));
-                    } else if let Some(msg) = text.strip_prefix("The coordinator sent a message while you were working:") {
-                        out.push(turn("user", msg));
-                    } else if !(text.is_empty()
-                        || text.starts_with('<')
-                        || text.starts_with("[Image")
-                        || text.starts_with("You've inherited the conversation context")
-                        || text.starts_with("Your response above was cut off"))
-                    {
-                        out.push(turn(if tasked { "user" } else { "task" }, text));
-                        tasked = true;
-                    }
-                }
-            }
-            // Before its task, a fork's transcript repeats the call that started it.
-            Some("assistant") if tasked => {
-                for block in content.as_array().into_iter().flatten() {
-                    match block["type"].as_str() {
-                        Some("text") => out.push(turn("agent", block["text"].as_str().unwrap_or(""))),
-                        Some("tool_use") => {
-                            let name = block["name"].as_str().unwrap_or("tool");
-                            out.push(turn("tool", &format!("{name}{}", tool_hint(&block["input"]))));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out.retain(|t| !t.text.is_empty());
-    out
-}
-
 /// Transcript JSONL as "User: …" / "Claude: …" lines, tool calls in brackets, newest last,
 /// keeping whole entries from the end up to `budget` characters.
 pub fn render(jsonl: &str, budget: usize) -> String {
@@ -229,25 +126,12 @@ fn entry(v: &Value) -> Option<String> {
     for block in content.as_array().into_iter().flatten() {
         match block["type"].as_str() {
             Some("text") => parts.push(block["text"].as_str().unwrap_or("").trim().to_string()),
-            Some("tool_use") => parts.push(format!("[{}{}]", block["name"].as_str().unwrap_or("tool"), tool_hint(&block["input"]))),
+            Some("tool_use") => parts.push(format!("[{}{}]", block["name"].as_str().unwrap_or("tool"), crate::history::hint(&block["input"]))),
             _ => {}
         }
     }
     parts.retain(|p| !p.is_empty() && !p.starts_with("<command-") && !p.starts_with("<local-command-"));
     (!parts.is_empty()).then(|| format!("{who}: {}", parts.join("\n")))
-}
-
-/// The telling argument of a tool call, shortened: the command, the file, the pattern.
-fn tool_hint(input: &Value) -> String {
-    let arg = ["command", "file_path", "pattern", "description", "url", "prompt"].iter().find_map(|k| input[*k].as_str());
-    match arg {
-        Some(a) => {
-            let a = a.lines().next().unwrap_or("");
-            let short: String = a.chars().take(100).collect();
-            format!(" {short}{}", if short.len() < a.len() { "…" } else { "" })
-        }
-        None => String::new(),
-    }
 }
 
 #[cfg(test)]
@@ -269,45 +153,6 @@ mod tests {
         // Over budget, the newest entries stay.
         assert_eq!(render(&jsonl, 20), "Claude: Fixed.");
         assert!(render(&jsonl, 5).starts_with('…'));
-    }
-
-    #[test]
-    fn a_subagents_conversation() {
-        let fork = [
-            r#"{"type":"fork-context-ref","agentId":"a1"}"#,
-            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","name":"Agent","input":{"description":"Polish"}}]}}"#,
-            r#"{"type":"user","isSidechain":true,"message":{"content":[{"type":"tool_result","content":"started"},{"type":"text","text":"<fork-boilerplate>\nYou are a fork.\n</fork-boilerplate>\n\nYour directive: Fix the sidebar."}]}}"#,
-            r#"{"type":"user","isSidechain":true,"message":{"content":"You've inherited the conversation context above"}}"#,
-            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"On it."},{"type":"tool_use","name":"Bash","input":{"command":"swift build"}}]}}"#,
-            r#"{"type":"user","isSidechain":true,"message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
-            r#"{"type":"attachment","isSidechain":true}"#,
-            r#"{"type":"user","isSidechain":true,"message":{"content":"[Image: original 3000x1716]"}}"#,
-            r#"{"type":"user","isSidechain":true,"message":{"content":"This session is being continued from a previous conversation"}}"#,
-            r#"{"type":"user","isSidechain":true,"message":{"content":"The coordinator sent a message while you were working: also the toolbar"}}"#,
-            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"Done."}]}}"#,
-        ]
-        .join("\n");
-        let t = |role: &str, text: &str| TurnInfo { role: role.into(), text: text.into() };
-        let all = turns(&fork, true);
-        assert_eq!(all, vec![
-            t("task", "Fix the sidebar."),
-            t("agent", "On it."),
-            t("tool", "Bash swift build"),
-            t("note", "Its context was compacted"),
-            t("user", "also the toolbar"),
-            t("agent", "Done."),
-        ]);
-        // Read from somewhere in the middle, nothing is taken for the task.
-        assert!(turns(&fork.lines().skip(4).collect::<Vec<_>>().join("\n"), false).iter().all(|t| t.role != "task"));
-        // A plain subagent's first message is its task.
-        let plain = r#"{"type":"user","isSidechain":true,"message":{"content":"Find the bug"}}"#;
-        assert_eq!(turns(plain, true), vec![t("task", "Find the bug")]);
-
-        // Over budget: the task, a note, then the newest.
-        let rest = vec![t("agent", "aaaa"), t("agent", "bbbb"), t("agent", "cccc")];
-        assert_eq!(fit(Some(t("task", "x")), rest.clone(), false, 9), vec![t("task", "x"), t("note", "Earlier turns left out"), t("agent", "bbbb"), t("agent", "cccc")]);
-        assert_eq!(fit(None, rest.clone(), false, 100), rest);
-        assert_eq!(fit(None, rest.clone(), true, 100)[0], t("note", "Earlier turns left out"));
     }
 
     #[test]

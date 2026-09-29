@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// One entry of an agent conversation: `role` is "user", "assistant", "tool" (a call, in brief) or
-/// "note" (something that happened, like an interruption).
+/// One entry of an agent conversation: `role` is "task" (what a subagent was asked), "user",
+/// "assistant", "tool" (a call, in brief) or "note" (something that happened, like an interruption).
 struct ConversationTurn: Codable, Equatable, Identifiable {
     var role: String
     var text: String
@@ -13,16 +13,114 @@ struct ConversationTurn: Codable, Equatable, Identifiable {
     static func == (a: Self, b: Self) -> Bool { a.role == b.role && a.text == b.text }
 }
 
-/// A read-only agent conversation, newest at the bottom. Knows nothing about where turns come
-/// from: `earlier` (when set) loads the part before the first turn.
+extension ConversationPage {
+    /// The part of conversation `id` of `agent` (a session's, or a Claude subagent's) ending at
+    /// byte `before`, off the main thread.
+    static func fetch(agent: String, id: String, before: UInt64? = nil) async -> Result<ConversationPage, Error> {
+        await Task.detached {
+            Result { try DinoConnection(path: DinoEnvironment.socketPath).conversation(agent: agent, sessionID: id, before: before) }
+        }.value
+    }
+}
+
+/// A read-only agent conversation, newest at the bottom, from the newest part of its transcript
+/// (`page`, which the owner keeps fresh). `earlier` (when set) loads the part before what's shown;
+/// once the user has, what's shown stays put while newer turns wait behind a button.
 struct ConversationView: View {
-    let turns: [ConversationTurn]
+    /// Nil while loading, or when it can't be read (then `unreadable` says why).
+    let page: ConversationPage?
     var agent = "claude"
-    var earlier: (() -> Void)?
-    var loadingEarlier = false
+    /// What a subagent was asked, shown first when the part shown starts after it.
+    var task: String?
+    var loading = false
+    var unreadable = "This conversation can’t be read."
+    var earlier: ((UInt64) async -> ConversationPage?)?
+
+    /// Earlier parts the user loaded, joined to the newest part as it was then.
+    @State private var loaded: ConversationPage?
+    @State private var loadingEarlier = false
+
+    private var shown: ConversationPage? { loaded ?? page }
+    /// Turns arrived since the user loaded earlier ones.
+    private var newer: Bool { loaded != nil && page?.turns.last != frozenLast }
+    @State private var frozenLast: ConversationTurn?
+
+    var body: some View {
+        if let shown, !shown.turns.isEmpty || shown.start > 0 || task != nil {
+            turnsView(shown)
+        } else {
+            VStack(spacing: 8) {
+                if loading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Text(page == nil ? unreadable : "Nothing said yet.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .padding(40)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func turnsView(_ shown: ConversationPage) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    if let task, !shown.turns.contains(where: { $0.role == "task" }) {
+                        TaskBox(text: task)
+                    }
+                    if earlier != nil && shown.start > 0 {
+                        HStack {
+                            Spacer()
+                            if loadingEarlier {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Button("Load earlier") { loadEarlier() }.buttonStyle(.link).font(.caption)
+                            }
+                            Spacer()
+                        }
+                    }
+                    ForEach(blocks(shown.turns)) { block in
+                        switch block {
+                        case .turn(let t): TurnBubble(turn: t, agent: agent)
+                        case .tools(_, let calls): ToolRun(calls: calls)
+                        }
+                    }
+                    Color.clear.frame(height: 1).id("end")
+                }
+                .padding(14)
+            }
+            .overlay(alignment: .bottom) {
+                if newer {
+                    Button { loaded = nil } label: { Label("Newer turns", systemImage: "arrow.down") }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .padding(10)
+                }
+            }
+            .onAppear { proxy.scrollTo("end", anchor: .bottom) }
+            .onChange(of: shown.turns.last?.id) { _, _ in
+                // New turns at the end follow; earlier ones loaded at the top don't move the view.
+                if !loadingEarlier { proxy.scrollTo("end", anchor: .bottom) }
+            }
+        }
+    }
+
+    private func loadEarlier() {
+        guard let earlier, let base = shown, !loadingEarlier else { return }
+        loadingEarlier = true
+        Task {
+            if let p = await earlier(base.start) {
+                if loaded == nil { frozenLast = base.turns.last }
+                loaded = ConversationPage(turns: p.turns + base.turns, start: p.start, path: base.path)
+            }
+            loadingEarlier = false
+        }
+    }
 
     /// Runs of tool calls fold into one row; the text around them is the conversation.
-    private var blocks: [Block] {
+    private func blocks(_ turns: [ConversationTurn]) -> [Block] {
         var out: [Block] = []
         for t in turns {
             if t.role == "tool", case .tools(let id, let calls) = out.last {
@@ -34,39 +132,6 @@ struct ConversationView: View {
             }
         }
         return out
-    }
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    if let earlier {
-                        HStack {
-                            Spacer()
-                            if loadingEarlier {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Button("Load earlier", action: earlier).buttonStyle(.link).font(.caption)
-                            }
-                            Spacer()
-                        }
-                    }
-                    ForEach(blocks) { block in
-                        switch block {
-                        case .turn(let t): TurnBubble(turn: t, agent: agent)
-                        case .tools(_, let calls): ToolRun(calls: calls)
-                        }
-                    }
-                    Color.clear.frame(height: 1).id("end")
-                }
-                .padding(14)
-            }
-            .onAppear { proxy.scrollTo("end", anchor: .bottom) }
-            .onChange(of: turns.last?.id) { _, _ in
-                // New turns at the end follow; earlier ones loaded at the top don't move the view.
-                if !loadingEarlier { proxy.scrollTo("end", anchor: .bottom) }
-            }
-        }
     }
 
     enum Block: Identifiable {
@@ -82,33 +147,50 @@ struct ConversationView: View {
     }
 }
 
+/// Very long messages are cut; the transcript file has the rest.
+private func markdown(_ text: String) -> AttributedString {
+    let limit = 4000
+    let s = text.count > limit ? String(text.prefix(limit)) + "…" : text
+    let md = try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+    return md ?? AttributedString(s)
+}
+
+private struct TaskBox: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Task").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(markdown(text)).textSelection(.enabled)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Brand.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 private struct TurnBubble: View {
     let turn: ConversationTurn
     let agent: String
 
-    /// Very long messages are cut; the transcript file has the rest.
-    private var text: AttributedString {
-        let limit = 4000
-        let s = turn.text.count > limit ? String(turn.text.prefix(limit)) + "…" : turn.text
-        let md = try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-        return md ?? AttributedString(s)
-    }
-
     var body: some View {
-        if turn.role == "note" {
-            Text(text).font(.caption).foregroundStyle(.tertiary).frame(maxWidth: .infinity)
-        } else if turn.role == "user" {
+        switch turn.role {
+        case "note":
+            Text(markdown(turn.text)).font(.caption.italic()).foregroundStyle(.tertiary).frame(maxWidth: .infinity)
+        case "task":
+            TaskBox(text: turn.text)
+        case "user":
             HStack {
                 Spacer(minLength: 60)
-                Text(text)
+                Text(markdown(turn.text))
                     .textSelection(.enabled)
                     .padding(.horizontal, 10).padding(.vertical, 7)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.14)))
             }
-        } else {
+        default:
             VStack(alignment: .leading, spacing: 3) {
                 Text(agent == "codex" ? "Codex" : "Claude").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Text(text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                Text(markdown(turn.text)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }

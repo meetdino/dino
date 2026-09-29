@@ -290,62 +290,29 @@ private struct SessionPreview: View {
     @Binding var path: String?
     @State private var page: ConversationPage?
     @State private var failed: String?
-    @State private var loadingEarlier = false
 
     var body: some View {
-        SwiftUI.Group {
-            if let page, !page.turns.isEmpty || page.start > 0 {
-                ConversationView(
-                    turns: page.turns, agent: session.agent,
-                    earlier: page.start > 0 ? { loadEarlier() } : nil,
-                    loadingEarlier: loadingEarlier)
-            } else if page != nil {
-                Text("Nothing said yet").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let failed {
-                Text(failed).foregroundStyle(.secondary).multilineTextAlignment(.center).padding().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+        let (agent, id) = (session.agent, session.session_id)
+        ConversationView(page: page, agent: agent, loading: page == nil && failed == nil, unreadable: failed ?? "This conversation can’t be read.") {
+            try? await ConversationPage.fetch(agent: agent, id: id, before: $0).get()
         }
         .task {
             await load()
-            // A live session keeps talking; follow it unless earlier parts were loaded.
+            // A live session keeps talking; follow it.
             while session.source == "running" && !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
-                if !Task.isCancelled && !loadingEarlier && (page?.start ?? 0) == (latestStart ?? 0) { await load() }
+                if !Task.isCancelled { await load() }
             }
         }
     }
 
-    /// Where the newest page began; if `page` starts earlier, the user loaded more.
-    @State private var latestStart: UInt64?
-
-    private func fetch(before: UInt64?) async -> Result<ConversationPage, Error> {
-        let (agent, id) = (session.agent, session.session_id)
-        return await Task.detached {
-            Result { try DinoConnection(path: DinoEnvironment.socketPath).conversation(agent: agent, sessionID: id, before: before) }
-        }.value
-    }
-
     private func load() async {
-        switch await fetch(before: nil) {
+        switch await ConversationPage.fetch(agent: session.agent, id: session.session_id) {
         case .success(let p):
-            latestStart = p.start
             if p != page { page = p }
             path = p.path
         case .failure(let e):
             if page == nil { failed = e.localizedDescription }
-        }
-    }
-
-    private func loadEarlier() {
-        guard let page, !loadingEarlier else { return }
-        loadingEarlier = true
-        Task {
-            if case .success(let p) = await fetch(before: page.start) {
-                self.page = ConversationPage(turns: p.turns + page.turns, start: p.start, path: page.path)
-            }
-            loadingEarlier = false
         }
     }
 }

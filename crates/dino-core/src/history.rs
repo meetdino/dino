@@ -93,7 +93,17 @@ fn one_line(s: &str) -> Option<String> {
 /// What a person typed, not a slash command's expansion or an injected wrapper.
 fn typed(text: &str) -> Option<&str> {
     let t = text.trim();
-    let wrapper = ["<", "[Request interrupted", "# AGENTS.md", "Caveat:"].iter().any(|w| t.starts_with(w));
+    let wrapper = [
+        "<",
+        "[Request interrupted",
+        "[Image",
+        "# AGENTS.md",
+        "Caveat:",
+        "You've inherited the conversation context",
+        "Your response above was cut off",
+    ]
+    .iter()
+    .any(|w| t.starts_with(w));
     (!t.is_empty() && !wrapper).then_some(t)
 }
 
@@ -289,7 +299,9 @@ pub fn finished(running: &[FoundSession]) -> Vec<FoundSession> {
 
 // ---- Reading ----
 
-/// One entry of a conversation: `role` is "user", "assistant", "tool" (a call, in brief) or "note".
+/// One entry of a conversation: `role` is "task" (what a subagent was asked), "user",
+/// "assistant", "tool" (a call, in brief) or "note" (something that happened, like an
+/// interruption).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Turn {
     pub role: String,
@@ -298,7 +310,7 @@ pub struct Turn {
 
 /// Part of a conversation, oldest first. `start` is where it begins in the file: pass it as
 /// `before` for the part before it; 0 means this is the beginning.
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct Page {
     pub turns: Vec<Turn>,
     pub start: u64,
@@ -306,45 +318,87 @@ pub struct Page {
 }
 
 /// The conversation of `agent`'s session `session_id`, the part ending at byte `before` (default:
-/// the end).
+/// the end). A Claude subagent's id reads its own transcript.
 pub fn conversation(agent: &str, session_id: &str, before: Option<u64>) -> Option<Page> {
     let path = match agent {
-        "claude" => crate::transcript::claude_path(session_id)?,
+        "claude" => crate::transcript::claude_path(session_id).or_else(|| crate::transcript::claude_subagent_path(None, session_id))?,
         "codex" => crate::transcript::codex_path(session_id)?,
         _ => return None,
     };
+    page(&path, before)
+}
+
+/// The part of the transcript at `path` ending at byte `before` (default: the end).
+pub fn page(path: &Path, before: Option<u64>) -> Option<Page> {
     let len = path.metadata().ok()?.len();
     let end = before.unwrap_or(len).min(len);
     let start = end.saturating_sub(PAGE);
-    let text = read_range(&path, start, end)?;
+    let text = read_range(path, start, end)?;
     // The fragment dropped at the start belongs to the page before.
     let start = if start == 0 { 0 } else { end - text.len() as u64 };
-    let turns = if agent == "claude" { claude_turns(&text) } else { codex_turns(&text) };
+    let turns = if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-")) {
+        codex_turns(&text)
+    } else {
+        claude_turns(&text, is_subagent(path).then_some(start == 0))
+    };
     Some(Page { turns, start, path: Some(path.display().to_string()) })
+}
+
+/// What the Claude subagent whose transcript is at `path` was asked, from the start of the file.
+pub fn subagent_task(path: &Path) -> Option<String> {
+    let len = path.metadata().ok()?.len();
+    let head = read_range(path, 0, len.min(1 << 20))?;
+    claude_turns(&head, Some(true)).into_iter().find(|t| t.role == "task").map(|t| t.text)
+}
+
+/// `~/.claude/projects/<dir>/<parent>/subagents/agent-<id>.jsonl`.
+fn is_subagent(path: &Path) -> bool {
+    path.parent().and_then(Path::file_name).is_some_and(|d| d == "subagents")
 }
 
 fn turn(role: &str, text: impl Into<String>) -> Turn {
     Turn { role: role.into(), text: text.into() }
 }
 
-fn claude_turns(jsonl: &str) -> Vec<Turn> {
+/// Longer lines are tool results carrying images or files, never something shown.
+const LONGEST_SHOWN_LINE: usize = 256 << 10;
+
+/// A Claude transcript as turns. What Claude Code adds on its side (reminders, notes about its
+/// setup, screenshots, tool results) is left out, and so are subagents' turns in their parent's
+/// file. `subagent`: this is a subagent's own file; `Some(true)` when read from its start, where
+/// its first message is its task (a fork's comes after the boilerplate that says it's a fork).
+fn claude_turns(jsonl: &str, subagent: Option<bool>) -> Vec<Turn> {
     let mut out = vec![];
-    for v in jsonl.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
-        // Subagents' own turns and Claude Code's bookkeeping aren't the conversation.
-        if v["isSidechain"] == true || v["isMeta"] == true {
+    let mut tasked = subagent != Some(true);
+    for line in jsonl.lines().filter(|l| l.len() <= LONGEST_SHOWN_LINE) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v["isMeta"] == true || (subagent.is_none() && v["isSidechain"] == true) {
             continue;
         }
         let content = &v["message"]["content"];
         match v["type"].as_str() {
             Some("user") => {
-                let text = claude_text(content);
-                if text.as_deref().is_some_and(|t| t.trim_start().starts_with("[Request interrupted")) {
-                    out.push(turn("note", "Interrupted"));
-                } else if let Some(t) = text.as_deref().and_then(typed) {
-                    out.push(turn("user", t));
+                let blocks = content.as_array().into_iter().flatten().filter(|b| b["type"] == "text");
+                for text in content.as_str().into_iter().chain(blocks.filter_map(|b| b["text"].as_str())) {
+                    let text = text.trim();
+                    if let Some((_, rest)) = text.split_once("</fork-boilerplate>") {
+                        let rest = rest.trim();
+                        out.push(turn("task", rest.strip_prefix("Your directive:").unwrap_or(rest).trim()));
+                        tasked = true;
+                    } else if text.starts_with("This session is being continued") {
+                        out.push(turn("note", "Context compacted"));
+                    } else if text.starts_with("[Request interrupted") {
+                        out.push(turn("note", "Interrupted"));
+                    } else if let Some(msg) = text.strip_prefix("The coordinator sent a message while you were working:") {
+                        out.push(turn("user", msg.trim()));
+                    } else if let Some(t) = typed(text) {
+                        out.push(turn(if tasked { "user" } else { "task" }, t));
+                        tasked = true;
+                    }
                 }
             }
-            Some("assistant") => {
+            // Before its task, a fork's transcript repeats the call that started it.
+            Some("assistant") if tasked => {
                 for b in content.as_array().into_iter().flatten() {
                     match b["type"].as_str() {
                         Some("text") => {
@@ -360,6 +414,7 @@ fn claude_turns(jsonl: &str) -> Vec<Turn> {
             _ => {}
         }
     }
+    out.retain(|t| !t.text.is_empty());
     out
 }
 
@@ -412,7 +467,7 @@ fn codex_turns(jsonl: &str) -> Vec<Turn> {
 }
 
 /// The telling argument of a tool call: the command, the file, the pattern.
-fn hint(input: &Value) -> String {
+pub(crate) fn hint(input: &Value) -> String {
     let arg = ["command", "cmd", "file_path", "path", "pattern", "description", "url", "query", "prompt"].iter().find_map(|k| match &input[*k] {
         Value::String(s) => Some(s.clone()),
         Value::Array(a) => Some(a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")),
@@ -508,9 +563,43 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed."}]}}"#,
         ]
         .join("\n");
-        let turns: Vec<(String, String)> = claude_turns(&jsonl).into_iter().map(|t| (t.role, t.text)).collect();
+        let turns: Vec<(String, String)> = claude_turns(&jsonl, None).into_iter().map(|t| (t.role, t.text)).collect();
         let want = [("user", "fix the build"), ("assistant", "Looking."), ("tool", "Bash cargo build"), ("note", "Interrupted"), ("assistant", "Fixed.")];
         assert_eq!(turns, want.map(|(r, t)| (r.to_string(), t.to_string())));
+    }
+
+    #[test]
+    fn a_subagents_conversation() {
+        let fork = [
+            r#"{"type":"fork-context-ref","agentId":"a1"}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","name":"Agent","input":{"description":"Polish"}}]}}"#,
+            r#"{"type":"user","isSidechain":true,"message":{"content":[{"type":"tool_result","content":"started"},{"type":"text","text":"<fork-boilerplate>\nYou are a fork.\n</fork-boilerplate>\n\nYour directive: Fix the sidebar."}]}}"#,
+            r#"{"type":"user","isSidechain":true,"message":{"content":"You've inherited the conversation context above"}}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"On it."},{"type":"tool_use","name":"Bash","input":{"command":"swift build"}}]}}"#,
+            r#"{"type":"user","isSidechain":true,"message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"attachment","isSidechain":true}"#,
+            r#"{"type":"user","isSidechain":true,"message":{"content":"[Image: original 3000x1716]"}}"#,
+            r#"{"type":"user","isSidechain":true,"message":{"content":"This session is being continued from a previous conversation"}}"#,
+            r#"{"type":"user","isSidechain":true,"message":{"content":"The coordinator sent a message while you were working: also the toolbar"}}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"Done."}]}}"#,
+        ]
+        .join("\n");
+        let all = claude_turns(&fork, Some(true));
+        assert_eq!(all, vec![
+            turn("task", "Fix the sidebar."),
+            turn("assistant", "On it."),
+            turn("tool", "Bash swift build"),
+            turn("note", "Context compacted"),
+            turn("user", "also the toolbar"),
+            turn("assistant", "Done."),
+        ]);
+        // Read from somewhere in the middle, nothing is taken for the task.
+        assert!(claude_turns(&fork.lines().skip(4).collect::<Vec<_>>().join("\n"), Some(false)).iter().all(|t| t.role != "task"));
+        // In its parent's file, a subagent's turns aren't the conversation.
+        assert!(claude_turns(&fork, None).is_empty());
+        // A plain subagent's first message is its task.
+        let plain = r#"{"type":"user","isSidechain":true,"message":{"content":"Find the bug"}}"#;
+        assert_eq!(claude_turns(plain, Some(true)), vec![turn("task", "Find the bug")]);
     }
 
     #[test]
