@@ -16,6 +16,7 @@ pub struct Settings {
     pub routing: Routing,
     pub policies: Policies,
     pub machine: Machine,
+    pub worktrees: Worktrees,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -43,7 +44,8 @@ pub struct Policies {
     pub worktree_trust: bool,
     /// Most tokens (input, cache and output) one routed session may use; 0 means no limit.
     pub session_token_budget: u64,
-    /// When a session's PR merges and its dino worktree has nothing left to lose, stop the session and remove the worktree.
+    /// When a session's PR merges and its dino worktree has nothing left to lose, archive the session
+    /// (its worktree goes, and comes back from the branch if it's started again).
     pub close_merged: bool,
 }
 
@@ -56,6 +58,39 @@ impl Default for Policies {
 impl Policies {
     pub fn allows(&self, short: &str) -> bool {
         short == "shell" || self.allowed_agents.is_empty() || self.allowed_agents.iter().any(|a| a == short)
+    }
+}
+
+/// Where the worktrees dino makes go, and what their branches are called.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct Worktrees {
+    /// Relative: inside each repo (and excluded from its status). Absolute or `~/…`: one folder
+    /// per repo under it.
+    pub location: String,
+    /// Put before every branch dino makes.
+    pub branch_prefix: String,
+}
+
+pub const DEFAULT_WORKTREE_LOCATION: &str = ".dino/worktrees";
+pub const DEFAULT_BRANCH_PREFIX: &str = "dino/";
+
+impl Default for Worktrees {
+    fn default() -> Self {
+        Self { location: DEFAULT_WORKTREE_LOCATION.into(), branch_prefix: DEFAULT_BRANCH_PREFIX.into() }
+    }
+}
+
+impl Worktrees {
+    /// The branch prefix, or the default when it's blank or can't start a branch name.
+    pub fn prefix(&self) -> String {
+        let p = self.branch_prefix.trim();
+        let ok = !p.is_empty()
+            && !p.starts_with(['/', '-', '.'])
+            && !p.contains("..")
+            && !p.contains("//")
+            && !p.chars().any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c));
+        if ok { p.to_string() } else { DEFAULT_BRANCH_PREFIX.into() }
     }
 }
 
@@ -82,6 +117,7 @@ impl Settings {
                     routing: Routing { proxy: get("route").as_deref() != Some("false") },
                     policies: Policies::default(),
                     machine: Machine { onboarded: get("onboarded").as_deref() == Some("true") },
+                    ..Default::default()
                 }
             }
         }
