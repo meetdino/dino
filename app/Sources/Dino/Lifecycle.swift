@@ -277,10 +277,9 @@ struct ArchivedRow: View {
     }
 
     private var detail: String {
-        var parts = [model.launcherLabel(session.launcher)]
-        parts.append(session.branch ?? shortPath(session.cwd))
-        parts.append(ago(session.archived_at))
-        return parts.filter { !$0.isEmpty }.joined(separator: " · ")
+        // Most telling first, so a narrow sidebar cuts the branch rather than when.
+        [ago(session.archived_at), model.launcherLabel(session.launcher), session.branch ?? shortPath(session.cwd)]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
@@ -321,9 +320,15 @@ struct ShortcutSheet: View {
         menu.items.flatMap { item -> [Entry] in
             if let sub = item.submenu { return entries(in: sub, prefix: prefix + item.title + " › ") }
             guard !item.isHidden, !item.isSeparatorItem, !item.keyEquivalent.isEmpty else { return [] }
+            // What macOS adds to Edit (dictation, emoji) comes several times over, some on the fn key.
+            if let action = item.action, systemActions.contains(action) { return [] }
             return [Entry(title: prefix + item.title, keys: keys(item))]
         }
     }
+
+    private static let systemActions: Set<Selector> = [
+        NSSelectorFromString("startDictation:"), #selector(NSApplication.orderFrontCharacterPalette(_:)),
+    ]
 
     private static func keys(_ item: NSMenuItem) -> String {
         let m = item.keyEquivalentModifierMask

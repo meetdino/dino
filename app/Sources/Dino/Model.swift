@@ -78,6 +78,13 @@ final class DinoModel: ObservableObject {
     /// The review each session is waiting on, so a cancelled one's late answer is dropped.
     private var reviewRuns: [String: UUID] = [:]
 
+    /// A file or the web preview, beside the terminals.
+    @Published var sidePane: SidePane?
+    /// Each session's browser, kept so switching sessions keeps its page ("" when opened without one).
+    var webPages: [String: WebPage] = [:]
+    /// The local address each session printed that the user has seen, opened or waved off.
+    @Published var offered: [String: String] = [:]
+
     /// The Create PR sheet, and the popover about the selected session's PR.
     @Published var showCreatePR = false
     @Published var showPR = false
@@ -238,6 +245,8 @@ final class DinoModel: ObservableObject {
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
         terminals = terminals.filter { live.contains($0.key) }
+        webPages = webPages.filter { $0.key.isEmpty || live.contains($0.key) }
+        for s in next { webPages[s.id]?.follow(s.previews ?? []) }
         // A pane whose session ended closes, as it would in a terminal.
         awaited.subtract(live)
         let kept = splits.filter { [$0.first, $0.second].allSatisfy { live.contains($0) || awaited.contains($0) } }
@@ -295,7 +304,7 @@ final class DinoModel: ObservableObject {
     /// Ghostty handles its own shortcuts before the menu sees them (⌘D splits, ⌘W closes, ⌘K
     /// clears), so a focused pane would swallow dino's. Hand those keys back to the menu.
     static let terminals = TerminalController(configSource: .generated(
-        ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace"]
+        ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p"]
             + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
             .map { "super+\($0)" }
             // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives.
@@ -312,6 +321,8 @@ final class DinoModel: ObservableObject {
             command: "\(DinoEnvironment.dinoBinary) attach \(id)",
             waitAfterCommand: false
         )
+        // ⌘-clicked paths and local URLs open in dino's side pane.
+        t.makePlatformView = { [weak self] in LinkTerminalView { self?.openLink($0, from: id) } }
         terminals[id] = t
         return t
     }

@@ -21,6 +21,7 @@ use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
 mod lifecycle;
+mod preview;
 mod schedule;
 
 /// Scrollback lines replayed to a newly attached client.
@@ -45,6 +46,8 @@ struct Session {
     last_write: Arc<Mutex<Option<Instant>>>,
     /// The user's last keystroke, resize or attach.
     poked: Arc<Mutex<Option<Instant>>>,
+    /// The last local web address the agent printed.
+    local_url: Arc<Mutex<Option<String>>>,
     attached: AtomicUsize,
     auto: Mutex<AutoState>,
     /// The scheduled task that started it, by name.
@@ -91,6 +94,8 @@ struct Daemon {
     pr_poll: Mutex<()>,
     /// Sessions whose PR merged, to close once they have nothing to lose; since when.
     closing: Mutex<HashMap<String, Instant>>,
+    /// Dev servers started for previews, each tied to a session.
+    previews: Mutex<Vec<Arc<preview::Server>>>,
     /// Subagents that run in a worktree of their own, and whose session started them.
     subagents: Mutex<Vec<SubagentWorktree>>,
     /// Worktree path → its git summary and when it was read; git is too slow for every tree poll.
@@ -131,6 +136,7 @@ pub fn run() -> anyhow::Result<()> {
         prs: Mutex::default(),
         pr_poll: Mutex::default(),
         closing: Mutex::default(),
+        previews: Mutex::default(),
         subagents: Mutex::new(load_subagents()),
         summaries: Mutex::default(),
         schedule: schedule::Scheduler::load(),
@@ -375,6 +381,27 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::PreviewConfigs { id } => match session_cwd(d, &id) {
+                Ok(cwd) => match dino_core::preview::configs(&cwd) {
+                    Ok(configs) => Response::PreviewConfigs { configs, error: None },
+                    Err(e) => Response::PreviewConfigs { configs: vec![], error: Some(e.to_string()) },
+                },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::PreviewStart { id, name } => match preview_start(d, &id, &name) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::PreviewStop { id, name } => {
+                if let Some(s) = d.previews.lock().unwrap().iter().find(|s| s.session == id && s.config.name == name) {
+                    s.stop();
+                }
+                Response::Ok
+            }
+            Request::PreviewLog { id, name } => match d.previews.lock().unwrap().iter().find(|s| s.session == id && s.config.name == name) {
+                Some(s) => Response::PreviewLog { text: s.log() },
+                None => Response::Error { message: format!("{name} hasn't been started") },
+            },
             Request::Keep { session } => match keep(d, &session) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
@@ -407,6 +434,9 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 ipc::write_json(&mut stream, &Response::Ok)?;
                 for s in d.sessions.lock().unwrap().drain(..) {
                     s.pane.kill();
+                }
+                for s in d.previews.lock().unwrap().drain(..) {
+                    s.stop();
                 }
                 let _ = std::fs::remove_file(ipc::socket_path());
                 std::process::exit(0);
@@ -486,7 +516,9 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let last_output: Arc<Mutex<Option<Instant>>> = Arc::default();
     let poked: Arc<Mutex<Option<Instant>>> = Arc::default();
     let last_write: Arc<Mutex<Option<Instant>>> = Arc::default();
-    let (subs, last, poke, write) = (subscribers.clone(), last_output.clone(), poked.clone(), last_write.clone());
+    let local_url: Arc<Mutex<Option<String>>> = Arc::default();
+    let (subs, last, poke, write, url) = (subscribers.clone(), last_output.clone(), poked.clone(), last_write.clone(), local_url.clone());
+    let mut tail = String::new();
     let pane = Pane::spawn(spec, cols.max(20), rows.max(5), move |bytes| {
         if !bytes.is_empty() {
             *write.lock().unwrap() = Some(Instant::now());
@@ -495,6 +527,16 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         let echo = poke.lock().unwrap().is_some_and(|t| t.elapsed() < USER_ECHO);
         if !bytes.is_empty() && !echo {
             *last.lock().unwrap() = Some(Instant::now());
+            // A dev server the agent started, or told the user about: the app offers a preview.
+            // Only up to the last space, so an address split across two chunks is read whole, from
+            // the next one with the unread tail in front.
+            let text = format!("{tail}{}", preview::strip_ansi(&String::from_utf8_lossy(bytes)));
+            let done = text.char_indices().rfind(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8());
+            if let Some(found) = dino_core::preview::find_local_url(&text[..done]) {
+                *url.lock().unwrap() = Some(found);
+            }
+            let rest = &text[done..];
+            tail = if rest.len() > 256 { String::new() } else { rest.to_string() };
         }
         // An empty chunk means EOF; it's forwarded so clients learn the session ended.
         subs.lock().unwrap().retain(|(_, tx)| tx.send(bytes.to_vec()).is_ok());
@@ -524,6 +566,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         last_output,
         last_write,
         poked,
+        local_url,
         attached: AtomicUsize::new(0),
         auto: Mutex::new(restore.as_ref().map(|r| r.auto.clone()).unwrap_or_default()),
         scheduled: restore.as_ref().map_or(scheduled, |r| r.scheduled.clone()),
@@ -625,6 +668,7 @@ fn idle(d: &Daemon, s: &Session) -> bool {
 fn state(d: &Daemon) -> Response {
     let groups = d.groups.lock().unwrap().clone();
     let prs = d.prs.lock().unwrap().clone();
+    let previews = d.previews.lock().unwrap().clone();
     let group_of = |id: &str| groups.iter().find(|g| g.members.iter().any(|m| m.session == id)).map(|g| g.id.clone());
     let sessions = d
         .sessions
@@ -658,6 +702,8 @@ fn state(d: &Daemon) -> Response {
                 cwd: real(&s.cwd),
                 pr: prs.get(&s.id).cloned(),
                 auto: s.auto.lock().unwrap().pr.clone(),
+                previews: previews.iter().filter(|p| p.session == s.id).map(|p| p.info()).collect(),
+                local_url: s.local_url.lock().unwrap().clone(),
                 scheduled: s.scheduled.clone(),
                 label,
             }
@@ -940,10 +986,38 @@ fn kill(d: &Daemon, id: &str) -> bool {
     match sessions.iter().position(|s| s.id == id) {
         Some(i) => {
             sessions.remove(i).pane.kill();
+            d.previews.lock().unwrap().retain(|p| {
+                if p.session == id {
+                    p.stop();
+                }
+                p.session != id
+            });
             true
         }
         None => false,
     }
+}
+
+fn session_cwd(d: &Daemon, id: &str) -> anyhow::Result<PathBuf> {
+    d.sessions.lock().unwrap().iter().find(|s| s.id == id).map(|s| s.cwd.clone()).ok_or_else(|| anyhow::anyhow!("no session {id}"))
+}
+
+/// Start (or restart) one of the session's dev servers. One run of each name per session.
+fn preview_start(d: &Daemon, id: &str, name: &str) -> anyhow::Result<()> {
+    let cwd = session_cwd(d, id)?;
+    let config = dino_core::preview::configs(&cwd)?
+        .into_iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| anyhow::anyhow!("no dev server named {name} in .dino/launch.json or .claude/launch.json"))?;
+    let mut previews = d.previews.lock().unwrap();
+    if let Some(i) = previews.iter().position(|p| p.session == id && p.config.name == name) {
+        if previews[i].running() {
+            return Ok(());
+        }
+        previews.remove(i);
+    }
+    previews.push(preview::Server::start(id, config)?);
+    Ok(())
 }
 
 // ---- Fan-out: one prompt, several agents, each in its own worktree; keep the best. ----
