@@ -137,6 +137,15 @@ pub enum Request {
     /// Remove a worktree dino made (and its branch when merged), never forcing: refuses one
     /// with uncommitted work, one a session runs in, and fan-out members (discard the group).
     RemoveStored { path: String },
+    /// Scheduled tasks, with their history and next run.
+    ScheduleList,
+    /// Add a task (no `id`) or replace one; pausing and resuming is a put with `enabled` changed.
+    SchedulePut { task: crate::schedule::ScheduledTask },
+    ScheduleDelete { id: String },
+    /// Run a task now, whatever its schedule; answers with the session it started.
+    ScheduleRun { id: String },
+    /// Check for due tasks now, as if the time were `now` (seconds since the epoch) when given.
+    ScheduleTick { now: Option<u64> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -159,6 +168,7 @@ pub enum Response {
     Review { findings: Vec<crate::review::Finding> },
     Archived { sessions: Vec<ArchivedInfo> },
     Storage { worktrees: Vec<StoredWorktree> },
+    Schedule { tasks: Vec<crate::schedule::ScheduledTask> },
     Ok,
     Error { message: String },
 }
@@ -206,6 +216,9 @@ pub struct SessionInfo {
     /// What dino does about the PR by itself.
     #[serde(default)]
     pub auto: AutoPr,
+    /// The scheduled task that started it, by name.
+    #[serde(default)]
+    pub scheduled: Option<String>,
     /// The name the user gave it (`Rename`); `title` already shows it over the agent's.
     #[serde(default)]
     pub label: Option<String>,

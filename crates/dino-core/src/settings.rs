@@ -99,6 +99,8 @@ impl Worktrees {
 pub struct Machine {
     /// Onboarding finished; skip the welcome scan.
     pub onboarded: bool,
+    /// Keep the Mac from idle-sleeping while tasks are scheduled, so they run on time. Closing the lid still sleeps it.
+    pub keep_awake: bool,
 }
 
 impl Settings {
@@ -116,7 +118,7 @@ impl Settings {
                 Self {
                     routing: Routing { proxy: get("route").as_deref() != Some("false") },
                     policies: Policies::default(),
-                    machine: Machine { onboarded: get("onboarded").as_deref() == Some("true") },
+                    machine: Machine { onboarded: get("onboarded").as_deref() == Some("true"), ..Default::default() },
                     ..Default::default()
                 }
             }
