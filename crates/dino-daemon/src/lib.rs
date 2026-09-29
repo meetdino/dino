@@ -80,8 +80,8 @@ struct Inside {
     fg: Option<u32>,
     checked: Option<Instant>,
     found: Option<FoundSession>,
-    /// The terminal title while the agent ran: it's the agent's, not the shell's.
-    title: Option<String>,
+    /// The shell's own title from before the command started, put back when an agent leaves.
+    before: Option<Option<String>>,
 }
 
 /// How often to look again at a foreground command that hasn't changed: an agent's title and
@@ -1435,18 +1435,21 @@ fn watch_shells(d: &Daemon) {
         let due = {
             let mut i = s.inside.lock().unwrap();
             if fg.is_none() {
-                // Agents set the title and leave it on exit; a shell that sets its own has since.
-                if i.found.is_some() && i.title.is_some() && s.pane.title() == i.title {
-                    *s.pane.shared.title.lock().unwrap() = None;
+                // Agents set the title, and change it again on the way out: put the shell's back.
+                if i.found.is_some() {
+                    *s.pane.shared.title.lock().unwrap() = i.before.clone().flatten();
                 }
                 *i = Inside::default();
+            } else if i.fg.is_none() {
+                i.before = Some(s.pane.title());
             }
             fg.is_some() && (i.fg != fg || i.checked.is_none_or(|t| t.elapsed() >= INSIDE_RECHECK))
         };
         let Some(fg) = fg.filter(|_| due) else { continue };
         let found = found::inside(fg);
-        let title = found.as_ref().and_then(|_| s.pane.title());
-        *s.inside.lock().unwrap() = Inside { fg: Some(fg), checked: Some(Instant::now()), found, title };
+        let mut i = s.inside.lock().unwrap();
+        let before = i.before.take();
+        *i = Inside { fg: Some(fg), checked: Some(Instant::now()), found, before };
     }
 }
 
