@@ -1,9 +1,11 @@
 //! Agent sessions that exist outside dino: running in another terminal, recent on disk, or in the
 //! cloud. dino can continue any of them (see dinod's `Adopt`).
 
-use std::io::{BufRead, BufReader};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -52,7 +54,22 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
 }
 
 fn alive(pid: u32) -> bool {
-    run("ps", &["-p", &pid.to_string(), "-o", "pid="]).is_some_and(|s| !s.trim().is_empty())
+    // Signal 0 only checks: EPERM still means it exists.
+    let sent = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// A process's terminal and launch flags never change, and finding them takes a `ps` per parent:
+/// read once per process, kept while it lives.
+static PROCS: Mutex<Option<HashMap<u32, (Option<String>, Vec<String>)>>> = Mutex::new(None);
+
+fn terminal_and_flags(agent: &str, pid: u32) -> (Option<String>, Vec<String>) {
+    if let Some(known) = PROCS.lock().unwrap().get_or_insert_default().get(&pid) {
+        return known.clone();
+    }
+    let found = (terminal_of(pid), portable_flags(agent, &args_of(pid)));
+    PROCS.lock().unwrap().get_or_insert_default().insert(pid, found.clone());
+    found
 }
 
 /// The GUI app (or multiplexer) a process lives in, found by walking up its parents.
@@ -117,6 +134,7 @@ pub fn portable_flags(agent: &str, args: &[String]) -> Vec<String> {
 /// Claude Code writes `~/.claude/sessions/<pid>.json` for every live process.
 fn running_claude() -> Vec<FoundSession> {
     let dir = home().join(".claude/sessions");
+    PROCS.lock().unwrap().get_or_insert_default().retain(|&pid, _| alive(pid));
     let mut out = vec![];
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
@@ -131,6 +149,7 @@ fn running_claude() -> Vec<FoundSession> {
         }
         let cwd = v["cwd"].as_str().map(String::from);
         let title = claude_title(sid).or_else(|| v["name"].as_str().map(String::from)).unwrap_or_else(|| "Claude Code session".into());
+        let (terminal, args) = terminal_and_flags("claude", pid);
         out.push(FoundSession {
             source: Source::Running,
             agent: "claude".into(),
@@ -140,8 +159,8 @@ fn running_claude() -> Vec<FoundSession> {
             updated_at: v["updatedAt"].as_u64().map_or(0, |ms| ms / 1000),
             pid: Some(pid),
             status: v["status"].as_str().map(String::from),
-            terminal: terminal_of(pid),
-            args: portable_flags("claude", &args_of(pid)),
+            terminal,
+            args,
             url: None,
         });
     }
@@ -154,13 +173,23 @@ fn running_codex() -> Vec<FoundSession> {
     let names = codex_names();
     let mut out = vec![];
     for pid in pids.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
-        let Some(files) = run("lsof", &["-p", &pid.to_string(), "-Fn"]) else { continue };
-        let Some(rollout) = files.lines().filter_map(|l| l.strip_prefix('n')).find(|f| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) else {
-            continue;
-        };
+        // One lsof: the open rollout names the session, the `cwd` entry the folder.
+        let Some(files) = run("lsof", &["-p", &pid.to_string(), "-Ffn"]) else { continue };
+        let (mut fd, mut rollout, mut cwd) = ("", None, None);
+        for l in files.lines() {
+            if let Some(f) = l.strip_prefix('f') {
+                fd = f;
+            } else if let Some(n) = l.strip_prefix('n') {
+                if fd == "cwd" && cwd.is_none() {
+                    cwd = Some(n.to_string());
+                } else if rollout.is_none() && n.contains("/.codex/sessions/") && n.ends_with(".jsonl") {
+                    rollout = Some(n);
+                }
+            }
+        }
+        let Some(rollout) = rollout else { continue };
         let Some(sid) = rollout_id(Path::new(rollout)) else { continue };
-        let cwd = run("lsof", &["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-            .and_then(|s| s.lines().find_map(|l| l.strip_prefix('n').map(String::from)));
+        let (terminal, args) = terminal_and_flags("codex", pid);
         out.push(FoundSession {
             source: Source::Running,
             agent: "codex".into(),
@@ -170,8 +199,8 @@ fn running_codex() -> Vec<FoundSession> {
             updated_at: mtime(Path::new(rollout)),
             pid: Some(pid),
             status: None,
-            terminal: terminal_of(pid),
-            args: portable_flags("codex", &args_of(pid)),
+            terminal,
+            args,
             url: None,
         });
     }
@@ -203,21 +232,51 @@ fn codex_names() -> Vec<(String, String, String)> {
     out
 }
 
-/// Title and cwd from a Claude transcript: the latest `ai-title`, else the last prompt.
-fn claude_transcript_info(path: &Path) -> (Option<String>, Option<String>) {
-    let Ok(f) = std::fs::File::open(path) else { return (None, None) };
-    let (mut title, mut prompt, mut cwd) = (None, None, None);
-    for line in BufReader::new(f).lines().map_while(Result::ok) {
+/// What a transcript said as of `len` bytes. Transcripts only grow, so each look reads just what
+/// was appended since the last one.
+#[derive(Default, Clone)]
+struct Scanned {
+    len: u64,
+    title: Option<String>,
+    prompt: Option<String>,
+    cwd: Option<String>,
+}
+
+static SCANNED: Mutex<Option<HashMap<PathBuf, Scanned>>> = Mutex::new(None);
+
+impl Scanned {
+    fn note(&mut self, line: &str) {
         if line.contains("\"type\":\"ai-title\"") {
-            title = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["aiTitle"].as_str().map(String::from));
+            self.title = serde_json::from_str::<Value>(line).ok().and_then(|v| v["aiTitle"].as_str().map(String::from));
         } else if line.contains("\"type\":\"last-prompt\"") {
-            prompt = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["lastPrompt"].as_str().map(String::from));
-        } else if cwd.is_none() && line.contains("\"cwd\":") {
-            cwd = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["cwd"].as_str().map(String::from));
+            self.prompt = serde_json::from_str::<Value>(line).ok().and_then(|v| v["lastPrompt"].as_str().map(String::from));
+        } else if self.cwd.is_none() && line.contains("\"cwd\":") {
+            self.cwd = serde_json::from_str::<Value>(line).ok().and_then(|v| v["cwd"].as_str().map(String::from));
         }
     }
-    let title = title.or(prompt.map(|p| p.chars().take(60).collect()));
-    (title, cwd)
+}
+
+/// Title and cwd from a Claude transcript: the latest `ai-title`, else the last prompt.
+fn claude_transcript_info(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(mut f) = std::fs::File::open(path) else { return (None, None) };
+    let size = f.metadata().map_or(0, |m| m.len());
+    let known = SCANNED.lock().unwrap().get_or_insert_default().get(path).cloned();
+    // Shorter than before means it was rewritten: start over.
+    let mut s = known.filter(|k| k.len <= size).unwrap_or_default();
+    let mut tail = String::new();
+    if s.len < size && f.seek(SeekFrom::Start(s.len)).is_ok() {
+        let mut r = BufReader::new(f);
+        while r.read_line(&mut tail).is_ok_and(|n| n > 0) && tail.ends_with('\n') {
+            s.len += tail.len() as u64;
+            s.note(&tail);
+            tail.clear();
+        }
+        SCANNED.lock().unwrap().get_or_insert_default().insert(path.to_path_buf(), s.clone());
+    }
+    // A last line with no newline yet counts now, and is read again once it's finished.
+    s.note(&tail);
+    let title = s.title.or(s.prompt.map(|p| p.chars().take(60).collect()));
+    (title, s.cwd)
 }
 
 fn claude_title(session_id: &str) -> Option<String> {
@@ -366,6 +425,25 @@ mod tests {
         assert_eq!(portable_flags("claude", &args), ["--dangerously-skip-permissions", "--model", "opus"]);
         let args: Vec<String> = ["--resume", "abc-123", "--permission-mode", "plan"].iter().map(|s| s.to_string()).collect();
         assert_eq!(portable_flags("claude", &args), ["--permission-mode", "plan"]);
+    }
+
+    #[test]
+    fn transcript_read_as_it_grows() {
+        let dir = std::env::temp_dir().join(format!("dino-found-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.jsonl");
+        std::fs::write(&p, "{\"cwd\":\"/a\"}\n{\"type\":\"last-prompt\",\"lastPrompt\":\"fix it\"}\n").unwrap();
+        assert_eq!(claude_transcript_info(&p), (Some("fix it".into()), Some("/a".into())));
+        // Appended in two writes: the unfinished line counts, then is read once whole.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        std::io::Write::write_all(&mut f, b"{\"type\":\"ai-title\",\"aiTitle\":\"Fix\"}").unwrap();
+        assert_eq!(claude_transcript_info(&p).0.as_deref(), Some("Fix"));
+        std::io::Write::write_all(&mut f, b"\n{\"cwd\":\"/b\"}\n").unwrap();
+        assert_eq!(claude_transcript_info(&p), (Some("Fix".into()), Some("/a".into())));
+        // Rewritten shorter: read from the start.
+        std::fs::write(&p, "{\"cwd\":\"/c\"}\n").unwrap();
+        assert_eq!(claude_transcript_info(&p), (None, Some("/c".into())));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
