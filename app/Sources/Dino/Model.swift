@@ -4,7 +4,8 @@ import SwiftUI
 import UserNotifications
 
 enum SessionStatus {
-    case thinking, working, idle, done, needsYou, exited
+    /// `ended`: its program exited cleanly and can be resumed; `exited`: it failed.
+    case thinking, working, idle, done, needsYou, ended, exited
 
     var label: String {
         switch self {
@@ -13,6 +14,7 @@ enum SessionStatus {
         case .idle: "idle"
         case .done: "done"
         case .needsYou: "needs you"
+        case .ended: "ended"
         case .exited: "exited"
         }
     }
@@ -24,6 +26,7 @@ enum SessionStatus {
         case .idle: .secondary
         case .done: Color(red: 0.45, green: 0.82, blue: 0.95)
         case .needsYou: Color(red: 1.0, green: 0.78, blue: 0.2)
+        case .ended: .secondary
         case .exited: Color(red: 0.95, green: 0.35, blue: 0.3)
         }
     }
@@ -283,7 +286,7 @@ final class DinoModel: ObservableObject {
     }
 
     func status(of s: SessionInfo) -> SessionStatus {
-        if s.exited { return .exited }
+        if s.exited { return (s.exit_code ?? 0) == 0 ? .ended : .exited }
         if attention.contains(s.id) || s.needs != nil { return .needsYou }
         // An agent run by hand in a shell says whether it's busy; its shell has no hooks.
         if let f = s.inside, let st = f.status {
@@ -774,5 +777,17 @@ final class DinoModel: ObservableObject {
     func kill(_ id: String) {
         guard let conn = connection else { return }
         Task.detached { _ = try? conn.request(["type": "kill", "id": id]) }
+    }
+
+    /// Start an ended session again in place; its pane picks it up (see `dino attach`).
+    func resume(_ id: String) {
+        guard let conn = connection else { return }
+        Task.detached {
+            do {
+                try conn.resume(session: id)
+            } catch {
+                await MainActor.run { self.error = error.localizedDescription }
+            }
+        }
     }
 }
