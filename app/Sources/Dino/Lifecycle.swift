@@ -107,8 +107,20 @@ extension DinoModel {
         lifecycle { try $0.archive(id) }
     }
 
+    /// A fan-out member goes with its fan-out: it's kept or discarded instead.
+    func canArchive(_ id: String) -> Bool {
+        sessions.contains { $0.id == id } && !groups.contains { $0.members.contains { $0.session == id } }
+    }
+
+    /// The sidebar's filter lives in the defaults (`@AppStorage("sidebar.filter")`).
+    func showArchived() {
+        UserDefaults.standard.set(SessionFilter.archived.rawValue, forKey: "sidebar.filter")
+    }
+
     func unarchive(_ a: ArchivedInfo) {
         archived.removeAll { $0.id == a.id }
+        // Back to every session, where the one coming back is selected.
+        UserDefaults.standard.set(SessionFilter.all.rawValue, forKey: "sidebar.filter")
         lifecycle { conn in
             let id = try conn.unarchive(a.id)
             await MainActor.run { self.pendingSelect = id }
@@ -214,17 +226,33 @@ extension DinoModel {
 
 // MARK: - Archived sessions
 
-/// The sidebar's "Archived" section, folded away until opened.
+/// The sidebar under its Archived filter: every archived session, newest first, to find,
+/// unarchive or delete.
 struct ArchivedSection: View {
     @EnvironmentObject var model: DinoModel
-    @AppStorage("sidebar.archivedOpen") private var open = false
+    @State private var query = ""
     @State private var deleting: ArchivedInfo?
 
+    private var shown: [ArchivedInfo] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return model.archived }
+        return model.archived.filter { a in
+            [a.display, a.name, a.cwd, a.branch ?? "", model.launcherLabel(a.launcher)].contains { $0.localizedCaseInsensitiveContains(q) }
+        }
+    }
+
     var body: some View {
-        if !model.archived.isEmpty {
-            Section(isExpanded: $open) {
-                ForEach(model.archived) { a in
-                    ArchivedRow(session: a)
+        Section {
+            if model.archived.isEmpty {
+                Text("Nothing archived. Archive a session from its row, its menu or ⇧⌘A: it stops, and waits here to pick up again.")
+                    .font(.callout).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                TextField("Search archived", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                ForEach(shown) { a in
+                    ArchivedRow(session: a, delete: { deleting = a })
                         .contextMenu {
                             Button("Unarchive") { model.unarchive(a) }
                             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: a.cwd)]) }
@@ -233,19 +261,22 @@ struct ArchivedSection: View {
                             Button("Delete…", role: .destructive) { deleting = a }
                         }
                 }
-            } header: {
-                Text("Archived (\(model.archived.count))")
+                if shown.isEmpty {
+                    Text("No archived session matches “\(query)”").font(.callout).foregroundStyle(.tertiary)
+                }
             }
-            .alert(
-                "Delete “\(deleting?.display ?? "")”?",
-                isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
-                presenting: deleting
-            ) { a in
-                Button("Delete", role: .destructive) { model.deleteArchived(a) }
-                Button("Cancel", role: .cancel) {}
-            } message: { a in
-                Text(a.branch.map { "It leaves the archive for good. Its branch \($0) stays in the repo." } ?? "It leaves the archive for good.")
-            }
+        } header: {
+            Text("Archived")
+        }
+        .alert(
+            "Delete “\(deleting?.display ?? "")”?",
+            isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+            presenting: deleting
+        ) { a in
+            Button("Delete", role: .destructive) { model.deleteArchived(a) }
+            Button("Cancel", role: .cancel) {}
+        } message: { a in
+            Text(a.branch.map { "It leaves the archive for good. Its branch \($0) stays in the repo." } ?? "It leaves the archive for good.")
         }
     }
 }
@@ -253,6 +284,7 @@ struct ArchivedSection: View {
 struct ArchivedRow: View {
     @EnvironmentObject var model: DinoModel
     let session: ArchivedInfo
+    let delete: () -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -268,6 +300,10 @@ struct ArchivedRow: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(Brand.green)
                     .help(session.resumable ? "Unarchive: continue the conversation" : "Unarchive: start \(model.launcherLabel(session.launcher)) again in its folder")
+                Button(action: delete) { Image(systemName: "trash") }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Delete…")
             }
         }
         .padding(.vertical, 2)
