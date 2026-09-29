@@ -1033,7 +1033,6 @@ fn codex_context(s: &Session, claimed: &[String]) -> Option<(u64, u64)> {
     }
 }
 
-/// Between turns: not working, not waiting on the user, and quiet.
 /// Whether a restart would cut nothing short: between turns, with no subagent or background
 /// command of its own still running, since those end with the agent.
 fn restartable(d: &Daemon, s: &Session) -> bool {
@@ -1044,10 +1043,22 @@ fn restartable(d: &Daemon, s: &Session) -> bool {
     idle(d, s) && !st.subagents.iter().any(|a| a.running) && !st.background.iter().any(|b| b.running)
 }
 
+/// "1 agent", "2 commands", "1 agent, 1 command": what a turn ended on and still runs.
+fn waiting_words(agents: usize, commands: usize) -> String {
+    let n = |k: usize, one: &str| (k > 0).then(|| format!("{k} {one}{}", if k == 1 { "" } else { "s" }));
+    [n(agents, "agent"), n(commands, "command")].into_iter().flatten().collect::<Vec<_>>().join(", ")
+}
+
+/// Between turns: not working, not waiting on the user, and quiet.
 fn idle(d: &Daemon, s: &Session) -> bool {
     let st = stats(d, s);
     let quiet = s.last_output.lock().unwrap().is_none_or(|t| t.elapsed() > TURN_OVER_QUIET);
     !s.pane.is_exited() && st.in_flight == 0 && !matches!(st.activity, Some(Activity::Working | Activity::NeedsPermission(_))) && quiet
+}
+
+/// Idle, and not waiting on subagents or background commands its last turn left running.
+fn finished(d: &Daemon, s: &Session) -> bool {
+    idle(d, s) && d.proxy.stats.session(&s.id).waiting() == (0, 0)
 }
 
 fn state(d: &Daemon) -> Response {
@@ -1064,6 +1075,7 @@ fn state(d: &Daemon) -> Response {
             let (context_tokens, context_limit) = context_use(s, &st, &claimed);
             let label = s.label.lock().unwrap().clone();
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
+            let waiting = st.waiting();
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -1081,7 +1093,10 @@ fn state(d: &Daemon) -> Response {
                 tier: st.tier,
                 activity: st.activity.map(|a| match a {
                     Activity::Working => "working".into(),
-                    Activity::Done => "done".into(),
+                    Activity::Done => match waiting {
+                        (0, 0) => "done".into(),
+                        (agents, commands) => format!("waiting:{}", waiting_words(agents, commands)),
+                    },
                     Activity::NeedsPermission(what) => format!("needs:{what}"),
                 }),
                 group: group_of(&s.id),
@@ -2191,7 +2206,7 @@ fn close_merged(d: &Daemon) {
             continue;
         };
         let target = real(&w.path);
-        if !sessions_in(d, &target).iter().all(|o| o.pane.is_exited() || idle(d, o)) {
+        if !sessions_in(d, &target).iter().all(|o| o.pane.is_exited() || finished(d, o)) {
             continue;
         }
         d.closing.lock().unwrap().remove(&id);

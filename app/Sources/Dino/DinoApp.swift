@@ -152,7 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func ask(_ model: DinoModel) -> QuitChoice {
         let count = model.sessions.count
-        let working = model.sessions.filter { [.thinking, .working, .needsYou].contains(model.status(of: $0)) }.count
+        let working = model.sessions.filter { [.thinking, .working, .waiting, .needsYou].contains(model.status(of: $0)) }.count
         let alert = NSAlert()
         alert.messageText = count == 1 ? "Keep your agent running?" : "Keep your \(count) agents running?"
         alert.informativeText = (working > 0 ? "\(working) \(working == 1 ? "is" : "are") working right now. " : "")
@@ -651,7 +651,12 @@ struct SessionRow: View {
                         .help("In a split with \(model.sessions.first { $0.id == split.other(session.id) }?.name ?? "another session")")
                 }
                 Spacer()
-                Text(status.label).font(.caption).foregroundStyle(status.color)
+                if status == .waiting, let on = session.waitingOn {
+                    Text("waiting on \(on)").font(.caption).foregroundStyle(status.color).lineLimit(1)
+                        .help("Its turn ended while these still run; it carries on when they finish")
+                } else {
+                    Text(status.label).font(.caption).foregroundStyle(status.color)
+                }
             }
             if let f = session.inside {
                 HStack(spacing: 5) {
@@ -730,6 +735,12 @@ struct StatusDot: View {
                 Circle().fill(status.color).frame(width: 10, height: 10)
                     .opacity(pulse ? 0.35 : 1)
                     .animation(.easeInOut(duration: 0.7).repeatForever(), value: pulse)
+                    .onAppear { pulse = true }
+            case .waiting:
+                // A ring, slower: busy, but not the agent itself.
+                Circle().strokeBorder(status.color, lineWidth: 2).frame(width: 10, height: 10)
+                    .opacity(pulse ? 0.35 : 1)
+                    .animation(.easeInOut(duration: 1.4).repeatForever(), value: pulse)
                     .onAppear { pulse = true }
             }
         }

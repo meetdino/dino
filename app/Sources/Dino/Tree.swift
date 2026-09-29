@@ -207,7 +207,7 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         switch self {
         case .all: "Every session"
         case .needsYou: "Waiting on you: asking for something, or finished and not looked at yet"
-        case .working: "Thinking or running tools"
+        case .working: "Thinking, running tools, or waiting on its subagents and background commands"
         case .idle: "Waiting for a prompt, or exited"
         }
     }
@@ -217,7 +217,7 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         switch self {
         case .all: true
         case .needsYou: status == .needsYou || status == .done
-        case .working: status == .thinking || status == .working
+        case .working: status == .thinking || status == .working || status == .waiting
         case .idle: status == .idle || status == .ended || status == .exited
         }
     }

@@ -47,6 +47,8 @@ enum Status {
     Thinking,
     /// Recent terminal output, e.g. a tool running.
     Working,
+    /// The turn ended on subagents or background commands that still run.
+    Waiting,
     Idle,
     Done,
     Attention,
@@ -63,6 +65,8 @@ impl Session {
             Status::Exited
         } else if self.attention || self.needs().is_some() {
             Status::Attention
+        } else if self.info.activity.as_deref().is_some_and(|a| a.starts_with("waiting:")) {
+            Status::Waiting
         } else if self.info.activity.as_deref().is_some_and(|a| a != "working") {
             // Hooks say the turn ended; side calls and redraws since then aren't work.
             if self.unseen_done { Status::Done } else { Status::Idle }
@@ -240,7 +244,7 @@ impl App {
                             }
                         }
                         let finished = info.activity.as_deref() == Some("done")
-                            && s.info.activity.as_deref().is_some_and(|a| a == "working" || a.starts_with("needs:"));
+                            && s.info.activity.as_deref().is_some_and(|a| a == "working" || a.starts_with("needs:") || a.starts_with("waiting:"));
                         if !focused && finished {
                             s.unseen_done = true;
                             notify(&format!("{} finished", info.name), info.title.as_deref().unwrap_or("Ready for your review"));
@@ -453,6 +457,7 @@ impl App {
             let (dot, label, color) = match s.status() {
                 Status::Thinking => (if blink { "◆" } else { "◇" }, "thinking", Color::LightMagenta),
                 Status::Working => (if blink { "●" } else { "◉" }, "working", ACCENT),
+                Status::Waiting => (if blink { "◌" } else { "○" }, "waiting", ACCENT),
                 Status::Idle => ("○", "idle", MUTED),
                 Status::Done => ("✓", "done", Color::LightCyan),
                 Status::Attention => ("!", "needs you", Color::Yellow),
