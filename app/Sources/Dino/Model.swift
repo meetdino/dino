@@ -55,6 +55,8 @@ final class DinoModel: ObservableObject {
     @Published var showFanout = false
     /// A member whose changes the user is about to keep.
     @Published var confirmKeep: MemberInfo?
+    /// A session worktree the user is about to close, and whether its changes come along.
+    @Published var closingWorktree: ClosingWorktree?
 
     var elsewhere: [FoundSession] { found.filter { $0.source == "running" } }
 
@@ -232,12 +234,13 @@ final class DinoModel: ObservableObject {
         return t
     }
 
-    func newSession(_ launcher: LauncherInfo) {
+    /// `worktree`: in a new worktree and branch of the repo, so its edits stay off your checkout.
+    func newSession(_ launcher: LauncherInfo, worktree: Bool = false) {
         guard let conn = connection else { return }
         let cwd = folder.path
         Task.detached {
             do {
-                let resp = try conn.request(["type": "new", "launcher": launcher.short, "args": [], "cwd": cwd, "cols": 120, "rows": 40])
+                let resp = try conn.request(["type": "new", "launcher": launcher.short, "args": [], "cwd": cwd, "cols": 120, "rows": 40, "worktree": worktree])
                 await MainActor.run {
                     if let id = resp.id { self.select(id) }
                 }
@@ -389,6 +392,18 @@ final class DinoModel: ObservableObject {
         panel.directoryURL = folder
         panel.prompt = "Use Folder"
         if panel.runModal() == .OK, let url = panel.url { folder = url }
+    }
+
+    /// Stop the sessions in a worktree dino made and remove it and its branch; `apply` first brings
+    /// its changes into the checkout it came from, uncommitted.
+    func closeWorktree(_ w: ClosingWorktree) {
+        Task.detached {
+            do {
+                _ = try DinoConnection(path: DinoEnvironment.socketPath).request(["type": "remove_worktree", "path": w.path, "apply": w.apply])
+            } catch {
+                await MainActor.run { self.error = error.localizedDescription }
+            }
+        }
     }
 
     func kill(_ id: String) {
