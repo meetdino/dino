@@ -58,7 +58,16 @@ pub enum Request {
     Launchers,
     /// Every launcher, allowed or not (for choosing policies).
     AllLaunchers,
-    New { launcher: String, args: Vec<String>, cwd: Option<String>, cols: u16, rows: u16 },
+    /// Start a session; with `worktree`, in a new git worktree (and branch) of the repo at `cwd`.
+    New {
+        launcher: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        worktree: bool,
+    },
     Kill { id: String },
     /// Switch this connection to a live terminal stream for session `id`.
     Attach { id: String, cols: u16, rows: u16 },
@@ -84,6 +93,9 @@ pub enum Request {
     Keep { session: String },
     /// Close a fan-out group: stop its agents, remove their worktrees and branches.
     Discard { group: String },
+    /// Close a worktree dino made for a session: stop the sessions in it, remove it and its branch.
+    /// `apply` first brings its changes into the checkout it came from, uncommitted.
+    RemoveWorktree { path: String, apply: bool },
     /// The settings document.
     Settings,
     /// Replace the settings document.

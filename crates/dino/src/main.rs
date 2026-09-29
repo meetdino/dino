@@ -138,6 +138,7 @@ impl App {
             cwd: std::env::current_dir().ok().map(|p| p.display().to_string()),
             cols: self.pane_size.0,
             rows: self.pane_size.1,
+            worktree: false,
         };
         match client::request(&req) {
             Ok(Response::Created { id }) => {
@@ -756,7 +757,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
-       dino ls | new <agent> [args...] | attach <id> | kill <id> | ping | stop | daemon
+       dino ls | new [--worktree] <agent> [args...] | attach <id> | kill <id> | ping | stop | daemon
        dino found | continue <session-id prefix>
        dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>";
 
@@ -785,9 +786,12 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("new") => {
-            let agent = cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone();
+            let worktree = cli.get(1).is_some_and(|a| a == "-w" || a == "--worktree");
+            let rest = &cli[if worktree { 2 } else { 1 }..];
+            let agent = rest.first().ok_or_else(|| anyhow::anyhow!(USAGE))?.clone();
             let (cols, rows) = terminal::size().unwrap_or((120, 40));
-            let req = Request::New { launcher: agent, args: cli[2..].to_vec(), cwd: std::env::current_dir().ok().map(|p| p.display().to_string()), cols, rows };
+            let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
+            let req = Request::New { launcher: agent, args: rest[1..].to_vec(), cwd, cols, rows, worktree };
             return print_response(client::request(&req)?);
         }
         Some("kill") => return print_response(client::request(&Request::Kill { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),

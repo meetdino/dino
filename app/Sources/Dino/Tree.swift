@@ -4,7 +4,16 @@ import SwiftUI
 struct Worktree: Codable, Equatable, Identifiable {
     var path: String
     var branch: String?
+    /// dino made it for a session (see `ClosingWorktree`).
+    var dino: Bool
     var id: String { path }
+}
+
+struct ClosingWorktree: Equatable {
+    var path: String
+    var label: String
+    /// Bring its changes into the checkout it came from first.
+    var apply: Bool
 }
 
 /// A git repo with its worktrees, or a plain folder (no worktrees) where sessions run.
@@ -32,6 +41,8 @@ struct PlaceNode: Identifiable, Equatable {
     var path: String
     var label: String
     var sessions: [SessionInfo]
+    /// A worktree dino made for a session, for the user to close.
+    var dino = false
     var id: String { path }
 }
 
@@ -63,7 +74,7 @@ enum SessionTree {
             let places = r.worktrees.isEmpty
                 ? [PlaceNode(path: r.path, label: r.name, sessions: [])]
                 : r.worktrees.filter { !groupWorktrees.contains($0.path) }.map {
-                    PlaceNode(path: $0.path, label: $0.branch ?? URL(fileURLWithPath: $0.path).lastPathComponent, sessions: [])
+                    PlaceNode(path: $0.path, label: $0.branch ?? URL(fileURLWithPath: $0.path).lastPathComponent, sessions: [], dino: $0.dino)
                 }
             return RepoNode(repo: r, places: places, groups: groups.filter { $0.repo == r.path })
         }
@@ -99,16 +110,29 @@ struct RepoRows: View {
                 sessionRows(node.places[0].sessions)
             } else {
                 ForEach(node.places) { place in
-                    if place.sessions.isEmpty {
-                        PlaceRow(icon: "arrow.triangle.branch", title: place.label, detail: nil)
-                            .tag("dir:\(place.path)")
-                    } else {
-                        DisclosureGroup(isExpanded: expanded(place.id)) {
-                            sessionRows(place.sessions)
-                        } label: {
+                    Group {
+                        if place.sessions.isEmpty {
                             PlaceRow(icon: "arrow.triangle.branch", title: place.label, detail: nil)
+                        } else {
+                            DisclosureGroup(isExpanded: expanded(place.id)) {
+                                sessionRows(place.sessions)
+                            } label: {
+                                PlaceRow(icon: "arrow.triangle.branch", title: place.label, detail: nil)
+                            }
                         }
-                        .tag("dir:\(place.path)")
+                    }
+                    .tag("dir:\(place.path)")
+                    .contextMenu {
+                        if place.dino {
+                            Button("Apply Changes and Close Worktree…") {
+                                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: true)
+                            }
+                            Button("Discard Worktree…", role: .destructive) {
+                                model.closingWorktree = ClosingWorktree(path: place.path, label: place.label, apply: false)
+                            }
+                            Divider()
+                        }
+                        Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: place.path) }
                     }
                 }
                 ForEach(node.groups) { g in
