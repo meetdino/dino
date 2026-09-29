@@ -47,10 +47,19 @@ them. Works with no account; an optional Dino login later syncs settings across 
   comes with Developer ID signing, behind the same `SetKey` interface.
 - Native Settings window (⌘,): General, Agents, Models & Routing, Keys, Policies.
 
-## 3. Policies (per repo, with defaults)
+## 3. Policies (global now; per repo, keyed by git remote, later)
 
-Only what dinod enforces: which agents may start, default agent, auto-trust dino worktrees
-(fixes fan-out stalling on "Trust this folder?"), token budget per session.
+Only what dinod enforces, in `[policies]` of settings.toml:
+
+- `allowed_agents`: launchers dino may start (empty = all; the shell always). Others leave the
+  menus and fan-out and are refused; running sessions keep going.
+- `default_agent`: listed first by `Launchers`, so it gets ⌘N.
+- `worktree_trust`: Claude keys trust per path and stops looking at the git root, so each fan-out
+  worktree would ask "Do you trust this folder?". When the repo is trusted in `~/.claude.json`,
+  fanout trusts the same folder in each Claude worktree; closing the fan-out forgets it. Codex
+  inherits a repo's trust by itself.
+- `session_token_budget`: the proxy refuses a routed session's model calls once it has used this
+  many tokens (input, cache, output), with a 400 its agent shows as is.
 
 ## 4. First run
 

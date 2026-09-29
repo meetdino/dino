@@ -14,6 +14,7 @@ use crate::{config_dir, keys_file};
 #[serde(default)]
 pub struct Settings {
     pub routing: Routing,
+    pub policies: Policies,
     pub machine: Machine,
 }
 
@@ -27,6 +28,32 @@ pub struct Routing {
 impl Default for Routing {
     fn default() -> Self {
         Self { proxy: true }
+    }
+}
+
+/// Rules for what agents may do. Global for now; per repo (keyed by remote) later.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct Policies {
+    /// Launchers dino may start (by short name); empty means all. The shell is always allowed.
+    pub allowed_agents: Vec<String>,
+    /// What ⌘N starts; none means Claude Code, or the first allowed agent.
+    pub default_agent: Option<String>,
+    /// A fan-out worktree is trusted when its repo is, so Claude doesn't ask again for each one.
+    pub worktree_trust: bool,
+    /// Most tokens (input, cache and output) one routed session may use; 0 means no limit.
+    pub session_token_budget: u64,
+}
+
+impl Default for Policies {
+    fn default() -> Self {
+        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0 }
+    }
+}
+
+impl Policies {
+    pub fn allows(&self, short: &str) -> bool {
+        short == "shell" || self.allowed_agents.is_empty() || self.allowed_agents.iter().any(|a| a == short)
     }
 }
 
@@ -51,6 +78,7 @@ impl Settings {
                 let get = |k: &str| old.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=').map(str::trim).map(String::from));
                 Self {
                     routing: Routing { proxy: get("route").as_deref() != Some("false") },
+                    policies: Policies::default(),
                     machine: Machine { onboarded: get("onboarded").as_deref() == Some("true") },
                 }
             }
@@ -153,7 +181,14 @@ mod tests {
         s2.save().unwrap();
         assert_eq!(Settings::load(), s2);
         std::fs::write(Settings::path(), "[routing]\nproxy = false\n").unwrap();
-        assert_eq!(Settings::load(), Settings { routing: Routing { proxy: false }, machine: Machine::default() }, "missing tables default");
+        assert_eq!(Settings::load(), Settings { routing: Routing { proxy: false }, ..Settings::default() }, "missing tables default");
+        assert!(Settings::load().policies.worktree_trust, "trust on by default");
+        let p = Policies { allowed_agents: vec!["codex".into()], ..Policies::default() };
+        assert!(p.allows("codex") && p.allows("shell") && !p.allows("claude"));
+        let mut s3 = Settings::default();
+        s3.policies = Policies { default_agent: Some("codex".into()), session_token_budget: 5, ..p };
+        s3.save().unwrap();
+        assert_eq!(Settings::load(), s3);
 
         set_key("DINO_TEST_A_KEY", Some(" abc ")).unwrap();
         set_key("DINO_TEST_B_KEY", Some("def")).unwrap();

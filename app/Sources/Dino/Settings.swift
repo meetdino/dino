@@ -3,8 +3,21 @@ import SwiftUI
 /// `settings.toml`, as dinod sends it. dinod owns the file; the app never parses TOML.
 struct DinoSettings: Codable, Equatable {
     struct Routing: Codable, Equatable { var proxy: Bool }
+    struct Policies: Codable, Equatable {
+        /// Launcher short names; empty means all. The shell is always allowed.
+        var allowed_agents: [String]
+        var default_agent: String?
+        var worktree_trust: Bool
+        /// 0 means no limit.
+        var session_token_budget: UInt64
+
+        func allows(_ short: String) -> Bool {
+            short == "shell" || allowed_agents.isEmpty || allowed_agents.contains(short)
+        }
+    }
     struct Machine: Codable, Equatable { var onboarded: Bool }
     var routing: Routing
+    var policies: Policies
     var machine: Machine
 }
 
@@ -30,6 +43,11 @@ extension DinoConnection {
         _ = try send(["type": "set_settings", "settings": encoded])
     }
 
+    /// Every agent dinod can start, allowed or not.
+    func allLaunchers() throws -> [LauncherInfo] {
+        try request(["type": "all_launchers"]).launchers ?? []
+    }
+
     func keys() throws -> [KeyInfo] {
         try JSONDecoder().decode(KeysResponse.self, from: send(["type": "keys"])).keys
     }
@@ -47,10 +65,15 @@ extension DinoConnection {
 final class SettingsStore: ObservableObject {
     @Published var settings: DinoSettings?
     @Published var keys: [KeyInfo] = []
+    @Published var agents: [LauncherInfo] = []
     @Published var error: String?
 
     func load() {
-        run { c in (try c.settings(), try c.keys()) } done: { self.settings = $0.0; self.keys = $0.1 }
+        run { c in (try c.settings(), try c.keys(), try c.allLaunchers()) } done: {
+            self.settings = $0.0
+            self.keys = $0.1
+            self.agents = $0.2
+        }
     }
 
     func update(_ change: (inout DinoSettings) -> Void) {
@@ -64,8 +87,11 @@ final class SettingsStore: ObservableObject {
     func setKey(_ name: String, value: String?) {
         run { c in
             try c.setKey(name, value: value)
-            return try c.keys()
-        } done: { self.keys = $0 }
+            return (try c.keys(), try c.allLaunchers())
+        } done: {
+            self.keys = $0.0
+            self.agents = $0.1
+        }
     }
 
     /// Socket work off the main thread; dinod's message becomes the pane's error line.
@@ -86,13 +112,14 @@ final class SettingsStore: ObservableObject {
 
 /// Settings' sections, in sidebar order.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case account, general, routing, keys
+    case account, general, policies, routing, keys
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .account: "Dino Account"
         case .general: "General"
+        case .policies: "Policies"
         case .routing: "Routing"
         case .keys: "Keys"
         }
@@ -102,6 +129,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .account: "person.crop.circle.fill"
         case .general: "gearshape.fill"
+        case .policies: "checkmark.shield.fill"
         case .routing: "arrow.triangle.branch"
         case .keys: "key.fill"
         }
@@ -111,6 +139,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .account: .blue
         case .general: .gray
+        case .policies: .indigo
         case .routing: .green
         case .keys: .orange
         }
@@ -149,6 +178,7 @@ struct SettingsView: View {
                 switch pane {
                 case .account: AccountPane()
                 case .general: GeneralPane()
+                case .policies: PoliciesPane()
                 case .routing: RoutingPane()
                 case .keys: KeysPane()
                 }
@@ -220,6 +250,21 @@ private struct AccountPane: View {
     }
 }
 
+/// A section's explanation, left-aligned like System Settings'.
+private struct Footnote: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 10)
+    }
+}
+
 /// Shown under a pane when dinod refused or couldn't be reached.
 private struct StoreError: View {
     @EnvironmentObject var store: SettingsStore
@@ -246,9 +291,7 @@ private struct GeneralPane: View {
                     Text("Stop them").tag(QuitChoice.stop.rawValue)
                 }
             } footer: {
-                Text("Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                Footnote("Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
             }
             Section {
                 LabeledContent("Settings and keys") {
@@ -267,6 +310,95 @@ private struct GeneralPane: View {
     }
 }
 
+private struct PoliciesPane: View {
+    @EnvironmentObject var store: SettingsStore
+
+    private static let budgets: [UInt64] = [0, 1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]
+
+    private var policies: DinoSettings.Policies? { store.settings?.policies }
+    private var agents: [LauncherInfo] { store.agents.filter { $0.short != "shell" } }
+    private var startable: [LauncherInfo] { store.agents.filter { policies?.allows($0.short) ?? true } }
+
+    private func allowed(_ l: LauncherInfo) -> Binding<Bool> {
+        Binding(
+            get: { policies?.allows(l.short) ?? true },
+            set: { on in
+                store.update {
+                    var list = $0.policies.allowed_agents.isEmpty ? agents.map(\.short) : $0.policies.allowed_agents
+                    list.removeAll { $0 == l.short }
+                    if on { list.append(l.short) }
+                    // Everything allowed is saved as "all", so agents dino finds later are allowed too.
+                    $0.policies.allowed_agents = agents.allSatisfy { list.contains($0.short) } ? [] : list
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(agents) { l in
+                    Toggle(l.label, isOn: allowed(l))
+                }
+                Picker("⌘N starts", selection: Binding(
+                    get: {
+                        // What dinod falls back to when the chosen one is off or missing: the first allowed.
+                        let want = policies?.default_agent ?? "claude"
+                        return startable.contains { $0.short == want } ? want : startable.first?.short ?? ""
+                    },
+                    set: { d in store.update { $0.policies.default_agent = d == "claude" ? nil : d } }
+                )) {
+                    ForEach(startable) { l in
+                        Text(l.label).tag(l.short)
+                    }
+                }
+            } header: {
+                Text("Agents")
+            } footer: {
+                Footnote("Agents you turn off leave the menus and fan-out, and dino won't start them. Ones already running keep going. The shell is always there.")
+            }
+            Section {
+                Toggle("Trust fan-out worktrees when the repo is trusted", isOn: Binding(
+                    get: { policies?.worktree_trust ?? true },
+                    set: { on in store.update { $0.policies.worktree_trust = on } }
+                ))
+            } header: {
+                Text("Fan-out")
+            } footer: {
+                Footnote("Claude asks whether to trust each new folder, and every fan-out worktree is one. When you've trusted the repo, dino tells Claude its worktrees are trusted too, and forgets them when the fan-out closes. Codex does this on its own.")
+            }
+            Section {
+                Picker("Tokens per session", selection: Binding(
+                    get: { policies?.session_token_budget ?? 0 },
+                    set: { n in store.update { $0.policies.session_token_budget = n } }
+                )) {
+                    ForEach(budgetChoices, id: \.self) { n in
+                        Text(n == 0 ? "No limit" : Self.format(n)).tag(n)
+                    }
+                }
+            } header: {
+                Text("Budget")
+            } footer: {
+                Footnote("Counts input, cached and output tokens, like the sidebar. A session over its budget gets an error on its next model call. Only sessions routed through dino (see Routing); applies to running ones too.")
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+    }
+
+    /// The presets, plus a value set by hand in settings.toml.
+    private var budgetChoices: [UInt64] {
+        let current = policies?.session_token_budget ?? 0
+        return Self.budgets.contains(current) ? Self.budgets : (Self.budgets + [current]).sorted()
+    }
+
+    private static func format(_ n: UInt64) -> String {
+        n >= 1_000_000 && n % 100_000 == 0
+            ? "\((Double(n) / 1_000_000).formatted()) million"
+            : "\(n.formatted()) tokens"
+    }
+}
+
 private struct RoutingPane: View {
     @EnvironmentObject var store: SettingsStore
 
@@ -282,9 +414,7 @@ private struct RoutingPane: View {
                     ))
                     .disabled(store.settings == nil)
                 } footer: {
-                    Text("dino's local proxy counts tokens per session and serves the free tier. Off, agents talk to their providers directly. Applies to sessions you start from now on.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    Footnote("dino's local proxy counts tokens per session and serves the free tier. Off, agents talk to their providers directly. Applies to sessions you start from now on.")
                 }
                 Section("Free tier") {
                     LabeledContent("Models") {
@@ -315,9 +445,7 @@ private struct KeysPane: View {
                         row(key)
                     }
                 } footer: {
-                    Text("Keys stay on this Mac in \(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)/keys, readable only by you, and dino never shows them again. They take effect immediately. Keychain storage comes with signed releases.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    Footnote("Keys stay on this Mac in \(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)/keys, readable only by you, and dino never shows them again. They take effect immediately. Keychain storage comes with signed releases.")
                 }
             }
             .formStyle(.grouped)
