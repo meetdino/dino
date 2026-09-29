@@ -84,20 +84,139 @@ final class SettingsStore: ObservableObject {
     }
 }
 
+/// Settings' sections, in sidebar order.
+enum SettingsPane: String, CaseIterable, Identifiable {
+    case account, general, routing, keys
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .account: "Dino Account"
+        case .general: "General"
+        case .routing: "Routing"
+        case .keys: "Keys"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .account: "person.crop.circle.fill"
+        case .general: "gearshape.fill"
+        case .routing: "arrow.triangle.branch"
+        case .keys: "key.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .account: .blue
+        case .general: .gray
+        case .routing: .green
+        case .keys: .orange
+        }
+    }
+}
+
+/// A System Settings-style window: sections in a sidebar that never collapses, the pane beside it.
+/// A plain Window, since the Settings scene forces centered toolbar tabs.
 struct SettingsView: View {
+    static let windowID = "settings"
+
     @StateObject private var store = SettingsStore()
     /// Settings reopens on the pane you left it at, like the system's.
-    @AppStorage("settingsTab") private var tab = "general"
+    @AppStorage("settingsTab") private var pane: SettingsPane = .general
 
     var body: some View {
-        TabView(selection: $tab) {
-            GeneralPane().tabItem { Label("General", systemImage: "gearshape") }.tag("general")
-            RoutingPane().tabItem { Label("Routing", systemImage: "arrow.triangle.branch") }.tag("routing")
-            KeysPane().tabItem { Label("Keys", systemImage: "key") }.tag("keys")
+        NavigationSplitView(columnVisibility: .constant(.all)) {
+            List(selection: Binding(get: { pane }, set: { if let p = $0 { pane = p } })) {
+                AccountRow().tag(SettingsPane.account)
+                    .padding(.vertical, 4)
+                Section {
+                    ForEach(SettingsPane.allCases.filter { $0 != .account }) { p in
+                        HStack(spacing: 8) {
+                            SettingsIcon(pane: p, size: 22)
+                            Text(p.title)
+                        }
+                        .tag(p)
+                    }
+                }
+            }
+            .frame(width: 215)
+            .navigationSplitViewColumnWidth(min: 215, ideal: 215, max: 215)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            VStack(spacing: 0) {
+                switch pane {
+                case .account: AccountPane()
+                case .general: GeneralPane()
+                case .routing: RoutingPane()
+                case .keys: KeysPane()
+                }
+                StoreError()
+            }
+            .navigationTitle(pane.title)
         }
         .environmentObject(store)
-        .frame(width: 540)
+        .frame(width: 715, height: 470)
         .onAppear { store.load() }
+    }
+}
+
+/// The rounded, colored glyph System Settings gives each section.
+private struct SettingsIcon: View {
+    let pane: SettingsPane
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: pane.icon)
+            .font(.system(size: size * 0.55, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(pane.tint.gradient, in: RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
+    }
+}
+
+private struct AccountRow: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "person.crop.circle.fill")
+                .font(.system(size: 30))
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Log In").fontWeight(.semibold)
+                Text("with your Dino Account").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct AccountPane: View {
+    var body: some View {
+        Form {
+            Section {
+                VStack(spacing: 10) {
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.system(size: 56))
+                        .foregroundStyle(.secondary)
+                    Text("Dino Account").font(.title2.weight(.semibold))
+                    Text("Log in to keep your settings, policies and keys the same on every Mac you use dino on.")
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Log In…") {}
+                        .controlSize(.large)
+                        .disabled(true)
+                        .padding(.top, 4)
+                    Text("Not available yet. dino works fully without an account, and nothing leaves this Mac.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 
@@ -120,22 +239,6 @@ private struct GeneralPane: View {
 
     var body: some View {
         Form {
-            Section("Account") {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "person.crop.circle")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Not logged in")
-                        Text("Logging in with Dino will sync your settings, policies and keys across your Macs. It isn't available yet; dino works fully without an account.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer()
-                    Button("Log In…") {}.disabled(true)
-                }
-            }
             Section {
                 Picker("When you quit with agents running", selection: $quitChoice) {
                     Text("Ask").tag("")
@@ -161,7 +264,6 @@ private struct GeneralPane: View {
             }
         }
         .formStyle(.grouped)
-        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -195,9 +297,7 @@ private struct RoutingPane: View {
                 }
             }
             .formStyle(.grouped)
-            StoreError()
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -221,9 +321,7 @@ private struct KeysPane: View {
                 }
             }
             .formStyle(.grouped)
-            StoreError()
         }
-        .fixedSize(horizontal: false, vertical: true)
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { key in
             Button("Remove", role: .destructive) { store.setKey(key.name, value: nil) }
         } message: { _ in
