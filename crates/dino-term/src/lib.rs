@@ -40,6 +40,10 @@ pub struct SpawnSpec {
 pub trait Transport: Send + Sync {
     fn write(&self, bytes: Vec<u8>);
     fn resize(&self, cols: u16, rows: u16);
+    /// The terminal's foreground process group, when it's a local PTY.
+    fn foreground(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// State shared between the output pump and whoever owns the pane.
@@ -122,6 +126,9 @@ impl Transport for PtyTransport {
     fn resize(&self, cols: u16, rows: u16) {
         let _ = self.master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
     }
+    fn foreground(&self) -> Option<u32> {
+        self.master.lock().unwrap().process_group_leader().and_then(|p| u32::try_from(p).ok())
+    }
 }
 
 pub struct Pane {
@@ -129,6 +136,8 @@ pub struct Pane {
     processor: Mutex<Processor>,
     pub shared: Arc<Shared>,
     killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
+    /// The program's process, when it runs on a local PTY.
+    pid: OnceLock<u32>,
 }
 
 impl Pane {
@@ -145,7 +154,7 @@ impl Pane {
         });
         let config = Config { kitty_keyboard: true, ..Config::default() };
         let term = Term::new(config, &TermSize { cols: cols as usize, rows: rows as usize }, Listener(shared.clone()));
-        Self { term: Arc::new(FairMutex::new(term)), processor: Mutex::new(Processor::new()), shared, killer: Mutex::new(None) }
+        Self { term: Arc::new(FairMutex::new(term)), processor: Mutex::new(Processor::new()), shared, killer: Mutex::new(None), pid: OnceLock::new() }
     }
 
     /// Run a program on a local PTY. `tap` sees every chunk of raw output (dinod forwards it to
@@ -170,6 +179,9 @@ impl Pane {
 
         let pane = Arc::new(Self::emulator(cols, rows, true));
         *pane.killer.lock().unwrap() = Some(child.clone_killer());
+        if let Some(pid) = child.process_id() {
+            let _ = pane.pid.set(pid);
+        }
         let mut reader = pair.master.try_clone_reader()?;
         let transport = PtyTransport { writer: Mutex::new(pair.master.take_writer()?), master: Mutex::new(pair.master) };
         let _ = pane.shared.transport.set(Arc::new(transport));
@@ -221,6 +233,17 @@ impl Pane {
         if let Some(mut k) = self.killer.lock().unwrap().take() {
             let _ = k.kill();
         }
+    }
+
+    /// The program it was started with (a shell, an agent), on this Mac.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid.get().copied()
+    }
+
+    /// The process group in the foreground: the program itself, or whatever it's running now
+    /// (a shell's current command).
+    pub fn foreground(&self) -> Option<u32> {
+        self.shared.transport.get()?.foreground()
     }
 
     pub fn size(&self) -> (u16, u16) {

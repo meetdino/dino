@@ -68,7 +68,23 @@ struct Session {
     host: Option<String>,
     /// Codex's rollout, where it reports its context window.
     rollout: Mutex<Rollout>,
+    /// A shell's: the agent someone started in it by hand.
+    inside: Mutex<Inside>,
 }
+
+/// What a shell is running in the foreground, as last looked at.
+#[derive(Default)]
+struct Inside {
+    fg: Option<u32>,
+    checked: Option<Instant>,
+    found: Option<FoundSession>,
+    /// The terminal title while the agent ran: it's the agent's, not the shell's.
+    title: Option<String>,
+}
+
+/// How often to look again at a foreground command that hasn't changed: an agent's title and
+/// status move while it runs, and a wrapper script may start one late.
+const INSIDE_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Default)]
 struct Rollout {
@@ -216,6 +232,15 @@ pub fn run() -> anyhow::Result<()> {
             }
         });
     }
+    {
+        let d = daemon.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                watch_shells(&d);
+            }
+        });
+    }
     schedule::start(&daemon);
     eprintln!("dinod listening on {}", path.display());
     for stream in listener.incoming().flatten() {
@@ -331,6 +356,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 };
             }
             Request::Found { cloud } => Response::Found { sessions: discover(d, cloud) },
+            Request::TakeOver { id } => match take_over(d, &id) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::Adopt { session, cwd } => match adopt(d, session, cwd) {
                 Ok(id) => {
                     save(d);
@@ -663,6 +692,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         label: Mutex::new(restore.as_ref().and_then(|r| r.label.clone())),
         host,
         rollout: Mutex::default(),
+        inside: Mutex::default(),
     }));
     Ok(id)
 }
@@ -1002,6 +1032,7 @@ fn state(d: &Daemon) -> Response {
                 messaged_by: s.messaged_by.lock().unwrap().clone(),
                 label,
                 tasks,
+                inside: s.inside.lock().unwrap().found.clone(),
             }
         })
         .collect();
@@ -1110,18 +1141,21 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
     let (cols, rows) = s.pane.size();
     let launch = Launch { cols, rows, restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) };
     let spawned = spawn(d, launch);
-    {
-        // The new one takes the old one's place, so the session never drops out of the list.
-        let mut sessions = d.sessions.lock().unwrap();
-        let i = sessions.iter().position(|o| Arc::ptr_eq(o, &s));
-        let j = sessions.iter().rposition(|o| o.id == id && !Arc::ptr_eq(o, &s));
-        if let (Some(i), Some(j)) = (i, j) {
-            let new = sessions.remove(j);
-            sessions[if j < i { i - 1 } else { i }] = new;
-        }
-    }
+    // The new one takes the old one's place, so the session never drops out of the list.
+    take_place(d, &s);
     save(d);
     spawned.map(|_| ())
+}
+
+/// The session just spawned with `old`'s id replaces `old` in the list, at its position.
+fn take_place(d: &Daemon, old: &Arc<Session>) {
+    let mut sessions = d.sessions.lock().unwrap();
+    let i = sessions.iter().position(|o| Arc::ptr_eq(o, old));
+    let j = sessions.iter().rposition(|o| o.id == old.id && !Arc::ptr_eq(o, old));
+    if let (Some(i), Some(j)) = (i, j) {
+        let new = sessions.remove(j);
+        sessions[if j < i { i - 1 } else { i }] = new;
+    }
 }
 
 /// Apply controls asked for mid-turn, now that the turn is over.
@@ -1218,10 +1252,14 @@ fn home() -> PathBuf {
 
 // ---- Continue anything: sessions dino didn't start. ----
 
-/// Found sessions minus the ones dino itself is running.
+/// Found sessions minus the ones dino itself is running, or that run inside its shells.
 fn discover(d: &Daemon, cloud: bool) -> Vec<FoundSession> {
-    let ours: Vec<String> = d.sessions.lock().unwrap().iter().filter_map(|s| s.agent_session.lock().unwrap().clone()).collect();
-    let running: Vec<FoundSession> = found::running().into_iter().filter(|f| !ours.contains(&f.session_id)).collect();
+    let sessions = d.sessions.lock().unwrap().clone();
+    let inside: Vec<FoundSession> = sessions.iter().filter_map(|s| s.inside.lock().unwrap().found.clone()).collect();
+    let mut ours: Vec<String> = sessions.iter().filter_map(|s| s.agent_session.lock().unwrap().clone()).collect();
+    ours.extend(inside.iter().map(|f| f.session_id.clone()).filter(|id| !id.is_empty()));
+    let in_shell = |f: &FoundSession| f.pid.is_some() && inside.iter().any(|i| i.pid == f.pid);
+    let running: Vec<FoundSession> = found::running().into_iter().filter(|f| !ours.contains(&f.session_id) && !in_shell(f)).collect();
     let mut out = found::recent(25, &running);
     out.retain(|f| !ours.contains(&f.session_id));
     out.splice(0..0, running);
@@ -1283,6 +1321,72 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         let _ = std::fs::OpenOptions::new().write(true).open(&tty).and_then(|mut t| io::Write::write_all(&mut t, note.as_bytes()));
     }
     Ok(id)
+}
+
+/// Notice agents started by hand in dino's shells, and when they exit back to the prompt.
+fn watch_shells(d: &Daemon) {
+    let shells: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| s.agent_id == "shell" && s.host.is_none() && !s.pane.is_exited()).cloned().collect();
+    for s in shells {
+        let fg = s.pane.foreground().filter(|fg| Some(*fg) != s.pane.pid());
+        let due = {
+            let mut i = s.inside.lock().unwrap();
+            if fg.is_none() {
+                // Agents set the title and leave it on exit; a shell that sets its own has since.
+                if i.found.is_some() && i.title.is_some() && s.pane.title() == i.title {
+                    *s.pane.shared.title.lock().unwrap() = None;
+                }
+                *i = Inside::default();
+            }
+            fg.is_some() && (i.fg != fg || i.checked.is_none_or(|t| t.elapsed() >= INSIDE_RECHECK))
+        };
+        let Some(fg) = fg.filter(|_| due) else { continue };
+        let found = found::inside(fg);
+        let title = found.as_ref().and_then(|_| s.pane.title());
+        *s.inside.lock().unwrap() = Inside { fg: Some(fg), checked: Some(Instant::now()), found, title };
+    }
+}
+
+/// Continue the agent someone started by hand in shell `id` as a dino session in the shell's
+/// place: same id and row, the agent's folder and flags, its conversation resumed. The shell goes.
+fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    anyhow::ensure!(s.agent_id == "shell" && s.host.is_none(), "{id} isn't a shell on this Mac");
+    // Looked at now, not as of the last poll: it may have exited, or named its conversation since.
+    let f = s.pane.foreground().and_then(found::inside).ok_or_else(|| anyhow::anyhow!("no agent is running in {id}"))?;
+    anyhow::ensure!(matches!(f.agent.as_str(), "claude" | "codex"), "dino can't continue {} sessions yet", f.agent);
+    anyhow::ensure!(!f.session_id.is_empty(), "the agent hasn't started a conversation yet; send it a prompt first");
+    let pid = f.pid.ok_or_else(|| anyhow::anyhow!("no agent is running in {id}"))?;
+    if f.agent == "claude" {
+        wait_until_idle(pid, std::time::Duration::from_secs(180))?;
+    }
+    stop(pid)?;
+    let restore = SavedSession {
+        id: id.to_string(),
+        name: session_name(&f.title),
+        launcher: f.agent.clone(),
+        args: f.args.clone(),
+        cwd: f.cwd.clone().unwrap_or_else(|| real(&s.cwd)),
+        started_at: now_secs(),
+        agent_session: Some(f.session_id.clone()),
+        auto: AutoState::default(),
+        // It keeps whatever the conversation ran with.
+        controls: Controls::default(),
+        scheduled: s.scheduled.clone(),
+        started_by: s.started_by.clone(),
+        messaged_by: s.messaged_by.lock().unwrap().clone(),
+        label: s.label.lock().unwrap().clone(),
+        host: None,
+    };
+    let (cols, rows) = s.pane.size();
+    spawn(d, Launch { cols, rows, restore: Some(restore.clone()), ..Launch::new(&restore.launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
+    // In the shell's place first, so clients reattaching by id find the agent.
+    take_place(d, &s);
+    // As in `restart`: clients see the stream drop without an exit, and reattach.
+    s.subscribers.lock().unwrap().clear();
+    s.pane.kill();
+    d.proxy.stats.restarted(id);
+    save(d);
+    Ok(())
 }
 
 /// Claude reports `busy`/`idle` in `~/.claude/sessions/<pid>.json`; don't cut a turn in half.
