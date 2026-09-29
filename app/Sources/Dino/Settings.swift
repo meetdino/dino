@@ -486,7 +486,7 @@ private struct PoliciesPane: View {
             }
             Section {
                 Toggle("Allow bypass permissions mode", isOn: Binding(
-                    get: { policies?.allow_bypass ?? false },
+                    get: { policies?.allow_bypass ?? true },
                     set: { on in
                         store.update {
                             $0.policies.allow_bypass = on
@@ -505,7 +505,7 @@ private struct PoliciesPane: View {
             } header: {
                 Text("Permissions")
             } footer: {
-                Footnote("Bypass lets an agent edit files and run any command without asking. Off, dino hides it and won't start or switch a session into it. Sessions already in it keep running.")
+                Footnote("Bypass lets an agent edit files and run any command without asking. Turn it off and dino hides it and won't start or switch a session into it. Sessions already in it keep running.")
             }
             Section {
                 Toggle("Cross-session communication", isOn: Binding(

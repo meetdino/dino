@@ -70,7 +70,7 @@ pub struct Policies {
     /// When a session's PR merges and its dino worktree has nothing left to lose, archive the session
     /// (its worktree goes, and comes back from the branch if it's started again).
     pub close_merged: bool,
-    /// Offer the permission mode that never asks. Off, it's hidden and refused.
+    /// Offer the permission mode that never asks (on unless turned off). Off, it's hidden and refused.
     pub allow_bypass: bool,
     /// Opt-in: give Claude sessions dino's tools (`dino mcp`) to list, read, message and start other sessions.
     pub session_tools: bool,
@@ -78,7 +78,7 @@ pub struct Policies {
 
 impl Default for Policies {
     fn default() -> Self {
-        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0, close_merged: false, allow_bypass: false, session_tools: false }
+        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0, close_merged: false, allow_bypass: true, session_tools: false }
     }
 }
 
@@ -405,7 +405,7 @@ mod tests {
         s3.policies = Policies { default_agent: Some("codex".into()), session_token_budget: 5, ..p };
         s3.save().unwrap();
         assert_eq!(Settings::load(), s3);
-        assert!(!Settings::default().policies.allow_bypass, "bypass hidden by default");
+        assert!(Settings::default().policies.allow_bypass, "bypass offered by default");
         assert!(!Settings::default().policies.session_tools, "session tools off by default");
 
         let mut s4 = Settings::default();
