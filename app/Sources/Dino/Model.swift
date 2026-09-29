@@ -220,6 +220,9 @@ final class DinoModel: ObservableObject {
     func status(of s: SessionInfo) -> SessionStatus {
         if s.exited { return .exited }
         if attention.contains(s.id) || s.needs != nil { return .needsYou }
+        // Agents with hooks (Claude) say when a turn starts and ends. Between turns, their side
+        // calls and their redraws when you focus or resize the pane aren't work.
+        if let a = s.activity, a != "working" { return unseenDone.contains(s.id) ? .done : .idle }
         if s.in_flight > 0 { return .thinking }
         if s.activity == "working" || (s.output_ms_ago ?? .max) < 1500 { return .working }
         if unseenDone.contains(s.id) { return .done }

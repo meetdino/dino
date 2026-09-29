@@ -305,7 +305,12 @@ final class DinoConnection: @unchecked Sendable {
         let n = Int(UInt32(head[1]) << 24 | UInt32(head[2]) << 16 | UInt32(head[3]) << 8 | UInt32(head[4]))
         let data = Data(try readExact(n))
         if let err = try? JSONDecoder().decode(Response.self, from: data), err.type == "error" {
-            throw DinoError.daemon(err.message ?? "error")
+            let message = err.message ?? "error"
+            // A request this dinod predates: it's still running an older build than the app.
+            if message.hasPrefix("bad request: unknown variant") {
+                throw DinoError.daemon("dinod is older than this app, so it can't do this yet. Restart it: run `dino stop` (your sessions come back), then start dinod again.")
+            }
+            throw DinoError.daemon(message)
         }
         return data
     }

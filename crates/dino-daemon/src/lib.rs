@@ -36,7 +36,12 @@ struct Session {
     agent_session: Mutex<Option<String>>,
     pane: Arc<Pane>,
     subscribers: Arc<Mutex<Vec<(u64, Sender<Vec<u8>>)>>>,
+    /// When the agent last wrote something the user didn't just cause (see `USER_ECHO`).
     last_output: Arc<Mutex<Option<Instant>>>,
+    /// When the agent last wrote anything at all.
+    last_write: Arc<Mutex<Option<Instant>>>,
+    /// The user's last keystroke, resize or attach.
+    poked: Arc<Mutex<Option<Instant>>>,
     attached: AtomicUsize,
 }
 
@@ -373,9 +378,16 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
 
     let subscribers: Arc<Mutex<Vec<(u64, Sender<Vec<u8>>)>>> = Arc::default();
     let last_output: Arc<Mutex<Option<Instant>>> = Arc::default();
-    let (subs, last) = (subscribers.clone(), last_output.clone());
+    let poked: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let last_write: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let (subs, last, poke, write) = (subscribers.clone(), last_output.clone(), poked.clone(), last_write.clone());
     let pane = Pane::spawn(spec, cols.max(20), rows.max(5), move |bytes| {
         if !bytes.is_empty() {
+            *write.lock().unwrap() = Some(Instant::now());
+        }
+        // Echoes and redraws answer the user; they don't mean the agent is working.
+        let echo = poke.lock().unwrap().is_some_and(|t| t.elapsed() < USER_ECHO);
+        if !bytes.is_empty() && !echo {
             *last.lock().unwrap() = Some(Instant::now());
         }
         // An empty chunk means EOF; it's forwarded so clients learn the session ended.
@@ -404,14 +416,30 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         pane,
         subscribers,
         last_output,
+        last_write,
+        poked,
         attached: AtomicUsize::new(0),
     }));
     Ok(id)
 }
 
+/// See `state`: how long a working agent can be silent before its turn counts as over.
+const TURN_OVER_QUIET: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// How long after a keystroke, resize or attach the agent's output is taken as its answer to
+/// that (an echo, a redraw) rather than as work of its own.
+const USER_ECHO: std::time::Duration = std::time::Duration::from_millis(700);
+
+impl Session {
+    fn poke(&self) {
+        *self.poked.lock().unwrap() = Some(Instant::now());
+    }
+}
+
 /// Stream a session to a client until it detaches or the session ends.
 fn attach(d: &Daemon, s: &Session, mut stream: UnixStream, cols: u16, rows: u16) -> io::Result<()> {
     ipc::write_json(&mut stream, &Response::Ok)?;
+    s.poke();
     // The most recent client decides the size, like tmux's "latest".
     s.pane.resize(cols, rows);
     // The client's terminal answers queries now; the daemon's emulator must stay quiet.
@@ -443,8 +471,13 @@ fn attach(d: &Daemon, s: &Session, mut stream: UnixStream, cols: u16, rows: u16)
 
     while let Ok((kind, payload)) = ipc::read_frame(&mut stream) {
         match kind {
-            ipc::DATA => s.pane.write(payload),
+            ipc::DATA => {
+                // Includes the focus in/out reports agents ask for: Claude repaints on those.
+                s.poke();
+                s.pane.write(payload)
+            }
             ipc::RESIZE => {
+                s.poke();
                 if let Some((c, r)) = ipc::parse_resize(&payload) {
                     s.pane.resize(c, r);
                 }
@@ -470,7 +503,14 @@ fn state(d: &Daemon) -> Response {
         .unwrap()
         .iter()
         .map(|s| {
-            let st = d.proxy.stats.session(&s.id);
+            let mut st = d.proxy.stats.session(&s.id);
+            // Mid-turn, Claude's spinner redraws many times a second, focused or not, even
+            // while a tool runs. Gone quiet with no model call out: the turn was interrupted.
+            let quiet = s.last_write.lock().unwrap().is_none_or(|t| t.elapsed() > TURN_OVER_QUIET);
+            if st.activity == Some(Activity::Working) && st.in_flight == 0 && quiet {
+                d.proxy.stats.end_turn(&s.id);
+                st = d.proxy.stats.session(&s.id);
+            }
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),

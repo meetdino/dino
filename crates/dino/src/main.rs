@@ -62,6 +62,9 @@ impl Session {
             Status::Exited
         } else if self.attention || self.needs().is_some() {
             Status::Attention
+        } else if self.info.activity.as_deref().is_some_and(|a| a != "working") {
+            // Hooks say the turn ended; side calls and redraws since then aren't work.
+            if self.unseen_done { Status::Done } else { Status::Idle }
         } else if self.info.in_flight > 0 {
             Status::Thinking
         } else if self.info.activity.as_deref() == Some("working")
