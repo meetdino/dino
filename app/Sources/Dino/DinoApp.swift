@@ -32,7 +32,12 @@ struct DinoApp: App {
             }
             // One window: ⌘N starts a session rather than opening a second window.
             CommandGroup(replacing: .newItem) {}
-            CommandGroup(replacing: .saveItem) { CloseCommand().environmentObject(model) }
+            CommandGroup(replacing: .saveItem) {
+                CloseCommand().environmentObject(model)
+                SaveCommand().environmentObject(model)
+                Button("Open File…") { model.chooseFile() }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
+            }
             CommandMenu("Session") {
                 Menu("New Session") {
                     // dinod lists the default agent first: ⌘N starts it.
@@ -69,6 +74,8 @@ struct DinoApp: App {
                     .keyboardShortcut("j")
                 Button(model.showReview ? "Hide Changes" : "Review Changes") { model.showReview.toggle() }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
+                Button(model.sidePane == .preview ? "Hide Preview" : "Show Preview") { model.togglePreview() }
+                    .keyboardShortcut("p", modifiers: [.command, .option])
                 ForEach(Array(model.sessions.prefix(9).enumerated()), id: \.element.id) { i, s in
                     Button("\(i + 1)  \(s.name)") { model.select(s.id) }
                         .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
@@ -163,6 +170,10 @@ struct ContentView: View {
         } detail: {
             HSplitView {
                 Terminals()
+                if let pane = model.sidePane {
+                    SidePaneView(pane: pane)
+                        .frame(minWidth: 320, idealWidth: 520, maxWidth: .infinity)
+                }
                 if model.showReview, let s = model.sessions.first(where: { $0.id == model.selected }) {
                     ReviewPanel(session: s)
                         .frame(minWidth: 340, idealWidth: 480, maxWidth: 900)
@@ -318,8 +329,20 @@ struct Terminals: View {
                 .help("Review this session's changes; click a line to comment for the agent (⇧⌘D)")
                 .disabled(!model.sessions.contains { $0.id == model.selected })
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button { model.togglePreview() } label: {
+                    Label("Preview", systemImage: model.sidePane == .preview ? "globe.americas.fill" : "globe.americas")
+                }
+                .help("Preview this session's dev server or any local page (⌥⌘P)")
+            }
             ToolbarItem(placement: .primaryAction) { PRToolbarButton() }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if let s = model.selectedSession, let u = s.local_url, model.offered[s.id] != u, model.sidePane != .preview {
+                PreviewOffer(session: s, url: u)
+            }
+        }
+        .animation(.spring(duration: 0.3), value: model.selectedSession?.local_url)
     }
 }
 
