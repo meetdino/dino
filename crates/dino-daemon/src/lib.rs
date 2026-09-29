@@ -66,7 +66,21 @@ struct Session {
     label: Mutex<Option<String>>,
     /// The SSH host it runs on; `cwd` is then a path there, and nothing local applies to it.
     host: Option<String>,
+    /// Codex's rollout, where it reports its context window.
+    rollout: Mutex<Rollout>,
 }
+
+#[derive(Default)]
+struct Rollout {
+    path: Option<PathBuf>,
+    /// When we last looked for it, not yet knowing its id.
+    searched: Option<Instant>,
+    /// The file's modification time when last read, and what it said.
+    read: Option<(SystemTime, Option<(u64, u64)>)>,
+}
+
+/// How often to look for a Codex session's rollout until it has one.
+const ROLLOUT_SEARCH: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Daemon {
     fn launcher(&self, short: &str) -> Option<LauncherInfo> {
@@ -632,6 +646,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         messaged_by: Mutex::new(restore.as_ref().and_then(|r| r.messaged_by.clone())),
         label: Mutex::new(restore.as_ref().and_then(|r| r.label.clone())),
         host,
+        rollout: Mutex::default(),
     }));
     Ok(id)
 }
@@ -651,7 +666,12 @@ fn local_spec(
     prompt: Option<String>,
 ) -> (SpawnSpec, PathBuf) {
     let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-    let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy, &|provider| d.proxy.base_url(id, provider));
+    // Claude reports its context window to its statusline; wrap the user's, if they have one.
+    let status_line = std::env::current_exe()
+        .ok()
+        .filter(|_| l.agent_id.starts_with("claude"))
+        .and_then(|dino| dino_core::statusline::wrapper(&cwd, &dino, &d.proxy.base_url(id, "hook")));
+    let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy, &|provider| d.proxy.base_url(id, provider), status_line);
     // The repo's environment first: dino's own wiring must win, or metering and hooks break.
     let mut env: HashMap<String, String> = repo_env(settings, &cwd).into_iter().collect();
     env.extend(wiring_env);
@@ -713,7 +733,7 @@ fn remote_spec(
         "claude" => {
             let port = ssh::pick_port();
             tunnel = Some((port, d.proxy.remote_port));
-            wired.extend(["--settings".into(), dino_core::claude_hook_settings(&d.proxy.remote_hook_url(id, &new_uuid(), port))]);
+            wired.extend(["--settings".into(), dino_core::claude_hook_settings(&d.proxy.remote_hook_url(id, &new_uuid(), port), None)]);
             ssh::Program::Claude { session: agent_session.get_or_insert_with(new_uuid), resume: restoring }
         }
         "claude-free" => anyhow::bail!("{} runs through dino on this Mac; start it here instead", l.label),
@@ -853,6 +873,48 @@ fn stats(d: &Daemon, s: &Session) -> SessionStats {
     st
 }
 
+/// Tokens in the context window, and its size as the agent reports it: Claude to its statusline,
+/// Codex in its rollout. Without a report, the tokens the proxy saw and no size: the window
+/// depends on the model, its variant and the agent's own settings, so dino doesn't guess. A report
+/// without usage (a new or just compacted conversation) means an empty window.
+fn context_use(s: &Session, st: &SessionStats, claimed: &[String]) -> (u64, Option<u64>) {
+    if let Some(r) = st.reported_context {
+        return (r.used.unwrap_or(0), Some(r.window));
+    }
+    if s.agent_id == "codex" && s.host.is_none() && let Some((used, window)) = codex_context(s, claimed) {
+        return (used, Some(window));
+    }
+    (st.context().map_or(0, |(_, used)| used), None)
+}
+
+/// What Codex's rollout last said about its context window; re-read only when the file changes.
+fn codex_context(s: &Session, claimed: &[String]) -> Option<(u64, u64)> {
+    let mut r = s.rollout.lock().unwrap();
+    if r.path.is_none() {
+        let known = s.agent_session.lock().unwrap().clone();
+        let id = match known {
+            Some(id) => Some(id),
+            None if r.searched.is_none_or(|t| t.elapsed() > ROLLOUT_SEARCH) => {
+                r.searched = Some(Instant::now());
+                let found = find_codex_session(&s.cwd, s.started_at, claimed);
+                s.agent_session.lock().unwrap().clone_from(&found);
+                found
+            }
+            None => None,
+        };
+        r.path = id.and_then(|id| dino_core::transcript::codex_path(&id));
+    }
+    let modified = r.path.as_ref()?.metadata().and_then(|m| m.modified()).ok()?;
+    match r.read {
+        Some((at, context)) if at == modified => context,
+        _ => {
+            let context = dino_core::transcript::codex_context(r.path.as_ref()?);
+            r.read = Some((modified, context));
+            context
+        }
+    }
+}
+
 /// Between turns: not working, not waiting on the user, and quiet.
 fn idle(d: &Daemon, s: &Session) -> bool {
     let st = stats(d, s);
@@ -865,18 +927,13 @@ fn state(d: &Daemon) -> Response {
     let prs = d.prs.lock().unwrap().clone();
     let previews = d.previews.lock().unwrap().clone();
     let group_of = |id: &str| groups.iter().find(|g| g.members.iter().any(|m| m.session == id)).map(|g| g.id.clone());
-    let sessions = d
-        .sessions
-        .lock()
-        .unwrap()
+    let live = d.sessions.lock().unwrap().clone();
+    let claimed: Vec<String> = live.iter().filter_map(|o| o.agent_session.lock().unwrap().clone()).collect();
+    let sessions = live
         .iter()
         .map(|s| {
             let st = stats(d, s);
-            let (context_tokens, context_limit) = match st.context() {
-                // Past the window we know: the model has a bigger one than the table says; don't guess.
-                Some((model, used)) => (used, controls::context_limit(model).filter(|limit| used <= *limit)),
-                None => (0, None),
-            };
+            let (context_tokens, context_limit) = context_use(s, &st, &claimed);
             let label = s.label.lock().unwrap().clone();
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
             SessionInfo {
