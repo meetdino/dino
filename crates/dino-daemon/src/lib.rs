@@ -330,7 +330,11 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     None => ipc::write_json(&mut stream, &Response::Error { message: format!("no session {id}") }),
                 };
             }
-            Request::Found { cloud } => Response::Found { sessions: discover(d, cloud) },
+            Request::Found { cloud, running_only } => Response::Found { sessions: discover(d, cloud, running_only) },
+            Request::Conversation { agent, session_id, before } => match dino_core::history::conversation(&agent, &session_id, before) {
+                Some(page) => Response::Conversation { page },
+                None => Response::Error { message: "no transcript for that session on this Mac".into() },
+            },
             Request::Adopt { session, cwd } => match adopt(d, session, cwd) {
                 Ok(id) => {
                     save(d);
@@ -1208,10 +1212,12 @@ fn home() -> PathBuf {
 // ---- Continue anything: sessions dino didn't start. ----
 
 /// Found sessions minus the ones dino itself is running.
-fn discover(d: &Daemon, cloud: bool) -> Vec<FoundSession> {
-    let ours: Vec<String> = d.sessions.lock().unwrap().iter().filter_map(|s| s.agent_session.lock().unwrap().clone()).collect();
+fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
+    // dino's own conversations, live or archived, are listed as dino sessions already.
+    let mut ours: Vec<String> = d.sessions.lock().unwrap().iter().filter_map(|s| s.agent_session.lock().unwrap().clone()).collect();
+    ours.extend(d.archived.lock().unwrap().iter().filter_map(|a| a.saved.agent_session.clone()));
     let running: Vec<FoundSession> = found::running().into_iter().filter(|f| !ours.contains(&f.session_id)).collect();
-    let mut out = found::recent(25, &running);
+    let mut out = if running_only { vec![] } else { dino_core::history::finished(&running) };
     out.retain(|f| !ours.contains(&f.session_id));
     out.splice(0..0, running);
     if cloud {
