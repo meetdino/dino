@@ -553,11 +553,8 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     // The repo's environment first: dino's own wiring must win, or metering and hooks break.
     let mut env: HashMap<String, String> = repo_env(&settings, &cwd).into_iter().collect();
     env.extend(wiring_env);
-    // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
+    // Which session this is, for `dino mcp` if the user adds it to an agent's own config.
     env.insert("DINO_SESSION".into(), id.clone());
-    if l.agent_id.starts_with("claude") && settings.policies.session_tools {
-        peers::wire_claude(&id, &mut wired_args);
-    }
 
     // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
     let mut agent_session = restore.as_ref().and_then(|r| r.agent_session.clone());

@@ -2,9 +2,6 @@
 
 use std::path::Path;
 
-/// Tools that only look; sessions may use them without asking.
-pub const READ_TOOLS: &[&str] = &["mcp__dino__list_sessions", "mcp__dino__read_session"];
-
 /// An `--mcp-config` document that runs `dino mcp`. `session` is the session whose agent uses it
 /// (so what it starts and messages is marked as its doing); `read_only` leaves out the tools that act.
 pub fn config(dino: &Path, session: Option<&str>, read_only: bool) -> String {
