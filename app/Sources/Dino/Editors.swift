@@ -44,10 +44,15 @@ struct ExternalEditor: Identifiable, Equatable {
 
     var appURL: URL? { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) }
 
+    /// Looked up once per app: the toolbar's Open in menu asks on every redraw.
+    private static var icons: [String: NSImage] = [:]
+
     var icon: NSImage? {
+        if let image = Self.icons[bundleID] { return image }
         guard let app = appURL else { return nil }
         let image = NSWorkspace.shared.icon(forFile: app.path)
         image.size = NSSize(width: 16, height: 16)
+        Self.icons[bundleID] = image
         return image
     }
 

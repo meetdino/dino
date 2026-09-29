@@ -695,16 +695,10 @@ private struct AgentsPane: View {
                     Text("No agent dino can start has a mode, model or effort to choose.").foregroundStyle(.secondary)
                 }
             }
+            // The organization may set one control and leave the others: each is locked on its own.
             ForEach(agents) { l in
-                let locked = store.isLocked("agents.\(l.agent_id)")
-                Section {
-                    ControlFields(knobs: l.knobs!, controls: controls(l.agent_id))
-                        .disabled(locked)
-                } header: {
-                    HStack(spacing: 6) {
-                        Text(l.label)
-                        if locked { OrgLock() }
-                    }
+                Section(l.label) {
+                    ControlFields(knobs: l.knobs!, controls: controls(l.agent_id), lockPath: "agents.\(l.agent_id)")
                 }
             }
             Section {} footer: {
