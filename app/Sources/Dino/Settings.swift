@@ -58,6 +58,27 @@ private struct SettingsResponse: Decodable {
 }
 private struct KeysResponse: Decodable { let keys: [KeyInfo] }
 
+/// An agent in Settings → Agents: whether it's here and signed in, and the agent's own commands
+/// for getting it and signing in, which dino runs in a shell.
+struct AgentSetupInfo: Codable, Identifiable, Equatable {
+    let id: String
+    let name: String
+    let path: String?
+    let version: String?
+    /// Nil when the agent has no quick way to ask.
+    let signed_in: Bool?
+    /// "Claude Max", "ChatGPT", "API key".
+    let account: String?
+    let install: String
+    let sign_in: String?
+    /// What to type in the agent to sign in, for ones that do it from inside ("/login").
+    let sign_in_hint: String?
+    let homepage: String
+
+    var installed: Bool { path != nil }
+}
+private struct AgentSetupResponse: Decodable { let agents: [AgentSetupInfo] }
+
 extension DinoConnection {
     func settings() throws -> DinoSettings {
         try settingsAndLocks().settings
@@ -81,6 +102,16 @@ extension DinoConnection {
         try JSONDecoder().decode(KeysResponse.self, from: send(["type": "keys"])).keys
     }
 
+    /// Every agent dino knows, as it is on this Mac now. Takes a moment: each one is asked.
+    func agentSetup() throws -> [AgentSetupInfo] {
+        try JSONDecoder().decode(AgentSetupResponse.self, from: send(["type": "agent_setup"])).agents
+    }
+
+    /// Runs the agent's own `install` or `sign_in` command in a new shell; the session's id.
+    func agentAction(_ id: String, _ action: String) throws -> String? {
+        try request(["type": "agent_action", "id": id, "action": action]).id
+    }
+
     /// Store `value` under `name`, or remove the key when `value` is nil.
     func setKey(_ name: String, value: String?) throws {
         var body: [String: Any] = ["type": "set_key", "name": name]
@@ -97,6 +128,8 @@ final class SettingsStore: ObservableObject {
     @Published var locked: [String] = []
     @Published var keys: [KeyInfo] = []
     @Published var agents: [LauncherInfo] = []
+    /// Every known agent, installed or not; nil until first asked.
+    @Published var setup: [AgentSetupInfo]?
     /// Hosts in ~/.ssh/config.
     @Published var configHosts: [String] = []
     @Published var error: String?
@@ -109,6 +142,19 @@ final class SettingsStore: ObservableObject {
             self.keys = $0.1
             self.agents = $0.2
         }
+    }
+
+    /// Ask every agent again; one just installed also becomes one dino can start.
+    func loadSetup() {
+        run { c in (try c.agentSetup(), try c.allLaunchers()) } done: {
+            if self.setup != $0.0 { self.setup = $0.0 }
+            if self.agents != $0.1 { self.agents = $0.1 }
+        }
+    }
+
+    /// Runs agent `id`'s own install or sign-in in a new shell; `done` gets the session.
+    func agentAction(_ id: String, _ action: String, done: @escaping @MainActor (String) -> Void) {
+        run { c in try c.agentAction(id, action) } done: { if let s = $0 { done(s) } }
     }
 
     /// `path` ("policies.allow_bypass", "agents.claude") or something in it is set by the organization.
@@ -671,9 +717,25 @@ private struct KeysPane: View {
     }
 }
 
-/// What each agent's new sessions start with. "Default" leaves it to the agent's own settings.
+/// Every agent dino knows: get it, sign in to it, and what its new sessions start with. Installing
+/// and signing in run the agent's own commands in a shell, where you see them and answer them.
 private struct AgentsPane: View {
     @EnvironmentObject var store: SettingsStore
+    @EnvironmentObject var model: DinoModel
+    /// Shells running an install or sign-in, by agent: asked again when one ends, and meanwhile,
+    /// until the agent is installed or signed in.
+    @State private var running: [String: (session: String, action: String)] = [:]
+    @State private var showMore = false
+
+    /// The ones dino works with best, in this order; the rest are under More Agents.
+    private static let featured = ["claude", "codex", "kimi", "qwen", "pi", "hermes"]
+
+    private var main: [AgentSetupInfo] {
+        Self.featured.compactMap { id in store.setup?.first { $0.id == id } }
+    }
+    private var more: [AgentSetupInfo] {
+        (store.setup ?? []).filter { !Self.featured.contains($0.id) }
+    }
 
     /// One per agent that has controls; the free tier is its own, since it picks models itself.
     private var agents: [LauncherInfo] {
@@ -690,6 +752,24 @@ private struct AgentsPane: View {
 
     var body: some View {
         Form {
+            Section {
+                if store.setup == nil {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Looking for agents on this Mac…").foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(main) { a in AgentSetupRow(agent: a, running: running[a.id] != nil, act: act) }
+                if !more.isEmpty {
+                    DisclosureGroup("More Agents", isExpanded: $showMore) {
+                        ForEach(more) { a in AgentSetupRow(agent: a, running: running[a.id] != nil, act: act) }
+                    }
+                }
+            } header: {
+                Text("On This Mac")
+            } footer: {
+                Footnote("Install and Sign In run the agent's own commands in a new shell, where you can see them and answer their questions. dino never sees your logins.")
+            }
             if agents.isEmpty {
                 Section {
                     Text("No agent dino can start has a mode, model or effort to choose.").foregroundStyle(.secondary)
@@ -697,7 +777,7 @@ private struct AgentsPane: View {
             }
             // The organization may set one control and leave the others: each is locked on its own.
             ForEach(agents) { l in
-                Section(l.label) {
+                Section("New \(l.label) Sessions") {
                     ControlFields(knobs: l.knobs!, controls: controls(l.agent_id), lockPath: "agents.\(l.agent_id)")
                 }
             }
@@ -707,6 +787,101 @@ private struct AgentsPane: View {
         }
         .formStyle(.grouped)
         .disabled(store.settings == nil)
+        .onAppear { store.loadSetup() }
+        // Back from the shell: what it did shows here.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+            if (note.object as? NSWindow)?.identifier?.rawValue.hasPrefix(SettingsView.windowID) == true { store.loadSetup() }
+        }
+        // While an install or sign-in runs, ask now and then, and once more when its shell ends.
+        // A task, not a timer publisher: this view redraws with every session change.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(4))
+                if !running.isEmpty { store.loadSetup() }
+            }
+        }
+        .onChange(of: model.sessions) { _, sessions in
+            let ended = running.filter { _, r in !sessions.contains { $0.id == r.session && !$0.exited } }
+            guard !ended.isEmpty else { return }
+            for agent in ended.keys { running[agent] = nil }
+            store.loadSetup()
+        }
+        // Done once it did what it was for, even if its shell stays open.
+        .onChange(of: store.setup) { _, setup in
+            for (id, r) in running {
+                guard let a = setup?.first(where: { $0.id == id }) else { continue }
+                if r.action == "install" ? a.installed : a.signed_in == true { running[id] = nil }
+            }
+        }
+    }
+
+    /// Runs it in a new shell, shown in the main window, where the user watches and answers it.
+    private func act(_ agent: AgentSetupInfo, _ action: String) {
+        // Read now, while the view is live: the reply comes after this copy of it is gone.
+        let model = model
+        store.agentAction(agent.id, action) { session in
+            running[agent.id] = (session, action)
+            model.pendingSelect = session
+            NSApp.windows.first { w in w.isVisible && !(w.identifier?.rawValue.hasPrefix(SettingsView.windowID) ?? false) && w.canBecomeMain }?
+                .makeKeyAndOrderFront(nil)
+        }
+    }
+}
+
+/// One agent: whether it's here and signed in, and the way to get it or sign in.
+private struct AgentSetupRow: View {
+    let agent: AgentSetupInfo
+    /// Its install or sign-in shell is open.
+    let running: Bool
+    let act: (AgentSetupInfo, String) -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(agent.name)
+                    if let url = URL(string: agent.homepage), !agent.homepage.isEmpty {
+                        Link(destination: url) {
+                            Image(systemName: "arrow.up.right.square").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(agent.homepage)
+                    }
+                }
+                Text(detail).font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if running {
+                ProgressView().controlSize(.small).help("Running in a shell in the main window")
+            }
+            status
+            if !agent.installed {
+                Button("Install…") { act(agent, "install") }
+                    .help(agent.install)
+            } else if let command = agent.sign_in, agent.signed_in != true {
+                Button("Sign In…") { act(agent, "sign_in") }
+                    .help(agent.sign_in_hint.map { "Opens \(agent.name); type \($0) there" } ?? command)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var detail: String {
+        guard agent.installed else { return "Not installed" }
+        let version = agent.version.map { "Version \($0)" } ?? "Installed"
+        if agent.signed_in == nil, let hint = agent.sign_in_hint {
+            return "\(version) · signs in with \(hint) inside \(agent.name)"
+        }
+        return version
+    }
+
+    @ViewBuilder private var status: some View {
+        if agent.installed, let signedIn = agent.signed_in {
+            HStack(spacing: 5) {
+                Circle().fill(signedIn ? Color.green : Color.orange).frame(width: 7, height: 7)
+                Text(signedIn ? (agent.account ?? "Signed in") : "Signed out").font(.callout).foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
