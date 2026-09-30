@@ -152,6 +152,15 @@ pub enum Request {
     Keys,
     /// Store a key in dino's key store, or remove it with no `value`. Takes effect at once.
     SetKey { name: String, value: Option<String> },
+    /// Where models come from: OpenRouter and model servers on this Mac, as last looked at.
+    Providers,
+    /// The models `provider` serves, as last fetched; asks again in the background when stale.
+    Models { provider: String },
+    /// Start connecting a hosted provider (OpenRouter) in the browser: the page to open. dinod
+    /// stores the key it gets and never shows it.
+    ConnectProvider { provider: String },
+    /// Forget the key dino got for it.
+    DisconnectProvider { provider: String },
     /// What a PR from the session's branch would hold, to fill the Create PR form.
     PrDraft { id: String },
     /// Commit what's uncommitted as `title`, push the session's branch, and open a PR into `base`.
@@ -253,6 +262,11 @@ pub enum Response {
         ssh_config_hosts: Vec<String>,
     },
     Keys { keys: Vec<crate::settings::KeyInfo> },
+    Providers { providers: Vec<crate::providers::ProviderInfo> },
+    /// Open this page to go on.
+    Connect { url: String },
+    /// `loading`: dinod is asking the provider now; ask again for what it says.
+    Models { provider: String, models: Vec<ModelRow>, loading: bool, error: Option<String> },
     PrDraft { draft: PrDraft },
     Pr { pr: PrInfo },
     Review { findings: Vec<crate::review::Finding> },
@@ -579,4 +593,12 @@ pub struct WindowInfo {
     pub name: String,
     pub utilization: f32,
     pub resets_at: Option<u64>,
+}
+
+/// A provider's model and what dino makes of it for each agent, the one to run it in first.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ModelRow {
+    #[serde(flatten)]
+    pub model: crate::providers::ProviderModel,
+    pub agents: Vec<crate::compat::Verdict>,
 }
