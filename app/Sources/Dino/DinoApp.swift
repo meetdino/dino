@@ -180,6 +180,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case ([.command], ";"):
             guard let s = model.selectedSession else { return false }
             model.askingAbout = s
+        // The shell's AI line (`dino init`): ⌘I asks, ⌘⏎ hands the line to an agent. Only a shell
+        // at its prompt gets them; an agent's own terminal keeps its keys.
+        case ([.command], "i"), ([.command], "\r"):
+            guard let shell = model.shellAtPrompt else { return false }
+            model.sendKeys(shell, e.charactersIgnoringModifiers == "i" ? "\u{1b}[57300~" : "\u{1b}[57301~")
         default:
             return false
         }

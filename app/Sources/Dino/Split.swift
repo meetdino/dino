@@ -72,6 +72,36 @@ extension DinoModel {
         select(id)
     }
 
+    /// Sessions a shell's AI line just handed its request to (⌘⏎, `dino ai agent`): each goes
+    /// under that shell when you're looking at it. Called with the sessions dinod reports before
+    /// they replace `sessions`.
+    func placeHandedOff(_ next: [SessionInfo]) {
+        for s in next where !sessions.contains(where: { $0.id == s.id }) {
+            guard let by = s.started_by, by == selected,
+                  sessions.first(where: { $0.id == by })?.agent_id == "shell",
+                  !splits.contains(where: { $0.contains(by) })
+            else { continue }
+            pair(by, s.id, vertical: true, helper: nil)
+            pendingSelect = s.id
+        }
+    }
+
+    /// The shell whose terminal has the keyboard, on this Mac, with no agent running in it: the
+    /// one the AI line's keys go to.
+    var shellAtPrompt: String? {
+        guard let id = focusedTerminal, NSApp.keyWindow?.firstResponder is LinkTerminalView,
+              let s = sessions.first(where: { $0.id == id }),
+              s.agent_id == "shell", !s.exited, s.inside == nil, s.host == nil
+        else { return nil }
+        return id
+    }
+
+    /// Keys for a session's terminal, as if typed.
+    func sendKeys(_ id: String, _ text: String) {
+        guard let conn = connection else { return }
+        Task.detached { try? conn.sendKeys(session: id, text: text) }
+    }
+
     /// A session is in one split at most: pairing it again ends its old pair.
     private func pair(_ a: String, _ b: String, vertical: Bool, helper: String?) {
         splits.removeAll { $0.contains(a) || $0.contains(b) }

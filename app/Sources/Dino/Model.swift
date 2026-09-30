@@ -277,6 +277,7 @@ final class DinoModel: ObservableObject {
         }
         // A session in a folder the tree hasn't seen: ask for it now rather than on the next tick.
         if Set(next.compactMap(\.cwd)) != Set(sessions.compactMap(\.cwd)) { refreshTree() }
+        placeHandedOff(next)
         if next != sessions { sessions = next }
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
