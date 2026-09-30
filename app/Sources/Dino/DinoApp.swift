@@ -42,6 +42,9 @@ struct DinoApp: App {
                 Button("New Shell") { model.newShell() }
                     .keyboardShortcut("t")
                     .disabled(model.launchers.isEmpty)
+                // Its shortcut works from any app (Settings → General); a menu key would only work here.
+                Button("Quick Terminal") { QuickTerminal.shared.toggle() }
+                    .disabled(model.launchers.isEmpty)
                 Menu("New Session") {
                     // dinod lists the default agent first: ⌘N starts it.
                     ForEach(model.launchers) { l in
@@ -149,7 +152,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Run as a regular app with a Dock icon and menu bar even when launched from a binary.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        NSApp.servicesProvider = services
+        NSUpdateDynamicServices()
+        QuickTerminal.shared.registerKey()
         desktopKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
+            if e.window is QuickPanel { return QuickTerminal.shared.key(e) ? nil : e }
             guard let model = self?.model, let w = e.window, !(w is NSPanel), w.attachedSheet == nil,
                   w.identifier?.rawValue != SettingsView.windowID,
                   Self.desktopKey(e, model: model) else { return e }
@@ -158,6 +165,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var desktopKeys: Any?
+    private let services = ServiceProvider()
+
+    /// Folders, scripts and man-page links opened with dino (Finder, `open -a`, a default
+    /// terminal's files).
+    func application(_: NSApplication, open urls: [URL]) {
+        guard let model else {
+            Opening.pending += urls
+            return
+        }
+        model.open(urls)
+    }
 
     /// Claude desktop's keys. Some are aliases for what the menus have under dino's own keys (a menu
     /// item shows one); the rest are in the Split menu too, but handled here so they work even when
@@ -197,7 +215,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { true }
 
-    weak var model: DinoModel?
+    weak var model: DinoModel? {
+        didSet {
+            services.model = model
+            QuickTerminal.shared.model = model
+        }
+    }
 
     /// Agents run in dinod, not in the app, so quitting leaves them running unless you say otherwise.
     func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
