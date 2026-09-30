@@ -11,6 +11,7 @@ use crate::models::Catalog;
 
 mod claude;
 pub mod codex;
+mod kimi;
 mod qwen;
 
 /// Which control a flag on an agent's command line sets.
@@ -28,6 +29,22 @@ pub enum StatusSource {
     Hooks,
     /// dino reads the record the agent keeps of its turns (see dinod's `codex`).
     Rollout,
+    /// dino follows the record the agent writes of its conversation as it goes (`log_path`),
+    /// reading each new line (`log_event`); see dinod's `agentlog`.
+    Log,
+}
+
+/// What one line of an agent's own record says about where its turn is.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LogEvent {
+    TurnStarted,
+    TurnEnded,
+    /// It waits on the user for this.
+    Needs(String),
+    /// Written whether or not anything happened for the user: says nothing about the turn.
+    Bookkeeping,
+    /// Anything else it does: it's no longer waiting.
+    Other,
 }
 
 /// Proxy and hook wiring for a session: env vars, and arguments that go before dino's others.
@@ -133,6 +150,19 @@ pub trait Agent: Sync {
     fn conversation_of(&self, _pid: u32) -> Option<String> {
         None
     }
+    /// The file conversation `session` is written to as it goes (`StatusSource::Log`).
+    fn log_path(&self, _session: &str) -> Option<PathBuf> {
+        None
+    }
+    /// What a line of that file says.
+    fn log_event(&self, _line: &serde_json::Value) -> LogEvent {
+        LogEvent::Other
+    }
+    /// For agents that can't be given a conversation id up front: the conversation a process of it
+    /// started in `cwd` at `since` (seconds) began, not one of `claimed`.
+    fn new_conversation(&self, _cwd: &Path, _since: u64, _claimed: &[String]) -> Option<String> {
+        None
+    }
 
     // ---- Its conversations ----
 
@@ -177,18 +207,21 @@ static CLAUDE_FREE: claude::Claude = claude::Claude { free: true };
 static CODEX: codex::Codex = codex::Codex;
 static QWEN: qwen::Qwen = qwen::Qwen { free: false };
 static QWEN_FREE: qwen::Qwen = qwen::Qwen { free: true };
+static KIMI: kimi::Kimi = kimi::Kimi { free: false };
+static KIMI_FREE: kimi::Kimi = kimi::Kimi { free: true };
 
 /// The agents dino works with, in the order they're listed and looked for.
-pub fn all() -> [&'static dyn Agent; 3] {
-    [&CLAUDE, &CODEX, &QWEN]
+pub fn all() -> [&'static dyn Agent; 4] {
+    [&CLAUDE, &CODEX, &QWEN, &KIMI]
 }
 
-/// The adapter for launcher agent id `id` (the free-tier ones, "claude-free" and "qwen-free", too);
-/// `None` for shells and agents dino only launches.
+/// The adapter for launcher agent id `id` (the free-tier ones, "claude-free", "qwen-free" and
+/// "kimi-free", too); `None` for shells and agents dino only launches.
 pub fn agent(id: &str) -> Option<&'static dyn Agent> {
     match id {
         "claude-free" => Some(&CLAUDE_FREE),
         "qwen-free" => Some(&QWEN_FREE),
+        "kimi-free" => Some(&KIMI_FREE),
         _ => all().into_iter().find(|a| a.id() == id),
     }
 }
