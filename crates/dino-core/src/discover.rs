@@ -106,7 +106,7 @@ fn agent_info(kind: &AgentKind) -> AgentInfo {
         path,
         version,
         auth,
-        meterable: crate::agent::agent(kind.id).is_some(),
+        meterable: crate::agent::agent(kind.id).is_some_and(|a| a.metered()),
         install: install_hint(kind.id),
     }
 }

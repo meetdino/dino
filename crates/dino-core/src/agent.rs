@@ -11,6 +11,7 @@ use crate::models::Catalog;
 
 mod claude;
 pub mod codex;
+mod qwen;
 
 /// Which control a flag on an agent's command line sets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,7 +34,7 @@ pub enum StatusSource {
 pub type Wiring = (Vec<(String, String)>, Vec<String>);
 
 pub trait Agent: Sync {
-    /// The launcher's agent id: "claude", "codex".
+    /// The launcher's agent id: "claude", "codex", "qwen".
     fn id(&self) -> &'static str;
 
     // ---- Controls ----
@@ -85,6 +86,18 @@ pub trait Agent: Sync {
     /// status. `base(provider)` is the proxy's URL for that provider; `status_line` a Claude
     /// `statusLine` setting to add.
     fn wiring(&self, route: bool, base: &dyn Fn(&str) -> String, status_line: Option<String>) -> Wiring;
+    /// It runs on dino's free tier, which picks the model for each turn and only runs on this Mac.
+    fn free(&self) -> bool {
+        false
+    }
+    /// dino can route its API traffic through the proxy, to meter it.
+    fn metered(&self) -> bool {
+        false
+    }
+    /// Arguments that give it `prompt` to start on, staying open for more.
+    fn prompt_args(&self, prompt: String) -> Vec<String> {
+        vec![prompt]
+    }
     /// Arguments that start conversation `session` (set when dino picks the id up front), or
     /// resume it when `restoring`: those before dino's other arguments, and those after.
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>);
@@ -162,17 +175,20 @@ pub trait Agent: Sync {
 static CLAUDE: claude::Claude = claude::Claude { free: false };
 static CLAUDE_FREE: claude::Claude = claude::Claude { free: true };
 static CODEX: codex::Codex = codex::Codex;
+static QWEN: qwen::Qwen = qwen::Qwen { free: false };
+static QWEN_FREE: qwen::Qwen = qwen::Qwen { free: true };
 
 /// The agents dino works with, in the order they're listed and looked for.
-pub fn all() -> [&'static dyn Agent; 2] {
-    [&CLAUDE, &CODEX]
+pub fn all() -> [&'static dyn Agent; 3] {
+    [&CLAUDE, &CODEX, &QWEN]
 }
 
-/// The adapter for launcher agent id `id` ("claude-free" too); `None` for shells and agents
-/// dino only launches.
+/// The adapter for launcher agent id `id` (the free-tier ones, "claude-free" and "qwen-free", too);
+/// `None` for shells and agents dino only launches.
 pub fn agent(id: &str) -> Option<&'static dyn Agent> {
     match id {
         "claude-free" => Some(&CLAUDE_FREE),
+        "qwen-free" => Some(&QWEN_FREE),
         _ => all().into_iter().find(|a| a.id() == id),
     }
 }

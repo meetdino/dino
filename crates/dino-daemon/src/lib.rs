@@ -330,6 +330,9 @@ fn launchers(free_tier: bool) -> Vec<LauncherInfo> {
         if d.kind.id == "claude" && free_tier {
             out.push(LauncherInfo { short: "free".into(), agent_id: "claude-free".into(), label: "Claude Code · free models".into(), program: program.clone(), knobs: Default::default() });
         }
+        if d.kind.id == "qwen" && free_tier {
+            out.push(LauncherInfo { short: "qwen-free".into(), agent_id: "qwen-free".into(), label: "Qwen Code · free models".into(), program: program.clone(), knobs: Default::default() });
+        }
         out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program, knobs: Default::default() });
     }
     let shell = user_shell();
@@ -839,8 +842,7 @@ fn local_spec(
     }
     wired_args.extend(controls::args(&l.agent_id, controls, &d.knobs(&l.agent_id, true)));
     wired_args.extend(args.iter().cloned());
-    // Claude and Codex both take an opening prompt as their last argument.
-    wired_args.extend(prompt);
+    wired_args.extend(prompt.map(|p| prompt_args(&l.agent_id, p)).unwrap_or_default());
     (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd)
 }
 
@@ -873,13 +875,13 @@ fn remote_spec(
             wired.extend(["--settings".into(), dino_core::claude_hook_settings(&d.proxy.remote_hook_url(id, &new_uuid(), port), None)]);
             ssh::Program::Claude { session: agent_session.get_or_insert_with(new_uuid), resume: restoring }
         }
-        "claude-free" => anyhow::bail!("{} runs through dino on this Mac; start it here instead", l.label),
+        _ if agent(&l.agent_id).is_some_and(|a| a.free()) => anyhow::bail!("{} runs through dino on this Mac; start it here instead", l.label),
         "shell" => ssh::Program::Shell,
         _ => ssh::Program::Agent { bin: &bin, name: &l.label },
     };
     wired.extend(controls::args(&l.agent_id, controls, &d.knobs(&l.agent_id, true)));
     wired.extend(args.iter().cloned());
-    wired.extend(prompt);
+    wired.extend(prompt.map(|p| prompt_args(&l.agent_id, p)).unwrap_or_default());
     let command = ssh::remote_command(host, folder, &program, &wired);
     let dir = ssh::control_dir();
     std::fs::create_dir_all(&dir)?;
@@ -1353,6 +1355,14 @@ fn restore(d: &Daemon, saved: Vec<SavedSession>) {
 
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// `prompt` for `agent_id` to start on: most take it as their last argument.
+fn prompt_args(agent_id: &str, prompt: String) -> Vec<String> {
+    match agent(agent_id) {
+        Some(a) => a.prompt_args(prompt),
+        None => vec![prompt],
+    }
 }
 
 /// The conversation `s`'s agent is on, looked at now, for agents that name it only as they go.

@@ -321,8 +321,8 @@ struct FoundSession: Codable, Identifiable, Equatable {
     var id: String { "\(source)-\(agent)-\(session_id)-\(pid ?? 0)" }
     var isBusy: Bool { status == "busy" }
     /// Started by hand in a dino shell, and dino can continue it (it has a conversation to resume).
-    var continuable: Bool { ["claude", "codex"].contains(agent) && !session_id.isEmpty }
-    var agentName: String { ["claude": "Claude", "codex": "Codex"][agent] ?? agent }
+    var continuable: Bool { ["claude", "codex", "qwen"].contains(agent) && !session_id.isEmpty }
+    var agentName: String { ["claude": "Claude", "codex": "Codex", "qwen": "Qwen"][agent] ?? agent }
 }
 
 /// Part of a conversation, oldest first. `start` is where it begins in its file; 0 means the beginning.

@@ -38,6 +38,10 @@ impl Agent for Claude {
         !self.free
     }
 
+    fn free(&self) -> bool {
+        self.free
+    }
+
     fn mode_args(&self, mode: &str) -> Vec<String> {
         let m = match mode {
             "ask" => "manual",
@@ -122,6 +126,10 @@ impl Agent for Claude {
         }
         let env = if crate::user_set(route, "ANTHROPIC_BASE_URL") { vec![] } else { vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))] };
         (env, hooks)
+    }
+
+    fn metered(&self) -> bool {
+        true
     }
 
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>) {
