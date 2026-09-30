@@ -87,6 +87,9 @@ pub enum Request {
         /// The session starting it, by id: a shell whose AI line handed its request on.
         #[serde(default)]
         by: Option<String>,
+        /// Run the agent on this provider's model (Settings → Providers) instead of its own account.
+        #[serde(default)]
+        route: Option<crate::providers::ProviderRoute>,
     },
     Kill { id: String },
     /// Change a session's mode, model or effort. The agent restarts, resuming its conversation;
@@ -416,6 +419,9 @@ pub struct SessionInfo {
     /// to wait on. With nothing else left running, `activity` is "server:<ports>".
     #[serde(default)]
     pub servers: Vec<ServerInfo>,
+    /// The provider and model it runs on, when it isn't its agent's own account.
+    #[serde(default)]
+    pub route: Option<crate::providers::ProviderRoute>,
 }
 
 /// A background command that serves: the agent's task id for it, and where it listens.

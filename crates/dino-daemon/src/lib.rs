@@ -17,6 +17,7 @@ use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
 use dino_core::controls::{self, Controls, Knobs};
 use dino_core::models::Catalog;
+use dino_core::providers::{Format, ProviderRoute, pick_format, route_path};
 use dino_core::settings::{self, Settings};
 use dino_core::agent::{StatusSource, agent};
 use dino_core::{detect_agents, load_keys, new_uuid, pr, proxy_wiring, ssh, trust, user_shell, worktree};
@@ -86,6 +87,8 @@ struct Session {
     screen_saved: AtomicBool,
     /// Background commands its agent left serving, as last looked at (see `servers`).
     servers: Mutex<Vec<servers::Server>>,
+    /// The provider and model it runs on instead of its agent's own account.
+    route: Option<ProviderRoute>,
 }
 
 /// What a shell is running in the foreground, as last looked at.
@@ -605,11 +608,11 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 let (models, loading, error) = providers::rows(&provider);
                 Response::Models { provider, models, loading, error }
             }
-            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by } => {
+            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by, route } => {
                 // A shell's "prompt" is a line typed at its prompt (a script opened with dino, a
                 // man page), not an argument.
                 let (prompt, line) = if launcher == "shell" { (None, prompt) } else { (prompt, None) };
-                let launch = Launch { cols, rows, controls, host, prompt, started_by: by, ..Launch::new(&launcher, args, cwd) };
+                let launch = Launch { cols, rows, controls, host, prompt, started_by: by, route, ..Launch::new(&launcher, args, cwd) };
                 match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {
                     Ok(id) => {
                         if let Some(line) = line {
@@ -904,6 +907,8 @@ struct Launch {
     started_by: Option<String>,
     /// Over SSH, on this host; a restored session keeps its own.
     host: Option<String>,
+    /// On a provider's model instead of the agent's own account; a restored session keeps its own.
+    route: Option<ProviderRoute>,
 }
 
 impl Launch {
@@ -913,7 +918,7 @@ impl Launch {
 }
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls, scheduled, started_by, host } = launch;
+    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls, scheduled, started_by, host, route } = launch;
     let host = restore.as_ref().map_or(host, |r| r.host.clone());
     let launcher = launcher.as_str();
     // Sessions already running come back even if the policies changed since; new ones must be allowed.
@@ -935,10 +940,20 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
             if check_bypass(&defaults, &settings).is_err() {
                 defaults.mode = None;
             }
+            // On a provider's model, the agent's own default model and effort don't apply.
+            if route.is_some() {
+                defaults.model = None;
+                defaults.effort = None;
+            }
             controls.or(&defaults)
         }
     };
     let args = controls::without(&l.agent_id, &args, &controls);
+    let route = match &restore {
+        Some(r) => r.route.clone(),
+        None => route.map(|r| provider_route(&l, r)).transpose()?,
+    };
+    anyhow::ensure!(route.is_none() || host.is_none(), "a provider's model runs through dino on this Mac; start it here instead");
     let id = match &restore {
         Some(r) => r.id.clone(),
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
@@ -955,7 +970,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
             (Some(remote_spec(d, &settings, &l, host, &folder, &id, &mut agent_session, restoring, &controls, &args, prompt)?), PathBuf::from(folder))
         }
         None => {
-            let (spec, cwd) = local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.is_some(), &controls, &args, prompt);
+            let (spec, cwd) = local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.is_some(), &controls, &args, prompt, route.as_ref());
             (Some(spec), cwd)
         }
     };
@@ -1034,6 +1049,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         inside: Mutex::default(),
         screen_saved: AtomicBool::new(false),
         servers: Mutex::new(vec![]),
+        route,
     }));
     Ok(id)
 }
@@ -1051,6 +1067,7 @@ fn local_spec(
     controls: &Controls,
     args: &[String],
     prompt: Option<String>,
+    route: Option<&ProviderRoute>,
 ) -> (SpawnSpec, PathBuf) {
     let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
     // Claude reports its context window to its statusline; wrap the user's, if they have one.
@@ -1059,10 +1076,20 @@ fn local_spec(
         .ok()
         .filter(|_| adapter.is_some_and(|a| a.statusline()))
         .and_then(|dino| dino_core::statusline::wrapper(&cwd, &dino, &d.proxy.base_url(id, "hook")));
-    let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy, &|provider| d.proxy.base_url(id, provider), status_line);
+    // On a provider's model the agent's own API isn't routed (it isn't used): only its status
+    // wiring, then the provider's, which wins.
+    let base = |provider: &str| d.proxy.base_url(id, provider);
+    let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy && route.is_none(), &base, status_line);
+    // The model picked since (the model control), over the one it started on.
+    let model = route.map(|r| controls.model.clone().unwrap_or_else(|| r.model.clone()));
+    let provider = route.zip(adapter).zip(model.as_deref()).and_then(|((r, a), m)| a.provider_wiring(&base(&route_path(&r.provider)), r.format?, m));
     // The repo's environment first: dino's own wiring must win, or metering and hooks break.
     let mut env: HashMap<String, String> = repo_env(settings, &cwd).into_iter().collect();
     env.extend(wiring_env);
+    if let Some((penv, pargs)) = provider.clone() {
+        env.extend(penv);
+        wired_args.extend(pargs);
+    }
     // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
     env.insert("DINO_SESSION".into(), id.to_string());
     if adapter.is_some_and(|a| a.session_tools()) && settings.policies.session_tools {
@@ -1078,7 +1105,9 @@ fn local_spec(
         wired_args.splice(0..0, before);
         wired_args.extend(after);
     }
-    wired_args.extend(controls::args(&l.agent_id, controls, &d.knobs(&l.agent_id, true)));
+    // The provider's wiring names the model.
+    let controls = Controls { model: if provider.is_some() { None } else { controls.model.clone() }, ..controls.clone() };
+    wired_args.extend(controls::args(&l.agent_id, &controls, &d.knobs(&l.agent_id, true)));
     wired_args.extend(args.iter().cloned());
     wired_args.extend(prompt.map(|p| prompt_args(&l.agent_id, p)).unwrap_or_default());
     (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd)
@@ -1126,6 +1155,29 @@ fn remote_spec(
     std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let env = HashMap::from([("DINO_SESSION".to_string(), id.to_string())]);
     Ok(SpawnSpec { program: "ssh".into(), args: ssh::ssh_args(host, tunnel, &command), cwd: Some(home()), env })
+}
+
+/// `r` for launcher `l`, checked, with the API shape they'll talk in: the first the agent speaks
+/// that the provider serves.
+fn provider_route(l: &LauncherInfo, r: ProviderRoute) -> anyhow::Result<ProviderRoute> {
+    let a = agent(&l.agent_id).filter(|a| !a.provider_formats().is_empty()).ok_or_else(|| anyhow::anyhow!("{} can't run on another provider's model", l.label))?;
+    anyhow::ensure!(!r.model.trim().is_empty(), "pick a model to run {} on", l.label);
+    let (name, serves) = match r.provider.as_str() {
+        // dino's own: it answers Anthropic Messages and Chat Completions.
+        "free" => ("free models".to_string(), vec![Format::Anthropic, Format::Chat]),
+        id => {
+            let p = providers::find(id).ok_or_else(|| anyhow::anyhow!("dino doesn't know a provider called {id}"))?;
+            anyhow::ensure!(!p.local || p.connected, "{} isn't running on this Mac", p.name);
+            anyhow::ensure!(!p.formats.is_empty(), "dino hasn't asked {} which APIs it serves yet: try again in a moment", p.name);
+            (p.name, p.formats)
+        }
+    };
+    let speaks = a.provider_formats();
+    let format = pick_format(speaks, &serves).ok_or_else(|| {
+        let wants: Vec<&str> = speaks.iter().map(|f| f.label()).collect();
+        anyhow::anyhow!("{} needs {}, which {name} doesn't serve", l.label, wants.join(" or "))
+    })?;
+    Ok(ProviderRoute { format: Some(format), name, ..r })
 }
 
 /// The mode that never asks is refused unless the policies allow it.
@@ -1402,6 +1454,8 @@ fn state(d: &Daemon) -> Response {
                 shell_cwd: s.pane.shared.cwd.lock().unwrap().clone(),
                 last_exit: *s.pane.shared.last_exit.lock().unwrap(),
                 servers: serving.into_iter().map(|x| ipc::ServerInfo { task: x.task, command: x.command, ports: x.ports }).collect(),
+                // With the model it runs on now.
+                route: s.route.clone().map(|r| ProviderRoute { model: s.controls.model.clone().unwrap_or(r.model), ..r }),
             }
         })
         .collect();
@@ -1448,6 +1502,8 @@ struct SavedSession {
     ended: bool,
     #[serde(default)]
     exit_code: Option<u32>,
+    #[serde(default)]
+    route: Option<ProviderRoute>,
 }
 
 fn saved_path() -> PathBuf {
@@ -1522,6 +1578,7 @@ fn snapshot(s: &Session) -> SavedSession {
         host: s.host.clone(),
         ended: s.pane.is_exited(),
         exit_code: s.pane.exit_code(),
+        route: s.route.clone(),
     }
 }
 
@@ -1685,6 +1742,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         host: None,
         ended: false,
         exit_code: None,
+        route: None,
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {
@@ -1753,6 +1811,7 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
         host: None,
         ended: false,
         exit_code: None,
+        route: None,
     };
     let (cols, rows) = s.pane.size();
     spawn(d, Launch { cols, rows, restore: Some(restore.clone()), ..Launch::new(&restore.launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;

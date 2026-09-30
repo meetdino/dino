@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::found::FoundSession;
 use crate::history::Turn;
 use crate::models::Catalog;
+use crate::providers::Format;
 
 mod claude;
 pub mod codex;
@@ -108,6 +109,15 @@ pub trait Agent: Sync {
     /// status. `base(provider)` is the proxy's URL for that provider; `status_line` a Claude
     /// `statusLine` setting to add.
     fn wiring(&self, route: bool, base: &dyn Fn(&str) -> String, status_line: Option<String>) -> Wiring;
+    /// The API shapes it can talk to a provider in, best first: empty when it can't be pointed at one.
+    fn provider_formats(&self) -> &'static [Format] {
+        &[]
+    }
+    /// Env vars and arguments that run it on `model`, served at `url` (a dino proxy route) in
+    /// `format`, one of its `provider_formats`. Its own settings and login stay as they are.
+    fn provider_wiring(&self, _url: &str, _format: Format, _model: &str) -> Option<Wiring> {
+        None
+    }
     /// It runs on dino's free tier, which picks the model for each turn and only runs on this Mac.
     fn free(&self) -> bool {
         false
@@ -257,4 +267,46 @@ pub(crate) fn control_args(a: &dyn Agent, mode: Option<&str>, model: Option<&str
     out.extend(model.map(|m| a.model_args(m)).unwrap_or_default());
     out.extend(effort.map(|e| a.effort_args(e)).unwrap_or_default());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const URL: &str = "http://127.0.0.1:5000/s/7/local/ollama";
+
+    fn env<'a>(w: &'a Wiring, k: &str) -> Option<&'a str> {
+        w.0.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn each_agent_is_pointed_at_the_provider_route_in_its_own_way() {
+        let claude = agent("claude").unwrap().provider_wiring(URL, Format::Anthropic, "qwen3:4b").unwrap();
+        assert_eq!(env(&claude, "ANTHROPIC_BASE_URL"), Some(URL));
+        assert_eq!(env(&claude, "ANTHROPIC_API_KEY"), Some(""));
+        for var in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"] {
+            assert_eq!(env(&claude, var), Some("qwen3:4b"), "{var}");
+        }
+        // Claude only speaks Anthropic Messages; the free tier is a launcher of its own.
+        assert!(agent("claude").unwrap().provider_wiring(URL, Format::Chat, "m").is_none());
+        assert!(agent("claude-free").unwrap().provider_formats().is_empty());
+
+        let codex = agent("codex").unwrap().provider_wiring(URL, Format::Responses, "qwen3:4b").unwrap();
+        let args = codex.1.join(" ");
+        assert!(args.contains("model_provider=\"dino\"") && args.contains(&format!("base_url=\"{URL}/v1\"")) && args.ends_with("-m qwen3:4b"), "{args}");
+        assert_eq!(env(&codex, "DINO_PROVIDER_KEY"), Some("dino"));
+
+        let qwen = agent("qwen").unwrap();
+        assert_eq!(qwen.provider_formats()[0], Format::Chat);
+        let chat = qwen.provider_wiring(URL, Format::Chat, "m").unwrap().1.join(" ");
+        assert!(chat.contains("--auth-type openai ") && chat.contains(&format!("--openai-base-url {URL}/v1")), "{chat}");
+        let anthropic = qwen.provider_wiring(URL, Format::Anthropic, "m").unwrap();
+        assert_eq!(env(&anthropic, "ANTHROPIC_BASE_URL"), Some(URL));
+
+        let kimi = agent("kimi").unwrap().provider_wiring(URL, Format::Responses, "m").unwrap();
+        assert_eq!(env(&kimi, "KIMI_MODEL_PROVIDER_TYPE"), Some("openai_responses"));
+        let hermes = agent("hermes").unwrap();
+        assert_eq!(hermes.provider_formats(), [Format::Chat]);
+        assert!(hermes.provider_wiring(URL, Format::Anthropic, "m").is_none());
+    }
 }

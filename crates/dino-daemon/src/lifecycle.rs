@@ -115,6 +115,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         host: s.host.clone(),
         ended: false,
         exit_code: None,
+        route: s.route.clone(),
     };
     let w = if s.host.is_some() { None } else { session_worktree(d, &s.cwd) };
     kill(d, id);
