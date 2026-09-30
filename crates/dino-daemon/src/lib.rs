@@ -1705,6 +1705,7 @@ fn kill(d: &Daemon, id: &str) -> bool {
     match sessions.iter().position(|s| s.id == id) {
         Some(i) => {
             sessions.remove(i).pane.kill();
+            dino_core::agent::qwen::forget(id);
             d.previews.lock().unwrap().retain(|p| {
                 if p.session == id {
                     p.stop();

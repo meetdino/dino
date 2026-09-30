@@ -11,7 +11,7 @@ use crate::models::Catalog;
 
 mod claude;
 pub mod codex;
-mod qwen;
+pub mod qwen;
 
 /// Which control a flag on an agent's command line sets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
