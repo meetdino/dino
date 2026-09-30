@@ -70,9 +70,8 @@ fn install_hint(id: &str) -> &'static str {
     match id {
         "claude" => "curl -fsSL https://claude.ai/install.sh | bash",
         "codex" => "npm i -g @openai/codex",
-        "gemini" => "npm i -g @google/gemini-cli",
         "qwen" => "npm i -g @qwen-code/qwen-code",
-        "kimi" => "uv tool install kimi-cli",
+        "kimi" => "npm i -g @moonshot-ai/kimi-code",
         "opencode" => "curl -fsSL https://opencode.ai/install | bash",
         "crush" => "brew install charmbracelet/tap/crush",
         "aider" => "pip install aider-install && aider-install",
@@ -157,7 +156,6 @@ fn auth_of(id: &str) -> Option<String> {
             Some(v) if v["OPENAI_API_KEY"].is_string() => "API key".into(),
             _ => "signed out".into(),
         }),
-        "gemini" => Some(if h.join(".gemini/oauth_creds.json").exists() { "Google login".into() } else { "not signed in".into() }),
         _ => None,
     }
 }

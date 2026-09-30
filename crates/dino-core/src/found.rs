@@ -289,14 +289,11 @@ fn subtree(table: &[(u32, u32, String)], root: u32) -> Vec<u32> {
 
 /// Which agent CLI a process is, from its command and arguments. Claude is found by its session
 /// file instead: its native binary is named after its version.
-fn agent_of(comm: &str, args: &[String]) -> Option<&'static str> {
+fn agent_of(comm: &str, _args: &[String]) -> Option<&'static str> {
     let base = |s: &str| s.rsplit('/').next().unwrap_or(s).to_string();
     let name = base(comm);
     if name == "codex" || name.starts_with("codex-") {
         return Some("codex");
-    }
-    if name == "gemini" || (name == "node" && args.first().is_some_and(|a| base(a) == "gemini" || a.contains("gemini-cli"))) {
-        return Some("gemini");
     }
     None
 }
@@ -339,7 +336,7 @@ fn claude_transcript(session_id: &str) -> Option<PathBuf> {
 }
 
 /// An agent someone started by hand inside a dino shell: `fg` is the shell's foreground process
-/// group. Its session id is empty until the agent has written one (Gemini never names it).
+/// group. Its session id is empty until the agent has written one.
 pub fn inside(fg: u32) -> Option<FoundSession> {
     let table = process_table();
     let found = |agent: &str, pid: u32| FoundSession {
@@ -390,12 +387,7 @@ pub fn inside(fg: u32) -> Option<FoundSession> {
                 s.args = portable_flags("codex", &args);
                 return Some(s);
             }
-            Some(agent) => {
-                let mut s = found(agent, pid);
-                s.title = "Gemini CLI".into();
-                return Some(s);
-            }
-            None => {}
+            _ => {}
         }
     }
     None
@@ -417,9 +409,6 @@ mod tests {
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(agent_of("/opt/homebrew/bin/codex", &[]), Some("codex"));
         assert_eq!(agent_of("/x/vendor/codex-aarch64-apple-darwin", &[]), Some("codex"));
-        assert_eq!(agent_of("node", &a(&["/opt/homebrew/bin/gemini", "-m", "x"])), Some("gemini"));
-        assert_eq!(agent_of("node", &a(&["/x/node_modules/@google/gemini-cli/dist/index.js"])), Some("gemini"));
-        assert_eq!(agent_of("node", &a(&["server.js", "gemini"])), None);
         assert_eq!(agent_of("/bin/zsh", &[]), None);
         assert_eq!(agent_of("vim", &a(&["codex.md"])), None);
     }

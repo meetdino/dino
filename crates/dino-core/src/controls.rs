@@ -96,7 +96,6 @@ pub fn knobs(agent_id: &str, allow_bypass: bool, catalog: Option<&Catalog>) -> K
         // The free tier picks the model for each turn.
         "claude-free" => Knobs { model: false, models: vec![], default_model: None, ..knobs("claude", true, catalog) },
         "codex" => Knobs { modes: strings(&["ask", "edits", "auto", "bypass"]), model: true, restart: true, ..listed },
-        "gemini" => Knobs { modes: strings(&["ask", "edits", "plan", "bypass"]), model: true, restart: true, ..Knobs::default() },
         _ => Knobs::default(),
     };
     if !allow_bypass {
@@ -149,20 +148,6 @@ pub fn args(agent_id: &str, c: &Controls, k: &Knobs) -> Vec<String> {
                 push(&["-c", &format!("model_reasoning_effort=\"{e}\"")]);
             }
         }
-        "gemini" => {
-            if let Some(m) = mode {
-                let m = match m {
-                    "ask" => "default",
-                    "edits" => "auto_edit",
-                    "plan" => "plan",
-                    _ => "yolo",
-                };
-                push(&["--approval-mode", m]);
-            }
-            if let Some(m) = model {
-                push(&["-m", m]);
-            }
-        }
         _ => {}
     }
     out
@@ -204,8 +189,6 @@ fn control_of(agent_id: &str, name: &str, value: Option<&str>) -> Option<Control
         ("codex", "-s" | "--sandbox" | "-a" | "--ask-for-approval" | "--approve-for-me" | "--full-auto" | "--dangerously-bypass-approvals-and-sandbox" | "--yolo") => Some(Mode),
         ("codex", "-m" | "--model") => Some(Model),
         ("codex", "-c" | "--config") if value.is_some_and(|v| v.trim_start().starts_with("model_reasoning_effort")) => Some(Effort),
-        ("gemini", "--approval-mode" | "-y" | "--yolo") => Some(Mode),
-        ("gemini", "-m" | "--model") => Some(Model),
         _ => None,
     }
 }
@@ -217,7 +200,7 @@ enum ControlKind {
     Effort,
 }
 
-const VALUE_FLAGS: &[&str] = &["--permission-mode", "--model", "--effort", "-s", "--sandbox", "-a", "--ask-for-approval", "-m", "-c", "--config", "--approval-mode"];
+const VALUE_FLAGS: &[&str] = &["--permission-mode", "--model", "--effort", "-s", "--sandbox", "-a", "--ask-for-approval", "-m", "-c", "--config"];
 
 /// What `args` ask `agent_id` for, in dino's words: a session started with
 /// `--dangerously-skip-permissions` is in bypass. A mode dino can't name stays `None`.
@@ -247,15 +230,6 @@ pub fn from_args(agent_id: &str, args: &[String]) -> Controls {
                     "--approve-for-me" => c.mode = Some("auto".into()),
                     "--full-auto" => c.mode = Some("edits".into()),
                     _ => c.mode = Some("bypass".into()),
-                }
-            }
-            ("gemini", Some(ControlKind::Mode), _) => {
-                c.mode = match (name, value) {
-                    ("--approval-mode", Some("default")) => Some("ask".into()),
-                    ("--approval-mode", Some("auto_edit")) => Some("edits".into()),
-                    ("--approval-mode", Some("plan")) => Some("plan".into()),
-                    ("--approval-mode", Some("yolo")) | ("-y" | "--yolo", _) => Some("bypass".into()),
-                    _ => None,
                 }
             }
             _ => {}
@@ -339,13 +313,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_and_gemini_flags() {
+    fn codex_flags() {
         let codex = k("codex");
         assert_eq!(args("codex", &c(Some("edits"), Some("gpt-5.5"), Some("low")), &codex), ["-s", "workspace-write", "-a", "on-request", "-m", "gpt-5.5", "-c", "model_reasoning_effort=\"low\""]);
         assert_eq!(args("codex", &c(None, Some("gpt-5.5"), Some("ultra")), &codex), ["-m", "gpt-5.5", "-c", "model_reasoning_effort=\"xhigh\""], "the most it takes");
         assert_eq!(args("codex", &c(Some("plan"), None, None), &codex), Vec::<String>::new(), "codex has no plan mode");
         assert_eq!(args("codex", &c(Some("bypass"), None, None), &codex), ["--dangerously-bypass-approvals-and-sandbox"]);
-        assert_eq!(args("gemini", &c(Some("edits"), Some("gemini-2.5-pro"), Some("high")), &k("gemini")), ["--approval-mode", "auto_edit", "-m", "gemini-2.5-pro"]);
         assert_eq!(args("aider", &c(Some("ask"), Some("x"), Some("high")), &k("aider")), Vec::<String>::new());
     }
 
@@ -366,11 +339,10 @@ mod tests {
         assert!(!knobs("claude", false, None).modes.contains(&"bypass".to_string()));
         assert!(k("claude").modes.contains(&"bypass".to_string()));
         assert!(!k("claude-free").model && k("claude-free").models.is_empty() && !k("claude-free").efforts.is_empty());
-        assert!(k("gemini").efforts.is_empty() && k("gemini").models.is_empty());
         assert!(knobs("codex", true, None).models.is_empty() && knobs("codex", true, None).efforts.is_empty(), "nothing it doesn't list");
         assert_eq!(k("shell"), Knobs::default());
         let all: Vec<&str> = MODES.iter().map(|m| m.0).collect();
-        for agent in ["claude", "codex", "gemini"] {
+        for agent in ["claude", "codex"] {
             let k = k(agent);
             let mut order = k.modes.iter().map(|m| all.iter().position(|a| a == m).expect("a known mode"));
             assert!(order.clone().zip(order.by_ref().skip(1)).all(|(a, b)| a < b), "{agent} modes in MODES order");
@@ -396,9 +368,8 @@ mod tests {
         assert_eq!(from_args("codex", &v(&["--yolo", "-m", "gpt-5", "-c", "model_reasoning_effort=\"high\""])), c(Some("bypass"), Some("gpt-5"), Some("high")));
         assert_eq!(from_args("codex", &v(&["-s", "read-only", "-a", "on-request"])), c(Some("ask"), None, None));
         assert_eq!(from_args("codex", &v(&["-s", "danger-full-access"])), Controls::default(), "no mode of dino's");
-        assert_eq!(from_args("gemini", &v(&["-y"])), c(Some("bypass"), None, None));
         // Every mode dino passes reads back as itself.
-        for agent in ["claude", "codex", "gemini"] {
+        for agent in ["claude", "codex"] {
             let k = k(agent);
             for m in &k.modes {
                 let want = c(Some(m), None, None);
