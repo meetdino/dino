@@ -7,13 +7,21 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-const FILES: [(&str, &str); 6] = [
+const FILES: [(&str, &str); 7] = [
     ("bash/ghostty.bash", include_str!("../shell-integration/bash/ghostty.bash")),
     ("bash/bash-preexec.sh", include_str!("../shell-integration/bash/bash-preexec.sh")),
     ("bash/dino.bash", include_str!("../shell-integration/bash/dino.bash")),
+    ("bash/dino-posix.bash", include_str!("../shell-integration/bash/dino-posix.bash")),
     ("zsh/.zshenv", include_str!("../shell-integration/zsh/.zshenv")),
     ("zsh/ghostty.zshenv", include_str!("../shell-integration/zsh/ghostty.zshenv")),
     ("zsh/ghostty-integration", include_str!("../shell-integration/zsh/ghostty-integration")),
+];
+
+/// The AI line (`dino init`), loaded after the user's own startup files. `__DINO_BIN__` becomes
+/// this dino, as `dino init` does it.
+const AI: [(&str, &str); 2] = [
+    ("zsh/dino-ai.zsh", include_str!("../../dino/shell/dino.zsh")),
+    ("bash/dino-ai.bash", include_str!("../../dino/shell/dino.bash")),
 ];
 
 /// What Ghostty turns on unless told otherwise: a bar cursor while editing, and the folder (at a
@@ -53,7 +61,7 @@ fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args:
             if let Some(e) = var(env, "ENV") {
                 env.insert("GHOSTTY_BASH_ENV".into(), e);
             }
-            env.insert("ENV".into(), dir.join("bash/ghostty.bash").display().to_string());
+            env.insert("ENV".into(), dir.join("bash/dino-posix.bash").display().to_string());
             // POSIX mode would keep history in ~/.sh_history.
             if var(env, "HISTFILE").is_none() {
                 if let Some(home) = var(env, "HOME") {
@@ -73,10 +81,20 @@ fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args:
 fn install(dir: &Path) -> std::io::Result<()> {
     for (name, text) in FILES {
         let path = dir.join(name);
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
-            std::fs::create_dir_all(path.parent().unwrap_or(dir))?;
-            std::fs::write(&path, text)?;
-        }
+        write_if_changed(&path, text)?;
+    }
+    let bin = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "dino".into());
+    let bin = format!("'{}'", bin.replace('\'', r"'\''"));
+    for (name, text) in AI {
+        write_if_changed(&dir.join(name), &text.replace("__DINO_BIN__", &bin))?;
+    }
+    Ok(())
+}
+
+fn write_if_changed(path: &Path, text: &str) -> std::io::Result<()> {
+    if std::fs::read_to_string(path).ok().as_deref() != Some(text) {
+        std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
+        std::fs::write(path, text)?;
     }
     Ok(())
 }

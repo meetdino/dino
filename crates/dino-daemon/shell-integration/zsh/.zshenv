@@ -4,7 +4,16 @@
 # the first prompt, in precmd_functions. A .zprofile or .zshrc that reassigns precmd_functions
 # drops it; zsh still calls a function named precmd, so that's the fallback.
 
-builtin source -- "${${(%):-%x}:A:h}/ghostty.zshenv"
+typeset -g _dino_zsh_dir=${${(%):-%x}:A:h}
+builtin source -- "$_dino_zsh_dir/ghostty.zshenv"
+
+# The AI line loads at the first prompt, after the user's .zshrc, so its keys win.
+_dino_ai_init() {
+    precmd_functions=(${precmd_functions:#_dino_ai_init})
+    builtin unfunction _dino_ai_init
+    builtin source -- "$_dino_zsh_dir/dino-ai.zsh"
+}
+[[ -o interactive ]] && precmd_functions+=(_dino_ai_init)
 
 if [[ -o interactive ]] && (( ! ${+functions[precmd]} )); then
     precmd() {
@@ -14,5 +23,6 @@ if [[ -o interactive ]] && (( ! ${+functions[precmd]} )); then
         (( ${+functions[_ghostty_deferred_init]} )) && builtin unfunction _ghostty_deferred_init
         # Its hook joins precmd_functions, which zsh runs right after this.
         (( ${+_ghostty_integration_loaded} )) || builtin source -- "$GHOSTTY_ZSH_INTEGRATION_DIR/ghostty-integration"
+        (( ${+functions[_dino_ai_init]} )) && _dino_ai_init
     }
 fi
