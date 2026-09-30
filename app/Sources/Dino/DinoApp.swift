@@ -126,6 +126,7 @@ struct DinoApp: App {
         }
         Window("Settings", id: SettingsView.windowID) {
             SettingsView()
+                .environmentObject(model)
         }
         .windowResizability(.contentSize)
         .windowToolbarStyle(.unified)
