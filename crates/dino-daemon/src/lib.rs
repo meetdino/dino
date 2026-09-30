@@ -485,8 +485,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host } => {
-                let launch = Launch { cols, rows, controls, host, ..Launch::new(&launcher, args, cwd) };
+            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by } => {
+                let launch = Launch { cols, rows, controls, host, prompt, started_by: by, ..Launch::new(&launcher, args, cwd) };
                 match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {
                     Ok(id) => {
                         save(d);
@@ -606,6 +606,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     None => Response::Error { message: format!("no session {id}") },
                 }
             }
+            Request::SendKeys { id, text } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                Some(s) if !s.pane.is_exited() => {
+                    s.pane.write(text.into_bytes());
+                    Response::Ok
+                }
+                Some(_) => Response::Error { message: format!("{id} has exited") },
+                None => Response::Error { message: format!("no session {id}") },
+            },
             Request::PrDraft { id } => match pr_session(d, &id) {
                 Ok(s) => {
                     let came_from = session_worktree(d, &s.cwd).and_then(|w| pr::branch(&w.checkout));
