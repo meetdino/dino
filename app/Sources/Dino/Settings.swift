@@ -387,6 +387,27 @@ private struct GeneralPane: View {
                 Footnote("Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
             }
             Section {
+                LabeledContent("Ghostty config") {
+                    let files = GhosttyConfig.loaded.map { NSString(string: $0).abbreviatingWithTildeInPath }
+                    Text(files.isEmpty ? "None: Ghostty's defaults" : files.joined(separator: "\n"))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .textSelection(.enabled)
+                }
+                if !GhosttyConfig.skipped.isEmpty {
+                    LabeledContent("Left out") {
+                        Text(GhosttyConfig.skipped.joined(separator: "\n"))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                            .textSelection(.enabled)
+                    }
+                }
+            } header: {
+                Text("Terminal")
+            } footer: {
+                Footnote("Panes use your Ghostty font, colors, cursor and keybinds, and pick up edits as you save them. dino keeps its own shortcuts, and runs each pane's shell or agent itself, so `command` and `working-directory` don't apply. Lines this Ghostty doesn't understand are left out.")
+            }
+            Section {
                 Toggle("Keep your Mac awake while tasks are scheduled", isOn: Binding(
                     get: { store.settings?.machine.keep_awake ?? false },
                     set: { on in store.update { $0.machine.keep_awake = on } }
