@@ -796,7 +796,7 @@ fn main() -> anyhow::Result<()> {
         Some("shell") => return shell::run(&cli[1..]),
         Some("login") => return cmd_login(cli.get(1).map(String::as_str)),
         Some("logout") => {
-            let provider = cli.get(1).cloned().ok_or_else(|| anyhow::anyhow!("usage: dino logout openrouter"))?;
+            let provider = cli.get(1).cloned().ok_or_else(|| anyhow::anyhow!("usage: dino logout openrouter|chatgpt"))?;
             return print_response(client::request(&Request::DisconnectProvider { provider })?);
         }
         Some("fan") => return cmd_fan(&cli[1..]),
@@ -972,11 +972,11 @@ fn cmd_fan(args: &[String]) -> anyhow::Result<()> {
     print_response(client::request(&Request::Fanout { prompt, launchers: agents, cwd })?)
 }
 
-/// Connect a hosted provider in the browser (OpenRouter's sign-in, no key to paste), then wait
-/// until dinod has the key it gave.
+/// Connect a hosted provider in the browser (OpenRouter's sign-in, or Sign in with ChatGPT; no key
+/// to paste), then wait until dinod has what it gave.
 fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
     let Some(provider) = provider else {
-        println!("usage: dino login openrouter\n\nConnect OpenRouter in your browser; dino keeps the key it gets, and never shows it.");
+        println!("usage: dino login openrouter|chatgpt\n\n  openrouter  Connect OpenRouter in your browser; dino keeps the key it gets, and never shows it.\n  chatgpt     Sign in with ChatGPT, so agents in dino can use your ChatGPT plan (up to the weekly\n              cap you set for dino in ChatGPT → Settings → Usage).");
         return Ok(());
     };
     if let Response::Providers { providers } = client::request(&Request::Providers)?
@@ -994,7 +994,10 @@ fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
         let Response::Providers { providers } = client::request(&Request::Providers)? else { continue };
         let Some(p) = providers.into_iter().find(|p| p.id == provider) else { continue };
         if p.connected {
-            println!("Connected {}.", p.name);
+            match p.account.and_then(|a| a.label) {
+                Some(label) if provider == "chatgpt" => println!("Signed in with ChatGPT. {label}."),
+                _ => println!("Connected {}.", p.name),
+            }
             return Ok(());
         }
         if let Some(e) = p.error {

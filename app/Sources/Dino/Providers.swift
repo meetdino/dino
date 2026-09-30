@@ -192,7 +192,7 @@ struct ProvidersPane: View {
             } header: {
                 Text("Providers")
             } footer: {
-                Footnote("Connect opens OpenRouter's sign-in in your browser; the key it makes is yours (see openrouter.ai/keys), stays on this Mac, and dino never shows it. dino reads model servers on this Mac at their usual ports, and asks every provider which APIs it serves and what its models can do: nothing here comes from a list dino keeps.")
+                Footnote("Connect opens OpenRouter's sign-in in your browser; the key it makes is yours (see openrouter.ai/keys), stays on this Mac, and dino never shows it. Sign in with ChatGPT lets agents in dino use your ChatGPT plan, up to the weekly cap you set for dino in ChatGPT; nothing is billed beyond it. dino reads model servers on this Mac at their usual ports, and asks every provider which APIs it serves and what its models can do: nothing here comes from a list dino keeps.")
             }
             Section {
                 HStack(spacing: 8) {
@@ -268,24 +268,32 @@ private struct ProviderRow: View {
                 if connecting {
                     ProgressView().controlSize(.small).help("Finish connecting in your browser")
                 } else if provider.connected {
-                    Button("Disconnect…") { confirming = true }
+                    if chatgpt, let cap = URL(string: "https://chatgpt.com/#settings/Usage") {
+                        Link("Weekly cap…", destination: cap)
+                            .help("Set how much of your ChatGPT plan dino may use each week, in ChatGPT → Settings → Usage")
+                    }
+                    Button(chatgpt ? "Sign Out…" : "Disconnect…") { confirming = true }
                 } else {
-                    Button("Connect…", action: connect)
-                        .help("Sign in to \(provider.name) in your browser")
+                    Button(chatgpt ? "Sign in with ChatGPT…" : "Connect…", action: connect)
+                        .help(chatgpt ? "Sign in with ChatGPT in your browser, and allow dino to use your plan" : "Sign in to \(provider.name) in your browser")
                 }
             }
         }
         .padding(.vertical, 2)
-        .confirmationDialog("Disconnect \(provider.name)?", isPresented: $confirming) {
-            Button("Disconnect", role: .destructive, action: disconnect)
+        .confirmationDialog(chatgpt ? "Sign out of ChatGPT?" : "Disconnect \(provider.name)?", isPresented: $confirming) {
+            Button(chatgpt ? "Sign Out" : "Disconnect", role: .destructive, action: disconnect)
         } message: {
-            Text("dino forgets the key. It stays on your \(provider.name) account until you delete it there.")
+            Text(chatgpt ? "dino forgets its sign-in. Agents stop using your ChatGPT plan through dino." : "dino forgets the key. It stays on your \(provider.name) account until you delete it there.")
         }
     }
+
+    /// Sign in with ChatGPT: the plan, not a key.
+    private var chatgpt: Bool { provider.id == "chatgpt" }
 
     private var state: String {
         if provider.local { return provider.connected ? "Running" : "Not running" }
         if connecting { return "Waiting for your browser" }
+        if chatgpt { return provider.connected ? "Signed in" : "Not signed in" }
         return provider.connected ? "Connected" : "Not connected"
     }
 
@@ -301,6 +309,7 @@ private struct ProviderRow: View {
         if !provider.formats.isEmpty {
             parts.append(provider.formats.map(formatName).joined(separator: ", "))
         }
+        if chatgpt, let label = provider.account?.label { parts.append(label) }
         if let a = provider.account, let usage = a.usage {
             parts.append(a.limit.map { String(format: "$%.2f of $%.2f used", usage, $0) } ?? String(format: "$%.2f used", usage))
         }

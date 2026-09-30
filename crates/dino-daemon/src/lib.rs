@@ -23,6 +23,7 @@ use dino_core::{detect_agents, load_keys, new_uuid, pr, proxy_wiring, ssh, trust
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
+mod chatgpt;
 mod codex;
 mod lifecycle;
 mod peers;
@@ -261,6 +262,31 @@ pub fn run() -> anyhow::Result<()> {
     }
     schedule::start(&daemon);
     providers::start();
+    {
+        // The ChatGPT sign-in's access token lasts an hour: a new one before it runs out.
+        let d = daemon.clone();
+        std::thread::spawn(move || {
+            loop {
+                match chatgpt::refresh_if_due(&chatgpt::Endpoints::default().token, &load_keys()) {
+                    Ok(Some(t)) => {
+                        if let Err(e) = save_chatgpt(&d, &t) {
+                            eprintln!("dinod: couldn't keep the new ChatGPT sign-in: {e}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("dinod: ChatGPT sign-in refresh: {e}");
+                        // Turned down: signed out, and it says why, rather than asking again every time.
+                        if e.downcast_ref::<chatgpt::Refused>().is_some() && chatgpt::SIGNED_IN.iter().try_for_each(|k| settings::set_key(k, None)).is_ok() {
+                            keys_changed(&d);
+                        }
+                        providers::set_error("chatgpt", Some(format!("Sign in with ChatGPT again: {e}")));
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        });
+    }
     eprintln!("dinod listening on {}", path.display());
     for stream in listener.incoming().flatten() {
         let daemon = daemon.clone();
@@ -348,6 +374,16 @@ fn launchers(free_tier: bool) -> Vec<LauncherInfo> {
 }
 
 /// dino's key store changed: the proxy, what can be started and the providers follow.
+/// A ChatGPT sign-in's tokens go to dino's key store, and the proxy uses them from the next request.
+fn save_chatgpt(d: &Daemon, t: &chatgpt::Tokens) -> anyhow::Result<()> {
+    for (k, v) in t.keys() {
+        settings::set_key(k, Some(&v))?;
+    }
+    providers::set_error("chatgpt", None);
+    keys_changed(d);
+    Ok(())
+}
+
 fn keys_changed(d: &Daemon) {
     let keys = load_keys();
     *d.launchers.write().unwrap() = launchers(keys.contains_key("NVIDIA_API_KEY"));
@@ -528,6 +564,25 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::ConnectProvider { provider } if provider == "chatgpt" => {
+                let d = d.clone();
+                match chatgpt::connect(chatgpt::Endpoints::default(), move |t| {
+                    save_chatgpt(&d, &t)
+                }) {
+                    Ok(url) => Response::Connect { url },
+                    Err(e) => Response::Error { message: e.to_string() },
+                }
+            }
+            Request::DisconnectProvider { provider } if provider == "chatgpt" => {
+                match chatgpt::SIGNED_IN.iter().try_for_each(|k| settings::set_key(k, None)) {
+                    Ok(()) => {
+                        providers::forget("chatgpt");
+                        keys_changed(d);
+                        Response::Ok
+                    }
+                    Err(e) => Response::Error { message: e.to_string() },
+                }
+            }
             Request::ConnectProvider { provider } | Request::DisconnectProvider { provider } => {
                 Response::Error { message: format!("{provider} doesn't sign in: dino finds it on this Mac") }
             }
