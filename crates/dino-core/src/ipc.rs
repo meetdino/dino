@@ -353,6 +353,12 @@ pub struct SessionInfo {
     /// A shell's foreground agent that someone started by hand: its title and busy/idle status.
     #[serde(default)]
     pub inside: Option<crate::found::FoundSession>,
+    /// Where a shell with shell integration says it is now (`cwd` is where it started), and the
+    /// exit code of the last command it ran.
+    #[serde(default)]
+    pub shell_cwd: Option<String>,
+    #[serde(default)]
+    pub last_exit: Option<i32>,
 }
 
 /// From the agent's hooks, so Claude only for now; empty for agents that don't report them.

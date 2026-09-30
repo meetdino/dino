@@ -37,11 +37,13 @@ const ALT_OFF: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"];
 /// what it showed there, not on the main screen it switched back to on the way out.
 const KEEP_ALT_WITHIN: Duration = Duration::from_secs(10);
 
-/// A desktop notification (OSC 9), which the parser drops: `ESC ] 9 ; text`, ended by BEL or ST.
-const NOTICE: &[u8] = b"\x1b]9;";
+/// The OSC sequences dino reads, which the parser drops: `ESC ] <kind> ; text`, ended by BEL or
+/// ST. 9 is a desktop notification, 7 the folder a shell is in, 133 a shell's prompt marks.
+const OSC: &[u8] = b"\x1b]";
+const READ: [&str; 3] = ["9", "7", "133"];
 
-/// Longer than any notice worth reading: an unended one this long is dropped, not kept waiting.
-const NOTICE_MAX: usize = 4096;
+/// Longer than any of those worth reading: an unended one this long is dropped, not kept waiting.
+const OSC_MAX: usize = 4096;
 
 pub struct SpawnSpec {
     pub program: String,
@@ -84,6 +86,11 @@ pub struct Shared {
     /// last one's text. Codex sends one when it waits on the user.
     pub notices: AtomicU64,
     pub notice: Mutex<Option<String>>,
+    /// From a shell with shell integration: the folder it's in (OSC 7), the exit code of the last
+    /// command it ran (OSC 133 D), and how many prompts it has shown (OSC 133 A).
+    pub cwd: Mutex<Option<String>>,
+    pub last_exit: Mutex<Option<i32>>,
+    pub prompts: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -162,8 +169,8 @@ struct Feed {
     /// The end of the last chunk, for a switch back split across two.
     carry: Vec<u8>,
     left_alt: Option<LeftAlt>,
-    /// The start of a notice (see [`NOTICE`]) whose end hasn't arrived yet.
-    notice: Vec<u8>,
+    /// The start of an OSC dino reads (see [`READ`]) whose end hasn't arrived yet.
+    osc: Vec<u8>,
 }
 
 /// The alternate screen as it was when the program last left it.
@@ -202,9 +209,12 @@ impl Pane {
             kept_alt: AtomicBool::new(false),
             notices: AtomicU64::new(0),
             notice: Mutex::new(None),
+            cwd: Mutex::new(None),
+            last_exit: Mutex::new(None),
+            prompts: AtomicU64::new(0),
         });
         let term = new_term(&shared, cols, rows);
-        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, notice: Vec::new() };
+        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, osc: Vec::new() };
         Self { term: Arc::new(FairMutex::new(term)), feed: Mutex::new(feed), shared, killer: Mutex::new(None), pid: OnceLock::new() }
     }
 
@@ -305,9 +315,28 @@ impl Pane {
     fn advance(&self, term: &mut Term<Listener>, bytes: &[u8]) {
         let mut guard = self.feed.lock().unwrap();
         let feed = &mut *guard;
-        for text in notices(&mut feed.notice, bytes) {
-            *self.shared.notice.lock().unwrap() = Some(text);
-            self.shared.notices.fetch_add(1, Ordering::Relaxed);
+        for (kind, text) in oscs(&mut feed.osc, bytes) {
+            let s = &self.shared;
+            match kind {
+                // `9;4;…` is a progress report, not a notice.
+                "9" if !text.is_empty() && !text.starts_with("4;") => {
+                    *s.notice.lock().unwrap() = Some(text);
+                    s.notices.fetch_add(1, Ordering::Relaxed);
+                }
+                "7" => {
+                    if let Some(path) = file_url_path(&text) {
+                        *s.cwd.lock().unwrap() = Some(path);
+                    }
+                }
+                "133" => match text.split(';').collect::<Vec<_>>()[..] {
+                    ["A", ..] => {
+                        s.prompts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ["D", code, ..] => *s.last_exit.lock().unwrap() = code.parse().ok(),
+                    _ => {}
+                },
+                _ => {}
+            }
         }
         let mut rest = bytes;
         while let Some((cut, end)) = alt_off(&feed.carry, rest) {
@@ -653,9 +682,9 @@ fn new_term(shared: &Arc<Shared>, cols: u16, rows: u16) -> Term<Listener> {
     Term::new(config, &TermSize { cols: cols as usize, rows: rows as usize }, Listener(shared.clone()))
 }
 
-/// The notices (OSC 9) in `bytes`, with `pending` the unended start of one from earlier chunks,
-/// left holding the start of one still unended. `ESC ] 9 ; 4 ;` is a progress report, not a notice.
-fn notices(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
+/// The OSCs dino reads (see [`READ`]) in `bytes`, as their kind and text, with `pending` the
+/// unended start of one from earlier chunks, left holding the start of one still unended.
+fn oscs(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<(&'static str, String)> {
     let joined;
     let data = if pending.is_empty() {
         bytes
@@ -666,8 +695,8 @@ fn notices(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
     let mut out = vec![];
     let mut at = 0;
     let mut rest = None;
-    while let Some(i) = data[at..].windows(NOTICE.len()).position(|w| w == NOTICE).map(|i| at + i) {
-        let body = &data[i + NOTICE.len()..];
+    while let Some(i) = data[at..].windows(OSC.len()).position(|w| w == OSC).map(|i| at + i) {
+        let body = &data[i + OSC.len()..];
         let Some((end, stop)) = body.iter().enumerate().find_map(|(k, &b)| match b {
             0x07 => Some((k, 1)),
             0x1b if body.get(k + 1) == Some(&b'\\') => Some((k, 2)),
@@ -676,23 +705,44 @@ fn notices(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
             rest = Some(i);
             break;
         };
-        let text = String::from_utf8_lossy(&body[..end]).trim().to_string();
-        if !text.is_empty() && !text.starts_with("4;") {
-            out.push(text);
+        let text = String::from_utf8_lossy(&body[..end]);
+        let (kind, text) = text.split_once(';').unwrap_or((&text, ""));
+        if let Some(kind) = READ.iter().find(|k| **k == kind) {
+            out.push((*kind, text.trim().to_string()));
         }
-        at = i + NOTICE.len() + end + stop;
+        at = i + OSC.len() + end + stop;
     }
     pending.clear();
     match rest {
-        Some(i) if data.len() - i <= NOTICE_MAX => pending.extend_from_slice(&data[i..]),
+        Some(i) if data.len() - i <= OSC_MAX => pending.extend_from_slice(&data[i..]),
         Some(_) => {}
-        // A notice may begin at the very end.
-        None => {
-            let tail = (1..NOTICE.len()).rev().find(|&k| data.len() >= k && data.ends_with(&NOTICE[..k])).unwrap_or(0);
-            pending.extend_from_slice(&data[data.len() - tail..]);
-        }
+        // One may begin at the very end.
+        None if data.ends_with(&OSC[..1]) => pending.push(OSC[0]),
+        None => {}
     }
     out
+}
+
+/// The path in an OSC 7 `file://host/path` URL, percent-decoded.
+fn file_url_path(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("file://")?;
+    let path = rest[rest.find('/')?..].as_bytes();
+    let mut out = Vec::with_capacity(path.len());
+    let mut i = 0;
+    while i < path.len() {
+        let hex = path.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(b) if path[i] == b'%' => {
+                out.push(b);
+                i += 3;
+            }
+            _ => {
+                out.push(path[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Where `bytes` switch back from the alternate screen, as the range to cut out; it starts at 0
@@ -937,7 +987,31 @@ mod tests {
         assert!(p.text(100).contains("workingmore"));
         // One that never ends isn't kept forever.
         let mut pending = vec![];
-        assert!(notices(&mut pending, &[b"\x1b]9;".as_slice(), &[b'x'; NOTICE_MAX]].concat()).is_empty());
+        assert!(oscs(&mut pending, &[b"\x1b]9;".as_slice(), &[b'x'; OSC_MAX]].concat()).is_empty());
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_shell_reports_its_folder_and_its_last_exit_code() {
+        let p = pane();
+        assert_eq!(*p.shared.cwd.lock().unwrap(), None);
+        // What shell integration prints around a prompt, split mid-sequence.
+        p.feed(b"\x1b]133;D;1\x07\x1b]133;A\x07\x1b]7;file://Mac/tmp/a%20b");
+        p.feed(b"/c%C3%A9\x07$ ");
+        assert_eq!(p.shared.cwd.lock().unwrap().as_deref(), Some("/tmp/a b/c\u{e9}"));
+        assert_eq!(*p.shared.last_exit.lock().unwrap(), Some(1));
+        assert_eq!(p.shared.prompts.load(Ordering::Relaxed), 1);
+        p.feed(b"true\r\n\x1b]133;C\x07\x1b]133;D;0\x1b\\\x1b]133;A\x07\x1b]7;file:///Users/me\x07$ ");
+        assert_eq!(*p.shared.last_exit.lock().unwrap(), Some(0));
+        assert_eq!(p.shared.cwd.lock().unwrap().as_deref(), Some("/Users/me"));
+        assert_eq!(p.shared.prompts.load(Ordering::Relaxed), 2);
+        // An introducer split at the very end of a chunk still counts.
+        p.feed(b"\x1b");
+        p.feed(b"]133;A\x07");
+        assert_eq!(p.shared.prompts.load(Ordering::Relaxed), 3);
+        // The marks don't show on the screen.
+        assert_eq!(p.text(100), "$ true\n$");
+        assert_eq!(file_url_path("file://host"), None);
+        assert_eq!(file_url_path("http://x/y"), None);
     }
 }

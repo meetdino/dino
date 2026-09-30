@@ -27,6 +27,7 @@ mod lifecycle;
 mod peers;
 mod preview;
 mod schedule;
+mod shell;
 
 /// Scrollback lines replayed to a newly attached client.
 const REPLAY_HISTORY: usize = 2000;
@@ -835,6 +836,9 @@ fn local_spec(
     if l.agent_id.starts_with("claude") && settings.policies.session_tools {
         peers::wire_claude(id, &mut wired_args);
     }
+    if l.agent_id == "shell" && settings.machine.shell_integration {
+        shell::wire(&l.program, &mut env, &mut wired_args);
+    }
 
     // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
     match l.agent_id.as_str() {
@@ -1171,6 +1175,8 @@ fn state(d: &Daemon) -> Response {
                 pinned: s.pinned.load(Ordering::Relaxed),
                 tasks,
                 inside: s.inside.lock().unwrap().found.clone(),
+                shell_cwd: s.pane.shared.cwd.lock().unwrap().clone(),
+                last_exit: *s.pane.shared.last_exit.lock().unwrap(),
             }
         })
         .collect();
