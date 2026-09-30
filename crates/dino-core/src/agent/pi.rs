@@ -267,7 +267,8 @@ impl Agent for Pi {
     }
 
     fn catalog(&self, program: &str) -> Option<Catalog> {
-        if self.free {
+        // Asking Pi makes its home folder: don't, for someone who has never run it.
+        if self.free || !pi_dir().exists() {
             return None;
         }
         // Offline: its own catalog, without refreshing it from the network.
