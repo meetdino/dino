@@ -14,7 +14,7 @@ use dino_core::ipc::{self, Request, Response};
 use dino_core::{pr, trust, worktree};
 
 use super::{
-    Daemon, Launch, SavedSession, SessionWorktree, codex, kill, now_secs, real, save, save_worktrees,
+    Daemon, Launch, SavedSession, SessionWorktree, kill, now_secs, real, save, save_worktrees,
     session_worktree, sessions_in, spawn,
 };
 
@@ -96,14 +96,7 @@ pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
 fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
     anyhow::ensure!(super::group_of(d, id).is_none(), "{} is part of a fan-out: keep or discard it instead", s.name);
-    let agent_session = {
-        let known = s.agent_session.lock().unwrap().clone();
-        if known.is_none() && s.agent_id == "codex" && s.host.is_none() {
-            codex::conversation(&s)
-        } else {
-            known
-        }
-    };
+    let agent_session = s.agent_session.lock().unwrap().clone().or_else(|| super::conversation_of(&s));
     let saved = SavedSession {
         id: s.id.clone(),
         name: s.name.clone(),

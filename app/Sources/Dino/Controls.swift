@@ -477,7 +477,7 @@ struct NewSessionSheet: View {
 
     private static let addHost = "\u{0}add"
     /// Claude Code on the free pool goes through dino on this Mac, so it doesn't run over SSH.
-    private var launchers: [LauncherInfo] { host.isEmpty ? model.launchers : model.launchers.filter { $0.agent_id != "claude-free" } }
+    private var launchers: [LauncherInfo] { host.isEmpty ? model.launchers : model.launchers.filter { !$0.agent_id.hasSuffix("-free") } }
     private var launcher: LauncherInfo? { launchers.first { $0.short == agent } ?? launchers.first }
 
     var body: some View {

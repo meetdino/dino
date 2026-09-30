@@ -70,9 +70,8 @@ fn install_hint(id: &str) -> &'static str {
     match id {
         "claude" => "curl -fsSL https://claude.ai/install.sh | bash",
         "codex" => "npm i -g @openai/codex",
-        "gemini" => "npm i -g @google/gemini-cli",
         "qwen" => "npm i -g @qwen-code/qwen-code",
-        "kimi" => "uv tool install kimi-cli",
+        "kimi" => "npm i -g @moonshot-ai/kimi-code",
         "opencode" => "curl -fsSL https://opencode.ai/install | bash",
         "crush" => "brew install charmbracelet/tap/crush",
         "aider" => "pip install aider-install && aider-install",
@@ -101,13 +100,13 @@ pub fn scan() -> Inventory {
 fn agent_info(kind: &AgentKind) -> AgentInfo {
     let path = which(kind.bin);
     let version = path.as_deref().and_then(version_of);
-    let auth = path.as_ref().and_then(|_| auth_of(kind.id));
+    let auth = path.as_ref().and_then(|_| crate::agent::agent(kind.id)?.login());
     AgentInfo {
         kind: kind.clone(),
         path,
         version,
         auth,
-        meterable: matches!(kind.id, "claude" | "codex"),
+        meterable: crate::agent::agent(kind.id).is_some_and(|a| a.metered()),
         install: install_hint(kind.id),
     }
 }
@@ -131,35 +130,8 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
-fn read_json(path: PathBuf) -> Option<serde_json::Value> {
+pub(crate) fn read_json(path: PathBuf) -> Option<serde_json::Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
-}
-
-fn auth_of(id: &str) -> Option<String> {
-    let h = home();
-    match id {
-        "claude" => {
-            let account = read_json(h.join(".claude.json")).map(|v| v["oauthAccount"].clone()).filter(|a| a.is_object());
-            match account {
-                Some(a) => Some(match a["organizationType"].as_str() {
-                    Some("claude_max") => "Claude Max".into(),
-                    Some("claude_pro") => "Claude Pro".into(),
-                    Some(t) if t.contains("team") => "Claude Team".into(),
-                    Some(t) if t.contains("enterprise") => "Claude Enterprise".into(),
-                    _ => "claude.ai login".into(),
-                }),
-                None if std::env::var_os("ANTHROPIC_API_KEY").is_some() => Some("API key".into()),
-                None => Some("signed out".into()),
-            }
-        }
-        "codex" => Some(match read_json(h.join(".codex/auth.json")) {
-            Some(v) if v["auth_mode"] == "chatgpt" && v["tokens"].is_object() => "ChatGPT login".into(),
-            Some(v) if v["OPENAI_API_KEY"].is_string() => "API key".into(),
-            _ => "signed out".into(),
-        }),
-        "gemini" => Some(if h.join(".gemini/oauth_creds.json").exists() { "Google login".into() } else { "not signed in".into() }),
-        _ => None,
-    }
 }
 
 fn mask(v: &str) -> String {

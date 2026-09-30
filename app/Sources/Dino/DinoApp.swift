@@ -932,14 +932,14 @@ struct AgentBadge: View {
     let agent: String
 
     var body: some View {
-        Text(["codex", "gemini"].contains(agent) ? agent : "claude")
+        Text(["codex", "qwen"].contains(agent) ? agent : "claude")
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
             .padding(.horizontal, 4).padding(.vertical, 1)
             .background(RoundedRectangle(cornerRadius: 3).fill(color.opacity(0.18)))
             .foregroundStyle(color)
     }
 
-    private var color: Color { agent == "codex" ? .blue : agent == "gemini" ? .purple : Brand.spike }
+    private var color: Color { agent == "codex" ? .blue : agent == "qwen" ? .purple : Brand.spike }
 }
 
 /// Continue an agent started by hand in a shell as a dino session: same row, conversation resumed.

@@ -69,10 +69,8 @@ pub(crate) fn read(d: &Daemon, id: &str, lines: Option<u32>) -> anyhow::Result<S
     if let Some(by) = s.messaged_by.lock().unwrap().clone() {
         out.push_str(&format!("Last messaged by {}'s agent\n", name_of(&by)));
     }
-    let conversation = match s.agent_id.as_str() {
-        "claude" | "claude-free" => s.agent_session.lock().unwrap().clone().and_then(|u| dino_core::transcript::claude_tail(&u, CONVERSATION_BUDGET)),
-        _ => None,
-    };
+    let session = s.agent_session.lock().unwrap().clone();
+    let conversation = session.zip(dino_core::agent::agent(&s.agent_id)).and_then(|(u, a)| a.tail(&u, CONVERSATION_BUDGET));
     if let Some(c) = conversation {
         out.push_str(&format!("\n## Conversation (latest last)\n{c}\n"));
     }

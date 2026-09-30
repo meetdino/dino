@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod agent;
 pub mod ask;
 pub mod controls;
 pub mod discover;
@@ -33,9 +34,8 @@ pub struct AgentKind {
 pub const KNOWN_AGENTS: &[AgentKind] = &[
     AgentKind { id: "claude", name: "Claude Code", bin: "claude" },
     AgentKind { id: "codex", name: "Codex", bin: "codex" },
-    AgentKind { id: "gemini", name: "Gemini CLI", bin: "gemini" },
     AgentKind { id: "qwen", name: "Qwen Code", bin: "qwen" },
-    AgentKind { id: "kimi", name: "Kimi CLI", bin: "kimi" },
+    AgentKind { id: "kimi", name: "Kimi Code", bin: "kimi" },
     AgentKind { id: "opencode", name: "OpenCode", bin: "opencode" },
     AgentKind { id: "crush", name: "Crush", bin: "crush" },
     AgentKind { id: "aider", name: "Aider", bin: "aider" },
@@ -76,62 +76,33 @@ fn is_executable(p: &Path) -> bool {
 /// `base(provider)` yields the proxy base URL for that provider; `status_line` is a Claude
 /// `statusLine` setting to add (see `statusline::wrapper`).
 /// Agents we don't know how to wire (or that the user already pointed elsewhere) run untouched.
-pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String, status_line: Option<String>) -> (Vec<(String, String)>, Vec<String>) {
-    // With routing off, only status hooks are wired; API traffic goes direct.
-    // A dino proxy URL in our own environment was inherited from a dino pane (dinod started from
-    // one), not set by the user: it points at another session, or another dinod.
-    let user_set = |var: &str| !route || std::env::var(var).is_ok_and(|v| !(v.starts_with("http://127.0.0.1:") && v.contains("/s/")));
-    match agent_id {
-        // Also used for shells, so `claude` started inside one is metered too.
-        "claude" => {
-            let env = if user_set("ANTHROPIC_BASE_URL") { vec![] } else { vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))] };
-            (env, vec!["--settings".into(), claude_hook_settings(&base("hook"), status_line)])
-        }
-        // Claude Code on the free pool: dino answers as the Anthropic API and routes each request.
-        // The token is a placeholder so Claude Code skips its own login; the proxy holds the real keys.
-        "claude-free" => {
-            let env = [
-                ("ANTHROPIC_BASE_URL", base("free")),
-                ("ANTHROPIC_AUTH_TOKEN", "dino-free".into()),
-                ("ANTHROPIC_MODEL", "auto".into()),
-                ("ANTHROPIC_DEFAULT_OPUS_MODEL", "auto".into()),
-                ("ANTHROPIC_DEFAULT_SONNET_MODEL", "auto".into()),
-                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "auto-fast".into()),
-                ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
-            ];
-            (env.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), vec!["--settings".into(), claude_hook_settings(&base("hook"), status_line)])
-        }
-        "shell" if !user_set("ANTHROPIC_BASE_URL") => (vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))], vec![]),
-        // A custom provider rather than `openai_base_url`: Codex otherwise tries WebSockets first,
-        // which the proxy doesn't carry. `requires_openai_auth` keeps the user's own login.
-        "codex" if !user_set("OPENAI_BASE_URL") => {
-            let base_url = match codex_auth_mode().as_deref() {
-                Some("chatgpt") => format!("{}/codex", base("chatgpt")),
-                _ => format!("{}/v1", base("openai")),
-            };
-            let args = [
-                "model_provider=\"dino\"".to_string(),
-                "model_providers.dino.name=\"dino\"".into(),
-                format!("model_providers.dino.base_url=\"{base_url}\""),
-                "model_providers.dino.wire_api=\"responses\"".into(),
-                "model_providers.dino.requires_openai_auth=true".into(),
-                "model_providers.dino.supports_websockets=false".into(),
-            ];
-            (vec![], args.into_iter().flat_map(|a| ["-c".to_string(), a]).collect())
-        }
-        _ => (vec![], vec![]),
+pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String, status_line: Option<String>) -> agent::Wiring {
+    match agent::agent(agent_id) {
+        Some(a) => a.wiring(route, base, status_line),
+        // So `claude` started inside a shell is metered too.
+        None if agent_id == "shell" && !user_set(route, "ANTHROPIC_BASE_URL") => (vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))], vec![]),
+        None => (vec![], vec![]),
     }
 }
 
-/// `"chatgpt"` or `"apikey"`, from `~/.codex/auth.json`.
-fn codex_auth_mode() -> Option<String> {
-    let home = std::env::var_os("HOME")?;
-    let auth = std::fs::read_to_string(Path::new(&home).join(".codex/auth.json")).ok()?;
-    // Avoid a JSON dependency for one field: find `"auth_mode": "<value>"`.
-    let rest = &auth[auth.find("\"auth_mode\"")? + 11..];
-    let start = rest.find('"')? + 1;
-    let len = rest[start..].find('"')?;
-    Some(rest[start..start + len].to_string())
+/// With routing off, only status hooks are wired; API traffic goes direct. Otherwise, whether the
+/// user pointed `var` elsewhere themselves. A dino proxy URL in our own environment was inherited
+/// from a dino pane (dinod started from one), not set by the user: it points at another session,
+/// or another dinod.
+pub(crate) fn user_set(route: bool, var: &str) -> bool {
+    !route || std::env::var(var).is_ok_and(|v| !(v.starts_with("http://127.0.0.1:") && v.contains("/s/")))
+}
+
+/// Random v4 UUID, for an agent's conversation id picked up front.
+pub fn new_uuid() -> String {
+    let mut b = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = std::io::Read::read_exact(&mut f, &mut b);
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
 /// Per-session settings layered on top of the user's own: HTTP hooks that report lifecycle events
@@ -147,6 +118,26 @@ pub fn claude_hook_settings(url: &str, status_line: Option<String>) -> String {
     let status_line = status_line.map(|s| format!(r#","statusLine":{s}"#)).unwrap_or_default();
     format!(r#"{{"hooks":{{{}}}{status_line}}}"#, hooks.join(","))
 }
+
+/// What a Claude Code session sets for the programs it runs. dinod started from one (a Claude's
+/// Bash tool, a terminal it opened) would hand them to every agent it starts, and a Claude under
+/// them takes itself for that session's child: among other things, it saves no transcript. The
+/// user's own settings (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_EFFORT_LEVEL`, …) aren't among them.
+pub const PARENT_AGENT_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_VERSION",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "AI_AGENT",
+];
 
 /// `~/.config/dino`, or `$DINO_HOME` (a second, isolated dino: tests, development).
 pub fn config_dir() -> PathBuf {

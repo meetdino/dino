@@ -1,6 +1,7 @@
 //! Agent controls: permission mode, model and effort, in dino's own words, and how each agent
 //! takes them on its command line. An agent without a knob simply doesn't offer it.
 
+use crate::agent::{ControlKind, agent};
 use crate::models::{Catalog, ModelInfo};
 use serde::{Deserialize, Serialize};
 
@@ -82,103 +83,30 @@ impl Knobs {
     }
 }
 
-fn strings(s: &[&str]) -> Vec<String> {
-    s.iter().map(|s| s.to_string()).collect()
-}
-
 /// The controls `agent_id` offers, its models and efforts from `catalog` (see `models`): without
 /// one, the model is typed and there's no effort to pick. `bypass` is left out unless the
 /// policies allow it.
 pub fn knobs(agent_id: &str, allow_bypass: bool, catalog: Option<&Catalog>) -> Knobs {
-    let listed = catalog.map(|c| Knobs { models: c.models.clone(), default_model: c.default_model.clone(), efforts: c.efforts(), ..Knobs::default() }).unwrap_or_default();
-    let mut k = match agent_id {
-        "claude" => Knobs { modes: strings(&["ask", "edits", "plan", "auto", "bypass"]), model: true, restart: true, ..listed },
-        // The free tier picks the model for each turn.
-        "claude-free" => Knobs { model: false, models: vec![], default_model: None, ..knobs("claude", true, catalog) },
-        "codex" => Knobs { modes: strings(&["ask", "edits", "auto", "bypass"]), model: true, restart: true, ..listed },
-        "gemini" => Knobs { modes: strings(&["ask", "edits", "plan", "bypass"]), model: true, restart: true, ..Knobs::default() },
-        _ => Knobs::default(),
-    };
-    if !allow_bypass {
-        k.modes.retain(|m| m != "bypass");
-    }
-    k
+    let Some(a) = agent(agent_id) else { return Knobs::default() };
+    let listed = catalog.filter(|_| a.picks_model()).map(|c| Knobs { models: c.models.clone(), default_model: c.default_model.clone(), ..Knobs::default() }).unwrap_or_default();
+    let modes = a.modes().iter().filter(|m| allow_bypass || **m != "bypass").map(|m| m.to_string()).collect();
+    Knobs { modes, model: a.picks_model(), efforts: catalog.map(Catalog::efforts).unwrap_or_default(), restart: true, ..listed }
 }
 
 /// Command-line arguments that apply `c` to an agent offering `k` (see `knobs`). Values it
 /// doesn't offer are dropped rather than passed on to fail; an effort the model doesn't take
 /// becomes the nearest one below that it does.
 pub fn args(agent_id: &str, c: &Controls, k: &Knobs) -> Vec<String> {
+    let Some(a) = agent(agent_id) else { return vec![] };
     let mode = c.mode.as_deref().filter(|m| k.modes.iter().any(|x| x == m));
     let model = c.model.as_deref().map(str::trim).filter(|m| k.model && !m.is_empty());
     let effort = c.effort.as_deref().and_then(|e| k.effort(model, e));
-    let effort = effort.as_deref();
-    let mut out: Vec<String> = vec![];
-    let mut push = |a: &[&str]| out.extend(a.iter().map(|s| s.to_string()));
-    match agent_id {
-        "claude" | "claude-free" => {
-            if let Some(m) = mode {
-                let m = match m {
-                    "ask" => "manual",
-                    "edits" => "acceptEdits",
-                    "plan" => "plan",
-                    "auto" => "auto",
-                    _ => "bypassPermissions",
-                };
-                push(&["--permission-mode", m]);
-            }
-            if let Some(m) = model {
-                push(&["--model", m]);
-            }
-            if let Some(e) = effort {
-                push(&["--effort", e]);
-            }
-        }
-        "codex" => {
-            match mode {
-                Some("ask") => push(&["-s", "read-only", "-a", "on-request"]),
-                Some("edits") => push(&["-s", "workspace-write", "-a", "on-request"]),
-                Some("auto") => push(&["--approve-for-me"]),
-                Some(_) => push(&["--dangerously-bypass-approvals-and-sandbox"]),
-                None => {}
-            }
-            if let Some(m) = model {
-                push(&["-m", m]);
-            }
-            if let Some(e) = effort {
-                push(&["-c", &format!("model_reasoning_effort=\"{e}\"")]);
-            }
-        }
-        "gemini" => {
-            if let Some(m) = mode {
-                let m = match m {
-                    "ask" => "default",
-                    "edits" => "auto_edit",
-                    "plan" => "plan",
-                    _ => "yolo",
-                };
-                push(&["--approval-mode", m]);
-            }
-            if let Some(m) = model {
-                push(&["-m", m]);
-            }
-        }
-        _ => {}
-    }
-    out
+    crate::agent::control_args(a, mode, model, effort.as_deref())
 }
 
-/// One of Claude's permission modes in dino's words; `dontAsk` has none.
-pub fn claude_mode(m: &str) -> Option<String> {
-    let id = match m {
-        "default" | "manual" => "ask",
-        "acceptEdits" => "edits",
-        "plan" => "plan",
-        "auto" => "auto",
-        "bypassPermissions" => "bypass",
-        _ => return None,
-    };
-    Some(id.into())
+/// A permission mode `agent_id` reports through its hooks, in dino's words.
+pub fn reported_mode(agent_id: &str, mode: &str) -> Option<String> {
+    agent(agent_id)?.reported_mode(mode)
 }
 
 /// A flag in `args` at `i`: its name and value, and how many arguments it takes up. `value_flags`
@@ -194,81 +122,29 @@ fn flag_at<'a>(args: &'a [String], i: usize, value_flags: &[&str]) -> Option<(&'
     a.starts_with('-').then_some((a, None, 1))
 }
 
-/// Which control a flag of `agent_id`'s sets, if any.
-fn control_of(agent_id: &str, name: &str, value: Option<&str>) -> Option<ControlKind> {
-    use ControlKind::*;
-    match (agent_id, name) {
-        ("claude" | "claude-free", "--permission-mode" | "--dangerously-skip-permissions") => Some(Mode),
-        ("claude" | "claude-free", "--model") => Some(Model),
-        ("claude" | "claude-free", "--effort") => Some(Effort),
-        ("codex", "-s" | "--sandbox" | "-a" | "--ask-for-approval" | "--approve-for-me" | "--full-auto" | "--dangerously-bypass-approvals-and-sandbox" | "--yolo") => Some(Mode),
-        ("codex", "-m" | "--model") => Some(Model),
-        ("codex", "-c" | "--config") if value.is_some_and(|v| v.trim_start().starts_with("model_reasoning_effort")) => Some(Effort),
-        ("gemini", "--approval-mode" | "-y" | "--yolo") => Some(Mode),
-        ("gemini", "-m" | "--model") => Some(Model),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum ControlKind {
-    Mode,
-    Model,
-    Effort,
-}
-
-const VALUE_FLAGS: &[&str] = &["--permission-mode", "--model", "--effort", "-s", "--sandbox", "-a", "--ask-for-approval", "-m", "-c", "--config", "--approval-mode"];
-
 /// What `args` ask `agent_id` for, in dino's words: a session started with
 /// `--dangerously-skip-permissions` is in bypass. A mode dino can't name stays `None`.
 pub fn from_args(agent_id: &str, args: &[String]) -> Controls {
     let mut c = Controls::default();
-    let (mut sandbox, mut approval, mut mode_flags) = (None, None, 0);
+    let Some(a) = agent(agent_id) else { return c };
+    let mut modes = vec![];
     let mut i = 0;
     while i < args.len() {
-        let Some((name, value, n)) = flag_at(args, i, VALUE_FLAGS) else {
+        let Some((name, value, n)) = flag_at(args, i, a.value_flags()) else {
             i += 1;
             continue;
         };
-        let kind = control_of(agent_id, name, value);
-        match (agent_id, kind, name) {
-            (_, Some(ControlKind::Model), _) => c.model = value.map(String::from),
-            ("codex", Some(ControlKind::Effort), _) => {
-                c.effort = value.and_then(|v| v.split_once('=')).map(|(_, e)| e.trim().trim_matches('"').to_string())
-            }
-            (_, Some(ControlKind::Effort), _) => c.effort = value.map(String::from),
-            ("claude" | "claude-free", Some(ControlKind::Mode), "--dangerously-skip-permissions") => c.mode = Some("bypass".into()),
-            ("claude" | "claude-free", Some(ControlKind::Mode), _) => c.mode = value.and_then(claude_mode),
-            ("codex", Some(ControlKind::Mode), _) => {
-                mode_flags += 1;
-                match name {
-                    "-s" | "--sandbox" => sandbox = value,
-                    "-a" | "--ask-for-approval" => approval = value,
-                    "--approve-for-me" => c.mode = Some("auto".into()),
-                    "--full-auto" => c.mode = Some("edits".into()),
-                    _ => c.mode = Some("bypass".into()),
-                }
-            }
-            ("gemini", Some(ControlKind::Mode), _) => {
-                c.mode = match (name, value) {
-                    ("--approval-mode", Some("default")) => Some("ask".into()),
-                    ("--approval-mode", Some("auto_edit")) => Some("edits".into()),
-                    ("--approval-mode", Some("plan")) => Some("plan".into()),
-                    ("--approval-mode", Some("yolo")) | ("-y" | "--yolo", _) => Some("bypass".into()),
-                    _ => None,
-                }
-            }
-            _ => {}
+        let kind = a.control_of(name, value);
+        match kind {
+            Some(ControlKind::Model) => c.model = value.map(String::from),
+            Some(ControlKind::Effort) => c.effort = value.and_then(|v| a.read_effort(v)),
+            Some(ControlKind::Mode) => modes.push((name, value)),
+            None => {}
         }
         i += if kind.is_some() { n } else { 1 };
     }
-    // Codex's sandbox and approval flags name a mode only together, the way `args` writes them.
-    if agent_id == "codex" && (sandbox.is_some() || approval.is_some()) {
-        c.mode = match (sandbox, approval, mode_flags) {
-            (Some("read-only"), Some("on-request"), 2) => Some("ask".into()),
-            (Some("workspace-write"), Some("on-request"), 2) => Some("edits".into()),
-            _ => None,
-        };
+    if !modes.is_empty() {
+        c.mode = a.read_mode(&modes);
     }
     c
 }
@@ -276,6 +152,7 @@ pub fn from_args(agent_id: &str, args: &[String]) -> Controls {
 /// `args` without the flags for what `c` sets, so a control chosen later isn't overruled by the
 /// flag the session was started with.
 pub fn without(agent_id: &str, args: &[String], c: &Controls) -> Vec<String> {
+    let Some(a) = agent(agent_id) else { return args.to_vec() };
     let set = |k: ControlKind| match k {
         ControlKind::Mode => c.mode.is_some(),
         ControlKind::Model => c.model.is_some(),
@@ -284,8 +161,8 @@ pub fn without(agent_id: &str, args: &[String], c: &Controls) -> Vec<String> {
     let mut out = vec![];
     let mut i = 0;
     while i < args.len() {
-        match flag_at(args, i, VALUE_FLAGS) {
-            Some((name, value, n)) if control_of(agent_id, name, value).is_some_and(set) => i += n,
+        match flag_at(args, i, a.value_flags()) {
+            Some((name, value, n)) if a.control_of(name, value).is_some_and(set) => i += n,
             _ => {
                 out.push(args[i].clone());
                 i += 1;
@@ -339,13 +216,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_and_gemini_flags() {
+    fn codex_flags() {
         let codex = k("codex");
         assert_eq!(args("codex", &c(Some("edits"), Some("gpt-5.5"), Some("low")), &codex), ["-s", "workspace-write", "-a", "on-request", "-m", "gpt-5.5", "-c", "model_reasoning_effort=\"low\""]);
         assert_eq!(args("codex", &c(None, Some("gpt-5.5"), Some("ultra")), &codex), ["-m", "gpt-5.5", "-c", "model_reasoning_effort=\"xhigh\""], "the most it takes");
         assert_eq!(args("codex", &c(Some("plan"), None, None), &codex), Vec::<String>::new(), "codex has no plan mode");
         assert_eq!(args("codex", &c(Some("bypass"), None, None), &codex), ["--dangerously-bypass-approvals-and-sandbox"]);
-        assert_eq!(args("gemini", &c(Some("edits"), Some("gemini-2.5-pro"), Some("high")), &k("gemini")), ["--approval-mode", "auto_edit", "-m", "gemini-2.5-pro"]);
         assert_eq!(args("aider", &c(Some("ask"), Some("x"), Some("high")), &k("aider")), Vec::<String>::new());
     }
 
@@ -366,11 +242,10 @@ mod tests {
         assert!(!knobs("claude", false, None).modes.contains(&"bypass".to_string()));
         assert!(k("claude").modes.contains(&"bypass".to_string()));
         assert!(!k("claude-free").model && k("claude-free").models.is_empty() && !k("claude-free").efforts.is_empty());
-        assert!(k("gemini").efforts.is_empty() && k("gemini").models.is_empty());
         assert!(knobs("codex", true, None).models.is_empty() && knobs("codex", true, None).efforts.is_empty(), "nothing it doesn't list");
         assert_eq!(k("shell"), Knobs::default());
         let all: Vec<&str> = MODES.iter().map(|m| m.0).collect();
-        for agent in ["claude", "codex", "gemini"] {
+        for agent in ["claude", "codex"] {
             let k = k(agent);
             let mut order = k.modes.iter().map(|m| all.iter().position(|a| a == m).expect("a known mode"));
             assert!(order.clone().zip(order.by_ref().skip(1)).all(|(a, b)| a < b), "{agent} modes in MODES order");
@@ -396,9 +271,8 @@ mod tests {
         assert_eq!(from_args("codex", &v(&["--yolo", "-m", "gpt-5", "-c", "model_reasoning_effort=\"high\""])), c(Some("bypass"), Some("gpt-5"), Some("high")));
         assert_eq!(from_args("codex", &v(&["-s", "read-only", "-a", "on-request"])), c(Some("ask"), None, None));
         assert_eq!(from_args("codex", &v(&["-s", "danger-full-access"])), Controls::default(), "no mode of dino's");
-        assert_eq!(from_args("gemini", &v(&["-y"])), c(Some("bypass"), None, None));
         // Every mode dino passes reads back as itself.
-        for agent in ["claude", "codex", "gemini"] {
+        for agent in ["claude", "codex"] {
             let k = k(agent);
             for m in &k.modes {
                 let want = c(Some(m), None, None);
