@@ -8,6 +8,7 @@ use super::{Agent, ControlKind, StatusSource, Wiring, strings};
 use crate::found::{self, FoundSession, Source};
 use crate::history::{self, Turn};
 use crate::models::{self, Catalog};
+use crate::providers::Format;
 
 pub(crate) struct Claude {
     pub(crate) free: bool,
@@ -126,6 +127,29 @@ impl Agent for Claude {
         }
         let env = if crate::user_set(route, "ANTHROPIC_BASE_URL") { vec![] } else { vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))] };
         (env, hooks)
+    }
+
+    fn provider_formats(&self) -> &'static [Format] {
+        if self.free { &[] } else { &[Format::Anthropic] }
+    }
+
+    // Every model it would pick, background ones too, is the chosen one: otherwise its side calls
+    // ask the provider for Claude models. The token is a placeholder: dino's proxy swaps whatever
+    // Claude sends (its own claude.ai login included) for the provider's credentials.
+    fn provider_wiring(&self, url: &str, format: Format, model: &str) -> Option<Wiring> {
+        if self.free || format != Format::Anthropic {
+            return None;
+        }
+        let mut env: Vec<(String, String)> = vec![
+            ("ANTHROPIC_BASE_URL".into(), url.into()),
+            ("ANTHROPIC_AUTH_TOKEN".into(), "dino".into()),
+            ("ANTHROPIC_API_KEY".into(), String::new()),
+            ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into()),
+        ];
+        for var in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"] {
+            env.push((var.into(), model.into()));
+        }
+        Some((env, strings(&["--model", model])))
     }
 
     fn metered(&self) -> bool {

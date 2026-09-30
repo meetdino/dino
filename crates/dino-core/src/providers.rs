@@ -245,6 +245,36 @@ fn openai_ids(v: &Value) -> Vec<String> {
     v["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect()
 }
 
+/// A session running its agent on a provider's model instead of the agent's own account: which
+/// provider, which of its models, and the API shape they talk in (dinod picks it at launch, from
+/// what the agent can speak and the provider serves).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProviderRoute {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub format: Option<Format>,
+    /// The provider as people know it, for the toolbar: "Ollama".
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Where dino's proxy serves `provider`, under `/s/<session>/`: OpenRouter at `or`, the ChatGPT
+/// plan at `siwc`, the free tier at `free`, a model server on this Mac at `local/<id>`.
+pub fn route_path(provider: &str) -> String {
+    match provider {
+        "openrouter" => "or".into(),
+        "chatgpt" => "siwc".into(),
+        "free" => "free".into(),
+        local => format!("local/{local}"),
+    }
+}
+
+/// The first of `speaks` (an agent's formats, best first) that `serves` has.
+pub fn pick_format(speaks: &[Format], serves: &[Format]) -> Option<Format> {
+    speaks.iter().copied().find(|f| serves.contains(f))
+}
+
 /// A probe's answer: whether `format` is served. Asked with an empty body, a server that has the
 /// route turns the request down (400, 401, 422…); one that doesn't says it isn't there.
 pub fn serves(status: u16) -> bool {
@@ -297,6 +327,16 @@ mod tests {
 
         let v = vllm_models(&json!({"data": [{"id": "Qwen/Qwen3.8-27B", "max_model_len": 131072}]}));
         assert_eq!((v[0].context, v[0].tools), (Some(131072), None));
+    }
+
+    #[test]
+    fn a_route_is_served_where_the_proxy_has_it() {
+        assert_eq!(route_path("openrouter"), "or");
+        assert_eq!(route_path("chatgpt"), "siwc");
+        assert_eq!(route_path("ollama"), "local/ollama");
+        use Format::*;
+        assert_eq!(pick_format(&[Anthropic, Chat], &[Chat, Responses]), Some(Chat));
+        assert_eq!(pick_format(&[Responses], &[Anthropic, Chat]), None);
     }
 
     #[test]

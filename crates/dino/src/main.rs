@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use dino_core::discover::{self, Inventory};
 use dino_core::settings::Settings;
 use dino_core::ipc::{LauncherInfo, QuotaInfo, Request, Response, SessionInfo};
+use dino_core::providers::ProviderRoute;
 use dino_term::Pane;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -154,6 +155,7 @@ impl App {
             host: None,
             prompt: None,
             by: None,
+            route: None,
         };
         match client::request(&req) {
             Ok(Response::Created { id }) => {
@@ -773,7 +775,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
-       dino ls | new [--worktree] <agent> [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
+       dino ls | new [--worktree] <agent> [--on <provider> <model>] [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
        dino found | continue <session-id prefix>
        dino mcp [--read-only]   (MCP server on stdio: agents list, read, message and start sessions)
        dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>
@@ -822,7 +824,12 @@ fn main() -> anyhow::Result<()> {
             let agent = rest.first().ok_or_else(|| anyhow::anyhow!(USAGE))?.clone();
             let (cols, rows) = terminal::size().unwrap_or((120, 40));
             let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
-            let req = Request::New { launcher: agent, args: rest[1..].to_vec(), cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None };
+            // `--on <provider> <model>`: a provider's model instead of the agent's own account.
+            let (route, args) = match &rest[1..] {
+                [on, provider, model, args @ ..] if on == "--on" => (Some(ProviderRoute { provider: provider.clone(), model: model.clone(), format: None, name: String::new() }), args.to_vec()),
+                args => (None, args.to_vec()),
+            };
+            let req = Request::New { launcher: agent, args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route };
             return print_response(client::request(&req)?);
         }
         Some("kill") => return print_response(client::request(&Request::Kill { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),
