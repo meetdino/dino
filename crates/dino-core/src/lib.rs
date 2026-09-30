@@ -33,9 +33,8 @@ pub struct AgentKind {
 pub const KNOWN_AGENTS: &[AgentKind] = &[
     AgentKind { id: "claude", name: "Claude Code", bin: "claude" },
     AgentKind { id: "codex", name: "Codex", bin: "codex" },
-    AgentKind { id: "gemini", name: "Gemini CLI", bin: "gemini" },
     AgentKind { id: "qwen", name: "Qwen Code", bin: "qwen" },
-    AgentKind { id: "kimi", name: "Kimi CLI", bin: "kimi" },
+    AgentKind { id: "kimi", name: "Kimi Code", bin: "kimi" },
     AgentKind { id: "opencode", name: "OpenCode", bin: "opencode" },
     AgentKind { id: "crush", name: "Crush", bin: "crush" },
     AgentKind { id: "aider", name: "Aider", bin: "aider" },
