@@ -36,6 +36,8 @@ terminal UI, a CLI, a native macOS app built on Ghostty, or other agents over MC
 | `app/` | `Dino.app`, the SwiftUI macOS app with Ghostty terminal surfaces |
 | `docs/` | Design notes, such as [`management-plane.md`](docs/management-plane.md) |
 
+This workspace will split into several repositories; [ARCHITECTURE.md](ARCHITECTURE.md) has the plan, and `crates/boundaries` keeps the crates to it.
+
 ## Building
 
 Requirements: a Rust toolchain that supports edition 2024 (Rust 1.85 or later). The app also
