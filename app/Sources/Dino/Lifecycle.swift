@@ -366,6 +366,13 @@ struct ShortcutSheet: View {
         Entry(title: "Unarchive a session", keys: "double-click"),
     ])
 
+    /// The shell's AI line (`dino init`), in a shell at its prompt.
+    private static let shell = MenuGroup(menu: "In a shell", entries: [
+        Entry(title: "Ask your agent for a command", keys: "⌘I"),
+        Entry(title: "Hand the line to an agent", keys: "⌘↩"),
+        Entry(title: "Search history and sessions", keys: "⌥R"),
+    ])
+
     /// Claude desktop's keys for what the menus list under dino's own (see `AppDelegate.desktopKey`).
     private static let desktop = MenuGroup(menu: "Also, as in Claude desktop", entries: [
         Entry(title: "Next Session", keys: "⇧⌘]"),
@@ -380,7 +387,7 @@ struct ShortcutSheet: View {
             let entries = Self.entries(in: menu, prefix: "")
             return entries.isEmpty ? nil : MenuGroup(menu: item.title, entries: entries)
         } ?? []
-        return menus + [Self.extra, Self.desktop]
+        return menus + [Self.extra, Self.shell, Self.desktop]
     }
 
     private static func entries(in menu: NSMenu, prefix: String) -> [Entry] {

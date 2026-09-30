@@ -81,6 +81,12 @@ pub enum Request {
         /// Run it over SSH on this host (one from Settings → Environments); `cwd` is then a path there.
         #[serde(default)]
         host: Option<String>,
+        /// Its agent's first message.
+        #[serde(default)]
+        prompt: Option<String>,
+        /// The session starting it, by id: a shell whose AI line handed its request on.
+        #[serde(default)]
+        by: Option<String>,
     },
     Kill { id: String },
     /// Change a session's mode, model or effort. The agent restarts, resuming its conversation;
@@ -126,6 +132,8 @@ pub enum Request {
     Changes { id: String },
     /// Type `text` into a session, as a paste; `submit` presses Return after it.
     SendInput { id: String, text: String, submit: bool },
+    /// Write `text` to a session as typed keys, not a paste (the app's ⌘I to a shell's AI line).
+    SendKeys { id: String, text: String },
     /// Apply this member's changes to the user's checkout and close its group.
     Keep { session: String },
     /// Close a fan-out group: stop its agents, remove their worktrees and branches.
