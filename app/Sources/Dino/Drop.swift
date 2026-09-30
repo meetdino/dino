@@ -51,6 +51,18 @@ enum TerminalDrop {
         }
     }
 
+    /// ⌘V with only an image on the clipboard (a screenshot copied with ⌃⇧⌘4, an image copied in a
+    /// browser): the terminal's own paste reads text only, so the image is written to a file and
+    /// its path pasted, which an agent attaches. Nil when there's text, a file or a URL to paste
+    /// the usual way.
+    static func clipboardImage(_ pasteboard: NSPasteboard = .general) -> String? {
+        guard pasteboard.string(forType: .string)?.isEmpty ?? true,
+              pasteboard.availableType(from: [.fileURL, .URL]) == nil,
+              let (data, type) = image(on: pasteboard),
+              let path = store(data, name: "pasted", type: type) else { return nil }
+        return escape(path)
+    }
+
     private static func image(on pasteboard: NSPasteboard) -> (Data, UTType)? {
         for (pbType, type) in images {
             guard let data = pasteboard.data(forType: pbType) else { continue }

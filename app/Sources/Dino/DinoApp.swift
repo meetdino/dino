@@ -184,6 +184,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case ([.command], ";"):
             guard let s = model.selectedSession else { return false }
             model.askingAbout = s
+        // The terminal pastes text only; an image on its own is written to a file and pasted as
+        // its path, which Claude Code and Codex attach.
+        case ([.command], "v"):
+            guard let view = e.window?.firstResponder as? LinkTerminalView else { return false }
+            return view.pasteClipboardImage()
         // The shell's AI line (`dino init`): ⌘I asks, ⌘⏎ hands the line to an agent. Only a shell
         // at its prompt gets them; an agent's own terminal keeps its keys.
         case ([.command], "i"), ([.command], "\r"):
