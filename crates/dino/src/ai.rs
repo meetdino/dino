@@ -109,6 +109,24 @@ impl<E: Into<anyhow::Error>> From<E> for Failure {
     }
 }
 
+/// A new empty file only this user can read, for Codex's answer: a name fixed by the pid could be
+/// planted beforehand (a file, or a symlink), and what it held taken for the suggestion.
+fn private_temp(prefix: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = std::env::temp_dir();
+    for n in 0..100u32 {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+        let path = dir.join(format!("{prefix}-{}-{nanos:08x}-{n}.txt", std::process::id()));
+        // `create_new` won't open what's already there, nor follow a symlink to it.
+        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for a temp file"))
+}
+
 /// Which agent answers: `--agent`/`DINO_AI_AGENT`, else the default in Settings, else whichever
 /// of Claude Code and Codex is installed.
 fn which_agent(asked: Option<&str>) -> anyhow::Result<&'static str> {
@@ -219,7 +237,7 @@ fn suggest(o: &Opts) -> Result<String, Failure> {
     let output = shell_output()
         .filter(|(_, exit)| exit.is_some_and(|e| e != 0))
         .map(|(text, _)| text.lines().rev().take(SUGGEST_OUTPUT_LINES).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
-    let out_file = std::env::temp_dir().join(format!("dino-ai-{}.txt", std::process::id()));
+    let out_file = private_temp("dino-ai")?;
     let mut cmd = Command::new(agent);
     match agent {
         "codex" => {
@@ -528,6 +546,16 @@ fn agent(o: &Opts) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temp_files_are_new_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (a, b) = (private_temp("dino-test").unwrap(), private_temp("dino-test").unwrap());
+        assert_ne!(a, b);
+        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&a).unwrap(), b"");
+        let _ = (std::fs::remove_file(a), std::fs::remove_file(b));
+    }
 
     #[test]
     fn replies_become_one_command() {
