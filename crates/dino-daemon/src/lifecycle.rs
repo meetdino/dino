@@ -173,6 +173,9 @@ fn list(d: &Daemon) -> Vec<ipc::ArchivedInfo> {
             archived_at: a.archived_at,
             resumable: a.saved.agent_session.is_some(),
             worktree_removed: a.worktree_removed,
+            agent: d.launcher(&a.saved.launcher).map_or_else(|| a.saved.launcher.clone(), |l| l.agent_id),
+            agent_session: a.saved.agent_session.clone(),
+            pinned: a.saved.pinned,
         })
         .collect()
 }
