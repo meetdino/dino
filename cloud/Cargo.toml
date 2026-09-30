@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/asdf9384/dino-cloud"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Proc-macros and build scripts: rustc < 1.98 strips them into dylibs that macOS 27's dyld
+# refuses to load ("mis-aligned LINKEDIT string pool", rust-lang/rust#157750).
+[profile.release.build-override]
+strip = false

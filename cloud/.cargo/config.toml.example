@@ -1,0 +1,8 @@
+# Copy to .cargo/config.toml to build against a local checkout of the dino repo instead of
+# fetching the pinned revision (the repo is private).
+[patch."https://github.com/asdf9384/dino"]
+dino-sync = { path = "../dino-app-poc/crates/dino-sync" }
+
+[net]
+# The dino repo is private: fetch with the git CLI, which has your GitHub credentials.
+git-fetch-with-cli = true
