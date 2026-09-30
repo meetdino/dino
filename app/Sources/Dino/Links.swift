@@ -52,6 +52,14 @@ final class LinkTerminalView: TerminalView {
         return true
     }
 
+    /// ⌘V when the clipboard holds only an image: its staged path goes in through the paste path.
+    /// False to let the terminal paste as usual.
+    func pasteClipboardImage() -> Bool {
+        guard local(), let path = TerminalDrop.clipboardImage() else { return false }
+        paste(text: path)
+        return true
+    }
+
     @available(*, unavailable)
     required init?(coder _: NSCoder) { fatalError() }
 

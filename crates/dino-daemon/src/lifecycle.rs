@@ -173,6 +173,9 @@ fn list(d: &Daemon) -> Vec<ipc::ArchivedInfo> {
             archived_at: a.archived_at,
             resumable: a.saved.agent_session.is_some(),
             worktree_removed: a.worktree_removed,
+            agent: d.launcher(&a.saved.launcher).map_or_else(|| a.saved.launcher.clone(), |l| l.agent_id),
+            agent_session: a.saved.agent_session.clone(),
+            pinned: a.saved.pinned,
         })
         .collect()
 }
@@ -224,6 +227,7 @@ fn delete(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let i = archived.iter().position(|a| a.saved.id == id).ok_or_else(|| anyhow::anyhow!("nothing archived as {id}"))?;
     let a = archived.remove(i);
     save_archived(&archived);
+    dino_core::agent::qwen::forget(id);
     if let (Some(w), true) = (&a.worktree, a.worktree_removed) {
         let _ = trust::claude_forget(&w.path);
     }

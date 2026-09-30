@@ -59,6 +59,14 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     /// how its last command ended.
     var shell_cwd: String?
     var last_exit: Int?
+    /// Background commands its agent left serving (a dev server); nil from an older dinod.
+    var servers: [ServerInfo]?
+
+    /// All its turn left running is a server: the ports it listens on ("3000, 8080").
+    var serving: String? {
+        guard let a = activity, a.hasPrefix("server:") else { return nil }
+        return String(a.dropFirst(7))
+    }
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }
@@ -70,6 +78,15 @@ struct SessionInfo: Codable, Identifiable, Equatable {
         guard let a = activity, a.hasPrefix("waiting:") else { return nil }
         return String(a.dropFirst(8))
     }
+}
+
+/// A background command that listens on a port (see crates/dino-core/src/ipc.rs).
+struct ServerInfo: Codable, Equatable, Hashable {
+    var task: String
+    var command: String
+    var ports: [Int]
+
+    var where_: String { ports.map { ":\($0)" }.joined(separator: " ") }
 }
 
 /// What an agent tracks underneath its conversation (see crates/dino-core/src/ipc.rs).
@@ -620,6 +637,11 @@ final class DinoConnection: @unchecked Sendable {
     /// Change mode, model or effort. The agent restarts, resuming its conversation; mid-turn, once the turn is over.
     func setControls(session: String, controls: Controls) throws {
         _ = try send(["type": "set_controls", "id": session, "controls": controls.json])
+    }
+
+    /// Stop a server the session's agent left running in the background.
+    func stopServer(session: String, task: String) throws {
+        _ = try send(["type": "stop_server", "id": session, "task": task])
     }
 
     /// Start a session whose program ended again, in place: the agent resumes its conversation.

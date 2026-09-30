@@ -202,6 +202,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case ([.command], ";"):
             guard let s = model.selectedSession else { return false }
             model.askingAbout = s
+        // The terminal pastes text only; an image on its own is written to a file and pasted as
+        // its path, which Claude Code and Codex attach.
+        case ([.command], "v"):
+            guard let view = e.window?.firstResponder as? LinkTerminalView else { return false }
+            return view.pasteClipboardImage()
         // The shell's AI line (`dino init`): ⌘I asks, ⌘⏎ hands the line to an agent. Only a shell
         // at its prompt gets them; an agent's own terminal keeps its keys.
         case ([.command], "i"), ([.command], "\r"):
@@ -791,6 +796,9 @@ struct SessionRow: View {
                 } else if status == .waiting, let on = session.waitingOn {
                     Text("waiting on \(on)").font(.caption).foregroundStyle(status.color).lineLimit(1)
                         .help("Its turn ended while these still run; it carries on when they finish")
+                } else if status == .idle || status == .done, let ports = session.serving {
+                    Text("serving :\(ports.replacingOccurrences(of: ", ", with: " :"))").font(.caption).foregroundStyle(SessionStatus.working.color).lineLimit(1)
+                        .help("Its turn is over; a server it started keeps running. Stop it from the session's menu.")
                 } else {
                     Text(status.label).font(.caption).foregroundStyle(status.color)
                 }
