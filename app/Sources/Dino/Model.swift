@@ -721,6 +721,17 @@ final class DinoModel: ObservableObject {
         }
     }
 
+    /// Stop a server the agent left running; the agent sees its command end.
+    func stopServer(_ session: String, _ server: ServerInfo) {
+        Task.detached {
+            do {
+                try DinoConnection(path: DinoEnvironment.socketPath).stopServer(session: session, task: server.task)
+            } catch {
+                await MainActor.run { self.error = error.localizedDescription }
+            }
+        }
+    }
+
     /// Models this Mac's sessions of `agent` have answered with, for the model menus.
     func seenModels(_ agent: String) -> [String] {
         Array(Set(sessions.filter { $0.agent_id == agent }.compactMap(\.last_model))).sorted()

@@ -16,6 +16,10 @@ struct ArchivedInfo: Codable, Identifiable, Equatable {
     var resumable: Bool
     /// Its worktree was removed; starting it again brings it back from `branch`.
     var worktree_removed: Bool
+    /// The agent and its conversation id, to show the conversation; nil from an older dinod.
+    var agent: String?
+    var agent_session: String?
+    var pinned: Bool?
 
     var display: String { label ?? name }
 }
@@ -309,12 +313,18 @@ struct ArchivedRow: View {
     let session: ArchivedInfo
     let delete: () -> Void
     @State private var hovering = false
+    @State private var previewing = false
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "archivebox").foregroundStyle(.tertiary).frame(width: 14)
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.display).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(session.display).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                    if session.pinned == true {
+                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.tertiary).help("Pinned")
+                    }
+                }
                 Text(detail).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer(minLength: 4)
@@ -332,13 +342,67 @@ struct ArchivedRow: View {
         .padding(.vertical, 2)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .simultaneousGesture(TapGesture(count: 2).onEnded { model.unarchive(session) })
+        // A click shows what it was about; a double-click picks it up again.
+        .gesture(TapGesture(count: 2).onEnded { model.unarchive(session) }.exclusively(before: TapGesture().onEnded { previewing = true }))
+        .popover(isPresented: $previewing, arrowEdge: .trailing) {
+            ArchivedPreview(session: session, delete: {
+                previewing = false
+                delete()
+            })
+            .environmentObject(model)
+        }
     }
 
     private var detail: String {
         // Most telling first, so a narrow sidebar cuts the branch rather than when.
         [ago(session.archived_at), model.launcherLabel(session.launcher), session.branch ?? shortPath(session.cwd)]
             .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+}
+
+/// An archived session's conversation, read from its transcript, with the way back.
+struct ArchivedPreview: View {
+    @EnvironmentObject var model: DinoModel
+    let session: ArchivedInfo
+    let delete: () -> Void
+    @State private var page: ConversationPage?
+    @State private var failed: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.display).font(.headline).lineLimit(1)
+                Text("\(model.launcherLabel(session.launcher)) · \(session.branch ?? shortPath(session.cwd))")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            Divider()
+            if let agent = session.agent, let id = session.agent_session {
+                ConversationView(page: page, agent: agent, loading: page == nil && failed == nil, unreadable: failed ?? "This conversation can’t be read.") {
+                    try? await ConversationPage.fetch(agent: agent, id: id, before: $0).get()
+                }
+                .task {
+                    switch await ConversationPage.fetch(agent: agent, id: id) {
+                    case .success(let p): page = p
+                    case .failure(let e): failed = e.localizedDescription
+                    }
+                }
+            } else {
+                Text("No conversation was kept for this session. Unarchiving starts \(model.launcherLabel(session.launcher)) again in its folder.")
+                    .foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Divider()
+            HStack {
+                Button("Delete…", role: .destructive, action: delete)
+                Spacer()
+                Button(session.resumable ? "Continue" : "Unarchive") { model.unarchive(session) }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 440, height: 520)
     }
 }
 

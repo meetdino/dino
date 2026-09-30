@@ -107,6 +107,11 @@ pub struct SessionStats {
 impl SessionStats {
     /// How many subagents and commands it ended its turn on still run. Monitors don't count:
     /// they watch for something rather than work towards an end.
+    /// Its last turn ended while background task `id` still ran.
+    pub fn waits_on(&self, id: &str) -> bool {
+        self.waiting_on.iter().any(|w| w == id)
+    }
+
     pub fn waiting(&self) -> (usize, usize) {
         let on = |id: &str| self.waiting_on.iter().any(|w| w == id);
         let agents = self.subagents.iter().filter(|a| a.running && on(&a.id)).count();
