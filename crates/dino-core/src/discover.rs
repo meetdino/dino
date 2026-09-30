@@ -66,13 +66,16 @@ const KEYS: &[(&str, &str)] = &[
 
 const LOCAL: &[(&str, &str)] = &[("Ollama", "127.0.0.1:11434"), ("LM Studio", "127.0.0.1:1234"), ("llama.cpp", "127.0.0.1:8080")];
 
-fn install_hint(id: &str) -> &'static str {
+/// Each agent's official install command.
+pub fn install_hint(id: &str) -> &'static str {
     match id {
         "claude" => "curl -fsSL https://claude.ai/install.sh | bash",
         "codex" => "npm i -g @openai/codex",
         "gemini" => "npm i -g @google/gemini-cli",
         "qwen" => "npm i -g @qwen-code/qwen-code",
-        "kimi" => "uv tool install kimi-cli",
+        "kimi" => "npm i -g @moonshot-ai/kimi-code",
+        "pi" => "npm i -g --ignore-scripts @earendil-works/pi-coding-agent",
+        "hermes" => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
         "opencode" => "curl -fsSL https://opencode.ai/install | bash",
         "crush" => "brew install charmbracelet/tap/crush",
         "aider" => "pip install aider-install && aider-install",
@@ -80,6 +83,94 @@ fn install_hint(id: &str) -> &'static str {
         "cursor" => "curl https://cursor.com/install -fsS | bash",
         _ => "",
     }
+}
+
+/// Where to read about an agent, and how it signs in: its own command, which dino runs in a shell
+/// pane so the user sees it and answers its prompts. Some agents sign in from inside their own
+/// terminal UI; `sign_in_hint` says what to type there.
+pub struct Setup {
+    pub homepage: &'static str,
+    pub sign_in: Option<&'static str>,
+    pub sign_in_hint: Option<&'static str>,
+}
+
+pub fn setup(id: &str) -> Setup {
+    let (homepage, sign_in, sign_in_hint) = match id {
+        "claude" => ("https://code.claude.com/docs", Some("claude auth login"), None),
+        "codex" => ("https://developers.openai.com/codex", Some("codex login"), None),
+        "kimi" => ("https://moonshotai.github.io/kimi-code/en/", Some("kimi login"), None),
+        "qwen" => ("https://qwenlm.github.io/qwen-code-docs/", Some("qwen"), Some("/auth")),
+        "pi" => ("https://pi.dev", Some("pi"), Some("/login")),
+        "hermes" => ("https://hermes-agent.nousresearch.com/docs/", Some("hermes setup"), None),
+        "gemini" => ("https://github.com/google-gemini/gemini-cli", None, None),
+        "opencode" => ("https://opencode.ai", None, None),
+        "crush" => ("https://github.com/charmbracelet/crush", None, None),
+        "aider" => ("https://aider.chat", None, None),
+        "amp" => ("https://ampcode.com", None, None),
+        "cursor" => ("https://cursor.com/cli", None, None),
+        _ => ("", None, None),
+    };
+    Setup { homepage, sign_in, sign_in_hint }
+}
+
+/// Whether agent `id` at `bin` is signed in, from its own status command, and how ("Claude Max",
+/// "ChatGPT"). `None` when the agent has no quick way to ask. Only the verdict is kept: no
+/// account names, emails or tokens.
+pub fn sign_in_status(id: &str, bin: &Path) -> Option<(bool, Option<String>)> {
+    match id {
+        "claude" => {
+            let v: serde_json::Value = serde_json::from_str(&run_quietly(bin, &["auth", "status", "--json"])?).ok()?;
+            let signed_in = v["loggedIn"].as_bool()?;
+            let how = match (v["subscriptionType"].as_str(), v["authMethod"].as_str()) {
+                (Some("max"), _) => Some("Claude Max"),
+                (Some("pro"), _) => Some("Claude Pro"),
+                (Some(t), _) if t.contains("team") => Some("Claude Team"),
+                (Some(t), _) if t.contains("enterprise") => Some("Claude Enterprise"),
+                (_, Some("claude.ai")) => Some("claude.ai"),
+                (_, Some(m)) if m.to_lowercase().contains("key") => Some("API key"),
+                _ => None,
+            };
+            Some((signed_in, how.filter(|_| signed_in).map(String::from)))
+        }
+        "codex" => codex_status(&run_quietly(bin, &["login", "status"])?),
+        _ => None,
+    }
+}
+
+/// `codex login status`: "Logged in using ChatGPT", "Logged in using an API key", "Not logged in".
+fn codex_status(out: &str) -> Option<(bool, Option<String>)> {
+    if out.contains("Not logged in") {
+        return Some((false, None));
+    }
+    let how = out.lines().find_map(|l| l.trim().strip_prefix("Logged in using ")).map(|m| {
+        let m = m.trim();
+        if m.to_lowercase().contains("api key") { "API key".to_string() } else { m.to_string() }
+    });
+    out.contains("Logged in").then_some((true, how))
+}
+
+/// `bin args`'s output (stdout, then stderr), or `None` if it doesn't finish within 3 s.
+fn run_quietly(bin: &Path, args: &[&str]) -> Option<String> {
+    let mut child = Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
+    for _ in 0..30 {
+        if child.try_wait().ok()?.is_some() {
+            let out = child.wait_with_output().ok()?;
+            return Some(format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    None
+}
+
+/// The login shell's `PATH` as it is now: an install may have added a folder that this process,
+/// started earlier, doesn't have. `None` if the shell doesn't answer within 3 s.
+pub fn login_path() -> Option<std::ffi::OsString> {
+    let shell = crate::user_shell();
+    let out = run_quietly(Path::new(&shell), &["-l", "-c", r#"printf '\n%s' "$PATH""#])?;
+    // The last line: a chatty profile may print before it.
+    let path = out.lines().last()?.trim();
+    (!path.is_empty()).then(|| path.into())
 }
 
 /// Full scan. Agent version probes run in parallel; worst case is bounded by a short timeout.
@@ -112,7 +203,7 @@ fn agent_info(kind: &AgentKind) -> AgentInfo {
     }
 }
 
-fn version_of(bin: &Path) -> Option<String> {
+pub fn version_of(bin: &Path) -> Option<String> {
     let mut child = Command::new(bin).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     // Some CLIs are slow to start; don't let one hold up the whole screen.
     for _ in 0..30 {
@@ -209,4 +300,25 @@ fn scan_keys() -> Vec<KeyInfo> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_login_status_is_read_without_the_account() {
+        assert_eq!(codex_status("Logged in using ChatGPT\n"), Some((true, Some("ChatGPT".into()))));
+        assert_eq!(codex_status("Logged in using an API key - sk-proj-***ABCD\n"), Some((true, Some("API key".into()))));
+        assert_eq!(codex_status("Not logged in\n"), Some((false, None)));
+        assert_eq!(codex_status("error: something else\n"), None);
+    }
+
+    #[test]
+    fn every_agent_has_a_way_in() {
+        for kind in KNOWN_AGENTS {
+            assert!(!install_hint(kind.id).is_empty(), "{} has no install command", kind.id);
+            assert!(setup(kind.id).homepage.starts_with("https://"), "{} has no homepage", kind.id);
+        }
+    }
 }
