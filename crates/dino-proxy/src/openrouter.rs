@@ -6,7 +6,11 @@
 use std::collections::HashMap;
 
 pub(crate) const PROVIDER: &str = "or";
-pub(crate) const UPSTREAM: &str = "https://openrouter.ai/api";
+/// OpenRouter, or a stand-in for tests (`DINO_OR_UPSTREAM`).
+pub(crate) fn upstream() -> &'static str {
+    static AT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    AT.get_or_init(|| std::env::var("DINO_OR_UPSTREAM").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| "https://openrouter.ai/api".into()))
+}
 pub(crate) const KEY: &str = "OPENROUTER_API_KEY";
 
 /// The agent's own credentials, dropped on the way out.

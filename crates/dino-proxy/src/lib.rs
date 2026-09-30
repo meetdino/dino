@@ -3,11 +3,12 @@
 //! (auth included) and observe usage, in-flight state and quota headers on the way back.
 //! The `free` provider is different: dino itself picks a free model and translates (see `free`).
 //! `or` is OpenRouter with the key dino holds for it (see `openrouter`), `siwc` the ChatGPT plan
-//! through Sign in with ChatGPT (see `siwc`).
+//! through Sign in with ChatGPT (see `siwc`), `local/<runtime>` a model server on this Mac (see `local`).
 
 mod catalog;
 mod codex;
 mod free;
+pub mod local;
 mod openrouter;
 mod siwc;
 pub mod tasks;
@@ -396,9 +397,19 @@ fn hop_by_hop(name: &HeaderName) -> bool {
 
 async fn forward(
     State(st): State<AppState>,
-    Path((session, provider, rest)): Path<(String, String, String)>,
+    Path((session, provider, mut rest)): Path<(String, String, String)>,
     req: Request,
 ) -> Response<Body> {
+    // A model server on this Mac: `local/<runtime>/…`.
+    let mut runtime = None;
+    if provider == local::PROVIDER {
+        let Some((id, r)) = rest.split_once('/').map(|(i, r)| (i.to_string(), r.to_string())) else {
+            return error(StatusCode::NOT_FOUND, "which model server? local/<runtime>/…".into());
+        };
+        let Some((name, base)) = local::runtime(&id) else { return error(StatusCode::NOT_FOUND, format!("dino doesn't know a model server called {id}")) };
+        rest = r;
+        runtime = Some((id, name, base));
+    }
     // Only model calls count toward activity; ignore e.g. token counting and telemetry.
     let is_model_call = rest.ends_with("messages") || rest.ends_with("chat/completions") || rest.ends_with("responses");
     if is_model_call && let Some(resp) = over_budget(&st, &session, &provider) {
@@ -417,7 +428,7 @@ async fn forward(
         let keys = st.keys.read().unwrap();
         match provider.as_str() {
             openrouter::PROVIDER => match openrouter::headers(&keys) {
-                Some(h) => Some((h.to_vec(), openrouter::is_credential, openrouter::UPSTREAM)),
+                Some(h) => Some((h.to_vec(), openrouter::is_credential, openrouter::upstream())),
                 None => return error(StatusCode::UNAUTHORIZED, "OpenRouter isn't connected: connect it in dino's Settings → Providers".into()),
             },
             siwc::PROVIDER if !siwc::allowed(&rest) => return error(StatusCode::NOT_FOUND, "the ChatGPT plan only takes the Responses API (v1/responses)".into()),
@@ -425,6 +436,7 @@ async fn forward(
                 Ok(h) => Some((h.to_vec(), siwc::is_credential, siwc::upstream())),
                 Err(why) => return error(StatusCode::UNAUTHORIZED, why.into()),
             },
+            local::PROVIDER => runtime.as_ref().map(|r| (vec![], local::is_credential as fn(&str) -> bool, r.2)),
             _ => None,
         }
     };
@@ -480,7 +492,10 @@ async fn forward(
         up.send()
     };
     let upstream_error = |e: reqwest::Error| {
-        let msg = format!("dino proxy: {e}");
+        let msg = match &runtime {
+            Some((_, name, base)) if e.is_connect() => local::unreachable(name, base),
+            _ => format!("dino proxy: {e}"),
+        };
         st.stats.update(&session, |s| {
             s.errors += 1;
             s.call_failed(msg.clone());
@@ -500,7 +515,7 @@ async fn forward(
         let text = resp.bytes().await.unwrap_or_default();
         resp = 'retry: {
             if provider == "chatgpt" && status == StatusCode::NOT_FOUND && codex::model_not_found(&text) {
-                let rejected = requested.unwrap_or_default();
+                let rejected = requested.clone().unwrap_or_default();
                 for model in codex::fallbacks(&rejected) {
                     let Some(retry) = codex::with_model(&body, &model) else { continue };
                     match send(retry).await {
@@ -519,6 +534,7 @@ async fn forward(
             record_quota(&st.stats, &provider, &headers);
             let msg = match provider.as_str() {
                 siwc::PROVIDER => siwc::refused(status.as_u16(), &codex::error_message(&text)),
+                local::PROVIDER => runtime.as_ref().map_or_else(String::new, |(id, name, _)| local::refused(id, name, status.as_u16(), &codex::error_message(&text), requested.as_deref())),
                 _ => format!("{} {}", status.as_u16(), codex::error_message(&text)),
             };
             st.stats.update(&session, |s| {
