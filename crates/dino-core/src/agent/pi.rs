@@ -182,15 +182,18 @@ fn born(p: &Path) -> u64 {
     p.metadata().and_then(|m| m.created()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
 }
 
-/// The conversation a live process is on: one it began (created in its folder since it started),
-/// else the newest written since, one it continued. Another Pi in the same folder writes there too,
-/// so what it began comes first.
+/// The conversation a live process is on: the one it began (created in its folder since it
+/// started). Nothing before then, and nothing for one it continued: its process title overwrites
+/// its arguments, so which one can't be told from another Pi's in the same folder.
 fn conversation_in(pid: u32) -> Option<PathBuf> {
     let cwd = crate::procinfo::cwd_of(pid)?;
     let since = crate::procinfo::started(pid).unwrap_or(0);
-    let files: Vec<PathBuf> = std::fs::read_dir(folder_of(&cwd)).ok()?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "jsonl")).collect();
-    let began = files.iter().filter(|p| born(p) + 1 >= since).min_by_key(|p| born(p));
-    began.or_else(|| files.iter().filter(|p| history::modified(p) + 1 >= since).max_by_key(|p| history::modified(p))).cloned()
+    std::fs::read_dir(folder_of(&cwd))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl") && born(p) + 1 >= since)
+        .min_by_key(|p| born(p))
 }
 
 impl Pi {

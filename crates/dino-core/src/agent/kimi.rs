@@ -140,21 +140,21 @@ fn catalog_in(config: &str) -> Option<Catalog> {
     (!models.is_empty()).then(|| Catalog { models, default_model: v.get("default_model").and_then(|d| d.as_str()).map(String::from) })
 }
 
-/// The conversation a live process is on: one it began (created in its folder since it started),
-/// else the newest one it continued. Another Kimi in the same folder writes there too, so what it
-/// began comes first.
+/// The conversation a live process is on: the one it began (created in its folder since it
+/// started). Nothing before then, and nothing for one it continued: its process title overwrites
+/// its arguments, so which one can't be told from another Kimi's in the same folder.
 fn conversation_in(pid: u32) -> Option<(Entry, Value)> {
     let cwd = crate::procinfo::cwd_of(pid)?;
     let since = crate::procinfo::started(pid).unwrap_or(0);
-    let mut here: Vec<(Entry, Value)> = index().into_iter().filter(|e| same_dir(&e.work_dir, Path::new(&cwd))).map(|e| {
-        let st = state(&e.dir);
-        (e, st)
-    }).collect();
-    let began = here.iter().position(|(_, st)| secs(&st["createdAt"]) + 1 >= since);
-    let pick = began.or_else(|| {
-        here.iter().enumerate().filter(|(_, (_, st))| secs(&st["updatedAt"]) + 1 >= since).max_by_key(|(_, (_, st))| st["updatedAt"].as_u64().unwrap_or(0)).map(|(i, _)| i)
-    })?;
-    Some(here.swap_remove(pick))
+    index()
+        .into_iter()
+        .filter(|e| same_dir(&e.work_dir, Path::new(&cwd)))
+        .map(|e| {
+            let st = state(&e.dir);
+            (e, st)
+        })
+        .filter(|(_, st)| secs(&st["createdAt"]) + 1 >= since)
+        .min_by_key(|(_, st)| st["createdAt"].as_u64().unwrap_or(0))
 }
 
 /// The conversation ran on dino's free tier: its record says its requests went to the model its

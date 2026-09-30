@@ -382,9 +382,9 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
                     if data == b"[DONE]" {
                         continue;
                     }
-                    if let Ok(chunk) = serde_json::from_slice::<ChatCompletionChunk>(data) {
-                        emit(translator.process_chunk(&chunk));
-                    } else if let Some(err) = serde_json::from_slice::<Value>(data).ok().filter(|v| v.get("error").is_some()) {
+                    // An error object reads as a chunk too (all its fields are optional): look for it first.
+                    let error = serde_json::from_slice::<Value>(data).ok().filter(|v| v.get("error").is_some());
+                    if let Some(err) = error {
                         // Upstream failed mid-answer and said so in the stream.
                         let msg = err["error"]["message"].as_str().unwrap_or("upstream error").to_string();
                         log(format_args!("{session} free stream error: {msg}"));
@@ -393,6 +393,9 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
                         done = true;
                         guard.take();
                         break;
+                    }
+                    if let Ok(chunk) = serde_json::from_slice::<ChatCompletionChunk>(data) {
+                        emit(translator.process_chunk(&chunk));
                     }
                 }
             }
