@@ -18,7 +18,7 @@ pub const RISKY: i32 = 10;
 pub const NOT_A_COMMAND: i32 = 3;
 
 const USAGE: &str = "usage: dino ai suggest [--agent claude|codex] [--shell zsh] [--cwd DIR] [--last CMD --status N] -- <request>
-       dino ai agent [--agent claude|codex] [--cwd DIR] -- <request>
+       dino ai agent [--agent claude|codex] [--cwd DIR] [--last CMD --status N] -- <request>
        dino ai risky [--cwd DIR] -- <command>";
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
@@ -146,13 +146,57 @@ fn instructions(shell: &str) -> String {
     )
 }
 
-fn request_text(o: &Opts) -> String {
+fn request_text(o: &Opts, output: Option<&str>) -> String {
     let mut t = format!("Folder: {}\n", o.cwd.display());
     if let Some(last) = &o.last {
         t.push_str(&format!("Last command: {last}{}\n", o.status.map(|s| format!(" (exit {s})")).unwrap_or_default()));
     }
+    if let Some(output) = output {
+        t.push_str(&format!("Its output (last lines):\n{output}\n"));
+    }
     t.push_str(&format!("Request: {}", o.words));
     t
+}
+
+/// Lines of output kept for a suggestion: enough to see an error, cheap to send.
+const SUGGEST_OUTPUT_LINES: usize = 60;
+
+/// What this Dino shell's last command printed, from its shell integration (via dinod), with
+/// lines that look like secrets taken out. None outside a Dino shell, if it printed nothing, or
+/// with `DINO_AI_OUTPUT=0`.
+fn shell_output() -> Option<(String, Option<i32>)> {
+    if std::env::var("DINO_AI_OUTPUT").is_ok_and(|v| v == "0") {
+        return None;
+    }
+    let id = std::env::var("DINO_SESSION").ok().filter(|s| !s.is_empty())?;
+    match crate::client::request(&Request::ShellOutput { id }).ok()? {
+        Response::ShellOutput { output: Some(text), exit } => Some((hide_secrets(&text), exit)),
+        _ => None,
+    }
+}
+
+/// `text` with any line that looks like it holds a secret (a key, a token, a password, a private
+/// key) replaced by a note: output goes to a model, and a leaked credential can't be taken back.
+pub fn hide_secrets(text: &str) -> String {
+    const MARKERS: [&str; 16] = [
+        "sk-", "sk_live_", "rk_live_", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "xoxb-", "xoxp-", "akia", "nvapi-", "aiza", "-----begin", "eyjhbgci", "glpat-",
+    ];
+    const NAMES: [&str; 8] = ["password", "passwd", "secret", "token", "api_key", "apikey", "authorization", "private_key"];
+    let looks_secret = |line: &str| {
+        let lower = line.to_ascii_lowercase();
+        if MARKERS.iter().any(|m| lower.contains(m)) {
+            return true;
+        }
+        // name=value or name: value
+        if NAMES.iter().any(|n| lower.find(n).is_some_and(|i| lower[i + n.len()..].trim_start().starts_with(['=', ':']))) {
+            return true;
+        }
+        // A long run of letters and digits mixed: a key or a hash of one.
+        line.split(|c: char| !(c.is_ascii_alphanumeric() || "+/_=-".contains(c))).any(|w| {
+            w.len() >= 32 && w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(|c| c.is_ascii_alphabetic()) && !w.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        })
+    };
+    text.lines().map(|l| if looks_secret(l) { "[line hidden: it looks like a secret]" } else { l }).collect::<Vec<_>>().join("\n")
 }
 
 /// The environment of a Claude Code the user started: this may run inside one, and a nested
@@ -171,6 +215,10 @@ fn suggest(o: &Opts) -> Result<String, Failure> {
         return Err(Failure::NotACommand("type what you want to do first".into()));
     }
     let agent = which_agent(o.agent.as_deref())?;
+    // After a failed command its error is usually what the request is about.
+    let output = shell_output()
+        .filter(|(_, exit)| exit.is_some_and(|e| e != 0))
+        .map(|(text, _)| text.lines().rev().take(SUGGEST_OUTPUT_LINES).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
     let out_file = std::env::temp_dir().join(format!("dino-ai-{}.txt", std::process::id()));
     let mut cmd = Command::new(agent);
     match agent {
@@ -178,14 +226,14 @@ fn suggest(o: &Opts) -> Result<String, Failure> {
             // Read-only sandbox, never asks, keeps no session: it can look but not act.
             cmd.args(["exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "--color", "never", "-o"]).arg(&out_file);
             cmd.args(control_args(agent));
-            cmd.arg(format!("{}\n\n{}", instructions(&o.shell), request_text(o)));
+            cmd.arg(format!("{}\n\n{}", instructions(&o.shell), request_text(o, output.as_deref())));
         }
         _ => {
             // No tools at all, no MCP servers, nothing saved: a plain answer.
             cmd.args(["-p", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--output-format", "text", "--system-prompt"]);
             cmd.arg(instructions(&o.shell));
             cmd.args(control_args(agent));
-            cmd.arg(request_text(o));
+            cmd.arg(request_text(o, output.as_deref()));
         }
     }
     scrub(&mut cmd);
@@ -301,6 +349,12 @@ fn agent(o: &Opts) -> anyhow::Result<()> {
     // In a Dino shell the app shows the new session under it; elsewhere it takes this terminal.
     let by = std::env::var("DINO_SESSION").ok().filter(|s| !s.is_empty());
     let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
+    // What the shell's last command printed goes along, so "fix this" has something to fix.
+    let context = by.as_ref().and_then(|_| shell_output()).map(|(text, exit)| {
+        let what = o.last.as_deref().map(|c| format!("`{c}`")).unwrap_or_else(|| "the last command".into());
+        let how = exit.map(|e| format!(", which exited with {e},")).unwrap_or_default();
+        format!("\n\nFor context: in my shell, {what}{how} printed:\n```\n{text}\n```")
+    });
     let req = Request::New {
         launcher: agent.into(),
         args: vec![],
@@ -310,7 +364,7 @@ fn agent(o: &Opts) -> anyhow::Result<()> {
         worktree: false,
         controls: Default::default(),
         host: None,
-        prompt: Some(o.words.clone()),
+        prompt: Some(format!("{}{}", o.words, context.unwrap_or_default())),
         by: by.clone(),
     };
     match crate::client::request(&req)? {
@@ -348,6 +402,14 @@ mod tests {
             assert!(risky(c, &dir).is_none(), "{c}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn secrets_stay_out_of_the_context() {
+        let text = "error: build failed\nexport OPENAI_API_KEY=sk-proj-abc123\nPASSWORD: hunter2\ntoken = 9f8e7d\nkey 3kF9aB2mQ7xL0pZ4rT8vW1yC6nH5jD2e\nsee https://example.com/docs\ncommit 4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39";
+        let shown = hide_secrets(text);
+        assert_eq!(shown.lines().filter(|l| l.starts_with("[line hidden")).count(), 4, "{shown}");
+        assert!(shown.contains("error: build failed") && shown.contains("https://example.com/docs") && shown.contains("commit 4f2a9c1e"));
     }
 
     #[test]

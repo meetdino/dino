@@ -614,6 +614,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Some(_) => Response::Error { message: format!("{id} has exited") },
                 None => Response::Error { message: format!("no session {id}") },
             },
+            Request::ShellOutput { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                Some(s) => Response::ShellOutput { output: s.pane.shared.last_output.lock().unwrap().clone(), exit: *s.pane.shared.last_exit.lock().unwrap() },
+                None => Response::Error { message: format!("no session {id}") },
+            },
             Request::PrDraft { id } => match pr_session(d, &id) {
                 Ok(s) => {
                     let came_from = session_worktree(d, &s.cwd).and_then(|w| pr::branch(&w.checkout));

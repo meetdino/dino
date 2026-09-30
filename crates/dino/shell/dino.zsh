@@ -90,7 +90,7 @@ _dino_suggest() {
   POSTDISPLAY='  … asking your agent'
   zle -R
   local err=${TMPDIR:-/tmp}/dino-ai-$$.err out rc
-  out=$(command $_DINO_BIN ai suggest --shell zsh --cwd $PWD --last $_DINO_LAST --status $_DINO_STATUS -- $line 2>$err </dev/null)
+  out=$(command $_DINO_BIN ai suggest --shell zsh --cwd $PWD --last "$_DINO_LAST" --status $_DINO_STATUS -- $line 2>$err </dev/null)
   rc=$?
   local why=$(<$err)
   command rm -f $err
@@ -141,7 +141,7 @@ _dino_ai_agent() {
   [[ -z ${line//[[:space:]]/} ]] && return
   if [[ -n $DINO_SESSION ]]; then
     local out
-    out=$(command $_DINO_BIN ai agent --cwd $PWD -- $line 2>&1 </dev/null)
+    out=$(command $_DINO_BIN ai agent --cwd $PWD --last "$_DINO_LAST" --status $_DINO_STATUS -- $line 2>&1 </dev/null)
     if (( $? )); then
       POSTDISPLAY="  ✗ $out"
       _dino_highlight
