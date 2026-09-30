@@ -45,6 +45,20 @@ pub fn claude_trusted_in(dir: &Path, root: &Path) -> Option<PathBuf> {
     rel.ancestors().find(|r| accepted(&config, &join(root, r))).map(Path::to_path_buf)
 }
 
+/// Whether Claude trusts `dir`, looking up to its repo's top, or at `dir` alone outside a repo.
+pub fn claude_trusts(dir: &Path) -> bool {
+    // Git answers with the real path; match it so a trusted subfolder is found.
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let root = crate::worktree::repo_root(&dir).unwrap_or_else(|_| dir.clone());
+    claude_trusted_in(&dir, &root).is_some()
+}
+
+/// Extra args for a headless `claude -p`, which skips the trust prompt but still loads the
+/// project's settings and runs their hooks: in a folder the user hasn't trusted, only theirs.
+pub fn claude_headless_args(trusted: bool) -> Vec<String> {
+    if trusted { vec![] } else { vec!["--setting-sources".into(), "user".into()] }
+}
+
 /// `root/rel` without a trailing slash when `rel` is empty: config keys have none.
 pub fn join(root: &Path, rel: &Path) -> PathBuf {
     if rel.as_os_str().is_empty() { root.to_path_buf() } else { root.join(rel) }
@@ -122,6 +136,12 @@ mod tests {
         assert_eq!(v["projects"].as_object().unwrap().len(), 2);
         assert_eq!(std::fs::metadata(&config).unwrap().permissions().mode() & 0o777, 0o600);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn headless_args() {
+        assert!(claude_headless_args(true).is_empty(), "trusted: the project's settings, as the user accepted");
+        assert_eq!(claude_headless_args(false), ["--setting-sources", "user"]);
     }
 
     use std::os::unix::fs::PermissionsExt;
