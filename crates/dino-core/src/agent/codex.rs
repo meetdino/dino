@@ -157,6 +157,10 @@ impl Agent for Codex {
         (vec![], args.into_iter().flat_map(|a| ["-c".to_string(), a]).collect())
     }
 
+    fn metered(&self) -> bool {
+        true
+    }
+
     fn session_args(&self, session: &mut Option<String>, _restoring: bool) -> (Vec<String>, Vec<String>) {
         let (before, mut after) = match session {
             Some(id) => (vec!["resume".to_string()], vec![id.clone()]),

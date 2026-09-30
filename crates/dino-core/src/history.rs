@@ -47,7 +47,7 @@ fn stat(p: &Path) -> Option<(u64, u64)> {
 }
 
 /// `parse(p)`, remembered until `p` changes.
-fn cached(p: &Path, parse: fn(&Path) -> Meta) -> Meta {
+pub(crate) fn cached(p: &Path, parse: fn(&Path) -> Meta) -> Meta {
     let Some((mtime, size)) = stat(p) else { return Meta::default() };
     if let Some(c) = CACHE.lock().unwrap().get(p).filter(|c| c.mtime == mtime && c.size == size) {
         return c.meta.clone();
@@ -75,7 +75,7 @@ fn read_range(p: &Path, from: u64, to: u64) -> Option<String> {
 }
 
 /// The start and end of `p` (all of it when small), in file order.
-fn peek(p: &Path) -> String {
+pub(crate) fn peek(p: &Path) -> String {
     let len = p.metadata().map_or(0, |m| m.len());
     if len <= 2 * PEEK {
         return read_range(p, 0, len).unwrap_or_default();
@@ -84,14 +84,14 @@ fn peek(p: &Path) -> String {
 }
 
 /// One line, at most 80 characters.
-fn one_line(s: &str) -> Option<String> {
+pub(crate) fn one_line(s: &str) -> Option<String> {
     let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
     let short: String = line.chars().take(80).collect();
     Some(if short.len() < line.len() { format!("{short}…") } else { short })
 }
 
 /// What a person typed, not a slash command's expansion or an injected wrapper.
-fn typed(text: &str) -> Option<&str> {
+pub(crate) fn typed(text: &str) -> Option<&str> {
     let t = text.trim();
     let wrapper = [
         "<",
@@ -331,7 +331,7 @@ pub(crate) fn is_subagent(path: &Path) -> bool {
     path.parent().and_then(Path::file_name).is_some_and(|d| d == "subagents")
 }
 
-fn turn(role: &str, text: impl Into<String>) -> Turn {
+pub(crate) fn turn(role: &str, text: impl Into<String>) -> Turn {
     Turn { role: role.into(), text: text.into() }
 }
 
@@ -451,7 +451,7 @@ pub(crate) fn hint(input: &Value) -> String {
     arg.map(|a| format!(" {}", short(&a))).unwrap_or_default()
 }
 
-fn short(s: &str) -> String {
+pub(crate) fn short(s: &str) -> String {
     let line = s.lines().next().unwrap_or("");
     let cut: String = line.chars().take(120).collect();
     if cut.len() < line.len() { format!("{cut}…") } else { cut }
