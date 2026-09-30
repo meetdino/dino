@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
 use dino_core::controls::{self, Controls, Knobs};
-use dino_core::models::{self, Catalog};
+use dino_core::models::Catalog;
 use dino_core::settings::{self, Settings};
-use dino_core::{detect_agents, load_keys, pr, proxy_wiring, ssh, trust, user_shell, worktree};
+use dino_core::agent::{StatusSource, agent};
+use dino_core::{detect_agents, load_keys, new_uuid, pr, proxy_wiring, ssh, trust, user_shell, worktree};
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
@@ -117,8 +118,8 @@ impl Daemon {
     /// What `agent_id` offers, its models as its own files last said.
     fn knobs(&self, agent_id: &str, allow_bypass: bool) -> Knobs {
         let catalogs = self.catalogs.read().unwrap();
-        let key = if agent_id == "claude-free" { "claude" } else { agent_id };
-        controls::knobs(agent_id, allow_bypass, catalogs.get(key))
+        let catalog = agent(agent_id).and_then(|a| catalogs.get(a.catalog_key()));
+        controls::knobs(agent_id, allow_bypass, catalog)
     }
 
     /// The launchers to offer: the allowed ones, the default (Claude Code unless set) first.
@@ -253,16 +254,17 @@ pub fn run() -> anyhow::Result<()> {
 /// Each catalog's files (and the agent's program) as last read, with when they changed.
 type CatalogStamps = HashMap<&'static str, Vec<(PathBuf, Option<SystemTime>)>>;
 
-/// Set `d.catalogs` to what Claude's and Codex's own files list, for those whose files (or the
-/// agent itself) changed since `seen`.
+/// Set `d.catalogs` to what each agent's own files list, for those whose files (or the agent
+/// itself) changed since `seen`.
 fn read_catalogs(d: &Daemon, seen: &mut CatalogStamps) {
-    for agent in ["claude", "codex"] {
+    for a in dino_core::agent::all() {
+        let agent = a.id();
         let program = d.launchers.read().unwrap().iter().find(|l| l.agent_id == agent).map(|l| l.program.clone());
         let Some(program) = program else {
             d.catalogs.write().unwrap().remove(agent);
             continue;
         };
-        let mut files = models::sources(agent);
+        let mut files = a.catalog_sources();
         files.push(PathBuf::from(&program));
         let stamp: Vec<_> = files
             .into_iter()
@@ -274,15 +276,7 @@ fn read_catalogs(d: &Daemon, seen: &mut CatalogStamps) {
         if seen.get(agent) == Some(&stamp) {
             continue;
         }
-        let catalog = match agent {
-            "claude" => {
-                let out = std::process::Command::new(&program).arg("--version").stdin(std::process::Stdio::null()).output().ok();
-                let version = out.and_then(|o| models::version_of(&String::from_utf8_lossy(&o.stdout)));
-                models::claude_from_files(version.as_deref())
-            }
-            // No cache yet: Codex prints the same list itself.
-            _ => models::codex_from_files().or_else(|| models::codex_from_program(&program)),
-        };
+        let catalog = a.catalog(&program);
         let mut catalogs = d.catalogs.write().unwrap();
         match catalog {
             Some(c) => catalogs.insert(agent.to_string(), c),
@@ -822,9 +816,10 @@ fn local_spec(
 ) -> (SpawnSpec, PathBuf) {
     let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
     // Claude reports its context window to its statusline; wrap the user's, if they have one.
+    let adapter = agent(&l.agent_id);
     let status_line = std::env::current_exe()
         .ok()
-        .filter(|_| l.agent_id.starts_with("claude"))
+        .filter(|_| adapter.is_some_and(|a| a.statusline()))
         .and_then(|dino| dino_core::statusline::wrapper(&cwd, &dino, &d.proxy.base_url(id, "hook")));
     let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy, &|provider| d.proxy.base_url(id, provider), status_line);
     // The repo's environment first: dino's own wiring must win, or metering and hooks break.
@@ -832,30 +827,15 @@ fn local_spec(
     env.extend(wiring_env);
     // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
     env.insert("DINO_SESSION".into(), id.to_string());
-    if l.agent_id.starts_with("claude") && settings.policies.session_tools {
+    if adapter.is_some_and(|a| a.session_tools()) && settings.policies.session_tools {
         peers::wire_claude(id, &mut wired_args);
     }
 
     // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
-    match l.agent_id.as_str() {
-        "claude" | "claude-free" => {
-            let uuid = agent_session.get_or_insert_with(new_uuid).clone();
-            // Claude only saves a transcript after the first prompt; resuming an unused id fails.
-            if restoring && claude_transcript_exists(&uuid) {
-                wired_args.extend(["--resume".into(), uuid]);
-            } else {
-                wired_args.extend(["--session-id".into(), uuid]);
-            }
-        }
-        "codex" => {
-            if let Some(sid) = agent_session {
-                wired_args.insert(0, "resume".into());
-                wired_args.push(sid.clone());
-            }
-            // So it says when it waits on the user (see `codex`).
-            wired_args.extend(codex::NOTICE_ARGS.map(String::from));
-        }
-        _ => {}
+    if let Some(a) = adapter {
+        let (before, after) = a.session_args(agent_session, restoring);
+        wired_args.splice(0..0, before);
+        wired_args.extend(after);
     }
     wired_args.extend(controls::args(&l.agent_id, controls, &d.knobs(&l.agent_id, true)));
     wired_args.extend(args.iter().cloned());
@@ -935,7 +915,7 @@ fn set_controls(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> 
         check_bypass(&controls, &settings)?;
     }
     // Switched in the agent itself (Claude's Shift+Tab): choosing the mode dino has on file still restarts it into that mode.
-    let agent_mode = d.proxy.stats.session(id).agent_mode.as_deref().and_then(controls::claude_mode);
+    let agent_mode = d.proxy.stats.session(id).agent_mode.as_deref().and_then(|m| controls::reported_mode(&s.agent_id, m));
     let switched = controls.mode.is_some() && agent_mode.is_some() && agent_mode != controls.mode;
     if controls == s.controls && !switched {
         *s.pending.lock().unwrap() = None;
@@ -1080,7 +1060,7 @@ fn context_use(s: &Session, st: &SessionStats) -> (u64, Option<u64>) {
     if let Some(r) = st.reported_context {
         return (r.used.unwrap_or(0), Some(r.window));
     }
-    if s.agent_id == "codex" && s.host.is_none() && let Some((used, window)) = codex::context(s) {
+    if watched(s) && let Some((used, window)) = codex::context(s) {
         return (used, Some(window));
     }
     (st.context().map_or(0, |(_, used)| used), None)
@@ -1161,7 +1141,7 @@ fn state(d: &Daemon) -> Response {
                 local_url: s.local_url.lock().unwrap().clone(),
                 controls: s.controls.clone(),
                 pending: s.pending.lock().unwrap().clone(),
-                agent_mode: st.agent_mode.as_deref().and_then(controls::claude_mode),
+                agent_mode: st.agent_mode.as_deref().and_then(|m| controls::reported_mode(&s.agent_id, m)),
                 context_tokens,
                 context_limit,
                 scheduled: s.scheduled.clone(),
@@ -1270,8 +1250,8 @@ fn save(d: &Daemon) {
 /// What it takes to bring `s` back.
 fn snapshot(s: &Session) -> SavedSession {
     let mut agent_session = s.agent_session.lock().unwrap();
-    if agent_session.is_none() && s.agent_id == "codex" && s.host.is_none() {
-        *agent_session = codex::conversation(s);
+    if agent_session.is_none() {
+        *agent_session = conversation_of(s);
     }
     SavedSession {
         id: s.id.clone(),
@@ -1375,22 +1355,14 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Random v4 UUID, for Claude's `--session-id`.
-fn new_uuid() -> String {
-    let mut b = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = io::Read::read_exact(&mut f, &mut b);
-    }
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+/// The conversation `s`'s agent is on, looked at now, for agents that name it only as they go.
+fn conversation_of(s: &Session) -> Option<String> {
+    s.host.is_none().then(|| agent(&s.agent_id)?.conversation_of(s.pane.pid()?)).flatten()
 }
 
-/// Claude keeps transcripts at `~/.claude/projects/<dir>/<uuid>.jsonl`.
-fn claude_transcript_exists(uuid: &str) -> bool {
-    let projects = home().join(".claude/projects");
-    std::fs::read_dir(projects).into_iter().flatten().flatten().any(|dir| dir.path().join(format!("{uuid}.jsonl")).exists())
+/// `s` is on this Mac, and dino follows its agent's own record of its turns (see `codex`).
+fn watched(s: &Session) -> bool {
+    s.host.is_none() && agent(&s.agent_id).is_some_and(|a| a.status_source() == StatusSource::Rollout)
 }
 
 fn home() -> PathBuf {
@@ -1413,8 +1385,7 @@ fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
     out.retain(|f| !ours.contains(&f.session_id));
     out.splice(0..0, running);
     if cloud {
-        let has = |short: &str| d.launcher(short).map(|l| PathBuf::from(&l.program));
-        out.extend(found::cloud(has("codex").as_deref(), has("claude").is_some()));
+        out.extend(found::cloud(&|id| d.launcher(id).map(|l| PathBuf::from(&l.program))));
     }
     out
 }
@@ -1422,25 +1393,15 @@ fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
 /// Hand a session over to dino. A running one is left to finish its current turn, stopped, and
 /// resumed here with the same conversation, folder and flags; its old terminal gets a note.
 fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<String> {
-    let launcher = match f.agent.as_str() {
-        "claude" | "codex" => f.agent.clone(),
-        other => anyhow::bail!("don't know how to continue {other} sessions yet"),
-    };
+    let Some(a) = agent(&f.agent) else { anyhow::bail!("don't know how to continue {} sessions yet", f.agent) };
+    let launcher = a.id().to_string();
     if f.source == Source::Cloud {
-        // Claude web sessions teleport into a checkout; Codex cloud tasks open in its cloud browser.
-        let args = match f.agent.as_str() {
-            "claude" if f.session_id.is_empty() => vec!["--teleport".to_string()],
-            "claude" => vec!["--teleport".into(), f.session_id.clone()],
-            _ => vec!["cloud".into()],
-        };
-        return spawn(d, Launch::new(&launcher, args, cwd.or(f.cwd.clone())));
+        return spawn(d, Launch::new(&launcher, a.cloud_args(&f.session_id), cwd.or(f.cwd.clone())));
     }
 
     let mut tty = None;
     if let (Source::Running, Some(pid)) = (&f.source, f.pid) {
-        if f.agent == "claude" {
-            wait_until_idle(pid, std::time::Duration::from_secs(180))?;
-        }
+        wait_until_idle(a, pid, std::time::Duration::from_secs(180))?;
         tty = tty_of(pid);
         stop(pid)?;
     }
@@ -1509,12 +1470,10 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
     anyhow::ensure!(s.agent_id == "shell" && s.host.is_none(), "{id} isn't a shell on this Mac");
     // Looked at now, not as of the last poll: it may have exited, or named its conversation since.
     let f = s.pane.foreground().and_then(found::inside).ok_or_else(|| anyhow::anyhow!("no agent is running in {id}"))?;
-    anyhow::ensure!(matches!(f.agent.as_str(), "claude" | "codex"), "dino can't continue {} sessions yet", f.agent);
+    let Some(a) = agent(&f.agent) else { anyhow::bail!("dino can't continue {} sessions yet", f.agent) };
     anyhow::ensure!(!f.session_id.is_empty(), "the agent hasn't started a conversation yet; send it a prompt first");
     let pid = f.pid.ok_or_else(|| anyhow::anyhow!("no agent is running in {id}"))?;
-    if f.agent == "claude" {
-        wait_until_idle(pid, std::time::Duration::from_secs(180))?;
-    }
+    wait_until_idle(a, pid, std::time::Duration::from_secs(180))?;
     stop(pid)?;
     let restore = SavedSession {
         id: id.to_string(),
@@ -1548,21 +1507,14 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Claude reports `busy`/`idle` in `~/.claude/sessions/<pid>.json`; don't cut a turn in half.
-fn wait_until_idle(pid: u32, max: std::time::Duration) -> anyhow::Result<()> {
-    let path = home().join(format!(".claude/sessions/{pid}.json"));
+/// Don't cut a turn in half, for agents that say when they're on one.
+fn wait_until_idle(a: &dyn dino_core::agent::Agent, pid: u32, max: std::time::Duration) -> anyhow::Result<()> {
     let deadline = Instant::now() + max;
-    loop {
-        let status = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v["status"].as_str().map(String::from));
-        match status.as_deref() {
-            Some("busy") if Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(300)),
-            Some("busy") => anyhow::bail!("the session is still working; try again when its turn finishes"),
-            _ => return Ok(()),
-        }
+    while a.busy(pid) == Some(true) {
+        anyhow::ensure!(Instant::now() < deadline, "the session is still working; try again when its turn finishes");
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
+    Ok(())
 }
 
 fn tty_of(pid: u32) -> Option<String> {
@@ -1710,7 +1662,6 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
     let dir = work_dir(cwd.as_deref());
     let repo = worktree::repo_root(&dir)?;
     let base = worktree::snapshot(&repo)?;
-    let claude_trusted = carried_trust(&dir, &repo);
     let id = format!("{}-{}", session_name(prompt), &new_uuid()[..4]);
     let mut group = Group { id: id.clone(), prompt: prompt.into(), repo: repo.clone(), base: base.clone(), members: vec![] };
     let prefix = Settings::load().worktrees.prefix();
@@ -1719,7 +1670,7 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
         let wt = worktree::add(&repo, &format!("{id}/{}", l.short), &branch, &base)?;
         // Same folder inside the worktree as the user was in inside the repo.
         let cwd = wt.join(dir.strip_prefix(&repo).unwrap_or(std::path::Path::new("")));
-        carry_trust(&l, claude_trusted.as_deref(), &wt);
+        carry_trust(&l, carried_trust(&l, &dir, &repo).as_deref(), &wt);
         let session = spawn(d, Launch {
             name: Some(format!("{}·{}", l.short, &id[id.len() - 4..])),
             prompt: Some(prompt.into()),
@@ -1981,7 +1932,8 @@ fn read_subagent(d: &Daemon, session: &str, id: &str) -> Option<ipc::SubagentVie
         .or_else(|| parent.as_deref().and_then(|p| dino_core::transcript::claude_subagent_path(Some(p), id)))
         .or_else(|| dino_core::transcript::claude_subagent_path(None, id));
     let Some(transcript) = transcript else { return Some(view) };
-    let conversation = dino_core::history::page(&transcript, None);
+    // Subagents dino records are Claude's (its SubagentStart hooks).
+    let conversation = agent("claude").and_then(|a| dino_core::history::page(a, &transcript, None));
     Some(ipc::SubagentView { task: dino_core::history::subagent_task(&transcript), conversation, ..view })
 }
 
@@ -2298,17 +2250,16 @@ fn work_dir(cwd: Option<&str>) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap_or(dir)
 }
 
-/// Where Claude is trusted in `repo`, from `dir` up, when the policies carry trust into worktrees.
-fn carried_trust(dir: &Path, repo: &Path) -> Option<PathBuf> {
-    Settings::load().policies.worktree_trust.then(|| trust::claude_trusted_in(dir, repo)).flatten()
+/// Where `l`'s agent is trusted in `repo`, from `dir` up, when the policies carry trust into worktrees.
+fn carried_trust(l: &LauncherInfo, dir: &Path, repo: &Path) -> Option<PathBuf> {
+    Settings::load().policies.worktree_trust.then(|| agent(&l.agent_id)?.trusted_in(dir, repo)).flatten()
 }
 
-/// Trust the same folder in worktree `wt`, so Claude starts there without asking again.
+/// Trust the same folder in worktree `wt`, so the agent starts there without asking again.
 fn carry_trust(l: &LauncherInfo, rel: Option<&Path>, wt: &Path) {
-    if let Some(rel) = rel.filter(|_| l.agent_id.starts_with("claude")) {
-        if let Err(e) = trust::claude_trust(&trust::join(wt, rel)) {
-            eprintln!("dinod: couldn't trust {} for Claude: {e}", wt.display());
-        }
+    let (Some(a), Some(rel)) = (agent(&l.agent_id), rel) else { return };
+    if let Err(e) = a.trust(&trust::join(wt, rel)) {
+        eprintln!("dinod: couldn't trust {} for {}: {e}", wt.display(), l.label);
     }
 }
 
@@ -2355,7 +2306,7 @@ fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let branch = format!("{}{name}", Settings::load().worktrees.prefix());
     let (wt, base) = worktree::start(&checkout, &name, &branch)?;
     let repo = worktree::list(&wt)?.into_iter().next().map_or_else(|| checkout.clone(), |w| PathBuf::from(w.path));
-    carry_trust(&l, carried_trust(&dir, &checkout).as_deref(), &wt);
+    carry_trust(&l, carried_trust(&l, &dir, &checkout).as_deref(), &wt);
     // Same folder inside the worktree as the user was in inside the checkout.
     let cwd = wt.join(dir.strip_prefix(&checkout).unwrap_or(Path::new("")));
     match spawn(d, Launch { cwd: Some(cwd.display().to_string()), ..launch }) {
