@@ -23,6 +23,8 @@ pub struct Limits {
     pub auth: DefaultKeyedRateLimiter<IpAddr>,
     /// The `/v1` API, by account.
     pub account: DefaultKeyedRateLimiter<Uuid>,
+    /// Settings written by a device: 2 a second, a burst of a full push and more.
+    pub sync_writes: DefaultKeyedRateLimiter<Uuid>,
 }
 
 fn quota(per_second: u32, burst: u32) -> Quota {
@@ -37,6 +39,7 @@ impl Default for Limits {
             // user codes gets about 60 tries a minute against 25 billion codes.
             auth: RateLimiter::keyed(Quota::with_period(std::time::Duration::from_secs(1)).unwrap().allow_burst(NonZeroU32::new(20).unwrap())),
             account: RateLimiter::keyed(quota(20, 60)),
+            sync_writes: RateLimiter::keyed(quota(2, 600)),
         }
     }
 }
@@ -46,6 +49,7 @@ impl Limits {
         self.ip.retain_recent();
         self.auth.retain_recent();
         self.account.retain_recent();
+        self.sync_writes.retain_recent();
     }
 }
 
@@ -62,6 +66,18 @@ pub fn auth(state: &AppState, ip: IpAddr) -> Result<(), Error> {
 
 pub fn account(state: &AppState, id: Uuid) -> Result<(), Error> {
     check(&state.limits.account, &id, "account")
+}
+
+/// `n` records written by `device`; the seconds to wait when that's too many.
+pub fn sync_writes(state: &AppState, device: Uuid, n: NonZeroU32) -> Result<(), u64> {
+    match state.limits.sync_writes.check_key_n(&device, n) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(not_until)) => {
+            metrics::counter!("rate_limited_total", "limit" => "sync_writes").increment(1);
+            Err(not_until.wait_time_from(DefaultClock::default().now()).as_secs().max(1))
+        }
+        Err(_) => Err(60),
+    }
 }
 
 /// The client's address. Behind a trusted proxy, from the header it sets; otherwise the socket's.

@@ -364,9 +364,10 @@ async fn harness_tokens_have_their_own_audience_and_introspect() {
     assert_eq!(i["client_id"], "dino-harness");
     let i: Value = app().post(s.url("/oauth/introspect")).bearer_auth(INTROSPECT_SECRET).form(&[("token", "dino_at_nope")]).send().await.unwrap().json().await.unwrap();
     assert_eq!(i["active"], false);
-    // The sync seam answers "not yet", distinguishable from "not found".
+    // dino tokens reach sync; a fresh account has nothing yet.
     let d = s.native_login(&b, "dino", "Mac").await;
-    let r = app().get(s.url("/v1/sync")).bearer_auth(d["access_token"].as_str().unwrap()).send().await.unwrap();
-    assert_eq!(r.status(), 501);
+    let r: Value = app().get(s.url("/v1/sync")).bearer_auth(d["access_token"].as_str().unwrap()).send().await.unwrap().json().await.unwrap();
+    assert_eq!(r["seq"], 0);
+    assert_eq!(app().get(s.url("/v1/sync")).bearer_auth(at).send().await.unwrap().status(), 401, "harness tokens don't");
     assert_eq!(app().get(s.url("/readyz")).send().await.unwrap().status(), 200);
 }

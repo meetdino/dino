@@ -282,6 +282,7 @@ async fn account_page(State(s): State<AppState>, headers: HeaderMap) -> Result<R
     };
     let summary = account::summary(&s, account).await?;
     let devices = account::devices(&s, account).await?;
+    let synced = crate::api::sync::summary(&s, account).await?;
     let csrf = session.csrf(&s);
     let providers: Vec<String> = summary["identities"].as_array().into_iter().flatten().filter_map(|i| i["provider"].as_str().map(str::to_owned)).collect();
     let page = pages::layout(&s, "Account", html! {
@@ -305,9 +306,21 @@ async fn account_page(State(s): State<AppState>, headers: HeaderMap) -> Result<R
                 }
             }
         }
-        h2 { "Settings" }
+        h2 { "Synced settings" }
         div.panel {
-            p.muted { "Settings sync is coming. Synced settings will be end-to-end encrypted: stored here, readable only on your devices." }
+            @if synced.is_empty() {
+                p.muted { "Nothing synced yet. Turn on sync in dino to keep your settings on every Mac." }
+            } @else {
+                ul.devices {
+                    @for (collection, count, bytes, at) in &synced {
+                        li {
+                            div.row { strong { (collection) } span.muted { (count) @if *count == 1 { " setting" } @else { " settings" } } }
+                            div.muted { "🔒 Encrypted · " (bytes) " bytes · changed " (ago(*at)) }
+                        }
+                    }
+                }
+            }
+            p.muted { "Values are encrypted on your devices. This server stores them sealed and can't read them." }
         }
         h2 { "Your data" }
         div.stack {

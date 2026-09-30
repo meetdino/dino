@@ -1,5 +1,5 @@
-//! dino-cloud: accounts, devices and sign-in for dino. It never proxies agent traffic; sync of
-//! end-to-end encrypted settings plugs in at [`api::sync`].
+//! dino-cloud: accounts, devices, sign-in and end-to-end encrypted settings sync for dino. It never
+//! proxies agent traffic and never holds a key that opens a synced value.
 
 pub mod api;
 pub mod config;
@@ -32,6 +32,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub limits: Arc<limits::Limits>,
     pub mailer: Arc<identity::mailer::Mailer>,
+    /// This node's sync WebSockets.
+    pub hub: Arc<api::sync::Hub>,
 }
 
 impl AppState {
@@ -51,7 +53,7 @@ impl AppState {
             .user_agent(concat!("dino-cloud/", env!("CARGO_PKG_VERSION")))
             .build()?;
         let mailer = Arc::new(identity::mailer::Mailer::new(&cfg.mail, http.clone()));
-        Ok(AppState { cfg: Arc::new(cfg), db, http, limits: Arc::new(limits::Limits::default()), mailer })
+        Ok(AppState { cfg: Arc::new(cfg), db, http, limits: Arc::new(limits::Limits::default()), mailer, hub: Default::default() })
     }
 }
 
@@ -79,9 +81,11 @@ async fn ready(axum::extract::State(s): axum::extract::State<AppState>) -> axum:
 /// Serve until SIGTERM or Ctrl-C, letting requests in flight finish.
 pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
     let jobs = jobs::spawn(state.clone());
+    let nudges = api::sync::listen(state.clone());
     let app = router(state);
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal()).await?;
     jobs.abort();
+    nudges.abort();
     Ok(())
 }
 

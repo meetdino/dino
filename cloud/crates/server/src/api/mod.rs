@@ -1,5 +1,4 @@
-//! `/v1`: the account API for dino (bearer access tokens with audience `dino`). Settings sync
-//! arrives at [`sync`] once the shared `dino-sync` protocol crate exists.
+//! `/v1`: the account API and settings sync for dino (bearer access tokens with audience `dino`).
 
 pub mod account;
 pub mod idempotency;
