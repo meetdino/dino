@@ -427,6 +427,11 @@ private struct GeneralPane: View {
     @EnvironmentObject var store: SettingsStore
     @AppStorage(QuitChoice.key) private var quitChoice = ""
     @AppStorage(StartWith.key) private var startWith = StartWith.last.rawValue
+    @AppStorage(QuickTerminal.Key.storageKey) private var quickKey = QuickTerminal.Key.commandGrave.rawValue
+    @AppStorage(QuickTerminal.autohideKey) private var quickAutohide = true
+    @State private var quickTaken = false
+    @State private var isDefault = false
+    @State private var makingDefault = false
 
     var body: some View {
         Form {
@@ -469,6 +474,53 @@ private struct GeneralPane: View {
                 Text("Terminal")
             } footer: {
                 Footnote("With no session to come back to, dino opens a shell; ⌘T opens another where you are. Shell integration has zsh and bash mark each prompt and say which folder they're in, as in Ghostty, without touching your startup files (new shells). Panes take your Ghostty font, colors, cursor and keybinds, and edits as you save them; dino keeps its own shortcuts and starts each pane itself, so command and working-directory don't apply.")
+            }
+            Section {
+                Picker("Quick terminal", selection: Binding(
+                    get: { quickKey },
+                    set: {
+                        quickKey = $0
+                        QuickTerminal.shared.registerKey()
+                        quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
+                    }
+                )) {
+                    ForEach(QuickTerminal.Key.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+                if quickTaken {
+                    Text("Another app has this shortcut. Choose another.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Toggle("Hide it when you click elsewhere", isOn: $quickAutohide)
+                LabeledContent("Default terminal") {
+                    if isDefault {
+                        Text("dino").foregroundStyle(.secondary)
+                    } else if makingDefault {
+                        // macOS takes up to a minute or so to apply it.
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Taking effect…").foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Button("Make dino the Default Terminal") {
+                            guard Opening.makeDefault() else { return NSSound.beep() }
+                            makingDefault = true
+                            Task {
+                                for _ in 0 ..< 60 where !Opening.isDefault {
+                                    try? await Task.sleep(for: .seconds(3))
+                                }
+                                isDefault = Opening.isDefault
+                                makingDefault = false
+                            }
+                        }
+                    }
+                }
+            } footer: {
+                Footnote("The quick terminal drops down from the top of the screen from any app, and keeps its shell while it's hidden. As the default terminal, dino opens scripts (.command, .tool), programs and man pages you open from the Finder or other apps; a folder opened with dino, or \"New dino Shell at Folder\" in the Finder's Services menu, opens a shell there.")
+            }
+            .onAppear {
+                isDefault = Opening.isDefault
+                quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
             }
             Section {
                 Toggle("Keep your Mac awake while tasks are scheduled", isOn: Binding(

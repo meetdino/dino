@@ -81,7 +81,7 @@ pub enum Request {
         /// Run it over SSH on this host (one from Settings → Environments); `cwd` is then a path there.
         #[serde(default)]
         host: Option<String>,
-        /// Its agent's first message.
+        /// Its agent's first message; for a shell, a line typed at its prompt.
         #[serde(default)]
         prompt: Option<String>,
         /// The session starting it, by id: a shell whose AI line handed its request on.
@@ -134,6 +134,9 @@ pub enum Request {
     SendInput { id: String, text: String, submit: bool },
     /// Write `text` to a session as typed keys, not a paste (the app's ⌘I to a shell's AI line).
     SendKeys { id: String, text: String },
+    /// What a shell's last command printed and its exit code, from its shell integration's
+    /// marks: the context `dino ai` hands an agent.
+    ShellOutput { id: String },
     /// Apply this member's changes to the user's checkout and close its group.
     Keep { session: String },
     /// Close a fan-out group: stop its agents, remove their worktrees and branches.
@@ -244,6 +247,7 @@ pub enum Response {
     Launchers { launchers: Vec<LauncherInfo> },
     AgentSetup { agents: Vec<AgentSetupInfo> },
     Created { id: String },
+    ShellOutput { output: Option<String>, exit: Option<i32> },
     Found { sessions: Vec<crate::found::FoundSession> },
     Conversation { page: crate::history::Page },
     Groups { groups: Vec<GroupInfo> },
