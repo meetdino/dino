@@ -339,19 +339,26 @@ fn run_id(link: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// `s` as plain text. It's pasted into an agent, where an escape would be a key: CSI sequences are
+/// taken out, then every other control character but tabs and line breaks, and a lone `\r` (a
+/// progress line redrawn) becomes a line break.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\u{1b}' && chars.peek() == Some(&'[') {
             chars.next();
-            // Parameters, then one final letter.
+            // Parameters, then one final character: a letter, `~`, `@`...
             for c in chars.by_ref() {
-                if c.is_ascii_alphabetic() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
                     break;
                 }
             }
-        } else {
+        } else if c == '\r' {
+            if chars.peek() != Some(&'\n') {
+                out.push('\n');
+            }
+        } else if c == '\t' || c == '\n' || !c.is_control() {
             out.push(c);
         }
     }
@@ -437,6 +444,10 @@ mod tests {
     fn strips_ansi_and_tails() {
         assert_eq!(strip_ansi("\u{1b}[31merror\u{1b}[0m: bad"), "error: bad");
         assert_eq!(tail("a\nb\nc", 2), "b\nc");
+        // The log is pasted into an agent: no escape may survive to end the paste or press keys.
+        assert_eq!(strip_ansi("\u{1b}\u{1b}[m[201~"), "[201~");
+        assert_eq!(strip_ansi("\u{1b}[201~x\u{1b}[Z"), "x");
+        assert_eq!(strip_ansi("a\r\nb 50%\rb 100%\u{9b}Z\u{7}\u{7f}\tc"), "a\nb 50%\nb 100%Z\tc");
     }
 
     #[test]

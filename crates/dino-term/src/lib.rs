@@ -582,7 +582,11 @@ impl Pane {
         }
     }
 
+    /// `text` as typed text, never keys: escapes and other control characters (C0 but tab and line
+    /// breaks, DEL, C1) are dropped, so it can't end the bracketed paste early (`ESC[201~`) and go
+    /// on to press keys in the program (`ESC[Z`, Shift+Tab).
     pub fn paste(&self, text: &str) {
+        let text: String = text.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || !c.is_control()).collect();
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         if bracketed {
             self.write(format!("\x1b[200~{text}\x1b[201~"));
@@ -1095,5 +1099,35 @@ mod tests {
         assert_eq!(p.shared.last_output.lock().unwrap().as_deref(), None);
         assert_eq!(file_url_path("file://host"), None);
         assert_eq!(file_url_path("http://x/y"), None);
+    }
+
+    /// What the pane sends to its program.
+    #[derive(Default)]
+    struct Sent(Mutex<Vec<u8>>);
+
+    impl Transport for Sent {
+        fn write(&self, bytes: Vec<u8>) {
+            self.0.lock().unwrap().extend(bytes);
+        }
+        fn resize(&self, _cols: u16, _rows: u16) {}
+    }
+
+    impl Sent {
+        fn drain(&self) -> String {
+            String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap()
+        }
+    }
+
+    #[test]
+    fn a_paste_cant_end_itself_or_press_keys() {
+        let sent = Arc::new(Sent::default());
+        let p = Pane::remote(sent.clone(), 40, 6);
+        // Unbracketed: line breaks become Return, and nothing else is a key.
+        p.paste("one\x1b[Z\u{9b}Z\x03\r\ntwo\n");
+        assert_eq!(sent.drain(), "one[ZZ\rtwo\r");
+        // Bracketed: an embedded end of paste can't close it early.
+        p.feed(b"\x1b[?2004h");
+        p.paste("fix it\x1b[201~\x1b[Z\x7f\u{85}\tnow\n");
+        assert_eq!(sent.drain(), "\x1b[200~fix it[201~[Z\tnow\n\x1b[201~");
     }
 }
