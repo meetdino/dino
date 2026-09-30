@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use dino_core::schedule::{Frequency, MAX_HISTORY, ScheduledRun, ScheduledTask, split_args};
 use dino_core::ipc::LauncherInfo;
 use dino_core::settings::Settings;
-use dino_core::{trust, worktree};
+use dino_core::worktree;
 
 use crate::{Daemon, Launch, finished, new_uuid, now_secs, save, send_input, spawn, spawn_in_worktree, work_dir};
 
@@ -221,12 +221,13 @@ fn fire(d: &Daemon, t: &ScheduledTask) -> anyhow::Result<String> {
     Ok(id)
 }
 
-/// Claude asks whether to trust a folder it hasn't seen; with nobody there to answer, refuse up front.
+/// An agent that asks whether to trust a folder it hasn't seen would wait there with nobody to
+/// answer: refuse up front.
 pub(crate) fn check_trust(l: &LauncherInfo, dir: &Path, worktree: bool) -> anyhow::Result<()> {
-    if l.agent_id.starts_with("claude") {
+    if let Some(a) = dino_core::agent::agent(&l.agent_id).filter(|a| a.asks_trust()) {
         let root = worktree::repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
         anyhow::ensure!(
-            trust::claude_trusted_in(dir, &root).is_some(),
+            a.trusted_in(dir, &root).is_some(),
             "Claude doesn't trust {} yet. Start Claude there once and accept its trust prompt",
             dir.display()
         );

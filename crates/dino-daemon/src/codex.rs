@@ -7,15 +7,11 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+use dino_core::agent::codex::open_rollout;
 use dino_core::history;
 use dino_proxy::Activity;
 
 use super::{Daemon, Session};
-
-/// Flags that make Codex say on its terminal when it waits on the user (an approval, a
-/// question), focused or not. It notices a finished turn too, which its rollout says anyway.
-pub(crate) const NOTICE_ARGS: [&str; 6] =
-    ["-c", "tui.notifications=true", "-c", "tui.notification_method=\"osc9\"", "-c", "tui.notification_condition=\"always\""];
 
 /// How Codex words an approval notice.
 const APPROVAL: &str = "Approval requested: ";
@@ -48,7 +44,7 @@ pub(crate) struct Rollout {
 
 /// Look at every Codex session on this Mac: which conversation it's on, and where its turn is.
 pub(crate) fn watch(d: &Daemon) {
-    let sessions: Vec<_> = d.sessions.lock().unwrap().iter().filter(|s| s.agent_id == "codex" && s.host.is_none() && !s.pane.is_exited()).cloned().collect();
+    let sessions: Vec<_> = d.sessions.lock().unwrap().iter().filter(|s| super::watched(s) && !s.pane.is_exited()).cloned().collect();
     for s in sessions {
         track(d, &s);
     }
@@ -113,21 +109,6 @@ fn track(d: &Daemon, s: &Session) {
         d.proxy.stats.report(&s.id, now.clone());
         r.reported = Some(now);
     }
-}
-
-/// The conversation Codex process `pid` is on: the rollout it has open. A subagent's is open too
-/// while it runs; the session's own is the one that isn't a subagent's.
-fn open_rollout(pid: u32) -> Option<PathBuf> {
-    dino_core::procinfo::open_files(pid)
-        .into_iter()
-        .map(PathBuf::from)
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")))
-        .find(|p| !history::codex_meta(p).hidden)
-}
-
-/// The conversation session `s` is on, looked at now: for saving it before the watcher has.
-pub(crate) fn conversation(s: &Session) -> Option<String> {
-    s.pane.pid().and_then(open_rollout).and_then(|p| history::rollout_id(&p))
 }
 
 /// The event types (`payload.type`) of the whole lines written since `offset`, moving it past them.

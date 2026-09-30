@@ -71,18 +71,17 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
-/// The files `agent_id`'s catalog is read from, to tell when to read it again.
-pub fn sources(agent_id: &str) -> Vec<PathBuf> {
-    match agent_id {
-        "codex" => vec![codex_home().join("models_cache.json"), codex_home().join("config.toml")],
-        "claude" => {
-            let mut v: Vec<PathBuf> = claude_catalog_file().into_iter().collect();
-            v.push(claude_home().join("settings.json"));
-            v.push(PathBuf::from(CLAUDE_MANAGED));
-            v
-        }
-        _ => vec![],
-    }
+/// The files Codex's catalog is read from, to tell when to read it again.
+pub fn codex_sources() -> Vec<PathBuf> {
+    vec![codex_home().join("models_cache.json"), codex_home().join("config.toml")]
+}
+
+/// The files Claude's catalog is read from, to tell when to read it again.
+pub fn claude_sources() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = claude_catalog_file().into_iter().collect();
+    v.push(claude_home().join("settings.json"));
+    v.push(PathBuf::from(CLAUDE_MANAGED));
+    v
 }
 
 const CLAUDE_MANAGED: &str = "/Library/Application Support/ClaudeCode/managed-settings.json";
