@@ -42,7 +42,7 @@ a { color: var(--green-ink); }
 .btn, button {
   display: flex; justify-content: center; align-items: center; gap: 8px; width: 100%;
   min-height: 44px; padding: 10px 16px; border-radius: 10px; border: 1px solid var(--line);
-  background: var(--panel); color: var(--ink); font: 600 15px/1.2 inherit; text-decoration: none; cursor: pointer;
+  background: var(--panel); color: var(--ink); font: inherit; font-size: 15px; font-weight: 600; line-height: 1.2; text-decoration: none; cursor: pointer;
 }
 .btn.primary, button.primary { background: var(--green); border-color: var(--green); color: var(--on-green); }
 button.danger { color: var(--danger); }
@@ -51,7 +51,7 @@ button.danger { color: var(--danger); }
 label { display: block; font-weight: 600; margin: 0 0 6px; }
 input[type=email], input[type=text] {
   width: 100%; min-height: 44px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
-  background: var(--bg); color: var(--ink); font: 16px/1.2 inherit;
+  background: var(--bg); color: var(--ink); font: inherit; font-size: 16px; line-height: 1.2;
 }
 input.codeinput { font: 600 22px/1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .12em; text-transform: uppercase; text-align: center; }
 .code { font: 700 34px/1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .12em; color: var(--ink); text-align: center; margin: 12px 0 20px; }

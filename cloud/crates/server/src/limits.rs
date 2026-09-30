@@ -28,17 +28,19 @@ pub struct Limits {
 }
 
 fn quota(per_second: u32, burst: u32) -> Quota {
-    Quota::per_second(NonZeroU32::new(per_second).unwrap()).allow_burst(NonZeroU32::new(burst).unwrap())
+    Quota::per_second(NonZeroU32::new(per_second.max(1)).unwrap()).allow_burst(NonZeroU32::new(burst.max(1)).unwrap())
 }
 
-impl Default for Limits {
-    fn default() -> Self {
+impl Limits {
+    pub fn new(cfg: &crate::config::Config) -> Self {
+        let (ip_rate, ip_burst) = cfg.ip_limit;
+        let (acct_rate, acct_burst) = cfg.account_limit;
         Limits {
-            ip: RateLimiter::keyed(quota(30, 120)),
+            ip: RateLimiter::keyed(quota(ip_rate, ip_burst)),
             // One a second, a burst of 20: a person signing in never notices, a script guessing
             // user codes gets about 60 tries a minute against 25 billion codes.
             auth: RateLimiter::keyed(Quota::with_period(std::time::Duration::from_secs(1)).unwrap().allow_burst(NonZeroU32::new(20).unwrap())),
-            account: RateLimiter::keyed(quota(20, 60)),
+            account: RateLimiter::keyed(quota(acct_rate, acct_burst)),
             sync_writes: RateLimiter::keyed(quota(2, 600)),
         }
     }

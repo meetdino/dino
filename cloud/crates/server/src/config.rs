@@ -29,6 +29,10 @@ pub struct Config {
     pub introspect_secret: Option<String>,
     /// JSON logs (production) or readable ones (development).
     pub json_logs: bool,
+    /// Requests per second and burst, per client address (`DINO_IP_LIMIT=30,120`).
+    pub ip_limit: (u32, u32),
+    /// `/v1` requests per second and burst, per account (`DINO_ACCOUNT_LIMIT=20,60`).
+    pub account_limit: (u32, u32),
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +64,15 @@ pub struct Turnstile {
 
 fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// `rate,burst`, both at least 1.
+fn pair(name: &str, default: (u32, u32)) -> anyhow::Result<(u32, u32)> {
+    let Some(v) = var(name) else { return Ok(default) };
+    let (a, b) = v.split_once(',').with_context(|| format!("{name} is rate,burst"))?;
+    let (a, b): (u32, u32) = (a.trim().parse().with_context(|| name.to_owned())?, b.trim().parse().with_context(|| name.to_owned())?);
+    anyhow::ensure!(a > 0 && b > 0, "{name} must be positive");
+    Ok((a, b))
 }
 
 impl Config {
@@ -116,6 +129,8 @@ impl Config {
             turnstile,
             introspect_secret: var("DINO_INTROSPECT_SECRET"),
             json_logs: production || var("DINO_JSON_LOGS").as_deref() == Some("1"),
+            ip_limit: pair("DINO_IP_LIMIT", (30, 120))?,
+            account_limit: pair("DINO_ACCOUNT_LIMIT", (20, 60))?,
         })
     }
 

@@ -36,10 +36,9 @@ pub fn layout(state: &AppState, title: &str, body: Markup) -> Markup {
 fn dino_mark() -> Markup {
     html! {
         svg viewBox="0 0 26 24" width="26" height="24" aria-hidden="true" shape-rendering="crispEdges" {
-            path d="M9 20h3v4h-3zM17 20h2v4h-2z" fill="#75B340" {}
-            path d="M4 10h2v2H4zM2 12h2v2H2z" fill="#FC4F26" {}
-            path d="M15 2h10v8h-5v2h4v2h-4v3h-2v3H8v-2H6v-2H4v-2h2v-2h3V8h6z" fill="#75B340" {}
-            path d="M17 4h2v2h-2z" fill="#0A0C09" {}
+            path d="M9 20h3v4h-3zM17 20h2v4h-2zM10 0h16v10h-16zM10 10h11v2h-11zM9 12h12v2h-12zM22 12h3v2h-3zM0 14h2v2h-2zM8 14h15v2h-15zM2 16h19v2h-19zM4 18h17v2h-17z" fill="#75B340" {}
+            path d="M8 2h2v2h-2zM8 6h2v2h-2zM8 10h2v2h-2zM7 12h2v2h-2zM2 14h6v2h-6z" fill="#FC4F26" {}
+            path d="M17 4h2v2h-2zM22 4h2v2h-2z" fill="#0A0C09" {}
         }
     }
 }

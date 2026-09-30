@@ -53,7 +53,8 @@ impl AppState {
             .user_agent(concat!("dino-cloud/", env!("CARGO_PKG_VERSION")))
             .build()?;
         let mailer = Arc::new(identity::mailer::Mailer::new(&cfg.mail, http.clone()));
-        Ok(AppState { cfg: Arc::new(cfg), db, http, limits: Arc::new(limits::Limits::default()), mailer, hub: Default::default() })
+        let limits = Arc::new(limits::Limits::new(&cfg));
+        Ok(AppState { cfg: Arc::new(cfg), db, http, limits, mailer, hub: Default::default() })
     }
 }
 

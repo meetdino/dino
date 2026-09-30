@@ -170,16 +170,18 @@ pub struct Bearer {
     pub scope: String,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    /// The device's last-seen time is older than five minutes: worth writing now.
+    pub seen_stale: bool,
 }
 
 pub async fn lookup_access(state: &AppState, token: &str) -> Result<Option<Bearer>> {
-    let row: Option<(Uuid, Option<Uuid>, String, String, String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT t.account_id, t.device_id, t.client_id, t.aud, t.scope, t.expires_at, t.created_at
+    let row: Option<(Uuid, Option<Uuid>, String, String, String, DateTime<Utc>, DateTime<Utc>, bool)> = sqlx::query_as(
+        "SELECT t.account_id, t.device_id, t.client_id, t.aud, t.scope, t.expires_at, t.created_at, coalesce(d.last_seen_at < now() - interval '5 minutes', false)
          FROM access_tokens t JOIN accounts a ON a.id = t.account_id LEFT JOIN devices d ON d.id = t.device_id
          WHERE t.hash = $1 AND t.expires_at > now() AND a.deleted_at IS NULL AND d.revoked_at IS NULL",
     )
     .bind(crypto::hash(token))
     .fetch_optional(&state.db)
     .await?;
-    Ok(row.map(|(account_id, device_id, client_id, aud, scope, expires_at, created_at)| Bearer { account_id, device_id, client_id, aud, scope, expires_at, created_at }))
+    Ok(row.map(|(account_id, device_id, client_id, aud, scope, expires_at, created_at, seen_stale)| Bearer { account_id, device_id, client_id, aud, scope, expires_at, created_at, seen_stale }))
 }

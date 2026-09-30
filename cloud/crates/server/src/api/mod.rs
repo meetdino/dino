@@ -46,9 +46,9 @@ impl FromRequestParts<AppState> for Authed {
             return Err(Error::Unauthorized);
         }
         limits::account(s, b.account_id)?;
-        if let Some(d) = b.device_id {
-            // Cheap enough to do inline, and rare: at most every five minutes per device.
-            sqlx::query("UPDATE devices SET last_seen_at = now() WHERE id = $1 AND last_seen_at < now() - interval '5 minutes'").bind(d).execute(&s.db).await?;
+        if let (Some(d), true) = (b.device_id, b.seen_stale) {
+            // At most every five minutes per device, so most requests are a single read.
+            sqlx::query("UPDATE devices SET last_seen_at = now() WHERE id = $1").bind(d).execute(&s.db).await?;
         }
         Ok(Authed { account_id: b.account_id, device_id: b.device_id, scope: b.scope })
     }
