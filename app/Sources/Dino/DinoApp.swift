@@ -39,6 +39,9 @@ struct DinoApp: App {
                     .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandMenu("Session") {
+                Button("New Shell") { model.newShell() }
+                    .keyboardShortcut("t")
+                    .disabled(model.launchers.isEmpty)
                 Menu("New Session") {
                     // dinod lists the default agent first: ⌘N starts it.
                     ForEach(model.launchers) { l in
@@ -230,6 +233,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return choice
     }
+}
+
+/// What opening dino shows: the session you left (a shell if there's none), or always a new shell.
+enum StartWith: String {
+    case last, shell
+    static let key = "startWith"
+    static var current: StartWith { UserDefaults.standard.string(forKey: key).flatMap(StartWith.init) ?? .last }
 }
 
 enum QuitChoice: String {
@@ -763,6 +773,16 @@ struct SessionRow: View {
                     Text(f.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 .help("\(f.agentName) started by hand in this shell")
+            } else if let here = session.shell_cwd {
+                HStack(spacing: 5) {
+                    Text(NSString(string: here).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.head)
+                    if let code = session.last_exit, code != 0 {
+                        Text("exit \(code)").foregroundStyle(SessionStatus.exited.color)
+                    }
+                }
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .help("Where this shell is now, and how its last command ended")
             }
             if let needs = session.needs {
                 Label(needs, systemImage: "exclamationmark.triangle.fill")

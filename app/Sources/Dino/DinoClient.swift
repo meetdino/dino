@@ -55,6 +55,10 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var host: String?
     /// A shell's: the agent someone started in it by hand, while it runs.
     var inside: FoundSession?
+    /// A shell's, from its shell integration: where it is now (`cwd` is where it started), and
+    /// how its last command ended.
+    var shell_cwd: String?
+    var last_exit: Int?
 
     var needs: String? {
         guard let a = activity, a.hasPrefix("needs:") else { return nil }

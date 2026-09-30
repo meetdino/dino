@@ -123,13 +123,21 @@ impl Worktrees {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct Machine {
     /// Onboarding finished; skip the welcome scan.
     pub onboarded: bool,
     /// Keep the Mac from idle-sleeping while tasks are scheduled, so they run on time. Closing the lid still sleeps it.
     pub keep_awake: bool,
+    /// Shells dino starts mark their prompts and report their folder, as in Ghostty (new shells only).
+    pub shell_integration: bool,
+}
+
+impl Default for Machine {
+    fn default() -> Self {
+        Self { onboarded: false, keep_awake: false, shell_integration: true }
+    }
 }
 
 impl Settings {
