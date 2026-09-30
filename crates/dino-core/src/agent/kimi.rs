@@ -14,6 +14,7 @@ use super::{Agent, ControlKind, LogEvent, StatusSource, Wiring, strings};
 use crate::found::{self, FoundSession, Source};
 use crate::history::{self, Turn, one_line, turn};
 use crate::models::{Catalog, ModelInfo};
+use crate::providers::Format;
 
 pub(crate) struct Kimi {
     pub(crate) free: bool,
@@ -215,6 +216,24 @@ impl Agent for Kimi {
 
     fn free(&self) -> bool {
         self.free
+    }
+
+    fn provider_formats(&self) -> &'static [Format] {
+        if self.free { &[] } else { &[Format::Anthropic, Format::Chat, Format::Responses] }
+    }
+
+    // Its one-off model from the environment, as on the free tier; its own config stays as it is.
+    fn provider_wiring(&self, url: &str, format: Format, model: &str) -> Option<Wiring> {
+        if self.free {
+            return None;
+        }
+        let (kind, base) = match format {
+            Format::Anthropic => ("anthropic", url.to_string()),
+            Format::Chat => ("openai", format!("{url}/v1")),
+            Format::Responses => ("openai_responses", format!("{url}/v1")),
+        };
+        let env = [("KIMI_MODEL_NAME", model.to_string()), ("KIMI_MODEL_API_KEY", "dino".into()), ("KIMI_MODEL_PROVIDER_TYPE", kind.into()), ("KIMI_MODEL_BASE_URL", base)];
+        Some((env.map(|(k, v)| (k.to_string(), v)).into(), vec![]))
     }
 
     fn model_args(&self, model: &str) -> Vec<String> {

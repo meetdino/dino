@@ -3,7 +3,7 @@
 //! fetch. Everything about a model is what its provider says (`dino_core::providers`).
 
 use std::collections::{HashMap, HashSet};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -15,13 +15,9 @@ use serde_json::Value;
 pub const OPENROUTER_KEY: &str = "OPENROUTER_API_KEY";
 const OPENROUTER: &str = "https://openrouter.ai/api";
 
-/// Model servers people run on their Macs, at their default ports.
-const LOCAL: &[(&str, &str, &str)] = &[
-    ("ollama", "Ollama", "127.0.0.1:11434"),
-    ("lmstudio", "LM Studio", "127.0.0.1:1234"),
-    ("llamacpp", "llama.cpp", "127.0.0.1:8080"),
-    ("vllm", "vLLM", "127.0.0.1:8000"),
-];
+/// Model servers people run on their Macs, at their default addresses; the proxy's `local` route
+/// serves the same ones.
+const LOCAL: &[(&str, &str, &str)] = dino_proxy::local::RUNTIMES;
 
 /// A local server's formats and models, asked again this often while it runs.
 const LOCAL_EVERY: Duration = Duration::from_secs(60);
@@ -70,7 +66,7 @@ pub fn list() -> Vec<ProviderInfo> {
     let c = cache().lock().unwrap();
     let mut out: Vec<ProviderInfo> = ["openrouter", "chatgpt"].into_iter().chain(LOCAL.iter().map(|l| l.0)).filter_map(|id| c.providers.get(id).map(|(_, p)| p.clone())).collect();
     if out.is_empty() {
-        out = [openrouter_bare(), chatgpt_bare()].into_iter().chain(LOCAL.iter().map(|(id, name, addr)| local_bare(id, name, addr))).collect();
+        out = [openrouter_bare(), chatgpt_bare()].into_iter().chain(LOCAL.iter().filter_map(|(id, _, _)| dino_proxy::local::runtime(id).map(|(name, base)| local_bare(id, name, base)))).collect();
     }
     out
 }
@@ -167,18 +163,19 @@ pub fn refresh(now: bool) {
     }
     store(chatgpt);
 
-    for (id, name, addr) in LOCAL {
-        let up = TcpStream::connect_timeout(&addr.parse::<SocketAddr>().unwrap(), Duration::from_millis(200)).is_ok();
+    for (id, _, _) in LOCAL {
+        let Some((name, base)) = dino_proxy::local::runtime(id) else { continue };
+        let addr = base.split_once("://").map_or(base, |(_, a)| a);
+        let up = addr.to_socket_addrs().ok().and_then(|mut a| a.next()).is_some_and(|a| TcpStream::connect_timeout(&a, Duration::from_millis(200)).is_ok());
         let p = if !up {
-            local_bare(id, name, addr)
+            local_bare(id, name, base)
         } else if let Some(p) = seen(id, LOCAL_EVERY).filter(|p| p.connected) {
             p
         } else {
-            let base = format!("http://{addr}");
-            let mut p = ProviderInfo { formats: probe(&base), connected: true, version: version(id, &base), ..local_bare(id, name, addr) };
+            let mut p = ProviderInfo { formats: probe(base), connected: true, version: version(id, base), ..local_bare(id, name, base) };
             // Something else on the port (a dev server on 8000): not this one.
-            if !is(id, &base) {
-                p = local_bare(id, name, addr);
+            if !is(id, base) {
+                p = local_bare(id, name, base);
             }
             p
         };
@@ -212,8 +209,8 @@ fn chatgpt_bare() -> ProviderInfo {
     }
 }
 
-fn local_bare(id: &str, name: &str, addr: &str) -> ProviderInfo {
-    ProviderInfo { id: id.into(), name: name.into(), base: format!("http://{addr}"), local: true, ..Default::default() }
+fn local_bare(id: &str, name: &str, base: &str) -> ProviderInfo {
+    ProviderInfo { id: id.into(), name: name.into(), base: base.into(), local: true, ..Default::default() }
 }
 
 /// Which formats `base` has routes for: each asked once with an empty body.
