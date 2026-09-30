@@ -772,6 +772,16 @@ struct SessionRow: View {
                     Text(f.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 .help("\(f.agentName) started by hand in this shell")
+            } else if let here = session.shell_cwd {
+                HStack(spacing: 5) {
+                    Text(NSString(string: here).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.head)
+                    if let code = session.last_exit, code != 0 {
+                        Text("exit \(code)").foregroundStyle(SessionStatus.exited.color)
+                    }
+                }
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .help("Where this shell is now, and how its last command ended")
             }
             if let needs = session.needs {
                 Label(needs, systemImage: "exclamationmark.triangle.fill")

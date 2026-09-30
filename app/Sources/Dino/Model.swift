@@ -425,10 +425,11 @@ final class DinoModel: ObservableObject {
     /// `worktree`: in a new worktree and branch of the repo, so its edits stay off your checkout.
     /// `controls`: mode, model and effort; what's left open comes from Settings → Agents.
     /// `host`: over SSH on that host, in `remoteFolder` there (empty: the host's default folder).
-    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "") {
+    /// `dir`: where on this Mac, instead of the current folder.
+    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "", in dir: String? = nil) {
         guard let conn = connection else { return }
         var body: [String: Any] = [
-            "type": "new", "launcher": launcher.short, "args": [], "cwd": folder.path, "cols": 120, "rows": 40,
+            "type": "new", "launcher": launcher.short, "args": [], "cwd": dir ?? folder.path, "cols": 120, "rows": 40,
             "worktree": worktree, "controls": controls.json,
         ]
         if let host {
@@ -453,11 +454,12 @@ final class DinoModel: ObservableObject {
         }
     }
 
-    /// A new shell in the folder you're in, like a new Ghostty tab (⌘T). False if none could start.
+    /// A new shell where you are, like a new Ghostty tab (⌘T): the folder the selected shell has
+    /// moved to, when it says, else the current folder. False if none could start.
     @discardableResult
     func newShell() -> Bool {
         guard connection != nil, let l = launchers.first(where: { $0.short == "shell" }) else { return false }
-        newSession(l)
+        newSession(l, in: selectedSession.flatMap { $0.host == nil ? $0.shell_cwd : nil })
         return true
     }
 
