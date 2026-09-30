@@ -64,7 +64,7 @@ struct ProviderModel: Codable, Equatable, Identifiable {
 }
 
 private struct ProvidersResponse: Decodable { let providers: [ProviderInfo] }
-private struct ModelsResponse: Decodable {
+struct ModelsResponse: Decodable {
     let models: [ProviderModel]
     let loading: Bool
     let error: String?
@@ -75,7 +75,7 @@ extension DinoConnection {
         try JSONDecoder().decode(ProvidersResponse.self, from: send(["type": "providers"])).providers
     }
 
-    fileprivate func models(_ provider: String) throws -> ModelsResponse {
+    func models(_ provider: String) throws -> ModelsResponse {
         try JSONDecoder().decode(ModelsResponse.self, from: send(["type": "models", "provider": provider]))
     }
 
@@ -327,6 +327,7 @@ func formatName(_ f: String) -> String {
 }
 
 private struct ModelRowView: View {
+    @EnvironmentObject var dino: DinoModel
     let model: ProviderModel
     /// The agent the list is filtered to, shown first.
     let highlight: String
@@ -342,20 +343,52 @@ private struct ModelRowView: View {
                 Text(facts).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
             }
             if let r = model.recommended {
-                Label {
-                    Text("Run in \(r.name)").fontWeight(.medium) + Text(r.reasons.first.map { " — \($0.text)" } ?? "").foregroundColor(.secondary)
-                } icon: {
-                    Image(systemName: "star.fill").foregroundStyle(.green)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Button { run(r) } label: {
+                        Label("Run in \(r.name)", systemImage: "play.fill")
+                    }
+                    .controlSize(.small)
+                    .disabled(why(r) != nil)
+                    .help(why(r) ?? "Start \(r.name) on \(model.name), through dino")
+                    let others = model.agents.filter { !$0.recommended && $0.status != "no" }
+                    if !others.isEmpty {
+                        Menu("Other agents") {
+                            ForEach(others) { v in
+                                Button("\(v.status == "works" ? "✓" : "~") \(v.name)\(v.reasons.first.map { " — \($0.text)" } ?? "")") { run(v) }
+                                    .disabled(why(v) != nil)
+                            }
+                        }
+                        .menuStyle(.borderlessButton)
+                        .controlSize(.small)
+                        .fixedSize()
+                    }
+                    Text(r.reasons.first?.text ?? "Recommended")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .help(r.reasons.first?.source ?? "")
                 }
-                .font(.callout)
-                .lineLimit(2)
-                .help(r.reasons.first?.source ?? "")
             }
             Wrap(spacing: 5) {
                 ForEach(chips) { v in VerdictChip(verdict: v) }
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// Why `v` can't be started from here, if it can't.
+    private func why(_ v: Verdict) -> String? {
+        if dino.launchers.first(where: { $0.agent_id == v.agent }) == nil { return "\(v.name) isn't installed: get it in Settings → Agents" }
+        if v.translated { return "\(v.name) would need dino to translate its API for this provider, which starting a session doesn't do yet" }
+        return nil
+    }
+
+    /// A new session of `v`'s agent on this model, shown in the main window.
+    private func run(_ v: Verdict) {
+        guard let l = dino.launchers.first(where: { $0.agent_id == v.agent }) else { return }
+        dino.newSession(l, route: ProviderRoute(provider: model.provider, model: model.id))
+        NSApp.windows.first { w in w.isVisible && !(w.identifier?.rawValue.hasPrefix(SettingsView.windowID) ?? false) && w.canBecomeMain }?
+            .makeKeyAndOrderFront(nil)
     }
 
     /// The recommended agent first, then the rest as dinod ranked them; ones that can't, last.

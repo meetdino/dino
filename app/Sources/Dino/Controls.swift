@@ -286,7 +286,24 @@ struct SessionControlsBar: View {
                 chip(.mode, knobs, icon: ControlKind.icon(mode: c.mode), text: Mode.label(c.mode),
                      tint: c.mode == "bypass" ? .red : nil)
             }
-            if ControlKind.model.offered(by: knobs) {
+            if let route = session.route {
+                // On a provider's model: that provider's models, not the agent's own.
+                Button { model.controlPicker = .model } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: route.provider == "openrouter" || route.provider == "chatgpt" ? "cloud" : "desktopcomputer").font(.caption)
+                        Text(route.label).lineLimit(1)
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help("Runs on \(route.label) through dino, not \(session.agent_id)'s own account (⇧⌘M)")
+                .popover(isPresented: Binding(get: { model.controlPicker == .model }, set: { if !$0, model.controlPicker == .model { model.controlPicker = nil } }), arrowEdge: .bottom) {
+                    ProviderModelPopover(session: session, route: route)
+                }
+            } else if ControlKind.model.offered(by: knobs) {
                 let text = c.model.map(knobs.label) ?? session.last_model.map { "Default · \(knobs.label($0))" } ?? "Default"
                 chip(.model, knobs, icon: "cpu", text: text, tint: session.otherModel == nil ? nil : .orange)
             }
@@ -444,6 +461,87 @@ struct ControlPopover: View {
     }
 }
 
+/// The models a session's provider serves that its agent can use, for a session on a provider's
+/// model: picking one restarts the agent on it, keeping its conversation.
+struct ProviderModelPopover: View {
+    @EnvironmentObject var model: DinoModel
+    let session: SessionInfo
+    let route: ProviderRoute
+    @State private var models: [ProviderModel]?
+    @State private var search = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(route.name ?? route.provider).font(.headline)
+            TextField("Search models", text: $search, prompt: Text("Search \(route.name ?? route.provider)"))
+                .textFieldStyle(.roundedBorder)
+            let shown = (models ?? []).filter { m in search.isEmpty || m.id.localizedCaseInsensitiveContains(search) }.prefix(80)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if models != nil {
+                        ForEach(shown) { m in row(m) }
+                        if shown.isEmpty { Text("No models match").foregroundStyle(.secondary).padding(4) }
+                    } else {
+                        ProgressView().controlSize(.small).padding(4)
+                    }
+                }
+            }
+            // A popover sizes a scroll view to nothing: as tall as its rows, up to a point.
+            .frame(height: min(260, max(40, CGFloat(shown.count) * 44)))
+            Divider()
+            Text(model.busy(session)
+                ? "Applies once the agent is idle. It restarts on the model and keeps its conversation."
+                : "The agent restarts on the model and keeps its conversation.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(width: 320)
+        .task {
+            let provider = route.provider, agent = session.agent_id
+            let list = await Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).models(provider).models }.value ?? []
+            // What its agent can use, the best for it first.
+            let usable = list.filter { m in m.agents.first { $0.agent == agent }.map { $0.status != "no" && !$0.translated } ?? true }
+            models = usable.sorted { a, b in rank(a, agent) < rank(b, agent) }
+        }
+    }
+
+    private func rank(_ m: ProviderModel, _ agent: String) -> Int {
+        guard let v = m.agents.first(where: { $0.agent == agent }) else { return 3 }
+        return v.recommended ? 0 : v.status == "works" ? 1 : 2
+    }
+
+    private func row(_ m: ProviderModel) -> some View {
+        let v = m.agents.first { $0.agent == session.agent_id }
+        return Button {
+            var c = session.shownControls
+            c.model = m.id
+            model.controlPicker = nil
+            model.setControls(session.id, c)
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "checkmark").font(.caption.weight(.semibold)).opacity(m.id == route.model ? 1 : 0)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(m.name).lineLimit(1)
+                    Text(v?.status == "caveat" ? v?.reasons.first?.text ?? m.id : m.id)
+                        .font(.caption)
+                        .foregroundStyle(v?.status == "caveat" ? .orange : .secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if v?.recommended == true {
+                    Image(systemName: "star.fill").font(.caption).foregroundStyle(.green).help("Recommended for this agent")
+                }
+            }
+            .padding(.vertical, 3)
+            .padding(.horizontal, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// Session → Permission Mode…, Model…, Effort…: open the toolbar's pickers.
 struct ControlMenuItems: View {
     @EnvironmentObject var model: DinoModel
@@ -454,9 +552,11 @@ struct ControlMenuItems: View {
         ForEach([ControlKind.mode, .model, .effort]) { kind in
             // A model without effort levels (Haiku) has none to pick.
             let none = kind == .effort && (knobs?.efforts(for: session?.shownControls.model).isEmpty ?? true)
+            // On a provider's model, its provider's models.
+            let offered = (knobs.map(kind.offered) ?? false) || (kind == .model && session?.route != nil)
             Button("\(kind.title)…") { model.controlPicker = kind }
                 .keyboardShortcut(kind.shortcut, modifiers: [.command, .shift])
-                .disabled(!(knobs.map(kind.offered) ?? false) || none)
+                .disabled(!offered || none)
         }
     }
 }
@@ -474,8 +574,27 @@ struct NewSessionSheet: View {
     @State private var hosts: [String: DinoSettings.SshHost] = [:]
     @State private var host = ""
     @State private var remoteFolder = ""
+    /// Settings → Providers' providers that can serve now; `provider` empty is the agent's own account.
+    @State private var providers: [ProviderInfo] = []
+    @State private var provider = ""
+    @State private var providerModels: [ProviderModel] = []
+    @State private var providerModel = ""
 
     private static let addHost = "\u{0}add"
+
+    /// The chosen provider model, with what each agent can make of it.
+    private var chosen: ProviderModel? { providerModels.first { $0.id == providerModel } }
+    /// What the chosen agent can make of the chosen model.
+    private var verdict: Verdict? { launcher.flatMap { l in chosen?.agents.first { $0.agent == l.agent_id } } }
+    /// Why it can't start on the chosen model, if it can't.
+    private var routeProblem: String? {
+        guard !provider.isEmpty else { return nil }
+        guard chosen != nil else { return "Pick a model" }
+        guard let v = verdict else { return "\(launcher?.label ?? "This agent") can't run on another provider's model" }
+        if v.status == "no" { return v.reasons.first?.text ?? "\(v.name) can't use this model" }
+        if v.translated { return "\(v.name) would need dino to translate its API for this provider, which starting a session doesn't do yet" }
+        return nil
+    }
     /// Claude Code on the free pool goes through dino on this Mac, so it doesn't run over SSH.
     private var launchers: [LauncherInfo] { host.isEmpty ? model.launchers : model.launchers.filter { !$0.agent_id.hasSuffix("-free") } }
     private var launcher: LauncherInfo? { launchers.first { $0.short == agent } ?? launchers.first }
@@ -533,7 +652,39 @@ struct NewSessionSheet: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                if let l = launcher, let k = l.knobs, k.any {
+                if host.isEmpty, !providers.isEmpty {
+                    Section {
+                        Picker("Model from", selection: $provider) {
+                            Text("\(launcher?.label ?? "The agent")'s own account").tag("")
+                            ForEach(providers) { p in Text(p.name).tag(p.id) }
+                        }
+                        if !provider.isEmpty {
+                            Picker("Model", selection: $providerModel) {
+                                if providerModels.isEmpty { Text("Asking \(providers.first { $0.id == provider }?.name ?? provider)…").tag("") }
+                                ForEach(providerModels) { m in Text(m.name).tag(m.id) }
+                            }
+                            if let v = verdict {
+                                let mark = v.status == "works" ? "✓" : v.status == "caveat" ? "~" : "✗"
+                                Text("\(mark) \(v.name)\(v.recommended ? " is the one to run it in" : "")\(v.reasons.first.map { ": \($0.text)" } ?? "")")
+                                    .font(.callout)
+                                    .foregroundStyle(v.status == "works" ? .green : v.status == "caveat" ? .orange : .secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            if let r = chosen?.recommended, r.agent != launcher?.agent_id,
+                               let l = model.launchers.first(where: { $0.agent_id == r.agent }) {
+                                Button("Use \(r.name) instead, recommended for it") { agent = l.short }
+                                    .buttonStyle(.link)
+                            }
+                        }
+                    } footer: {
+                        Text(provider.isEmpty
+                            ? "Or run the agent on a model from a provider in Settings → Providers, through dino."
+                            : "The agent runs on this model through dino; its own login and settings stay as they are.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let l = launcher, let k = l.knobs.map({ provider.isEmpty ? $0 : Knobs(modes: $0.modes, model: false, models: [], default_model: nil, efforts: [], restart: $0.restart) }), k.any {
                     Section {
                         ControlFields(knobs: k, controls: $controls, defaults: defaults[l.agent_id] ?? Controls(), seen: model.seenModels(l.agent_id))
                     } footer: {
@@ -548,10 +699,14 @@ struct NewSessionSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                if let problem = routeProblem, chosen != nil {
+                    Text(problem).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                }
                 Button("Start") {
                     if let l = launcher {
                         if host.isEmpty {
-                            model.newSession(l, worktree: worktree, controls: controls)
+                            let route = provider.isEmpty ? nil : ProviderRoute(provider: provider, model: providerModel)
+                            model.newSession(l, worktree: worktree, controls: controls, route: route)
                         } else {
                             model.newSession(l, controls: controls, host: host, remoteFolder: remoteFolder.trimmingCharacters(in: .whitespaces))
                         }
@@ -559,16 +714,38 @@ struct NewSessionSheet: View {
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(launcher == nil)
+                .disabled(launcher == nil || (host.isEmpty && routeProblem != nil))
             }
             .padding([.horizontal, .bottom], 20)
         }
         .frame(width: 460)
         .onChange(of: launcher?.agent_id) { controls = Controls() }
+        .onChange(of: provider) { loadModels() }
+        // A model picked: its recommended agent, when it's here.
+        .onChange(of: providerModel) {
+            if let r = chosen?.recommended, let l = model.launchers.first(where: { $0.agent_id == r.agent }) { agent = l.short }
+        }
         .task {
             let s = await Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).settings() }.value
             defaults = s?.agents ?? [:]
             hosts = s?.ssh ?? [:]
+            let all = await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).providers()) ?? [] }.value
+            providers = all.filter(\.connected)
+        }
+    }
+
+    /// The chosen provider's models that some agent here can run, those with a recommendation first.
+    private func loadModels() {
+        providerModels = []
+        providerModel = ""
+        guard !provider.isEmpty else { return }
+        let id = provider, here = Set(model.launchers.map(\.agent_id))
+        Task {
+            let list = await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).models(id).models) ?? [] }.value
+            guard id == provider else { return }
+            providerModels = list.filter { m in m.agents.contains { here.contains($0.agent) && $0.status != "no" } }
+                .sorted { ($0.recommended == nil ? 1 : 0, $0.name) < ($1.recommended == nil ? 1 : 0, $1.name) }
+            providerModel = providerModels.first?.id ?? ""
         }
     }
 
