@@ -170,6 +170,11 @@ struct Daemon {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    // Nothing dinod starts is a child of the agent session that may have started dinod.
+    for var in dino_core::PARENT_AGENT_ENV {
+        // SAFETY: first thing, before dinod starts any thread.
+        unsafe { std::env::remove_var(var) };
+    }
     let path = ipc::socket_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

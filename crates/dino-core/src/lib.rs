@@ -119,6 +119,26 @@ pub fn claude_hook_settings(url: &str, status_line: Option<String>) -> String {
     format!(r#"{{"hooks":{{{}}}{status_line}}}"#, hooks.join(","))
 }
 
+/// What a Claude Code session sets for the programs it runs. dinod started from one (a Claude's
+/// Bash tool, a terminal it opened) would hand them to every agent it starts, and a Claude under
+/// them takes itself for that session's child: among other things, it saves no transcript. The
+/// user's own settings (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_EFFORT_LEVEL`, …) aren't among them.
+pub const PARENT_AGENT_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_VERSION",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "AI_AGENT",
+];
+
 /// `~/.config/dino`, or `$DINO_HOME` (a second, isolated dino: tests, development).
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("DINO_HOME") {
