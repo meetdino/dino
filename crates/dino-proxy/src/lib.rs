@@ -547,7 +547,14 @@ impl Drop for Tap {
         if aborted {
             log(format_args!("{} model call dropped by the agent", self.session));
         }
+        if let Some(e) = &self.meter.error {
+            log(format_args!("{} model call answered 200 with an error: {e}", self.session));
+        }
         self.stats.update(&self.session, |s| {
+            if let Some(e) = self.meter.error.take() {
+                s.errors += 1;
+                s.call_failed(e);
+            }
             if let Some(u) = self.meter.seen.take() {
                 s.usage.add(&u);
                 // Probes (Claude checks its quota with a one-word call) say nothing about the conversation.
@@ -799,6 +806,9 @@ struct Meter {
     /// The whole answer came through. Agents hang up once they have it, so the body running
     /// out can't tell a finished answer from an interrupted one; its last event can.
     complete: bool,
+    /// The answer was an error after all, though it came with 200: OpenRouter passes an upstream
+    /// failure ("provider_overloaded") on in the body, and a stream can end in an error event.
+    error: Option<String>,
 }
 
 impl Meter {
@@ -833,6 +843,18 @@ impl Meter {
     }
 
     fn observe(&mut self, v: &Value) {
+        // `{"error": {...}}` (OpenRouter, a Chat stream's chunk, Anthropic's error event) or a
+        // failed Responses answer. A finished Responses answer carries `"error": null`.
+        if self.error.is_none()
+            && let Some(e) = [&v["error"], &v["response"]["error"]].into_iter().find(|e| e.is_object())
+        {
+            let said = e["message"].as_str().or(e["type"].as_str()).unwrap_or("the provider failed");
+            self.error = Some(match e["code"].as_u64() {
+                Some(code) => format!("{code} {said}"),
+                None => said.to_string(),
+            });
+            self.complete = true;
+        }
         if self.model.is_none() {
             self.model = [&v["message"]["model"], &v["response"]["model"], &v["model"]].iter().find_map(|m| m.as_str()).map(String::from);
         }
@@ -884,6 +906,33 @@ mod tests {
         assert_eq!(s.last_error.as_deref(), Some("529 overloaded"));
         s.turn_hook("UserPromptSubmit", &json!({}));
         assert_eq!(s.last_error, None);
+    }
+
+    #[test]
+    fn a_200_that_is_an_error_counts_as_one() {
+        let stats = Arc::new(Stats::default());
+        let call = |body: &str| {
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), _in_flight: None };
+            tap.meter.feed(&Bytes::from(body.to_string()));
+        };
+        // OpenRouter, as it answered for real: HTTP 200, and an upstream 503 in the body.
+        call(r#"{"id":"gen-1790742907-SecNFKzI8AeVJ53NBH9p","error":{"message":"Upstream error from Nvidia: Service temporarily overloaded","code":503,"metadata":{"error_type":"provider_overloaded"}}}"#);
+        let s = stats.session("1");
+        assert_eq!(s.errors, 1);
+        assert_eq!(s.last_error.as_deref(), Some("503 Upstream error from Nvidia: Service temporarily overloaded"));
+
+        // The same inside a Chat Completions stream, and a Responses stream that failed.
+        call("data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"PEL\"}}]}\n\ndata: {\"error\":{\"message\":\"Provider returned error\",\"code\":429}}\n\n");
+        assert_eq!(stats.session("1").last_error.as_deref(), Some("429 Provider returned error"));
+        call("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"The model failed\"}}}\n\n");
+        assert_eq!(stats.session("1").errors, 3);
+        assert_eq!(stats.session("1").last_error.as_deref(), Some("The model failed"));
+
+        // A finished Responses answer says `"error": null`: not an error.
+        let before = stats.session("1").errors;
+        call("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n");
+        call(r#"{"id":"c","choices":[{"message":{"content":"PELICAN"}}],"usage":{"prompt_tokens":5,"completion_tokens":1}}"#);
+        assert_eq!(stats.session("1").errors, before);
     }
 
     #[test]
