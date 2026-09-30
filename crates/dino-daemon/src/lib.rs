@@ -351,6 +351,9 @@ fn launchers_from(free_tier: bool, agents: Vec<dino_core::Detected>) -> Vec<Laun
         if d.kind.id == "kimi" && free_tier {
             out.push(LauncherInfo { short: "kimi-free".into(), agent_id: "kimi-free".into(), label: "Kimi Code · free models".into(), program: program.clone(), knobs: Default::default() });
         }
+        if d.kind.id == "pi" && free_tier {
+            out.push(LauncherInfo { short: "pi-free".into(), agent_id: "pi-free".into(), label: "Pi · free models".into(), program: program.clone(), knobs: Default::default() });
+        }
         out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program, knobs: Default::default() });
     }
     let shell = user_shell();

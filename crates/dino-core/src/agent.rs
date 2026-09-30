@@ -12,6 +12,7 @@ use crate::models::Catalog;
 mod claude;
 pub mod codex;
 mod kimi;
+mod pi;
 mod qwen;
 
 /// Which control a flag on an agent's command line sets.
@@ -209,19 +210,22 @@ static QWEN: qwen::Qwen = qwen::Qwen { free: false };
 static QWEN_FREE: qwen::Qwen = qwen::Qwen { free: true };
 static KIMI: kimi::Kimi = kimi::Kimi { free: false };
 static KIMI_FREE: kimi::Kimi = kimi::Kimi { free: true };
+static PI: pi::Pi = pi::Pi { free: false };
+static PI_FREE: pi::Pi = pi::Pi { free: true };
 
 /// The agents dino works with, in the order they're listed and looked for.
-pub fn all() -> [&'static dyn Agent; 4] {
-    [&CLAUDE, &CODEX, &QWEN, &KIMI]
+pub fn all() -> [&'static dyn Agent; 5] {
+    [&CLAUDE, &CODEX, &QWEN, &KIMI, &PI]
 }
 
-/// The adapter for launcher agent id `id` (the free-tier ones, "claude-free", "qwen-free" and
-/// "kimi-free", too); `None` for shells and agents dino only launches.
+/// The adapter for launcher agent id `id` (the free-tier ones, "claude-free", "qwen-free",
+/// "kimi-free" and "pi-free", too); `None` for shells and agents dino only launches.
 pub fn agent(id: &str) -> Option<&'static dyn Agent> {
     match id {
         "claude-free" => Some(&CLAUDE_FREE),
         "qwen-free" => Some(&QWEN_FREE),
         "kimi-free" => Some(&KIMI_FREE),
+        "pi-free" => Some(&PI_FREE),
         _ => all().into_iter().find(|a| a.id() == id),
     }
 }

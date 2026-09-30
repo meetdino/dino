@@ -42,21 +42,23 @@ fn track(d: &Daemon, s: &Session, claimed: &[String]) {
     let Some(a) = agent(&s.agent_id) else { return };
     let mut l = s.log.lock().unwrap();
     if l.path.is_none() {
+        let Some(since) = s.pane.pid().and_then(dino_core::procinfo::started) else { return };
         let known = s.agent_session.lock().unwrap().clone();
-        // An agent that can't be told its conversation id starts one with its first prompt.
-        let (id, fresh) = match known {
-            Some(id) => (id, false),
+        let id = match known {
+            Some(id) => id,
+            // An agent that can't be told its conversation id starts one with its first prompt.
             None => {
-                let Some(since) = s.pane.pid().and_then(dino_core::procinfo::started) else { return };
                 let Some(id) = a.new_conversation(&s.cwd, since, claimed) else { return };
                 *s.agent_session.lock().unwrap() = Some(id.clone());
-                (id, true)
+                id
             }
         };
+        // Some write it only once the first prompt is sent.
         let Some(path) = a.log_path(&id).filter(|p| p.exists()) else { return };
-        // A conversation it just began is read from its start, so its first turn counts; one it
-        // continues, from where it is now.
-        l.offset = if fresh { 0 } else { path.metadata().map_or(0, |m| m.len()) };
+        // A record begun since this process started is read from its start, so its first turn
+        // counts; one it continues, from where it is now.
+        let born = path.metadata().and_then(|m| m.created()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+        l.offset = if born + 1 >= since { 0 } else { path.metadata().map_or(0, |m| m.len()) };
         l.path = Some(path);
     }
     let Some(path) = l.path.clone() else { return };
