@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
-use dino_core::controls::{self, Controls};
+use dino_core::controls::{self, Controls, Knobs};
+use dino_core::models::{self, Catalog};
 use dino_core::settings::{self, Settings};
 use dino_core::{detect_agents, load_keys, pr, proxy_wiring, ssh, trust, user_shell, worktree};
 use dino_proxy::{Activity, Proxy, SessionStats};
@@ -119,9 +120,16 @@ impl Daemon {
         let allow_bypass = Settings::load().policies.allow_bypass;
         let mut out = self.launchers.read().unwrap().clone();
         for l in &mut out {
-            l.knobs = controls::knobs(&l.agent_id, allow_bypass);
+            l.knobs = self.knobs(&l.agent_id, allow_bypass);
         }
         out
+    }
+
+    /// What `agent_id` offers, its models as its own files last said.
+    fn knobs(&self, agent_id: &str, allow_bypass: bool) -> Knobs {
+        let catalogs = self.catalogs.read().unwrap();
+        let key = if agent_id == "claude-free" { "claude" } else { agent_id };
+        controls::knobs(agent_id, allow_bypass, catalogs.get(key))
     }
 
     /// The launchers to offer: the allowed ones, the default (Claude Code unless set) first.
@@ -141,6 +149,8 @@ struct Daemon {
     proxy: Proxy,
     /// Rebuilt when keys change: the free tier needs one.
     launchers: RwLock<Vec<LauncherInfo>>,
+    /// Agent id → the models its own files list (see `watch_catalogs`).
+    catalogs: RwLock<HashMap<String, Catalog>>,
     sessions: Mutex<Vec<Arc<Session>>>,
     groups: Mutex<Vec<Group>>,
     worktrees: Mutex<Vec<SessionWorktree>>,
@@ -186,6 +196,9 @@ pub fn run() -> anyhow::Result<()> {
     let proxy = Proxy::start(keys)?;
     proxy.set_budget(Settings::load().policies.session_token_budget);
     let daemon = new_daemon(proxy, launchers(free_tier));
+    // Before sessions restart, so they get the efforts their models take.
+    let mut stamps = CatalogStamps::new();
+    read_catalogs(&daemon, &mut stamps);
     restore(&daemon, saved);
     {
         // Pick up late-discovered agent ids (Codex) and sessions that exited on their own.
@@ -205,6 +218,10 @@ pub fn run() -> anyhow::Result<()> {
                 apply_pending(&d);
             }
         });
+    }
+    {
+        let d = daemon.clone();
+        std::thread::spawn(move || watch_catalogs(&d, stamps));
     }
     {
         let d = daemon.clone();
@@ -235,11 +252,62 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Each catalog's files (and the agent's program) as last read, with when they changed.
+type CatalogStamps = HashMap<&'static str, Vec<(PathBuf, Option<SystemTime>)>>;
+
+/// Set `d.catalogs` to what Claude's and Codex's own files list, for those whose files (or the
+/// agent itself) changed since `seen`.
+fn read_catalogs(d: &Daemon, seen: &mut CatalogStamps) {
+    for agent in ["claude", "codex"] {
+        let program = d.launchers.read().unwrap().iter().find(|l| l.agent_id == agent).map(|l| l.program.clone());
+        let Some(program) = program else {
+            d.catalogs.write().unwrap().remove(agent);
+            continue;
+        };
+        let mut files = models::sources(agent);
+        files.push(PathBuf::from(&program));
+        let stamp: Vec<_> = files
+            .into_iter()
+            .map(|p| {
+                let m = p.metadata().and_then(|m| m.modified()).ok();
+                (p, m)
+            })
+            .collect();
+        if seen.get(agent) == Some(&stamp) {
+            continue;
+        }
+        let catalog = match agent {
+            "claude" => {
+                let out = std::process::Command::new(&program).arg("--version").stdin(std::process::Stdio::null()).output().ok();
+                let version = out.and_then(|o| models::version_of(&String::from_utf8_lossy(&o.stdout)));
+                models::claude_from_files(version.as_deref())
+            }
+            // No cache yet: Codex prints the same list itself.
+            _ => models::codex_from_files().or_else(|| models::codex_from_program(&program)),
+        };
+        let mut catalogs = d.catalogs.write().unwrap();
+        match catalog {
+            Some(c) => catalogs.insert(agent.to_string(), c),
+            None => catalogs.remove(agent),
+        };
+        seen.insert(agent, stamp);
+    }
+}
+
+/// Keep reading the catalogs as the agents rewrite them; off the request path.
+fn watch_catalogs(d: &Daemon, mut seen: CatalogStamps) {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        read_catalogs(d, &mut seen);
+    }
+}
+
 /// The daemon's state, with what was saved of it (all but the sessions, see `restore`).
 fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
     let daemon = Arc::new(Daemon {
         proxy,
         launchers: RwLock::new(launchers),
+        catalogs: RwLock::default(),
         sessions: Mutex::default(),
         groups: Mutex::new(load_groups()),
         worktrees: Mutex::new(load_worktrees()),
@@ -789,7 +857,7 @@ fn local_spec(
         }
         _ => {}
     }
-    wired_args.extend(controls::args(&l.agent_id, controls));
+    wired_args.extend(controls::args(&l.agent_id, controls, &d.knobs(&l.agent_id, true)));
     wired_args.extend(args.iter().cloned());
     // Claude and Codex both take an opening prompt as their last argument.
     wired_args.extend(prompt);
@@ -829,7 +897,7 @@ fn remote_spec(
         "shell" => ssh::Program::Shell,
         _ => ssh::Program::Agent { bin: &bin, name: &l.label },
     };
-    wired.extend(controls::args(&l.agent_id, controls));
+    wired.extend(controls::args(&l.agent_id, controls, &d.knobs(&l.agent_id, true)));
     wired.extend(args.iter().cloned());
     wired.extend(prompt);
     let command = ssh::remote_command(host, folder, &program, &wired);
