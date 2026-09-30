@@ -490,6 +490,10 @@ pub struct ArchivedInfo {
     pub resumable: bool,
     /// Its worktree was removed and comes back from `branch` when it's started again.
     pub worktree_removed: bool,
+    /// The agent (`claude`, `codex`…) and its own conversation id, to read the conversation back.
+    pub agent: String,
+    pub agent_session: Option<String>,
+    pub pinned: bool,
 }
 
 /// A worktree dino made, for the Storage list.
