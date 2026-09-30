@@ -79,7 +79,7 @@ pub async fn delete(s: &AppState, account: Uuid) -> Result<DateTime<Utc>> {
     Ok(Utc::now() + ERASE_AFTER)
 }
 
-/// Everything stored about the account, as JSON. Synced records join this once sync exists.
+/// Everything stored about the account, as JSON.
 pub async fn export(s: &AppState, account: Uuid) -> Result<Value> {
     let mut v = summary(s, account).await?;
     let all: Vec<Device> = sqlx::query_as::<_, Device>(
@@ -89,7 +89,10 @@ pub async fn export(s: &AppState, account: Uuid) -> Result<Value> {
     .fetch_all(&s.db)
     .await?;
     v["devices"] = json!(all);
-    v["records"] = json!([]);
+    // Values stay sealed: they open only with the account key, which the server never has.
+    v["records"] = json!(crate::api::sync::export(s, account).await?);
+    let wrapped: Option<(String,)> = sqlx::query_as("SELECT wrapped_recovery FROM sync_keys WHERE account_id = $1").bind(account).fetch_optional(&s.db).await?;
+    v["recovery_wrapped_key"] = json!(wrapped.map(|w| w.0));
     v["exported_at"] = json!(Utc::now());
     Ok(v)
 }

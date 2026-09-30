@@ -56,7 +56,7 @@ pub struct Server {
     pub base: String,
     pub state: AppState,
     pub mail: std::path::PathBuf,
-    db_name: String,
+    db_url: String,
 }
 
 async fn upstream_mock() -> SocketAddr {
@@ -82,7 +82,8 @@ pub async fn start() -> Server {
     let admin_url = std::env::var("DINO_TEST_DATABASE_URL").unwrap_or_else(|_| "postgres://dino@127.0.0.1:55432/postgres".into());
     let db_name = format!("dino_test_{}", uuid::Uuid::new_v4().simple());
     let admin = PgPoolOptions::new().max_connections(1).connect(&admin_url).await.expect("test Postgres (see README)");
-    sqlx::query(&format!("CREATE DATABASE {db_name}")).execute(&admin).await.unwrap();
+    // The name is ours: a fixed prefix and a UUID.
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {db_name}"))).execute(&admin).await.unwrap();
     admin.close().await;
     let db_url = format!("{}/{}", admin_url.rsplit_once('/').unwrap().0, db_name);
 
@@ -116,7 +117,34 @@ pub async fn start() -> Server {
     let state = AppState::with_pool(cfg, pool).await.unwrap();
     let s2 = state.clone();
     tokio::spawn(async move { serve(s2, listener).await.unwrap() });
-    Server { base: format!("http://127.0.0.1:{port}"), state, mail, db_name }
+    Server { base: format!("http://127.0.0.1:{port}"), state, mail, db_url }
+}
+
+impl Server {
+    /// Another node on the same database, as behind a load balancer.
+    pub async fn second_node(&self) -> Server {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut cfg = (*self.state.cfg).clone();
+        cfg.public_url = format!("http://127.0.0.1:{port}").parse().unwrap();
+        let pool = PgPoolOptions::new().max_connections(16).connect(&self.db_url).await.unwrap();
+        let state = AppState::with_pool(cfg, pool).await.unwrap();
+        let s2 = state.clone();
+        tokio::spawn(async move { serve(s2, listener).await.unwrap() });
+        Server { base: format!("http://127.0.0.1:{port}"), state, mail: self.mail.clone(), db_url: self.db_url.clone() }
+    }
+
+    /// Every row of every table, as text: what someone with the database would see.
+    pub async fn dump(&self) -> String {
+        let tables: Vec<(String,)> = sqlx::query_as("SELECT table_name::text FROM information_schema.tables WHERE table_schema = 'public'").fetch_all(&self.state.db).await.unwrap();
+        let mut out = String::new();
+        for (t,) in tables {
+            let rows: (Option<String>,) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT string_agg(to_jsonb(x)::text, E'\\n') FROM \"{t}\" x"))).fetch_one(&self.state.db).await.unwrap();
+            out.push_str(&rows.0.unwrap_or_default());
+            out.push('\n');
+        }
+        out
+    }
 }
 
 fn rand_secret() -> [u8; 32] {
