@@ -12,6 +12,7 @@ use rusqlite::{Connection, OpenFlags, params};
 use super::{Agent, ControlKind, StatusSource, Wiring, strings};
 use crate::found::{self, FoundSession};
 use crate::history::{self, Page, Turn, one_line, turn};
+use crate::providers::Format;
 
 pub(crate) struct Hermes {
     pub(crate) free: bool,
@@ -152,6 +153,19 @@ impl Agent for Hermes {
 
     fn free(&self) -> bool {
         self.free
+    }
+
+    fn provider_formats(&self) -> &'static [Format] {
+        if self.free { &[] } else { &[Format::Chat] }
+    }
+
+    // Its OpenAI-compatible provider pointed at dino for the session, as on the free tier.
+    fn provider_wiring(&self, url: &str, format: Format, model: &str) -> Option<Wiring> {
+        if self.free || format != Format::Chat {
+            return None;
+        }
+        let env = vec![("OPENAI_API_KEY".to_string(), "dino".to_string()), ("OPENAI_BASE_URL".to_string(), format!("{url}/v1"))];
+        Some((env, strings(&["--provider", "openai-api", "-m", model])))
     }
 
     fn model_args(&self, model: &str) -> Vec<String> {

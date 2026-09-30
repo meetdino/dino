@@ -18,7 +18,7 @@
       "source": "https://github.com/openai/codex/discussions/7782"
     },
     "qwen": {
-      "formats": ["anthropic", "chat", "responses"],
+      "formats": ["chat", "anthropic", "responses"],
       "min_context": 32000,
       "needs": ["tools"]
     },

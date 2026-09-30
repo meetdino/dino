@@ -11,6 +11,7 @@ use super::{Agent, ControlKind, StatusSource, Wiring, strings};
 use crate::found::{self, FoundSession, Source};
 use crate::history::{self, Turn};
 use crate::models::{self, Catalog};
+use crate::providers::Format;
 use crate::procinfo;
 
 pub(crate) struct Codex;
@@ -159,6 +160,29 @@ impl Agent for Codex {
 
     fn metered(&self) -> bool {
         true
+    }
+
+    fn provider_formats(&self) -> &'static [Format] {
+        &[Format::Responses]
+    }
+
+    // A provider of its own for the session, named so it can't be one of Codex's built-in ones
+    // (openai, ollama, lmstudio). The key is a placeholder: dino's proxy holds the real one.
+    fn provider_wiring(&self, url: &str, format: Format, model: &str) -> Option<Wiring> {
+        if format != Format::Responses {
+            return None;
+        }
+        let config = [
+            "model_provider=\"dino\"".to_string(),
+            "model_providers.dino.name=\"dino\"".into(),
+            format!("model_providers.dino.base_url=\"{url}/v1\""),
+            "model_providers.dino.wire_api=\"responses\"".into(),
+            "model_providers.dino.env_key=\"DINO_PROVIDER_KEY\"".into(),
+            "model_providers.dino.supports_websockets=false".into(),
+        ];
+        let mut args: Vec<String> = config.into_iter().flat_map(|a| ["-c".to_string(), a]).collect();
+        args.extend(strings(&["-m", model]));
+        Some((vec![("DINO_PROVIDER_KEY".into(), "dino".into())], args))
     }
 
     fn session_args(&self, session: &mut Option<String>, _restoring: bool) -> (Vec<String>, Vec<String>) {

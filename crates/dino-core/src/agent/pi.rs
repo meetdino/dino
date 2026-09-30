@@ -14,6 +14,7 @@ use super::{Agent, ControlKind, LogEvent, StatusSource, Wiring, strings};
 use crate::found::{self, FoundSession};
 use crate::history::{self, Meta, Turn, one_line, turn};
 use crate::models::{Catalog, ModelInfo};
+use crate::providers::Format;
 
 pub(crate) struct Pi {
     pub(crate) free: bool,
@@ -177,6 +178,26 @@ fn route_extension(base: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// An extension that gives this Pi session a provider, "dino", serving `model` at `url` (a dino
+/// proxy route) in `format`. Like the free tier's, it registers nothing else. The key is a
+/// placeholder: dino's proxy holds the real one.
+fn provider_extension(url: &str, format: Format, model: &str) -> Option<PathBuf> {
+    let dir = crate::config_dir().join("pi");
+    std::fs::create_dir_all(&dir).ok()?;
+    let session = url.split("/s/").nth(1).and_then(|r| r.split('/').next()).unwrap_or("session");
+    let name: String = session.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let path = dir.join(format!("provider-{name}.js"));
+    let (api, base) = match format {
+        Format::Anthropic => ("anthropic-messages", url.to_string()),
+        Format::Chat => ("openai-completions", format!("{url}/v1")),
+        Format::Responses => ("openai-responses", format!("{url}/v1")),
+    };
+    let config = serde_json::json!({"baseUrl": base, "api": api, "apiKey": "dino", "models": [{"id": model, "name": model}]});
+    let text = format!("// Written by dino: this Pi session's model, served through dino. No tools.\nexport default function (pi) {{\n  pi.registerProvider(\"dino\", {config});\n}}\n");
+    std::fs::write(&path, text).ok()?;
+    Some(path)
+}
+
 /// When a file was created, in seconds.
 fn born(p: &Path) -> u64 {
     p.metadata().and_then(|m| m.created()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
@@ -232,6 +253,20 @@ impl Agent for Pi {
 
     fn free(&self) -> bool {
         self.free
+    }
+
+    fn provider_formats(&self) -> &'static [Format] {
+        if self.free { &[] } else { &[Format::Anthropic, Format::Chat, Format::Responses] }
+    }
+
+    // A provider of its own for the session, from an extension that only registers it (no tools),
+    // as on the free tier.
+    fn provider_wiring(&self, url: &str, format: Format, model: &str) -> Option<Wiring> {
+        if self.free {
+            return None;
+        }
+        let ext = provider_extension(url, format, model)?;
+        Some((vec![], vec!["-e".into(), ext.display().to_string(), "--provider".into(), "dino".into(), "--model".into(), model.into()]))
     }
 
     fn model_args(&self, model: &str) -> Vec<String> {

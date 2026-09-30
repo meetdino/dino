@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::{Agent, ControlKind, StatusSource, Wiring, strings};
+use crate::providers::Format;
 use crate::found::{self, FoundSession, Source};
 use crate::history::{self, Meta, Turn, one_line, turn, typed};
 
@@ -177,6 +178,28 @@ impl Agent for Qwen {
 
     fn free(&self) -> bool {
         self.free
+    }
+
+    fn provider_formats(&self) -> &'static [Format] {
+        // Its own way to a custom endpoint is its OpenAI mode.
+        if self.free { &[] } else { &[Format::Chat, Format::Anthropic, Format::Responses] }
+    }
+
+    // Each of its auth types takes a base URL of its own; the key is a placeholder for dino's.
+    fn provider_wiring(&self, url: &str, format: Format, model: &str) -> Option<Wiring> {
+        if self.free {
+            return None;
+        }
+        let (auth, env, base) = match format {
+            Format::Anthropic => ("anthropic", vec![("ANTHROPIC_BASE_URL", url.to_string()), ("ANTHROPIC_API_KEY", "dino".into()), ("ANTHROPIC_MODEL", model.into())], None),
+            Format::Chat => ("openai", vec![], Some(format!("{url}/v1"))),
+            Format::Responses => ("openai-responses", vec![], Some(format!("{url}/v1"))),
+        };
+        let mut args = strings(&["--auth-type", auth, "-m", model]);
+        if let Some(base) = base {
+            args.extend(["--openai-base-url".into(), base, "--openai-api-key".into(), "dino".into()]);
+        }
+        Some((env.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), args))
     }
 
     fn model_args(&self, model: &str) -> Vec<String> {
