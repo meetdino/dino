@@ -304,6 +304,9 @@ pub struct Page {
 /// the end). A Claude subagent's id reads its own transcript.
 pub fn conversation(agent: &str, session_id: &str, before: Option<u64>) -> Option<Page> {
     let a = crate::agent::agent(agent)?;
+    if let Some(p) = a.page(session_id, before) {
+        return Some(p);
+    }
     page(a, &a.transcript(session_id)?, before)
 }
 
