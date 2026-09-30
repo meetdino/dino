@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use dino_core::ipc::{self, LauncherInfo};
 use dino_proxy::Activity;
 
-use crate::schedule::{check_trust, type_when_ready};
+use crate::schedule::check_trust;
 use crate::{Daemon, Launch, Session, idle, save, send_input, spawn, spawn_in_worktree, stats, work_dir};
 
 /// Screen lines `read_session` gives by default, and at most.
@@ -35,26 +35,20 @@ pub(crate) fn find(d: &Daemon, id: &str) -> anyhow::Result<Arc<Session>> {
 }
 
 /// A new session for session `by`'s agent. Claude isn't started where it would ask whether to
-/// trust the folder: the agent asking can't answer that for the user.
+/// trust the folder: the agent asking can't answer that for the user. Nor is a shell: its
+/// commands would run with none of the checks an agent asks the user through.
 pub(crate) fn start(d: &Daemon, launcher: &str, cwd: Option<String>, prompt: Option<String>, worktree: bool, by: Option<String>) -> anyhow::Result<String> {
     let l: LauncherInfo = d.allowed_launcher(launcher)?;
+    anyhow::ensure!(l.agent_id != "shell", "an agent can't start a shell session: its commands would run without asking the user. Start an agent instead");
     // Where the asking session is, when no folder is given.
     let cwd = cwd.or_else(|| by.as_deref().and_then(|b| find(d, b).ok()).filter(|s| s.host.is_none()).map(|s| s.cwd.display().to_string()));
     let dir = work_dir(cwd.as_deref());
     anyhow::ensure!(dir.is_dir(), "{} isn't a folder", dir.display());
     check_trust(&l, &dir, worktree)?;
     let prompt = prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
-    let shell = l.agent_id == "shell";
-    let launch = Launch {
-        prompt: prompt.clone().filter(|_| !shell),
-        started_by: by,
-        ..Launch::new(&l.short, vec![], Some(dir.display().to_string()))
-    };
+    let launch = Launch { prompt, started_by: by, ..Launch::new(&l.short, vec![], Some(dir.display().to_string())) };
     let id = if worktree { spawn_in_worktree(d, launch)? } else { spawn(d, launch)? };
     save(d);
-    if let (true, Some(p)) = (shell, prompt) {
-        type_when_ready(d, &id, &p);
-    }
     Ok(id)
 }
 
@@ -100,12 +94,25 @@ pub(crate) fn message(d: &Daemon, id: &str, text: &str, by: Option<String>) -> a
     anyhow::ensure!(by.as_deref() != Some(id), "that's this session; message another one");
     anyhow::ensure!(!text.trim().is_empty(), "the message is empty");
     anyhow::ensure!(!s.pane.is_exited(), "{} has exited", s.name);
+    // Its mode as dino set it, as the agent last reported it (Claude's Shift+Tab), and as it's
+    // about to become.
+    let reported = d.proxy.stats.session(&s.id).agent_mode.as_deref().and_then(|m| dino_core::controls::reported_mode(&s.agent_id, m));
+    let pending = s.pending.lock().unwrap().as_ref().and_then(|c| c.mode.clone());
+    check_messageable(&s.name, &s.agent_id, &[s.controls.mode.as_deref(), reported.as_deref(), pending.as_deref()])?;
     // Typed into a permission prompt or mid-turn, the text would answer the wrong question.
     anyhow::ensure!(idle(d, &s), "{} is {}; message it once it's idle", s.name, status(d, &s));
     // Hand over only once nobody is typing into it, so the text doesn't join a half-written prompt.
     anyhow::ensure!(s.attached.load(Ordering::Relaxed) == 0 || s.poked.lock().unwrap().is_none_or(|t| t.elapsed() > USER_TYPING), "the user is typing in {}; try again shortly", s.name);
     *s.messaged_by.lock().unwrap() = by;
     send_input(&s, text.trim(), true);
+    Ok(())
+}
+
+/// Another session's agent may only message an agent that still asks the user before acting: not
+/// a shell, which would run the message as a command, nor an agent in bypass mode (`modes`).
+fn check_messageable(name: &str, agent_id: &str, modes: &[Option<&str>]) -> anyhow::Result<()> {
+    anyhow::ensure!(agent_id != "shell", "{name} is a shell: another session's agent can't type commands into it");
+    anyhow::ensure!(!modes.contains(&Some("bypass")), "{name} is in bypass mode, running whatever it's told without asking: another session's agent can't message it");
     Ok(())
 }
 
@@ -130,5 +137,24 @@ pub(crate) fn ipc_result(r: anyhow::Result<()>) -> ipc::Response {
     match r {
         Ok(()) => ipc::Response::Ok,
         Err(e) => ipc::Response::Error { message: e.to_string() },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_agents_that_still_ask_can_be_messaged() {
+        assert!(check_messageable("claude", "claude", &[Some("ask"), None, None]).is_ok());
+        assert!(check_messageable("codex", "codex", &[None, None, None]).is_ok());
+        assert!(check_messageable("zsh", "shell", &[None, None, None]).is_err());
+        // Set by dino, switched to in the agent, or about to be.
+        for i in 0..3 {
+            let mut modes = [Some("ask"), None, None];
+            modes[i] = Some("bypass");
+            let e = check_messageable("claude", "claude", &modes).unwrap_err().to_string();
+            assert!(e.contains("bypass"), "{e}");
+        }
     }
 }

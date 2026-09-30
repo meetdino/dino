@@ -104,7 +104,7 @@ fn tools(read_only: bool) -> Vec<Value> {
     if !read_only {
         out.push(json!({
             "name": "send_message",
-            "description": "Type a message into another session's agent and submit it, as if the user had. Only works while that session is idle; if it's working or waiting on the user, try later.",
+            "description": "Type a message into another session's agent and submit it, as if the user had. Only works while that session is idle; if it's working or waiting on the user, try later. Shells and agents in bypass mode can't be messaged.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "session": session, "text": { "type": "string", "description": "The message" } },
@@ -117,8 +117,8 @@ fn tools(read_only: bool) -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent": { "type": "string", "description": "Which agent: claude (default), codex, shell, or another launcher dino offers" },
-                    "prompt": { "type": "string", "description": "Its first message (for a shell, a command)" },
+                    "agent": { "type": "string", "description": "Which agent: claude (default), codex, or another agent dino offers (not a shell)" },
+                    "prompt": { "type": "string", "description": "Its first message (it can't start with \"-\")" },
                     "cwd": { "type": "string", "description": "Folder to work in (default: this session's)" },
                     "worktree": { "type": "boolean", "description": "Work in a new git worktree and branch of that folder's repo, so its changes stay apart (default false)" },
                 },
