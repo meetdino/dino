@@ -872,7 +872,6 @@ struct ResumeButton: View {
 
 struct StatusDot: View {
     let status: SessionStatus
-    @State private var pulse = false
 
     var body: some View {
         ZStack {
@@ -888,19 +887,78 @@ struct StatusDot: View {
             case .idle:
                 Circle().strokeBorder(.secondary, lineWidth: 1.5).frame(width: 10, height: 10)
             case .thinking, .working:
-                Circle().fill(status.color).frame(width: 10, height: 10)
-                    .opacity(pulse ? 0.35 : 1)
-                    .animation(.easeInOut(duration: 0.7).repeatForever(), value: pulse)
-                    .onAppear { pulse = true }
+                Pulse(color: NSColor(status.color), ring: false, period: 0.7).frame(width: 10, height: 10)
             case .waiting:
                 // A ring, slower: busy, but not the agent itself.
-                Circle().strokeBorder(status.color, lineWidth: 2).frame(width: 10, height: 10)
-                    .opacity(pulse ? 0.35 : 1)
-                    .animation(.easeInOut(duration: 1.4).repeatForever(), value: pulse)
-                    .onAppear { pulse = true }
+                Pulse(color: NSColor(status.color), ring: true, period: 1.4).frame(width: 10, height: 10)
             }
         }
         .frame(width: 14, height: 14)
+    }
+}
+
+/// A dot or ring that fades in and out. Core Animation runs it in the render server: a SwiftUI
+/// repeating animation re-renders the whole window on the main thread every frame while any
+/// session is busy.
+private struct Pulse: NSViewRepresentable {
+    let color: NSColor
+    let ring: Bool
+    let period: Double
+
+    func makeNSView(context: Context) -> PulseView { PulseView() }
+
+    func updateNSView(_ view: PulseView, context: Context) {
+        view.set(color: color, ring: ring, period: period)
+    }
+}
+
+final class PulseView: NSView {
+    private let shape = CAShapeLayer()
+    private var style: (NSColor, Bool, Double)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.addSublayer(shape)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func set(color: NSColor, ring: Bool, period: Double) {
+        if let s = style, s.0 == color, s.1 == ring, s.2 == period { return }
+        style = (color, ring, period)
+        needsLayout = true
+        shape.removeAnimation(forKey: "pulse")
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0.35
+        fade.duration = period
+        fade.autoreverses = true
+        fade.repeatCount = .infinity
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        // Survives the view leaving and rejoining a window, as sidebar rows do.
+        fade.isRemovedOnCompletion = false
+        shape.add(fade, forKey: "pulse")
+    }
+
+    override func layout() {
+        super.layout()
+        guard let (color, ring, _) = style else { return }
+        let resolved = color.usingColorSpace(.deviceRGB)?.cgColor ?? color.cgColor
+        let inset: CGFloat = ring ? 1 : 0
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        shape.frame = bounds
+        shape.path = CGPath(ellipseIn: bounds.insetBy(dx: inset, dy: inset), transform: nil)
+        shape.fillColor = ring ? nil : resolved
+        shape.strokeColor = ring ? resolved : nil
+        shape.lineWidth = ring ? 2 : 0
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsLayout = true
     }
 }
 
