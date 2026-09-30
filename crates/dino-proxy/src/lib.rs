@@ -75,6 +75,8 @@ pub struct SessionStats {
     pub call_error: Option<String>,
     /// The agent reports its turns through hooks (Claude).
     pub hooked: bool,
+    /// The agent's own record says where its turns are (Codex's rollout): no guessing from quiet.
+    pub tracked: bool,
     /// The permission mode the agent last said it's in, in its own words (Claude's hooks).
     pub agent_mode: Option<String>,
     /// Router tier for free-tier sessions ("fast", "code", "reason").
@@ -219,6 +221,15 @@ impl Stats {
             if s.activity == Some(Activity::Working) && s.in_flight == 0 {
                 s.activity = Some(Activity::Done);
             }
+        });
+    }
+
+    /// Where the agent's turn is, as its own record says (Codex's rollout and notices): what the
+    /// hooks say for Claude.
+    pub fn report(&self, id: &str, activity: Activity) {
+        self.update(id, |s| {
+            s.tracked = true;
+            s.activity = Some(activity);
         });
     }
 
