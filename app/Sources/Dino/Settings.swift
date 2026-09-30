@@ -25,6 +25,8 @@ struct DinoSettings: Codable, Equatable {
         var onboarded: Bool
         /// Keep the Mac from idle-sleeping while tasks are scheduled; nil from an older dinod.
         var keep_awake: Bool?
+        /// Shells mark their prompts and say where they are; nil from an older dinod (on there).
+        var shell_integration: Bool?
     }
     struct Repo: Codable, Equatable { var env: [String: String] }
     struct SshHost: Codable, Equatable { var folder: String }
@@ -420,6 +422,7 @@ private struct StoreError: View {
 private struct GeneralPane: View {
     @EnvironmentObject var store: SettingsStore
     @AppStorage(QuitChoice.key) private var quitChoice = ""
+    @AppStorage(StartWith.key) private var startWith = StartWith.last.rawValue
 
     var body: some View {
         Form {
@@ -431,6 +434,37 @@ private struct GeneralPane: View {
                 }
             } footer: {
                 Footnote("Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
+            }
+            Section {
+                Picker("When dino opens", selection: $startWith) {
+                    Text("Your last session").tag(StartWith.last.rawValue)
+                    Text("A new shell").tag(StartWith.shell.rawValue)
+                }
+                Toggle("Shell integration", isOn: Binding(
+                    get: { store.settings?.machine.shell_integration ?? true },
+                    set: { on in store.update { $0.machine.shell_integration = on } }
+                ))
+                .disabled(store.settings == nil)
+                .orgLocked("machine.shell_integration")
+                LabeledContent("Ghostty config") {
+                    let files = GhosttyConfig.loaded.map { NSString(string: $0).abbreviatingWithTildeInPath }
+                    Text(files.isEmpty ? "None: Ghostty's defaults" : files.joined(separator: "\n"))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .textSelection(.enabled)
+                }
+                if !GhosttyConfig.skipped.isEmpty {
+                    LabeledContent("Left out") {
+                        Text(GhosttyConfig.skipped.joined(separator: "\n"))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                            .textSelection(.enabled)
+                    }
+                }
+            } header: {
+                Text("Terminal")
+            } footer: {
+                Footnote("With no session to come back to, dino opens a shell; ⌘T opens another where you are. Shell integration has zsh and bash mark each prompt and say which folder they're in, as in Ghostty, without touching your startup files (new shells). Panes take your Ghostty font, colors, cursor and keybinds, and edits as you save them; dino keeps its own shortcuts and starts each pane itself, so command and working-directory don't apply.")
             }
             Section {
                 Toggle("Keep your Mac awake while tasks are scheduled", isOn: Binding(
