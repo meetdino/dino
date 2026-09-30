@@ -149,7 +149,7 @@ fn instructions(shell: &str) -> String {
 fn request_text(o: &Opts, output: Option<&str>) -> String {
     let mut t = format!("Folder: {}\n", o.cwd.display());
     if let Some(last) = &o.last {
-        t.push_str(&format!("Last command: {last}{}\n", o.status.map(|s| format!(" (exit {s})")).unwrap_or_default()));
+        t.push_str(&format!("Last command: {}{}\n", hide_secrets(last), o.status.map(|s| format!(" (exit {s})")).unwrap_or_default()));
     }
     if let Some(output) = output {
         t.push_str(&format!("Its output (last lines):\n{output}\n"));
@@ -351,7 +351,11 @@ fn agent(o: &Opts) -> anyhow::Result<()> {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
     // What the shell's last command printed goes along, so "fix this" has something to fix.
     let context = by.as_ref().and_then(|_| shell_output()).map(|(text, exit)| {
-        let what = o.last.as_deref().map(|c| format!("`{c}`")).unwrap_or_else(|| "the last command".into());
+        let what = match o.last.as_deref().map(hide_secrets) {
+            Some(c) if c.starts_with("[line hidden") => "the last command (not shown: it looks like it holds a secret)".into(),
+            Some(c) => format!("`{c}`"),
+            None => "the last command".to_string(),
+        };
         let how = exit.map(|e| format!(", which exited with {e},")).unwrap_or_default();
         format!("\n\nFor context: in my shell, {what}{how} printed:\n```\n{text}\n```")
     });
