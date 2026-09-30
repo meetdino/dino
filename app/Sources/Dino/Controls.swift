@@ -47,22 +47,26 @@ enum ControlKind: String, Identifiable {
         }
     }
 
-    /// The choices besides Default, as (value, label, explanation).
-    func options(_ k: Knobs, seen: [String] = [], current: String? = nil) -> [(String, String, String?)] {
+    /// The choices besides Default. `model` is the one chosen, for the efforts it takes.
+    func options(_ k: Knobs, seen: [String] = [], current: String? = nil, model: String? = nil) -> [ControlOption] {
         switch self {
         case .mode:
-            return k.modes.map { ($0, Mode.label($0), Mode.help($0)) }
+            return k.modes.map { ControlOption(value: $0, label: Mode.label($0), help: Mode.help($0)) }
         case .model:
-            // The agent's aliases, then models its sessions have answered with, then one typed by hand.
-            var names = k.models
-            for m in seen where !names.contains(where: { same(m, $0) }) {
-                names.append(m)
+            // The agent's own list, then models its sessions have answered with, then one typed by hand.
+            var out = k.models.map { ControlOption(value: $0.id, label: $0.label, help: $0.id, group: $0.group) }
+            let known = { (m: String) in k.listed(m) != nil || out.contains { same(m, $0.value) } }
+            for m in seen where !known(m) {
+                out.append(ControlOption(value: m, label: shortModel(m), help: m))
             }
-            // The chosen one needs its own entry even when it's an alias's full name, or the picker shows nothing.
-            if let current, !names.contains(current) { names.append(current) }
-            return names.map { ($0, shortModel($0), nil) }
+            // One typed by hand needs its own entry, or the picker shows nothing; an alias is its model's.
+            if let current, k.listed(current) == nil, !out.contains(where: { $0.value == current }) {
+                out.append(ControlOption(value: current, label: k.label(current), help: current))
+            }
+            return out
         case .effort:
-            return k.efforts.map { ($0, $0.capitalized, nil) }
+            let recommended = k.listed(model ?? k.default_model)?.default_effort
+            return k.efforts(for: model).map { ControlOption(value: $0, label: $0.capitalized, help: $0 == recommended ? "Recommended for this model" : nil) }
         }
     }
 
@@ -75,6 +79,25 @@ enum ControlKind: String, Identifiable {
         case "bypass": "exclamationmark.shield"
         default: "shield"
         }
+    }
+}
+
+/// One choice in a control's picker.
+struct ControlOption {
+    var value: String
+    var label: String
+    var help: String?
+    /// Listed after the rest, under this heading ("More models").
+    var group: String?
+}
+
+extension Controls {
+    /// `self` with `model` chosen, and its effort brought within what that model takes.
+    func choosing(model: String?, in k: Knobs) -> Controls {
+        var c = self
+        c.model = model
+        c.effort = k.clamp(effort, for: model)
+        return c
     }
 }
 
@@ -97,24 +120,48 @@ struct ControlFields: View {
 
     private static let other = "\u{1}other"
 
+    /// The model efforts are for: the one chosen here, else the default.
+    private var model: String? { controls.model ?? defaults.model }
+
+    private func set(_ kind: ControlKind, _ v: String?) {
+        if kind == .model {
+            controls = controls.choosing(model: v, in: knobs)
+        } else {
+            kind.set(&controls, v)
+        }
+    }
+
     private func picker(_ kind: ControlKind) -> some View {
-        let options = kind.options(knobs, seen: seen, current: kind.value(controls))
-        let fallback = kind.value(defaults).map { v in options.first { $0.0 == v }?.1 ?? shortModel(v) }
+        let options = kind.options(knobs, seen: seen, current: kind.value(controls), model: model)
+        let fallback = kind == .model
+            ? (defaults.model ?? knobs.default_model).map(knobs.label)
+            : kind.value(defaults).map { v in options.first { $0.value == v }?.label ?? v }
         return Picker(kind == .mode ? "Mode" : kind.title, selection: Binding(
-            get: { typing && kind == .model ? Self.other : kind.value(controls) ?? "" },
+            get: {
+                if typing && kind == .model { return Self.other }
+                let v = kind.value(controls) ?? ""
+                return kind == .model ? knobs.canonical(v) : v
+            },
             set: { v in
                 if v == Self.other {
                     typed = controls.model ?? ""
                     typing = true
                 } else {
                     typing = false
-                    kind.set(&controls, v.isEmpty ? nil : v)
+                    set(kind, v.isEmpty ? nil : v)
                 }
             }
         )) {
             Text(fallback.map { "Default (\($0))" } ?? "Default").tag("")
-            ForEach(options, id: \.0) { o in
-                Text(o.1).tag(o.0).help(o.2 ?? o.0)
+            ForEach(options.filter { $0.group == nil }, id: \.value) { o in
+                Text(o.label).tag(o.value).help(o.help ?? o.value)
+            }
+            ForEach(Array(Set(options.compactMap(\.group))).sorted(), id: \.self) { g in
+                Section(g) {
+                    ForEach(options.filter { $0.group == g }, id: \.value) { o in
+                        Text(o.label).tag(o.value).help(o.help ?? o.value)
+                    }
+                }
             }
             if kind == .model {
                 Divider()
@@ -142,12 +189,13 @@ struct ControlFields: View {
                     .font(.body.monospaced())
                     .onSubmit {
                         let name = typed.trimmingCharacters(in: .whitespaces)
-                        controls.model = name.isEmpty ? nil : name
+                        set(.model, name.isEmpty ? nil : name)
                         typing = false
                     }
             }
         }
-        if ControlKind.effort.offered(by: knobs) {
+        // A model without effort levels (Haiku) has no effort to pick.
+        if ControlKind.effort.offered(by: knobs), !knobs.efforts(for: model).isEmpty {
             field(.effort)
         }
     }
@@ -231,7 +279,7 @@ struct SessionControlsBar: View {
     let session: SessionInfo
 
     var body: some View {
-        let knobs = model.knobs(for: session) ?? Knobs(modes: [], model: false, models: [], efforts: [], restart: false)
+        let knobs = model.knobs(for: session) ?? .none
         let c = session.shownControls
         HStack(spacing: 2) {
             if ControlKind.mode.offered(by: knobs) {
@@ -239,10 +287,11 @@ struct SessionControlsBar: View {
                      tint: c.mode == "bypass" ? .red : nil)
             }
             if ControlKind.model.offered(by: knobs) {
-                let text = c.model.map(shortModel) ?? session.last_model.map { "Default · \(shortModel($0))" } ?? "Default"
+                let text = c.model.map(knobs.label) ?? session.last_model.map { "Default · \(knobs.label($0))" } ?? "Default"
                 chip(.model, knobs, icon: "cpu", text: text, tint: session.otherModel == nil ? nil : .orange)
             }
-            if ControlKind.effort.offered(by: knobs) {
+            // A model without effort levels (Haiku) has none to show.
+            if ControlKind.effort.offered(by: knobs), !knobs.efforts(for: c.model).isEmpty {
                 chip(.effort, knobs, icon: "gauge.with.dots.needle.50percent", text: c.effort?.capitalized ?? "Default")
             }
             if session.pending != nil {
@@ -301,14 +350,23 @@ struct ControlPopover: View {
     let knobs: Knobs
     @State private var typed = ""
 
-    private var current: String? { kind.value(session.shownControls) }
+    /// What's chosen, an alias as the model it names so its row is checked.
+    private var current: String? {
+        let v = kind.value(session.shownControls)
+        return kind == .model ? v.map(knobs.canonical) : v
+    }
 
     var body: some View {
-        let options: [(String?, String, String?)] = [(nil, "Default", "The agent's own setting")]
-            + kind.options(knobs, seen: model.seenModels(session.agent_id), current: current).map { ($0.0, $0.1, $0.2) }
+        let listed = kind.options(knobs, seen: model.seenModels(session.agent_id), current: current, model: session.shownControls.model)
+        // Ungrouped first, so the numbers follow what's shown.
+        let ordered = listed.filter { $0.group == nil } + listed.filter { $0.group != nil }
+        let options: [(String?, String, String?)] = [(nil, "Default", defaultHelp)] + ordered.map { ($0.value, $0.label, $0.help) }
         VStack(alignment: .leading, spacing: 2) {
             Text(kind.title).font(.headline).padding(.bottom, 6)
             ForEach(Array(options.enumerated()), id: \.offset) { i, o in
+                if i > 0, let g = ordered[i - 1].group, i == 1 || ordered[i - 2].group != g {
+                    Text(g).font(.caption).foregroundStyle(.secondary).padding(.top, 6)
+                }
                 row(i, o)
             }
             if kind == .model {
@@ -368,9 +426,19 @@ struct ControlPopover: View {
         }
     }
 
+    /// What Default is here, when the agent's settings say.
+    private var defaultHelp: String {
+        if kind == .model, let d = knobs.default_model { return "The agent's own setting: \(knobs.label(d))" }
+        return "The agent's own setting"
+    }
+
     private func choose(_ value: String?) {
         var c = session.shownControls
-        kind.set(&c, value)
+        if kind == .model {
+            c = c.choosing(model: value, in: knobs)
+        } else {
+            kind.set(&c, value)
+        }
         model.controlPicker = nil
         model.setControls(session.id, c)
     }
@@ -381,11 +449,14 @@ struct ControlMenuItems: View {
     @EnvironmentObject var model: DinoModel
 
     var body: some View {
-        let knobs = model.selectedSession.flatMap { model.knobs(for: $0) }
+        let session = model.selectedSession
+        let knobs = session.flatMap { model.knobs(for: $0) }
         ForEach([ControlKind.mode, .model, .effort]) { kind in
+            // A model without effort levels (Haiku) has none to pick.
+            let none = kind == .effort && (knobs?.efforts(for: session?.shownControls.model).isEmpty ?? true)
             Button("\(kind.title)…") { model.controlPicker = kind }
                 .keyboardShortcut(kind.shortcut, modifiers: [.command, .shift])
-                .disabled(!(knobs.map(kind.offered) ?? false))
+                .disabled(!(knobs.map(kind.offered) ?? false) || none)
         }
     }
 }

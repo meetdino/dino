@@ -211,17 +211,81 @@ struct Controls: Codable, Equatable, Hashable {
     }
 }
 
+/// One model an agent lists, as its own files say (see crates/dino-core/src/models.rs).
+struct ModelInfo: Codable, Equatable {
+    var id: String
+    var label: String
+    /// Effort levels it takes, lowest first; empty when it has none.
+    var efforts: [String]
+    var default_effort: String?
+    /// Listed after the main ones, under this heading.
+    var group: String?
+    /// Other names the agent takes for it ("haiku").
+    var aliases: [String]
+
+    func named(_ name: String) -> Bool {
+        id == name || aliases.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
+    }
+}
+
 /// What a launcher lets you choose; empty lists mean it has no such control.
 struct Knobs: Codable, Equatable {
     var modes: [String]
     var model: Bool
-    /// Short model names it understands; others can be typed.
-    var models: [String]
+    /// The models the agent lists; empty when it keeps no list, and the model is typed.
+    var models: [ModelInfo]
+    /// The model the agent starts with when none is chosen.
+    var default_model: String?
+    /// Every effort its models take, lowest first.
     var efforts: [String]
     /// Changing a control restarts the agent, resuming its conversation.
     var restart: Bool
 
     var any: Bool { !modes.isEmpty || model || !efforts.isEmpty }
+
+    static let none = Knobs(modes: [], model: false, models: [], default_model: nil, efforts: [], restart: false)
+
+    /// `name`'s entry: a model id or one of its aliases.
+    func listed(_ name: String?) -> ModelInfo? {
+        name.flatMap { n in models.first { $0.named(n) } }
+    }
+
+    /// The listed id `name` stands for ("haiku" is claude-haiku-4-5-…), else `name` itself.
+    func canonical(_ name: String) -> String {
+        listed(name)?.id ?? name
+    }
+
+    /// How to show a model: its listed name, else shortened.
+    func label(_ name: String) -> String {
+        listed(name)?.label ?? shortModel(name)
+    }
+
+    /// The efforts `model` takes (the agent's default when nil); all of them for one it doesn't list.
+    func efforts(for model: String?) -> [String] {
+        listed(model ?? default_model)?.efforts ?? efforts
+    }
+
+    /// `effort` kept for `model`: as is when it takes it, else the nearest level below that it does.
+    func clamp(_ effort: String?, for model: String?) -> String? {
+        guard let effort else { return nil }
+        let takes = efforts(for: model)
+        if takes.contains(effort) { return effort }
+        guard let wanted = efforts.firstIndex(of: effort) else { return nil }
+        return takes.filter { (efforts.firstIndex(of: $0) ?? .max) < wanted }.last
+    }
+}
+
+extension Knobs {
+    /// Leniently: a dinod from before model lists sent names, not entries.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        modes = try c.decodeIfPresent([String].self, forKey: .modes) ?? []
+        model = try c.decodeIfPresent(Bool.self, forKey: .model) ?? false
+        models = (try? c.decodeIfPresent([ModelInfo].self, forKey: .models)) ?? []
+        default_model = try c.decodeIfPresent(String.self, forKey: .default_model)
+        efforts = try c.decodeIfPresent([String].self, forKey: .efforts) ?? []
+        restart = try c.decodeIfPresent(Bool.self, forKey: .restart) ?? false
+    }
 }
 
 /// Neutral permission modes: dino maps each to the agent's own flags.

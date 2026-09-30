@@ -1,0 +1,449 @@
+{
+ "version": 2,
+ "catalog": {
+  "surface": "cc",
+  "config": {
+   "id": "cc",
+   "models": [
+    {
+     "id": "claude-opus-5-5",
+     "name": "Opus 5.5",
+     "short_name": "Opus",
+     "section": "main",
+     "quick_select": true,
+     "min_claude_code_version": "2.1.280",
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "high",
+        "name": "High"
+       },
+       {
+        "id": "xhigh",
+        "name": "Extra"
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "claude-fable-5-1",
+     "name": "Fable 5.1",
+     "short_name": "Fable",
+     "section": "main",
+     "quick_select": true,
+     "min_claude_code_version": "2.1.251",
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium"
+       },
+       {
+        "id": "high",
+        "name": "High",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "xhigh",
+        "name": "Extra"
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "claude-sonnet-5-5",
+     "name": "Sonnet 5.5",
+     "short_name": "Sonnet",
+     "section": "main",
+     "quick_select": true,
+     "min_claude_code_version": null,
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "high",
+        "name": "High"
+       },
+       {
+        "id": "xhigh",
+        "name": "Extra"
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "claude-haiku-4-5-20251001",
+     "name": "Haiku 4.5",
+     "short_name": "Haiku",
+     "section": "main",
+     "quick_select": true,
+     "min_claude_code_version": null,
+     "thinking": {
+      "type": "none"
+     }
+    },
+    {
+     "id": "claude-sonnet-5",
+     "name": "Sonnet 5",
+     "short_name": "Sonnet",
+     "section": "overflow",
+     "quick_select": null,
+     "min_claude_code_version": null,
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium"
+       },
+       {
+        "id": "high",
+        "name": "High",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "xhigh",
+        "name": "Extra"
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "claude-opus-5",
+     "name": "Opus 5",
+     "short_name": "Opus",
+     "section": "overflow",
+     "quick_select": null,
+     "min_claude_code_version": null,
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium"
+       },
+       {
+        "id": "high",
+        "name": "High",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "xhigh",
+        "name": "Extra"
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "claude-fable-5",
+     "name": "Fable 5",
+     "short_name": "Fable",
+     "section": "overflow",
+     "quick_select": null,
+     "min_claude_code_version": null,
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium"
+       },
+       {
+        "id": "high",
+        "name": "High",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "xhigh",
+        "name": "Extra"
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "claude-opus-4-8",
+     "name": "Opus 4.8",
+     "short_name": "Opus",
+     "section": "overflow",
+     "quick_select": null,
+     "min_claude_code_version": null,
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium"
+       },
+       {
+        "id": "high",
+        "name": "High",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "xhigh",
+        "name": "Extra"
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "claude-opus-4-7",
+     "name": "Opus 4.7",
+     "short_name": "Opus",
+     "section": "overflow",
+     "quick_select": null,
+     "min_claude_code_version": null,
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium"
+       },
+       {
+        "id": "high",
+        "name": "High"
+       },
+       {
+        "id": "xhigh",
+        "name": "Extra",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "claude-opus-4-6",
+     "name": "Opus 4.6",
+     "short_name": "Opus",
+     "section": "overflow",
+     "quick_select": null,
+     "min_claude_code_version": null,
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium"
+       },
+       {
+        "id": "high",
+        "name": "High",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "claude-sonnet-4-6",
+     "name": "Sonnet 4.6",
+     "short_name": "Sonnet",
+     "section": "overflow",
+     "quick_select": null,
+     "min_claude_code_version": null,
+     "thinking": {
+      "type": "effort",
+      "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+      "effort_options": [
+       {
+        "id": "low",
+        "name": "Low"
+       },
+       {
+        "id": "medium",
+        "name": "Medium"
+       },
+       {
+        "id": "high",
+        "name": "High",
+        "badge": {
+         "message": "Recommended",
+         "variant": "neutral"
+        }
+       },
+       {
+        "id": "max",
+        "name": "Max",
+        "tooltip": {
+         "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+        }
+       }
+      ]
+     }
+    }
+   ],
+   "settings_vocabulary": {
+    "create_mode": {
+     "default": 1
+    },
+    "effort_level": {
+     "high": 3,
+     "low": 1,
+     "max": 5,
+     "medium": 2,
+     "xhigh": 4
+    },
+    "thinking_mode": {
+     "auto": 2,
+     "extended": 1,
+     "off": 3
+    }
+   }
+  },
+  "state": {
+   "id": "cc",
+   "model": "claude-opus-5-5",
+   "thinking": {
+    "type": "effort",
+    "effort": "medium"
+   }
+  }
+ }
+}
