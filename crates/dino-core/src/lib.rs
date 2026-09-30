@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 pub mod agent;
 pub mod ask;
+pub mod compat;
 pub mod controls;
 pub mod discover;
 pub mod found;
@@ -14,6 +15,7 @@ pub mod models;
 pub mod pr;
 pub mod preview;
 pub mod procinfo;
+pub mod providers;
 pub mod review;
 pub mod schedule;
 pub mod settings;

@@ -794,6 +794,11 @@ fn main() -> anyhow::Result<()> {
         Some("search") => return search::run(&cli[1..]),
         Some("init") => return shell::init(cli.get(1).map(String::as_str)),
         Some("shell") => return shell::run(&cli[1..]),
+        Some("login") => return cmd_login(cli.get(1).map(String::as_str)),
+        Some("logout") => {
+            let provider = cli.get(1).cloned().ok_or_else(|| anyhow::anyhow!("usage: dino logout openrouter"))?;
+            return print_response(client::request(&Request::DisconnectProvider { provider })?);
+        }
         Some("fan") => return cmd_fan(&cli[1..]),
         Some("groups") => return cmd_groups(),
         Some("diff") => {
@@ -965,6 +970,38 @@ fn cmd_fan(args: &[String]) -> anyhow::Result<()> {
     };
     let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
     print_response(client::request(&Request::Fanout { prompt, launchers: agents, cwd })?)
+}
+
+/// Connect a hosted provider in the browser (OpenRouter's sign-in, no key to paste), then wait
+/// until dinod has the key it gave.
+fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
+    let Some(provider) = provider else {
+        println!("usage: dino login openrouter\n\nConnect OpenRouter in your browser; dino keeps the key it gets, and never shows it.");
+        return Ok(());
+    };
+    if let Response::Providers { providers } = client::request(&Request::Providers)?
+        && let Some(p) = providers.iter().find(|p| p.id == provider && p.connected)
+    {
+        println!("{} is already connected (dino logout {provider} disconnects it).", p.name);
+        return Ok(());
+    }
+    let Response::Connect { url } = client::request(&Request::ConnectProvider { provider: provider.into() })? else { anyhow::bail!("unexpected reply") };
+    println!("Opening your browser to connect {provider}. If it doesn't open, go to:\n\n  {url}\n");
+    let _ = std::process::Command::new("open").arg(&url).status();
+    let until = Instant::now() + std::time::Duration::from_secs(10 * 60);
+    while Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let Response::Providers { providers } = client::request(&Request::Providers)? else { continue };
+        let Some(p) = providers.into_iter().find(|p| p.id == provider) else { continue };
+        if p.connected {
+            println!("Connected {}.", p.name);
+            return Ok(());
+        }
+        if let Some(e) = p.error {
+            anyhow::bail!("{e}");
+        }
+    }
+    anyhow::bail!("gave up waiting for the browser")
 }
 
 fn cmd_groups() -> anyhow::Result<()> {

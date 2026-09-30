@@ -204,7 +204,7 @@ final class SettingsStore: ObservableObject {
 
 /// Settings' sections, in sidebar order.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case account, general, agents, policies, repos, worktrees, environments, routing, keys
+    case account, general, agents, providers, policies, repos, worktrees, environments, routing, keys
     var id: String { rawValue }
 
     var title: String {
@@ -212,6 +212,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .account: "Dino Account"
         case .general: "General"
         case .agents: "Agents"
+        case .providers: "Providers"
         case .policies: "Policies"
         case .repos: "Repositories"
         case .worktrees: "Worktrees"
@@ -226,6 +227,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .account: "person.crop.circle.fill"
         case .general: "gearshape.fill"
         case .agents: "cpu.fill"
+        case .providers: "cube.fill"
         case .policies: "checkmark.shield.fill"
         case .repos: "folder.fill"
         case .worktrees: "square.stack.3d.up.fill"
@@ -240,6 +242,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .account: .blue
         case .general: .gray
         case .agents: .purple
+        case .providers: .pink
         case .policies: .indigo
         case .repos: .teal
         case .worktrees: .teal
@@ -283,6 +286,7 @@ struct SettingsView: View {
                 case .account: AccountPane()
                 case .general: GeneralPane()
                 case .agents: AgentsPane()
+                case .providers: ProvidersPane()
                 case .policies: PoliciesPane()
                 case .repos: ReposPane()
                 case .worktrees: WorktreesPane()
