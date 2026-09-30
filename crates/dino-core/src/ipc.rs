@@ -156,6 +156,11 @@ pub enum Request {
     Providers,
     /// The models `provider` serves, as last fetched; asks again in the background when stale.
     Models { provider: String },
+    /// Start connecting a hosted provider (OpenRouter) in the browser: the page to open. dinod
+    /// stores the key it gets and never shows it.
+    ConnectProvider { provider: String },
+    /// Forget the key dino got for it.
+    DisconnectProvider { provider: String },
     /// What a PR from the session's branch would hold, to fill the Create PR form.
     PrDraft { id: String },
     /// Commit what's uncommitted as `title`, push the session's branch, and open a PR into `base`.
@@ -258,6 +263,8 @@ pub enum Response {
     },
     Keys { keys: Vec<crate::settings::KeyInfo> },
     Providers { providers: Vec<crate::providers::ProviderInfo> },
+    /// Open this page to go on.
+    Connect { url: String },
     /// `loading`: dinod is asking the provider now; ask again for what it says.
     Models { provider: String, models: Vec<ModelRow>, loading: bool, error: Option<String> },
     PrDraft { draft: PrDraft },

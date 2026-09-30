@@ -335,6 +335,14 @@ fn launchers(free_tier: bool) -> Vec<LauncherInfo> {
     launchers_from(free_tier, detect_agents())
 }
 
+/// dino's key store changed: the proxy, what can be started and the providers follow.
+fn keys_changed(d: &Daemon) {
+    let keys = load_keys();
+    *d.launchers.write().unwrap() = launchers(keys.contains_key("NVIDIA_API_KEY"));
+    d.proxy.set_keys(keys);
+    std::thread::spawn(|| providers::refresh(true));
+}
+
 fn launchers_from(free_tier: bool, agents: Vec<dino_core::Detected>) -> Vec<LauncherInfo> {
     let mut out = vec![];
     for d in agents {
@@ -480,14 +488,33 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::Keys => Response::Keys { keys: settings::key_status() },
             Request::SetKey { name, value } => match settings::set_key(&name, value.as_deref()) {
                 Ok(()) => {
-                    let keys = load_keys();
-                    *d.launchers.write().unwrap() = launchers(keys.contains_key("NVIDIA_API_KEY"));
-                    d.proxy.set_keys(keys);
-                    std::thread::spawn(|| providers::refresh(true));
+                    keys_changed(d);
                     Response::Ok
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::ConnectProvider { provider } if provider == "openrouter" => {
+                let d = d.clone();
+                match providers::connect_openrouter(move |key| {
+                    settings::set_key(providers::OPENROUTER_KEY, Some(&key))?;
+                    keys_changed(&d);
+                    Ok(())
+                }) {
+                    Ok(url) => Response::Connect { url },
+                    Err(e) => Response::Error { message: e.to_string() },
+                }
+            }
+            Request::DisconnectProvider { provider } if provider == "openrouter" => match settings::set_key(providers::OPENROUTER_KEY, None) {
+                Ok(()) => {
+                    providers::forget("openrouter");
+                    keys_changed(d);
+                    Response::Ok
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ConnectProvider { provider } | Request::DisconnectProvider { provider } => {
+                Response::Error { message: format!("{provider} doesn't sign in: dino finds it on this Mac") }
+            }
             Request::Providers => Response::Providers { providers: providers::list() },
             Request::Models { provider } => {
                 let (models, loading, error) = providers::rows(&provider);
