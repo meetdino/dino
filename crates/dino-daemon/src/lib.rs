@@ -27,6 +27,7 @@ mod codex;
 mod lifecycle;
 mod peers;
 mod preview;
+mod providers;
 mod schedule;
 mod shell;
 
@@ -247,6 +248,7 @@ pub fn run() -> anyhow::Result<()> {
         });
     }
     schedule::start(&daemon);
+    providers::start();
     eprintln!("dinod listening on {}", path.display());
     for stream in listener.incoming().flatten() {
         let daemon = daemon.clone();
@@ -481,10 +483,16 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     let keys = load_keys();
                     *d.launchers.write().unwrap() = launchers(keys.contains_key("NVIDIA_API_KEY"));
                     d.proxy.set_keys(keys);
+                    std::thread::spawn(|| providers::refresh(true));
                     Response::Ok
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::Providers => Response::Providers { providers: providers::list() },
+            Request::Models { provider } => {
+                let (models, loading, error) = providers::models(&provider);
+                Response::Models { provider, models, loading, error }
+            }
             Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by } => {
                 let launch = Launch { cols, rows, controls, host, prompt, started_by: by, ..Launch::new(&launcher, args, cwd) };
                 match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {

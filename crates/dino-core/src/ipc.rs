@@ -152,6 +152,10 @@ pub enum Request {
     Keys,
     /// Store a key in dino's key store, or remove it with no `value`. Takes effect at once.
     SetKey { name: String, value: Option<String> },
+    /// Where models come from: OpenRouter and model servers on this Mac, as last looked at.
+    Providers,
+    /// The models `provider` serves, as last fetched; asks again in the background when stale.
+    Models { provider: String },
     /// What a PR from the session's branch would hold, to fill the Create PR form.
     PrDraft { id: String },
     /// Commit what's uncommitted as `title`, push the session's branch, and open a PR into `base`.
@@ -253,6 +257,9 @@ pub enum Response {
         ssh_config_hosts: Vec<String>,
     },
     Keys { keys: Vec<crate::settings::KeyInfo> },
+    Providers { providers: Vec<crate::providers::ProviderInfo> },
+    /// `loading`: dinod is asking the provider now; ask again for what it says.
+    Models { provider: String, models: Vec<crate::providers::ProviderModel>, loading: bool, error: Option<String> },
     PrDraft { draft: PrDraft },
     Pr { pr: PrInfo },
     Review { findings: Vec<crate::review::Finding> },
