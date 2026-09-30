@@ -31,9 +31,13 @@ pub(crate) fn headers(keys: &HashMap<String, String>) -> Result<[(&'static str, 
     Ok([("authorization", format!("Bearer {token}"))])
 }
 
-/// Only the Responses API and the model list take the plan.
+/// Only the Responses API and the model list take the plan: these paths exactly, or one model's
+/// (a single segment, so nothing like `v1/models/../../v1/files` gets through).
 pub(crate) fn allowed(rest: &str) -> bool {
-    matches!(rest.trim_start_matches('/'), "v1/responses" | "v1/models") || rest.trim_start_matches('/').starts_with("v1/models/")
+    match rest.strip_prefix("v1/models/") {
+        Some(model) => !matches!(model, "" | "." | "..") && !model.contains(['/', '\\', '%', '?', '#']),
+        None => matches!(rest, "v1/responses" | "v1/models"),
+    }
 }
 
 /// Fields the plan doesn't take (it keeps nothing between requests).
@@ -137,6 +141,9 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
     fn only_responses_and_models() {
         assert!(allowed("v1/responses") && allowed("v1/models") && allowed("v1/models/gpt-5.5"));
         assert!(!allowed("v1/chat/completions") && !allowed("v1/embeddings") && !allowed("v1/responses/resp_1"));
+        for sneaky in ["v1/models/../../v1/files", "v1/models/..", "v1/models/", "v1/models/x/../../files", "v1/models/%2e%2e", "v1/models/..\\files", "v1/responses/", "v1/responses/.."] {
+            assert!(!allowed(sneaky), "{sneaky}");
+        }
         assert!(refused(429, "rate limited").contains("weekly cap"));
     }
 }
