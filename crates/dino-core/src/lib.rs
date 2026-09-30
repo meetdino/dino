@@ -9,6 +9,7 @@ pub mod found;
 pub mod history;
 pub mod ipc;
 pub mod mcp;
+pub mod models;
 pub mod pr;
 pub mod preview;
 pub mod procinfo;
