@@ -21,6 +21,7 @@ use dino_core::{detect_agents, load_keys, pr, proxy_wiring, ssh, trust, user_she
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
+mod codex;
 mod lifecycle;
 mod peers;
 mod preview;
@@ -68,8 +69,8 @@ struct Session {
     pinned: AtomicBool,
     /// The SSH host it runs on; `cwd` is then a path there, and nothing local applies to it.
     host: Option<String>,
-    /// Codex's rollout, where it reports its context window.
-    rollout: Mutex<Rollout>,
+    /// Codex's rollout: which conversation it's on, where its turn is, its context window.
+    rollout: Mutex<codex::Rollout>,
     /// A shell's: the agent someone started in it by hand.
     inside: Mutex<Inside>,
     /// Once it has ended: its last screen is on disk (see `save`).
@@ -89,18 +90,6 @@ struct Inside {
 /// How often to look again at a foreground command that hasn't changed: an agent's title and
 /// status move while it runs, and a wrapper script may start one late.
 const INSIDE_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
-
-#[derive(Default)]
-struct Rollout {
-    path: Option<PathBuf>,
-    /// When we last looked for it, not yet knowing its id.
-    searched: Option<Instant>,
-    /// The file's modification time when last read, and what it said.
-    read: Option<(SystemTime, Option<(u64, u64)>)>,
-}
-
-/// How often to look for a Codex session's rollout until it has one.
-const ROLLOUT_SEARCH: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Daemon {
     fn launcher(&self, short: &str) -> Option<LauncherInfo> {
@@ -221,6 +210,15 @@ pub fn run() -> anyhow::Result<()> {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 watch_shells(&d);
+            }
+        });
+    }
+    {
+        let d = daemon.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                codex::watch(&d);
             }
         });
     }
@@ -786,6 +784,8 @@ fn local_spec(
                 wired_args.insert(0, "resume".into());
                 wired_args.push(sid.clone());
             }
+            // So it says when it waits on the user (see `codex`).
+            wired_args.extend(codex::NOTICE_ARGS.map(String::from));
         }
         _ => {}
     }
@@ -997,7 +997,7 @@ fn stats(d: &Daemon, s: &Session) -> SessionStats {
     // Mid-turn, Claude's spinner redraws many times a second, focused or not, even
     // while a tool runs. Gone quiet with no model call out: the turn was interrupted.
     let quiet = s.last_write.lock().unwrap().is_none_or(|t| t.elapsed() > TURN_OVER_QUIET);
-    if st.activity == Some(Activity::Working) && st.in_flight == 0 && quiet {
+    if st.activity == Some(Activity::Working) && st.in_flight == 0 && quiet && !st.tracked {
         d.proxy.stats.end_turn(&s.id);
         return d.proxy.stats.session(&s.id);
     }
@@ -1008,42 +1008,14 @@ fn stats(d: &Daemon, s: &Session) -> SessionStats {
 /// Codex in its rollout. Without a report, the tokens the proxy saw and no size: the window
 /// depends on the model, its variant and the agent's own settings, so dino doesn't guess. A report
 /// without usage (a new or just compacted conversation) means an empty window.
-fn context_use(s: &Session, st: &SessionStats, claimed: &[String]) -> (u64, Option<u64>) {
+fn context_use(s: &Session, st: &SessionStats) -> (u64, Option<u64>) {
     if let Some(r) = st.reported_context {
         return (r.used.unwrap_or(0), Some(r.window));
     }
-    if s.agent_id == "codex" && s.host.is_none() && let Some((used, window)) = codex_context(s, claimed) {
+    if s.agent_id == "codex" && s.host.is_none() && let Some((used, window)) = codex::context(s) {
         return (used, Some(window));
     }
     (st.context().map_or(0, |(_, used)| used), None)
-}
-
-/// What Codex's rollout last said about its context window; re-read only when the file changes.
-fn codex_context(s: &Session, claimed: &[String]) -> Option<(u64, u64)> {
-    let mut r = s.rollout.lock().unwrap();
-    if r.path.is_none() {
-        let known = s.agent_session.lock().unwrap().clone();
-        let id = match known {
-            Some(id) => Some(id),
-            None if r.searched.is_none_or(|t| t.elapsed() > ROLLOUT_SEARCH) => {
-                r.searched = Some(Instant::now());
-                let found = find_codex_session(&s.cwd, s.started_at, claimed);
-                s.agent_session.lock().unwrap().clone_from(&found);
-                found
-            }
-            None => None,
-        };
-        r.path = id.and_then(|id| dino_core::transcript::codex_path(&id));
-    }
-    let modified = r.path.as_ref()?.metadata().and_then(|m| m.modified()).ok()?;
-    match r.read {
-        Some((at, context)) if at == modified => context,
-        _ => {
-            let context = dino_core::transcript::codex_context(r.path.as_ref()?);
-            r.read = Some((modified, context));
-            context
-        }
-    }
 }
 
 /// Whether a restart would cut nothing short: between turns, with no subagent or background
@@ -1080,12 +1052,11 @@ fn state(d: &Daemon) -> Response {
     let previews = d.previews.lock().unwrap().clone();
     let group_of = |id: &str| groups.iter().find(|g| g.members.iter().any(|m| m.session == id)).map(|g| g.id.clone());
     let live = d.sessions.lock().unwrap().clone();
-    let claimed: Vec<String> = live.iter().filter_map(|o| o.agent_session.lock().unwrap().clone()).collect();
     let sessions = live
         .iter()
         .map(|s| {
             let st = stats(d, s);
-            let (context_tokens, context_limit) = context_use(s, &st, &claimed);
+            let (context_tokens, context_limit) = context_use(s, &st);
             let label = s.label.lock().unwrap().clone();
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
             let waiting = st.waiting();
@@ -1201,9 +1172,7 @@ fn load_screen(id: &str) -> Vec<u8> {
 /// until the user resumes or removes them.
 fn save(d: &Daemon) {
     let sessions = d.sessions.lock().unwrap().clone();
-    // Snapshot first: a session's own lock must not be held while reading the others.
-    let claimed: Vec<String> = sessions.iter().filter_map(|o| o.agent_session.lock().unwrap().clone()).collect();
-    let saved: Vec<SavedSession> = sessions.iter().map(|s| snapshot(s, &claimed)).collect();
+    let saved: Vec<SavedSession> = sessions.iter().map(|s| snapshot(s)).collect();
     let dir = screens_dir();
     for s in sessions.iter().filter(|s| s.pane.is_exited() && !s.screen_saved.load(Ordering::Relaxed)) {
         use std::os::unix::fs::OpenOptionsExt;
@@ -1230,11 +1199,11 @@ fn save(d: &Daemon) {
     }
 }
 
-/// What it takes to bring `s` back. `claimed`: Codex conversations other sessions already own.
-fn snapshot(s: &Session, claimed: &[String]) -> SavedSession {
+/// What it takes to bring `s` back.
+fn snapshot(s: &Session) -> SavedSession {
     let mut agent_session = s.agent_session.lock().unwrap();
     if agent_session.is_none() && s.agent_id == "codex" && s.host.is_none() {
-        *agent_session = find_codex_session(&s.cwd, s.started_at, claimed);
+        *agent_session = codex::conversation(s);
     }
     SavedSession {
         id: s.id.clone(),
@@ -1264,8 +1233,7 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
     let (s, mut saved) = {
         let sessions = d.sessions.lock().unwrap();
         let s = sessions.iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-        let claimed: Vec<String> = sessions.iter().filter(|o| o.id != id).filter_map(|o| o.agent_session.lock().unwrap().clone()).collect();
-        let saved = snapshot(&s, &claimed);
+        let saved = snapshot(&s);
         (s, saved)
     };
     // Dropping the subscribers ends each client's stream without the exit the dying agent would send.
@@ -1355,44 +1323,6 @@ fn new_uuid() -> String {
 fn claude_transcript_exists(uuid: &str) -> bool {
     let projects = home().join(".claude/projects");
     std::fs::read_dir(projects).into_iter().flatten().flatten().any(|dir| dir.path().join(format!("{uuid}.jsonl")).exists())
-}
-
-/// The Codex rollout this session created: our `dino` provider, same cwd, started after launch.
-/// Codex offers no way to choose the id up front, so we find it in `~/.codex/sessions/Y/M/D/`.
-fn find_codex_session(cwd: &std::path::Path, started_at: u64, claimed: &[String]) -> Option<String> {
-    let root = home().join(".codex/sessions");
-    let mut best: Option<(String, String)> = None; // (timestamp, id): earliest after launch wins
-    for year in read_dirs(&root) {
-        for month in read_dirs(&year) {
-            for day in read_dirs(&month) {
-                for f in std::fs::read_dir(&day).into_iter().flatten().flatten() {
-                    let modified = f.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok());
-                    if modified.is_none_or(|m| m.as_secs() + 5 < started_at) {
-                        continue;
-                    }
-                    let Some(meta) = first_line(&f.path()).and_then(|l| serde_json::from_str::<serde_json::Value>(&l).ok()) else { continue };
-                    let p = &meta["payload"];
-                    let (Some(id), Some(ts)) = (p["id"].as_str(), p["timestamp"].as_str()) else { continue };
-                    if p["model_provider"] != "dino" || p["cwd"].as_str() != Some(&cwd.display().to_string()) || claimed.iter().any(|c| c == id) {
-                        continue;
-                    }
-                    if best.as_ref().is_none_or(|(t, _)| ts < t.as_str()) {
-                        best = Some((ts.to_string(), id.to_string()));
-                    }
-                }
-            }
-        }
-    }
-    best.map(|(_, id)| id)
-}
-
-fn read_dirs(p: &std::path::Path) -> Vec<PathBuf> {
-    std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
-}
-
-fn first_line(p: &std::path::Path) -> Option<String> {
-    use std::io::BufRead;
-    std::io::BufReader::new(std::fs::File::open(p).ok()?).lines().next()?.ok()
 }
 
 fn home() -> PathBuf {
