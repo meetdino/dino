@@ -110,7 +110,7 @@ fn typed(text: &str) -> Option<&str> {
 // ---- Claude ----
 
 /// `~/.claude/projects/<dir>/<uuid>.jsonl`, not subagents' (`<uuid>/subagents/…`).
-fn claude_transcripts() -> Vec<PathBuf> {
+pub(crate) fn claude_transcripts() -> Vec<PathBuf> {
     std::fs::read_dir(home().join(".claude/projects"))
         .into_iter()
         .flatten()
@@ -171,7 +171,7 @@ pub fn claude_title(session_id: &str) -> Option<String> {
 
 // ---- Codex ----
 
-fn codex_rollouts() -> Vec<PathBuf> {
+pub(crate) fn codex_rollouts() -> Vec<PathBuf> {
     let mut out = vec![];
     let mut stack = vec![home().join(".codex/sessions")];
     while let Some(dir) = stack.pop() {
@@ -250,10 +250,14 @@ fn codex_status_in(jsonl: &str) -> Option<String> {
 
 // ---- Listing ----
 
-/// Every conversation on disk that isn't running (those are in `running`), newest first.
-pub fn finished(running: &[FoundSession]) -> Vec<FoundSession> {
-    let is_running = |id: &str| running.iter().any(|r| r.session_id == id);
-    let entry = |agent: &str, session_id: String, title: String, cwd, updated_at| FoundSession {
+/// When `p` last changed, in seconds; 0 when it can't be read.
+pub(crate) fn modified(p: &Path) -> u64 {
+    stat(p).map_or(0, |s| s.0)
+}
+
+/// A conversation on disk that nothing is running.
+pub(crate) fn recent(agent: &str, session_id: String, title: String, cwd: Option<String>, updated_at: u64) -> FoundSession {
+    FoundSession {
         source: Source::Recent,
         agent: agent.into(),
         session_id,
@@ -265,34 +269,13 @@ pub fn finished(running: &[FoundSession]) -> Vec<FoundSession> {
         terminal: None,
         args: vec![],
         url: None,
-    };
-    let mut out = vec![];
-    for p in claude_transcripts() {
-        let Some(sid) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else { continue };
-        let meta = claude_meta(&p);
-        if meta.hidden || is_running(&sid) {
-            continue;
-        }
-        let title = meta.title.unwrap_or_else(|| "Claude Code session".into());
-        out.push(entry("claude", sid, title, meta.cwd, stat(&p).map_or(0, |s| s.0)));
     }
+}
 
-    let titles = codex_titles();
-    let mut rollouts: Vec<(u64, PathBuf)> = codex_rollouts().into_iter().filter_map(|p| Some((stat(&p)?.0, p))).collect();
-    rollouts.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut seen = std::collections::HashSet::new();
-    for (updated, p) in rollouts {
-        let Some(sid) = rollout_id(&p) else { continue };
-        if is_running(&sid) || !seen.insert(sid.clone()) {
-            continue;
-        }
-        let meta = codex_meta(&p);
-        if meta.hidden {
-            continue;
-        }
-        let title = titles.get(&sid).cloned().or(meta.title).unwrap_or_else(|| "Codex session".into());
-        out.push(entry("codex", sid, title, meta.cwd, updated));
-    }
+/// Every conversation on disk that isn't running (those are in `running`), newest first.
+pub fn finished(running: &[FoundSession]) -> Vec<FoundSession> {
+    let is_running = |id: &str| running.iter().any(|r| r.session_id == id);
+    let mut out: Vec<FoundSession> = crate::agent::all().into_iter().flat_map(|a| a.recent(&is_running)).collect();
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     out
 }
@@ -320,27 +303,19 @@ pub struct Page {
 /// The conversation of `agent`'s session `session_id`, the part ending at byte `before` (default:
 /// the end). A Claude subagent's id reads its own transcript.
 pub fn conversation(agent: &str, session_id: &str, before: Option<u64>) -> Option<Page> {
-    let path = match agent {
-        "claude" => crate::transcript::claude_path(session_id).or_else(|| crate::transcript::claude_subagent_path(None, session_id))?,
-        "codex" => crate::transcript::codex_path(session_id)?,
-        _ => return None,
-    };
-    page(&path, before)
+    let a = crate::agent::agent(agent)?;
+    page(a, &a.transcript(session_id)?, before)
 }
 
-/// The part of the transcript at `path` ending at byte `before` (default: the end).
-pub fn page(path: &Path, before: Option<u64>) -> Option<Page> {
+/// The part of `agent`'s transcript at `path` ending at byte `before` (default: the end).
+pub fn page(agent: &dyn crate::agent::Agent, path: &Path, before: Option<u64>) -> Option<Page> {
     let len = path.metadata().ok()?.len();
     let end = before.unwrap_or(len).min(len);
     let start = end.saturating_sub(PAGE);
     let text = read_range(path, start, end)?;
     // The fragment dropped at the start belongs to the page before.
     let start = if start == 0 { 0 } else { end - text.len() as u64 };
-    let turns = if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-")) {
-        codex_turns(&text)
-    } else {
-        claude_turns(&text, is_subagent(path).then_some(start == 0))
-    };
+    let turns = agent.turns(&text, path, start);
     Some(Page { turns, start, path: Some(path.display().to_string()) })
 }
 
@@ -352,7 +327,7 @@ pub fn subagent_task(path: &Path) -> Option<String> {
 }
 
 /// `~/.claude/projects/<dir>/<parent>/subagents/agent-<id>.jsonl`.
-fn is_subagent(path: &Path) -> bool {
+pub(crate) fn is_subagent(path: &Path) -> bool {
     path.parent().and_then(Path::file_name).is_some_and(|d| d == "subagents")
 }
 
@@ -367,7 +342,7 @@ const LONGEST_SHOWN_LINE: usize = 256 << 10;
 /// setup, screenshots, tool results) is left out, and so are subagents' turns in their parent's
 /// file. `subagent`: this is a subagent's own file; `Some(true)` when read from its start, where
 /// its first message is its task (a fork's comes after the boilerplate that says it's a fork).
-fn claude_turns(jsonl: &str, subagent: Option<bool>) -> Vec<Turn> {
+pub(crate) fn claude_turns(jsonl: &str, subagent: Option<bool>) -> Vec<Turn> {
     let mut out = vec![];
     let mut tasked = subagent != Some(true);
     for line in jsonl.lines().filter(|l| l.len() <= LONGEST_SHOWN_LINE) {
@@ -420,7 +395,7 @@ fn claude_turns(jsonl: &str, subagent: Option<bool>) -> Vec<Turn> {
 
 /// Codex writes each message twice: as an event (what its UI shows) and as a model item. Events
 /// are used where the rollout has them.
-fn codex_turns(jsonl: &str) -> Vec<Turn> {
+pub(crate) fn codex_turns(jsonl: &str) -> Vec<Turn> {
     let values: Vec<Value> = jsonl.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     let events = values.iter().any(|v| v["type"] == "event_msg" && v["payload"]["type"] == "user_message");
     let mut out = vec![];
