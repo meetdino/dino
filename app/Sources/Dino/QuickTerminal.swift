@@ -182,13 +182,10 @@ final class QuickTerminal: NSObject, NSWindowDelegate {
             command: "\(DinoEnvironment.dinoBinary) attach \(id)",
             waitAfterCommand: false
         )
-        t.makePlatformView = {
+        t.makePlatformView = { [weak t] in
+            // No file pane here: files are revealed in the Finder, never opened (a `.command` would run).
             LinkTerminalView(local: { true }) { link in
-                if let url = URL(string: link), url.scheme != nil {
-                    NSWorkspace.shared.open(url)
-                } else {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: NSString(string: link).expandingTildeInPath))
-                }
+                LinkPolicy.open(link, cwd: t?.workingDirectory ?? NSHomeDirectory())
             }
         }
         return t
