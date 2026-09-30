@@ -56,7 +56,8 @@ pub(crate) fn watch(d: &Daemon) {
 
 fn track(d: &Daemon, s: &Session) {
     let mut r = s.rollout.lock().unwrap();
-    if r.looked.is_none_or(|t| t.elapsed() >= RELOOK) {
+    // Until its first prompt makes one, look every poll: a short first turn is over in seconds.
+    if r.path.is_none() || r.looked.is_none_or(|t| t.elapsed() >= RELOOK) {
         r.looked = Some(Instant::now());
         if let Some(path) = s.pane.pid().and_then(open_rollout).filter(|p| r.path.as_ref() != Some(p)) {
             // Its first prompt, or another conversation: pick up where that one is.
