@@ -2,15 +2,34 @@
 //! disagree a little. Wall time first, a counter for changes within the same millisecond or after
 //! seeing a later remote stamp, and the device id to break exact ties.
 //!
+//! The device id is chosen by the device that wrote the stamp, so a device can always win exact
+//! ties. That's harmless because the whole stamp is sealed into the value's token (`crypto`): only
+//! a device holding the account key can pick one, and such a device can write any value anyway.
+//!
 //! Kulkarni et al., "Logical Physical Clocks" (2014); the shape follows
 //! <https://jaredforsyth.com/posts/hybrid-logical-clocks/>.
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-/// How far ahead of the server's clock a stamp may be before the server refuses it. A device
-/// whose clock runs days ahead would otherwise win every conflict until then.
+/// How far ahead of the server's clock a stamp may be before the server refuses it, and of a
+/// device's clock before the device refuses it. A device whose clock runs days ahead would
+/// otherwise win every conflict until then, and a stamp near `u64::MAX` would win forever.
 pub const MAX_SKEW_MS: u64 = 10 * 60 * 1000;
+
+/// A remote stamp refused for being further ahead of this device's clock than `MAX_SKEW_MS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FutureStamp {
+    pub ahead_ms: u64,
+}
+
+impl std::fmt::Display for FutureStamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stamped {} ms ahead of this device's clock", self.ahead_ms)
+    }
+}
+
+impl std::error::Error for FutureStamp {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Hlc {
@@ -63,20 +82,40 @@ impl Clock {
 
     /// A stamp for a change made here at `wall_ms`.
     pub fn now(&mut self, wall_ms: u64) -> Hlc {
-        let next = match &self.last {
-            Some(l) if l.wall_ms >= wall_ms => Hlc { wall_ms: l.wall_ms, counter: l.counter + 1, device: self.device.clone() },
-            _ => Hlc { wall_ms, counter: 0, device: self.device.clone() },
+        let (wall_ms, counter) = match &self.last {
+            Some(l) if l.wall_ms >= wall_ms => after(l.wall_ms, l.counter),
+            _ => (wall_ms, 0),
         };
+        let next = Hlc { wall_ms, counter, device: self.device.clone() };
         self.last = Some(next.clone());
         next
     }
 
     /// Takes in a stamp seen from another device at `wall_ms`, so later local stamps come after it.
-    pub fn observe(&mut self, remote: &Hlc, wall_ms: u64) {
+    /// Refuses (and ignores) a stamp further ahead of `wall_ms` than `MAX_SKEW_MS`: taking it would
+    /// drag every later local stamp that far into the future.
+    pub fn observe(&mut self, remote: &Hlc, wall_ms: u64) -> Result<(), FutureStamp> {
+        if let Some(ahead_ms) = remote.too_far_ahead(wall_ms) {
+            return Err(FutureStamp { ahead_ms });
+        }
         let top = [self.last.as_ref().map_or(0, |l| l.wall_ms), remote.wall_ms, wall_ms].into_iter().max().unwrap_or(0);
-        let counter = |h: Option<&Hlc>| h.filter(|h| h.wall_ms == top).map(|h| h.counter + 1);
-        let c = counter(self.last.as_ref()).max(counter(Some(remote))).unwrap_or(0);
-        self.last = Some(Hlc { wall_ms: top, counter: c, device: self.device.clone() });
+        let counter = |h: Option<&Hlc>| h.filter(|h| h.wall_ms == top).map(|h| h.counter);
+        let (wall_ms, counter) = match counter(self.last.as_ref()).max(counter(Some(remote))) {
+            Some(c) => after(top, c),
+            None => (top, 0),
+        };
+        self.last = Some(Hlc { wall_ms, counter, device: self.device.clone() });
+        Ok(())
+    }
+}
+
+/// The `(wall_ms, counter)` right after the given one: the next counter, or the next millisecond
+/// when the counter is spent. (`wall_ms` saturates at `u64::MAX`, which `observe` never lets a
+/// clock get near.)
+fn after(wall_ms: u64, counter: u32) -> (u64, u32) {
+    match counter.checked_add(1) {
+        Some(c) => (wall_ms, c),
+        None => (wall_ms.saturating_add(1), 0),
     }
 }
 
@@ -98,7 +137,7 @@ mod tests {
     fn a_later_remote_stamp_pulls_the_clock_along() {
         let mut a = Clock::new("a");
         let remote = Hlc { wall_ms: 5000, counter: 3, device: "b".into() };
-        a.observe(&remote, 1000);
+        a.observe(&remote, 1000).unwrap();
         let s = a.now(1000);
         assert!(s > remote);
         assert_eq!((s.wall_ms, s.counter), (5000, 5));
@@ -116,5 +155,34 @@ mod tests {
         let h = Hlc { wall_ms: 1_000_000 + MAX_SKEW_MS + 1, counter: 0, device: "a".into() };
         assert_eq!(h.too_far_ahead(1_000_000), Some(MAX_SKEW_MS + 1));
         assert_eq!(Hlc { wall_ms: 1_000_000 + MAX_SKEW_MS, ..h }.too_far_ahead(1_000_000), None);
+    }
+
+    #[test]
+    fn a_stamp_far_in_the_future_is_refused_and_leaves_the_clock_alone() {
+        let mut a = Clock::new("a");
+        let before = a.now(1000);
+        let poison = Hlc { wall_ms: u64::MAX, counter: u32::MAX, device: "evil".into() };
+        assert!(matches!(a.observe(&poison, 1000), Err(FutureStamp { .. })));
+        let edge = Hlc { wall_ms: 1000 + MAX_SKEW_MS + 1, counter: 0, device: "b".into() };
+        assert_eq!(a.observe(&edge, 1000), Err(FutureStamp { ahead_ms: MAX_SKEW_MS + 1 }));
+        assert_eq!(a.last(), Some(&before));
+        let s = a.now(1000);
+        assert_eq!((s.wall_ms, s.counter), (1000, 1));
+    }
+
+    #[test]
+    fn a_spent_counter_moves_to_the_next_millisecond() {
+        let full = Hlc { wall_ms: 1000, counter: u32::MAX, device: "a".into() };
+        let mut a = Clock::resume("a", Some(full.clone()));
+        let s = a.now(1000);
+        assert!(s > full);
+        assert_eq!((s.wall_ms, s.counter), (1001, 0));
+
+        let mut b = Clock::new("b");
+        let remote = Hlc { wall_ms: 2000, counter: u32::MAX, device: "a".into() };
+        b.observe(&remote, 2000).unwrap();
+        let s = b.now(2000);
+        assert!(s > remote);
+        assert_eq!((s.wall_ms, s.counter), (2001, 1));
     }
 }
