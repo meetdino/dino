@@ -160,6 +160,7 @@ final class DinoModel: ObservableObject {
                     self.watchElsewhere()
                     self.watchGroups()
                     self.watchTree()
+                    self.watchGhosttyConfig()
                 }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
@@ -354,15 +355,31 @@ final class DinoModel: ObservableObject {
     }
 
     /// Ghostty handles its own shortcuts before the menu sees them (⌘D splits, ⌘W closes, ⌘K
-    /// clears), so a focused pane would swallow dino's. Hand those keys back to the menu.
-    static let terminals = TerminalController(configSource: .generated(
-        ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t"]
-            + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
-            .map { "super+\($0)" }
-            // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F finds sessions.
-            + ["ctrl+tab", "ctrl+shift+tab", "super+slash", "super+shift+a", "super+shift+f"])
-            .map { "keybind = \($0)=unbind" }.joined(separator: "\n")
-    ))
+    /// clears), so a focused pane would swallow dino's. Hand those keys back to the menu, over
+    /// whatever the user's Ghostty config binds them to.
+    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t"]
+        + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
+        .map { "super+\($0)" }
+        // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F finds sessions.
+        + ["ctrl+tab", "ctrl+shift+tab", "super+slash", "super+shift+a", "super+shift+f"])
+        .map { "keybind = \($0)=unbind" }.joined(separator: "\n")
+
+    static let terminals: TerminalController = {
+        let c = TerminalController(configSource: .generated(menuKeys))
+        GhosttyConfig.apply(to: c, overrides: menuKeys)
+        return c
+    }()
+
+    /// Picks up edits to the Ghostty config, as Ghostty does when told to reload.
+    private func watchGhosttyConfig() {
+        // Read now, not at the first pane: Settings says what's in effect.
+        _ = Self.terminals
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                if GhosttyConfig.changed { GhosttyConfig.apply(to: Self.terminals, overrides: Self.menuKeys) }
+            }
+        }
+    }
 
     func terminal(for id: String) -> TerminalViewState {
         if let t = terminals[id] { return t }
