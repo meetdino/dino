@@ -567,11 +567,8 @@ struct DinoMark: View {
     let size: CGFloat
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text("▲▲").foregroundStyle(Brand.spike)
-            Text("dino").foregroundStyle(Brand.green)
-        }
-        .font(.system(size: size, weight: .bold, design: .monospaced))
+        Text("dino").foregroundStyle(Brand.green)
+            .font(.system(size: size, weight: .bold, design: .monospaced))
     }
 }
 
