@@ -113,10 +113,26 @@ final class DinoModel: ObservableObject {
 
     var elsewhere: [FoundSession] { found.filter { $0.source == "running" } }
 
-    /// Where new sessions start.
-    @Published var folder: URL = FileManager.default.homeDirectoryForCurrentUser {
-        didSet { if folder != oldValue { refreshTree() } }
+    /// Where new sessions start; kept across launches, so the first shell opens where you left off.
+    @Published var folder: URL = DinoModel.lastFolder {
+        didSet {
+            guard folder != oldValue else { return }
+            UserDefaults.standard.set(folder.path, forKey: Self.lastFolderKey)
+            refreshTree()
+        }
     }
+    static let lastFolderKey = "folder.\(DinoEnvironment.home)"
+    private static var lastFolder: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        guard let path = UserDefaults.standard.string(forKey: lastFolderKey) else { return home }
+        var dir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &dir) && dir.boolValue ? URL(fileURLWithPath: path) : home
+    }
+
+    /// Launch has been handled: the session left selected is back, or a shell was started.
+    private var launched = false
+    /// The shell started at launch, until dinod says which it is.
+    private var startingShell = false
 
     /// Repos and folders the sidebar shows, with their worktrees.
     @Published var repos: [RepoInfo] = []
@@ -292,10 +308,18 @@ final class DinoModel: ObservableObject {
             pendingSelect = nil
             select(want)
         }
+        // Opening dino opens a terminal: a shell when there's nothing to come back to, or always if
+        // Settings says so.
+        if !launched {
+            launched = true
+            if next.isEmpty || StartWith.current == .shell {
+                startingShell = newShell()
+            }
+        }
         let groupSelected = selected.map { id in groups.contains { "group:\($0.id)" == id } } ?? false
         let folderSelected = selected?.hasPrefix("dir:") ?? false
         let subagentSelected = selected?.hasPrefix("agent:") ?? false
-        if !groupSelected, !folderSelected, !subagentSelected, selected == nil || !live.contains(selected!) {
+        if !startingShell, !groupSelected, !folderSelected, !subagentSelected, selected == nil || !live.contains(selected!) {
             // The one selected when the app last quit, else the one that last did something.
             // Through select(), so the terminal also takes keyboard focus on launch.
             let last = UserDefaults.standard.string(forKey: Self.lastSelectedKey).flatMap { live.contains($0) ? $0 : nil }
@@ -357,7 +381,7 @@ final class DinoModel: ObservableObject {
     /// Ghostty handles its own shortcuts before the menu sees them (⌘D splits, ⌘W closes, ⌘K
     /// clears), so a focused pane would swallow dino's. Hand those keys back to the menu, over
     /// whatever the user's Ghostty config binds them to.
-    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t"]
+    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "t", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t"]
         + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
         .map { "super+\($0)" }
         // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F finds sessions.
@@ -418,11 +442,23 @@ final class DinoModel: ObservableObject {
                 await MainActor.run {
                     if let host, !remoteFolder.isEmpty { self.rememberFolder(remoteFolder, on: host) }
                     if let id = resp.id { self.select(id) }
+                    self.startingShell = false
                 }
             } catch {
-                await MainActor.run { self.error = error.localizedDescription }
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    self.startingShell = false
+                }
             }
         }
+    }
+
+    /// A new shell in the folder you're in, like a new Ghostty tab (⌘T). False if none could start.
+    @discardableResult
+    func newShell() -> Bool {
+        guard connection != nil, let l = launchers.first(where: { $0.short == "shell" }) else { return false }
+        newSession(l)
+        return true
     }
 
     /// Folders sessions recently started in on `host`, newest first. Kept by the app, not in
