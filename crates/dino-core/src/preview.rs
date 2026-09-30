@@ -200,8 +200,10 @@ pub fn find_local_url(text: &str) -> Option<String> {
             let rest = &text[at..];
             let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | ')' | ']' | '│' | '\u{1b}')).unwrap_or(rest.len());
             let url = rest[..end].trim_end_matches(['.', ',', ';', ':']);
-            let port = &rest[start.len()..end];
-            if port.starts_with(|c: char| c.is_ascii_digit()) && best.as_ref().is_none_or(|(i, _)| at > *i) {
+            // Up to the path, only a port: `http://localhost:3000@evil.example/` is evil.example's.
+            let port = url.get(start.len()..).unwrap_or_default().split(['/', '?', '#']).next().unwrap_or_default();
+            let local = !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit());
+            if local && best.as_ref().is_none_or(|(i, _)| at > *i) {
                 best = Some((at, url.replace("0.0.0.0", "localhost")));
             }
         }
@@ -220,6 +222,18 @@ mod tests {
         assert_eq!(find_local_url("│ http://0.0.0.0:8080 │"), Some("http://localhost:8080".into()));
         assert_eq!(find_local_url("http://localhost:abc http://example.com:80"), None);
         assert_eq!(find_local_url("see http://localhost: and http://localhost:"), None);
+        assert_eq!(find_local_url("http://localhost:5173?x=1#top"), Some("http://localhost:5173?x=1#top".into()));
+    }
+
+    #[test]
+    fn look_alike_local_urls_are_not_local() {
+        // The host is what's after the `@`, or the port isn't one.
+        assert_eq!(find_local_url("http://localhost:3000@evil.example/"), None);
+        assert_eq!(find_local_url("https://127.0.0.1:443@evil.example"), None);
+        assert_eq!(find_local_url("http://0.0.0.0:80.evil.example/x"), None);
+        assert_eq!(find_local_url("http://localhost:3000:4000/"), None);
+        // A real one earlier still counts.
+        assert_eq!(find_local_url("http://localhost:5173/ then http://localhost:3000@evil.example/"), Some("http://localhost:5173/".into()));
     }
 
     #[test]
