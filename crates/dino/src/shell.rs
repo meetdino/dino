@@ -1,7 +1,7 @@
 //! Shell integration: `dino init <shell>` prints the script, `dino shell install|uninstall` adds or
 //! removes the one line that loads it from the shell's startup file.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const ZSH: &str = include_str!("../shell/dino.zsh");
 const BASH: &str = include_str!("../shell/dino.bash");
@@ -66,21 +66,67 @@ fn without_block(text: &str) -> (String, bool) {
     (format!("{}{}", &text[..start], after), true)
 }
 
+/// The startup file's text: empty when there isn't one yet, and an error, never an empty file to
+/// write over, when it can't be read or isn't UTF-8.
+fn read_rc(rc: &Path) -> anyhow::Result<String> {
+    match std::fs::read(rc) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} isn't UTF-8 text, so dino left it alone: add its line by hand", rc.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => anyhow::bail!("couldn't read {}, so dino left it alone: {e}", rc.display()),
+    }
+}
+
+/// Where `rc` really is: through any symlinks (a dotfiles repo's, say), so writing it keeps the link.
+fn resolved(rc: &Path) -> PathBuf {
+    let mut path = rc.to_path_buf();
+    // A loop of links ends somewhere; the write then fails and says so.
+    for _ in 0..40 {
+        let Ok(target) = std::fs::read_link(&path) else { break };
+        path = path.parent().map(|dir| dir.join(&target)).unwrap_or(target);
+    }
+    path
+}
+
+/// `text` into `path` whole or not at all: a new file beside it, with its permissions, renamed
+/// over it.
+fn write_whole(path: &Path, text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let name = path.file_name().ok_or_else(|| anyhow::anyhow!("{} isn't a file", path.display()))?;
+    let tmp = dir.join(format!(".{}.dino-{}", name.to_string_lossy(), std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            f.set_permissions(meta.permissions())?;
+        }
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    };
+    write().map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::anyhow!("couldn't write {}: {e}", path.display())
+    })
+}
+
 /// `dino shell install|uninstall [zsh|bash|fish]`.
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let usage = "usage: dino shell install|uninstall [zsh|bash|fish]";
     let shell = args.get(1).cloned().or_else(current).ok_or_else(|| anyhow::anyhow!(usage))?;
     anyhow::ensure!(script(&shell).is_some(), "dino has no integration for {shell}: zsh, bash and fish");
     let rc = rc_file(&shell)?;
-    let text = std::fs::read_to_string(&rc).unwrap_or_default();
+    let target = resolved(&rc);
+    let text = read_rc(&target)?;
     let (rest, had) = without_block(&text);
     match args.first().map(String::as_str) {
         Some("install") => {
             let sep = if rest.is_empty() || rest.ends_with('\n') { "" } else { "\n" };
-            if let Some(dir) = rc.parent() {
+            if let Some(dir) = target.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            std::fs::write(&rc, format!("{rest}{sep}{}", block(&shell)))?;
+            write_whole(&target, &format!("{rest}{sep}{}", block(&shell)))?;
             println!("{} dino in {}; open a new {shell} to use it", if had { "Updated" } else { "Added" }, rc.display());
             if shell == "bash" && cfg!(target_os = "macos") {
                 println!("macOS starts bash as a login shell, which reads ~/.bash_profile: make sure it sources ~/.bashrc");
@@ -88,7 +134,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         Some("uninstall") => {
             if had {
-                std::fs::write(&rc, rest)?;
+                write_whole(&target, &rest)?;
                 println!("Removed dino from {}", rc.display());
             } else {
                 println!("dino isn't in {}", rc.display());
@@ -110,6 +156,36 @@ mod tests {
         assert!(had);
         assert_eq!(rest, "export A=1\nalias x=y\n");
         assert_eq!(without_block("plain\n"), ("plain\n".to_string(), false));
+    }
+
+    #[test]
+    fn a_startup_file_is_rewritten_whole_or_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("dino-rc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        // None yet is empty; one that isn't text, or can't be read, is an error, not an empty file.
+        assert_eq!(read_rc(&dir.join("none")).unwrap(), "");
+        std::fs::write(dir.join("latin1"), b"export A=\xe9\n").unwrap();
+        assert!(read_rc(&dir.join("latin1")).is_err());
+        assert!(read_rc(&dir).is_err());
+        // Through a symlink to the real file, which keeps its permissions; the link stays a link.
+        let real = dir.join("dotfiles/zshrc");
+        std::fs::write(&real, "export A=1\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join(".zshrc");
+        std::os::unix::fs::symlink("dotfiles/zshrc", &link).unwrap();
+        assert_eq!(resolved(&link), real);
+        write_whole(&resolved(&link), "export A=2\n").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "export A=2\n");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        // A new one, and no temp file left behind.
+        write_whole(&dir.join("new"), "x\n").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("new")).unwrap(), "x\n");
+        let left = std::fs::read_dir(&dir).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains(".dino-")).count();
+        assert_eq!(left, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
