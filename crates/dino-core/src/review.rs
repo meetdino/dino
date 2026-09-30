@@ -109,6 +109,7 @@ pub(crate) fn headless(key: &str, dir: &Path, args: &[String], input: String, ti
     })?;
     let mut child = Command::new(claude)
         .args(["-p", "--output-format", "json"])
+        .args(crate::trust::claude_headless_args(crate::trust::claude_trusts(dir)))
         .args(args)
         // No entry in the user's resumable sessions.
         .arg("--no-session-persistence")
