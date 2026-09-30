@@ -14,7 +14,7 @@ use dino_core::ipc::{self, Request, Response};
 use dino_core::{pr, trust, worktree};
 
 use super::{
-    Daemon, Launch, SavedSession, SessionWorktree, find_codex_session, kill, now_secs, real, save, save_worktrees,
+    Daemon, Launch, SavedSession, SessionWorktree, codex, kill, now_secs, real, save, save_worktrees,
     session_worktree, sessions_in, spawn,
 };
 
@@ -99,9 +99,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
     let agent_session = {
         let known = s.agent_session.lock().unwrap().clone();
         if known.is_none() && s.agent_id == "codex" && s.host.is_none() {
-            let claimed: Vec<String> =
-                d.sessions.lock().unwrap().iter().filter(|o| o.id != s.id).filter_map(|o| o.agent_session.lock().unwrap().clone()).collect();
-            find_codex_session(&s.cwd, s.started_at, &claimed)
+            codex::conversation(&s)
         } else {
             known
         }
