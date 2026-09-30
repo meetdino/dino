@@ -347,7 +347,8 @@ fn stored() -> Vec<(String, String)> {
 pub fn key_status() -> Vec<KeyInfo> {
     let stored = stored();
     let mut names: Vec<String> = KNOWN_KEYS.iter().map(|(k, _)| k.to_string()).collect();
-    names.extend(stored.iter().map(|(k, _)| k.clone()).filter(|k| !KNOWN_KEYS.iter().any(|(n, _)| n == k)));
+    // Sign in with ChatGPT's tokens are Settings → Providers' to keep, not keys to edit.
+    names.extend(stored.iter().map(|(k, _)| k.clone()).filter(|k| !KNOWN_KEYS.iter().any(|(n, _)| n == k) && !k.starts_with("CHATGPT_")));
     names
         .into_iter()
         .map(|name| {

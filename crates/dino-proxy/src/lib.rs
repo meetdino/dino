@@ -2,12 +2,14 @@
 //! `http://127.0.0.1:<port>/s/<session>/<provider>`; we forward to the real API untouched
 //! (auth included) and observe usage, in-flight state and quota headers on the way back.
 //! The `free` provider is different: dino itself picks a free model and translates (see `free`).
-//! `or` is OpenRouter with the key dino holds for it (see `openrouter`).
+//! `or` is OpenRouter with the key dino holds for it (see `openrouter`), `siwc` the ChatGPT plan
+//! through Sign in with ChatGPT (see `siwc`).
 
 mod catalog;
 mod codex;
 mod free;
 mod openrouter;
+mod siwc;
 pub mod tasks;
 
 use std::collections::HashMap;
@@ -408,14 +410,27 @@ async fn forward(
         };
         return free::handle(st, session, &rest, body).await;
     }
-    // OpenRouter goes out with dino's key, not the agent's.
-    let openrouter = (provider == openrouter::PROVIDER).then(|| openrouter::headers(&st.keys.read().unwrap()));
-    if let Some(None) = openrouter {
-        return error(StatusCode::UNAUTHORIZED, "OpenRouter isn't connected: connect it in dino's Settings → Providers".into());
-    }
+    // Providers dino signs in to (OpenRouter, the ChatGPT plan) go out with dino's credentials,
+    // not the agent's: (what to add, which of the agent's to drop, where).
+    type Hosted = (Vec<(&'static str, String)>, fn(&str) -> bool, &'static str);
+    let hosted: Option<Hosted> = {
+        let keys = st.keys.read().unwrap();
+        match provider.as_str() {
+            openrouter::PROVIDER => match openrouter::headers(&keys) {
+                Some(h) => Some((h.to_vec(), openrouter::is_credential, openrouter::UPSTREAM)),
+                None => return error(StatusCode::UNAUTHORIZED, "OpenRouter isn't connected: connect it in dino's Settings → Providers".into()),
+            },
+            siwc::PROVIDER if !siwc::allowed(&rest) => return error(StatusCode::NOT_FOUND, "the ChatGPT plan only takes the Responses API (v1/responses)".into()),
+            siwc::PROVIDER => match siwc::headers(&keys) {
+                Ok(h) => Some((h.to_vec(), siwc::is_credential, siwc::upstream())),
+                Err(why) => return error(StatusCode::UNAUTHORIZED, why.into()),
+            },
+            _ => None,
+        }
+    };
     let upstream = match PROVIDERS.iter().find(|(p, _)| *p == provider) {
         Some(&(_, upstream)) => upstream,
-        None if openrouter.is_some() => openrouter::UPSTREAM,
+        None if hosted.is_some() => hosted.as_ref().map(|h| h.2).unwrap_or_default(),
         None => return error(StatusCode::NOT_FOUND, format!("unknown provider {provider}")),
     };
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
@@ -425,6 +440,11 @@ async fn forward(
         return error(StatusCode::BAD_REQUEST, "unreadable body".into());
     };
     let requested = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["model"].as_str().map(String::from));
+    // The ChatGPT plan streams; an agent that asked for one JSON answer gets it put together.
+    let collect = provider == siwc::PROVIDER && is_model_call && !siwc::wants_stream(&body);
+    if provider == siwc::PROVIDER && is_model_call && let Some(b) = siwc::shape(&body) {
+        body = Bytes::from(b);
+    }
     // A Codex model the backend already rejected: go straight to the one that answered instead.
     if provider == "chatgpt" {
         let sub = requested.as_ref().and_then(|m| st.substitutes.lock().unwrap().get(m).cloned());
@@ -449,12 +469,12 @@ async fn forward(
     let send = |body: Bytes| {
         let mut up = st.client.request(method.clone(), &url).body(body);
         for (name, value) in parts.headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
-            if openrouter.is_some() && openrouter::is_credential(name.as_str()) {
+            if hosted.as_ref().is_some_and(|h| h.1(name.as_str())) {
                 continue;
             }
             up = up.header(name, value);
         }
-        for (name, value) in openrouter.iter().flatten().flatten() {
+        for (name, value) in hosted.iter().flat_map(|h| &h.0) {
             up = up.header(*name, value);
         }
         up.send()
@@ -497,7 +517,10 @@ async fn forward(
             }
             log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
             record_quota(&st.stats, &provider, &headers);
-            let msg = format!("{} {}", status.as_u16(), codex::error_message(&text));
+            let msg = match provider.as_str() {
+                siwc::PROVIDER => siwc::refused(status.as_u16(), &codex::error_message(&text)),
+                _ => format!("{} {}", status.as_u16(), codex::error_message(&text)),
+            };
             st.stats.update(&session, |s| {
                 s.errors += 1;
                 s.call_failed(msg);
@@ -530,8 +553,16 @@ async fn forward(
     }
 
     let mut builder = Response::builder().status(status.as_u16());
-    for (name, value) in resp.headers().iter().filter(|(n, _)| !hop_by_hop(n)) {
+    // Put together into one answer: its content type is JSON, not the stream's.
+    for (name, value) in resp.headers().iter().filter(|(n, _)| !hop_by_hop(n) && !(collect && n.as_str() == "content-type")) {
         builder = builder.header(name, value);
+    }
+    if collect && status.is_success() {
+        let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, _in_flight: guard };
+        let whole = resp.bytes().await.unwrap_or_default();
+        tap.meter.feed(&whole);
+        let answer = siwc::collect(&whole).unwrap_or_else(|| whole.to_vec());
+        return builder.header("content-type", "application/json").body(Body::from(answer)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()));
     }
 
     // Tee the body: pass every chunk through immediately, scan a copy for usage.
@@ -559,7 +590,14 @@ impl Drop for Tap {
         if aborted {
             log(format_args!("{} model call dropped by the agent", self.session));
         }
+        if let Some(e) = &self.meter.error {
+            log(format_args!("{} model call answered 200 with an error: {e}", self.session));
+        }
         self.stats.update(&self.session, |s| {
+            if let Some(e) = self.meter.error.take() {
+                s.errors += 1;
+                s.call_failed(e);
+            }
             if let Some(u) = self.meter.seen.take() {
                 s.usage.add(&u);
                 // Probes (Claude checks its quota with a one-word call) say nothing about the conversation.
@@ -811,6 +849,9 @@ struct Meter {
     /// The whole answer came through. Agents hang up once they have it, so the body running
     /// out can't tell a finished answer from an interrupted one; its last event can.
     complete: bool,
+    /// The answer was an error after all, though it came with 200: OpenRouter passes an upstream
+    /// failure ("provider_overloaded") on in the body, and a stream can end in an error event.
+    error: Option<String>,
 }
 
 impl Meter {
@@ -845,6 +886,18 @@ impl Meter {
     }
 
     fn observe(&mut self, v: &Value) {
+        // `{"error": {...}}` (OpenRouter, a Chat stream's chunk, Anthropic's error event) or a
+        // failed Responses answer. A finished Responses answer carries `"error": null`.
+        if self.error.is_none()
+            && let Some(e) = [&v["error"], &v["response"]["error"]].into_iter().find(|e| e.is_object())
+        {
+            let said = e["message"].as_str().or(e["type"].as_str()).unwrap_or("the provider failed");
+            self.error = Some(match e["code"].as_u64() {
+                Some(code) => format!("{code} {said}"),
+                None => said.to_string(),
+            });
+            self.complete = true;
+        }
         if self.model.is_none() {
             self.model = [&v["message"]["model"], &v["response"]["model"], &v["model"]].iter().find_map(|m| m.as_str()).map(String::from);
         }
@@ -896,6 +949,33 @@ mod tests {
         assert_eq!(s.last_error.as_deref(), Some("529 overloaded"));
         s.turn_hook("UserPromptSubmit", &json!({}));
         assert_eq!(s.last_error, None);
+    }
+
+    #[test]
+    fn a_200_that_is_an_error_counts_as_one() {
+        let stats = Arc::new(Stats::default());
+        let call = |body: &str| {
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), _in_flight: None };
+            tap.meter.feed(&Bytes::from(body.to_string()));
+        };
+        // OpenRouter, as it answered for real: HTTP 200, and an upstream 503 in the body.
+        call(r#"{"id":"gen-1790742907-SecNFKzI8AeVJ53NBH9p","error":{"message":"Upstream error from Nvidia: Service temporarily overloaded","code":503,"metadata":{"error_type":"provider_overloaded"}}}"#);
+        let s = stats.session("1");
+        assert_eq!(s.errors, 1);
+        assert_eq!(s.last_error.as_deref(), Some("503 Upstream error from Nvidia: Service temporarily overloaded"));
+
+        // The same inside a Chat Completions stream, and a Responses stream that failed.
+        call("data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"PEL\"}}]}\n\ndata: {\"error\":{\"message\":\"Provider returned error\",\"code\":429}}\n\n");
+        assert_eq!(stats.session("1").last_error.as_deref(), Some("429 Provider returned error"));
+        call("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"The model failed\"}}}\n\n");
+        assert_eq!(stats.session("1").errors, 3);
+        assert_eq!(stats.session("1").last_error.as_deref(), Some("The model failed"));
+
+        // A finished Responses answer says `"error": null`: not an error.
+        let before = stats.session("1").errors;
+        call("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"error\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n");
+        call(r#"{"id":"c","choices":[{"message":{"content":"PELICAN"}}],"usage":{"prompt_tokens":5,"completion_tokens":1}}"#);
+        assert_eq!(stats.session("1").errors, before);
     }
 
     #[test]

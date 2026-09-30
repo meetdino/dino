@@ -68,9 +68,9 @@ pub fn start() {
 /// Every provider, local ones whether or not they run.
 pub fn list() -> Vec<ProviderInfo> {
     let c = cache().lock().unwrap();
-    let mut out: Vec<ProviderInfo> = std::iter::once("openrouter").chain(LOCAL.iter().map(|l| l.0)).filter_map(|id| c.providers.get(id).map(|(_, p)| p.clone())).collect();
+    let mut out: Vec<ProviderInfo> = ["openrouter", "chatgpt"].into_iter().chain(LOCAL.iter().map(|l| l.0)).filter_map(|id| c.providers.get(id).map(|(_, p)| p.clone())).collect();
     if out.is_empty() {
-        out = std::iter::once(openrouter_bare()).chain(LOCAL.iter().map(|(id, name, addr)| local_bare(id, name, addr))).collect();
+        out = [openrouter_bare(), chatgpt_bare()].into_iter().chain(LOCAL.iter().map(|(id, name, addr)| local_bare(id, name, addr))).collect();
     }
     out
 }
@@ -95,7 +95,7 @@ pub fn rows(id: &str) -> (Vec<ModelRow>, bool, Option<String>) {
 
 /// What `id` serves as last fetched; a stale or missing list is asked for again, off this thread.
 fn models(id: &str) -> (Vec<ProviderModel>, bool, Option<String>) {
-    let every = if id == "openrouter" { HOSTED_EVERY } else { LOCAL_EVERY };
+    let every = if matches!(id, "openrouter" | "chatgpt") { HOSTED_EVERY } else { LOCAL_EVERY };
     let mut c = cache().lock().unwrap();
     let (models, error, stale) = match c.models.get(id) {
         Some(f) => (f.models.clone(), f.error.clone(), f.at.elapsed() >= every),
@@ -147,6 +147,26 @@ pub fn refresh(now: bool) {
     };
     store(or);
 
+    // Signed in with ChatGPT: what the key store says, and the last error until the next try.
+    let keys = dino_core::load_keys();
+    let mut chatgpt = chatgpt_bare();
+    let signed_in = crate::chatgpt::status(&keys);
+    chatgpt.connected = signed_in.is_some();
+    chatgpt.account = signed_in.map(|plan| providers::Account {
+        label: Some(if plan { "Plan usage allowed" } else { "Signed in, but plan usage wasn't allowed: sign in again and allow it" }.into()),
+        ..Default::default()
+    });
+    {
+        let mut c = cache().lock().unwrap();
+        let was = c.providers.get("chatgpt").map(|(_, p)| (p.connected, p.error.clone()));
+        chatgpt.error = was.as_ref().and_then(|w| w.1.clone());
+        // Signed in or out since: the list was for someone else.
+        if was.is_some_and(|w| w.0 != chatgpt.connected) {
+            c.models.remove("chatgpt");
+        }
+    }
+    store(chatgpt);
+
     for (id, name, addr) in LOCAL {
         let up = TcpStream::connect_timeout(&addr.parse::<SocketAddr>().unwrap(), Duration::from_millis(200)).is_ok();
         let p = if !up {
@@ -178,6 +198,18 @@ fn store(p: ProviderInfo) {
 
 fn openrouter_bare() -> ProviderInfo {
     ProviderInfo { id: "openrouter".into(), name: "OpenRouter".into(), base: OPENROUTER.into(), key: Some(OPENROUTER_KEY.into()), ..Default::default() }
+}
+
+/// The ChatGPT plan, through Sign in with ChatGPT: the Responses API is what the plan may be spent on.
+fn chatgpt_bare() -> ProviderInfo {
+    ProviderInfo {
+        id: "chatgpt".into(),
+        name: "ChatGPT plan".into(),
+        base: crate::chatgpt::API.trim_end_matches("/v1").into(),
+        formats: vec![Format::Responses],
+        key: Some(crate::chatgpt::REFRESH_KEY.into()),
+        ..Default::default()
+    }
 }
 
 fn local_bare(id: &str, name: &str, addr: &str) -> ProviderInfo {
@@ -322,11 +354,11 @@ fn wait_for_code(listener: &std::net::TcpListener) -> anyhow::Result<String> {
     }
 }
 
-fn percent(s: &str) -> String {
+pub(crate) fn percent(s: &str) -> String {
     s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-fn unpercent(s: &str) -> String {
+pub(crate) fn unpercent(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -360,7 +392,7 @@ pub fn forget(id: &str) {
 }
 
 /// Say why `id` isn't usable (or stop saying it).
-fn set_error(id: &str, error: Option<String>) {
+pub(crate) fn set_error(id: &str, error: Option<String>) {
     let mut c = cache().lock().unwrap();
     if let Some((_, p)) = c.providers.get_mut(id) {
         p.error = error;
@@ -371,6 +403,13 @@ fn fetch_models(id: &str) {
     let base = find(id).map(|p| p.base).unwrap_or_default();
     let got: Result<Vec<ProviderModel>, String> = match id {
         "openrouter" => get(&format!("{OPENROUTER}/v1/models")).map(|v| providers::openrouter_models(&v)),
+        // The account's own list; Codex's catalog for the same account when that's empty or out of reach.
+        "chatgpt" => {
+            let access = dino_core::load_keys().remove(crate::chatgpt::ACCESS_KEY).unwrap_or_default();
+            let api = http().get(format!("{}/models", crate::chatgpt::API)).bearer_auth(access).send().ok().filter(|r| r.status().is_success()).and_then(|r| r.json::<Value>().ok()).unwrap_or(Value::Null);
+            let models = providers::chatgpt_models(&api, dino_core::models::codex_cache().as_deref());
+            if models.is_empty() { Err("ChatGPT listed no models, and Codex has no list for this account".into()) } else { Ok(models) }
+        }
         "ollama" => get(&format!("{base}/api/tags")).map(|v| {
             v["models"]
                 .as_array()
