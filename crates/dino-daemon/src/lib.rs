@@ -405,17 +405,21 @@ fn agent_action(d: &Daemon, id: &str, action: &str) -> anyhow::Result<String> {
     let session = spawn(d, Launch::new("shell", vec![], Some(home().display().to_string())))?;
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == session).cloned().ok_or_else(|| anyhow::anyhow!("the shell went away"))?;
     *s.label.lock().unwrap() = Some(label);
-    let command = command.to_string();
+    type_at_prompt(s, command.to_string());
+    Ok(session)
+}
+
+/// Type `line` at a new shell's prompt and press Return, as if by hand: once the shell has drawn
+/// its prompt, so the line lands there and not in its startup.
+fn type_at_prompt(s: Arc<Session>, line: String) {
     std::thread::spawn(move || {
-        // Once the shell has drawn its prompt, so the line lands there and not in its startup.
         let started = Instant::now();
         while s.pane.text(0).trim().is_empty() && started.elapsed() < std::time::Duration::from_secs(5) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
-        send_input(&s, &command, true);
+        send_input(&s, &line, true);
     });
-    Ok(session)
 }
 
 fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
@@ -486,9 +490,17 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by } => {
+                // A shell's "prompt" is a line typed at its prompt (a script opened with dino, a
+                // man page), not an argument.
+                let (prompt, line) = if launcher == "shell" { (None, prompt) } else { (prompt, None) };
                 let launch = Launch { cols, rows, controls, host, prompt, started_by: by, ..Launch::new(&launcher, args, cwd) };
                 match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {
                     Ok(id) => {
+                        if let Some(line) = line {
+                            if let Some(s) = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                                type_at_prompt(s, line);
+                            }
+                        }
                         save(d);
                         Response::Created { id }
                     }

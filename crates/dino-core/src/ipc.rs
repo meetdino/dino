@@ -81,7 +81,7 @@ pub enum Request {
         /// Run it over SSH on this host (one from Settings → Environments); `cwd` is then a path there.
         #[serde(default)]
         host: Option<String>,
-        /// Its agent's first message.
+        /// Its agent's first message; for a shell, a line typed at its prompt.
         #[serde(default)]
         prompt: Option<String>,
         /// The session starting it, by id: a shell whose AI line handed its request on.

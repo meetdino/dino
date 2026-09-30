@@ -130,7 +130,7 @@ final class DinoModel: ObservableObject {
     }
 
     /// Launch has been handled: the session left selected is back, or a shell was started.
-    private var launched = false
+    private(set) var launched = false
     /// The shell started at launch, until dinod says which it is.
     private var startingShell = false
 
@@ -238,9 +238,11 @@ final class DinoModel: ObservableObject {
     }
 
     private func apply(_ next: [SessionInfo], _ quotas: [QuotaInfo]) {
+        // The quick terminal's shell is its own, not a session in the sidebar.
+        QuickTerminal.shared.sessionAlive = next.contains { $0.id == QuickTerminal.shared.sessionID && !$0.exited }
         // Output older than 5s all reads as quiet: without this an idle session differs on every
         // tick and the whole window redraws four times a second.
-        let next = next.map { s in
+        let next = next.filter { $0.id != QuickTerminal.shared.sessionID }.map { s in
             var s = s
             s.output_ms_ago = s.output_ms_ago.map { min($0, 5000) }
             return s
@@ -313,7 +315,11 @@ final class DinoModel: ObservableObject {
         // Settings says so.
         if !launched {
             launched = true
-            if next.isEmpty || StartWith.current == .shell {
+            // Opened with something (a folder, a script): that instead of the usual first shell.
+            if !Opening.pending.isEmpty {
+                open(Opening.pending)
+                Opening.pending = []
+            } else if next.isEmpty || StartWith.current == .shell {
                 startingShell = newShell()
             }
         }
@@ -427,12 +433,14 @@ final class DinoModel: ObservableObject {
     /// `controls`: mode, model and effort; what's left open comes from Settings → Agents.
     /// `host`: over SSH on that host, in `remoteFolder` there (empty: the host's default folder).
     /// `dir`: where on this Mac, instead of the current folder.
-    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "", in dir: String? = nil) {
+    /// `line`: for a shell, a line typed at its prompt once it's up; `label`: its name in the sidebar.
+    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "", in dir: String? = nil, line: String? = nil, label: String? = nil) {
         guard let conn = connection else { return }
         var body: [String: Any] = [
             "type": "new", "launcher": launcher.short, "args": [], "cwd": dir ?? folder.path, "cols": 120, "rows": 40,
             "worktree": worktree, "controls": controls.json,
         ]
+        if let line { body["prompt"] = line }
         if let host {
             body["host"] = host
             body["cwd"] = remoteFolder.isEmpty ? nil : remoteFolder
@@ -441,6 +449,7 @@ final class DinoModel: ObservableObject {
         Task.detached {
             do {
                 let resp = try conn.request(request)
+                if let label, let id = resp.id { try? conn.rename(id, to: label) }
                 await MainActor.run {
                     if let host, !remoteFolder.isEmpty { self.rememberFolder(remoteFolder, on: host) }
                     if let id = resp.id { self.select(id) }
