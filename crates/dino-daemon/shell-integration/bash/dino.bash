@@ -12,3 +12,5 @@ done
 builtin unset _dino_file
 
 builtin source "${BASH_SOURCE[0]%/*}/ghostty.bash"
+
+[[ $- == *i* ]] && builtin source "${BASH_SOURCE[0]%/*}/dino-ai.bash"
