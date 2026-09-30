@@ -259,7 +259,7 @@ pub enum Response {
     Keys { keys: Vec<crate::settings::KeyInfo> },
     Providers { providers: Vec<crate::providers::ProviderInfo> },
     /// `loading`: dinod is asking the provider now; ask again for what it says.
-    Models { provider: String, models: Vec<crate::providers::ProviderModel>, loading: bool, error: Option<String> },
+    Models { provider: String, models: Vec<ModelRow>, loading: bool, error: Option<String> },
     PrDraft { draft: PrDraft },
     Pr { pr: PrInfo },
     Review { findings: Vec<crate::review::Finding> },
@@ -586,4 +586,12 @@ pub struct WindowInfo {
     pub name: String,
     pub utilization: f32,
     pub resets_at: Option<u64>,
+}
+
+/// A provider's model and what dino makes of it for each agent, the one to run it in first.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ModelRow {
+    #[serde(flatten)]
+    pub model: crate::providers::ProviderModel,
+    pub agents: Vec<crate::compat::Verdict>,
 }
