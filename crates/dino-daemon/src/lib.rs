@@ -330,8 +330,12 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
 }
 
 fn launchers(free_tier: bool) -> Vec<LauncherInfo> {
+    launchers_from(free_tier, detect_agents())
+}
+
+fn launchers_from(free_tier: bool, agents: Vec<dino_core::Detected>) -> Vec<LauncherInfo> {
     let mut out = vec![];
-    for d in detect_agents() {
+    for d in agents {
         let program: String = d.path.to_string_lossy().into();
         if d.kind.id == "claude" && free_tier {
             out.push(LauncherInfo { short: "free".into(), agent_id: "claude-free".into(), label: "Claude Code · free models".into(), program: program.clone(), knobs: Default::default() });
@@ -342,6 +346,73 @@ fn launchers(free_tier: bool) -> Vec<LauncherInfo> {
     let shell_name = shell.rsplit('/').next().unwrap_or("shell").to_string();
     out.push(LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell, knobs: Default::default() });
     out
+}
+
+/// Every agent dino knows, as it is on this Mac now. Looked up on the login shell's current `PATH`,
+/// so one installed since dinod started is found, and becomes one dino can start.
+fn agent_setup(d: &Daemon) -> Vec<ipc::AgentSetupInfo> {
+    let mut path = dino_core::discover::login_path().unwrap_or_default();
+    if let Some(own) = std::env::var_os("PATH") {
+        path.push(":");
+        path.push(own);
+    }
+    let found = dino_core::detect_agents_in(&path);
+    let startable: Vec<String> = d.launchers.read().unwrap().iter().map(|l| l.agent_id.clone()).collect();
+    if found.iter().any(|a| !startable.iter().any(|s| s == a.kind.id)) {
+        *d.launchers.write().unwrap() = launchers_from(load_keys().contains_key("NVIDIA_API_KEY"), found.clone());
+    }
+    std::thread::scope(|s| {
+        let probes: Vec<_> = dino_core::KNOWN_AGENTS
+            .iter()
+            .filter(|k| k.id != "gemini")
+            .map(|kind| {
+                let bin = found.iter().find(|a| a.kind.id == kind.id).map(|a| a.path.clone());
+                s.spawn(move || {
+                    let setup = dino_core::discover::setup(kind.id);
+                    let status = bin.as_deref().and_then(|b| dino_core::discover::sign_in_status(kind.id, b));
+                    ipc::AgentSetupInfo {
+                        id: kind.id.into(),
+                        name: kind.name.into(),
+                        version: bin.as_deref().and_then(dino_core::discover::version_of),
+                        path: bin.map(|b| b.display().to_string()),
+                        signed_in: status.as_ref().map(|s| s.0),
+                        account: status.and_then(|s| s.1),
+                        install: dino_core::discover::install_hint(kind.id).into(),
+                        sign_in: setup.sign_in.map(String::from),
+                        sign_in_hint: setup.sign_in_hint.map(String::from),
+                        homepage: setup.homepage.into(),
+                    }
+                })
+            })
+            .collect();
+        probes.into_iter().map(|p| p.join().unwrap()).collect()
+    })
+}
+
+/// Run agent `id`'s own install or sign-in command in a new shell, typed at its prompt as if by
+/// hand: the user sees it run, answers its questions, and the shell stays when it's done.
+fn agent_action(d: &Daemon, id: &str, action: &str) -> anyhow::Result<String> {
+    let kind = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id).ok_or_else(|| anyhow::anyhow!("unknown agent {id}"))?;
+    let (command, label) = match action {
+        "install" => (dino_core::discover::install_hint(id), format!("Install {}", kind.name)),
+        "sign_in" => (dino_core::discover::setup(id).sign_in.unwrap_or_default(), format!("Sign in to {}", kind.name)),
+        _ => anyhow::bail!("unknown action {action}"),
+    };
+    anyhow::ensure!(!command.is_empty(), "dino doesn't know how to {} {}", action.replace('_', " "), kind.name);
+    let session = spawn(d, Launch::new("shell", vec![], Some(home().display().to_string())))?;
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == session).cloned().ok_or_else(|| anyhow::anyhow!("the shell went away"))?;
+    *s.label.lock().unwrap() = Some(label);
+    let command = command.to_string();
+    std::thread::spawn(move || {
+        // Once the shell has drawn its prompt, so the line lands there and not in its startup.
+        let started = Instant::now();
+        while s.pane.text(0).trim().is_empty() && started.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        send_input(&s, &command, true);
+    });
+    Ok(session)
 }
 
 fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
@@ -361,6 +432,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::State => state(d),
             Request::Launchers => Response::Launchers { launchers: d.offered() },
             Request::AllLaunchers => Response::Launchers { launchers: d.all_launchers() },
+            Request::AgentSetup => Response::AgentSetup { agents: agent_setup(d) },
+            Request::AgentAction { id, action } => match agent_action(d, &id, &action) {
+                Ok(id) => {
+                    save(d);
+                    Response::Created { id }
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::Settings => {
                 Response::Settings {
                     settings: Settings::load(),

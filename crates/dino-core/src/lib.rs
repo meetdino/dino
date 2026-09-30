@@ -35,7 +35,9 @@ pub const KNOWN_AGENTS: &[AgentKind] = &[
     AgentKind { id: "codex", name: "Codex", bin: "codex" },
     AgentKind { id: "gemini", name: "Gemini CLI", bin: "gemini" },
     AgentKind { id: "qwen", name: "Qwen Code", bin: "qwen" },
-    AgentKind { id: "kimi", name: "Kimi CLI", bin: "kimi" },
+    AgentKind { id: "kimi", name: "Kimi Code", bin: "kimi" },
+    AgentKind { id: "pi", name: "Pi", bin: "pi" },
+    AgentKind { id: "hermes", name: "Hermes Agent", bin: "hermes" },
     AgentKind { id: "opencode", name: "OpenCode", bin: "opencode" },
     AgentKind { id: "crush", name: "Crush", bin: "crush" },
     AgentKind { id: "aider", name: "Aider", bin: "aider" },
@@ -51,9 +53,14 @@ pub struct Detected {
 
 /// Known agents found on `PATH`, in catalog order.
 pub fn detect_agents() -> Vec<Detected> {
+    detect_agents_in(&std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// Known agents found on `path` (a `PATH`-style list), in catalog order.
+pub fn detect_agents_in(path: &std::ffi::OsStr) -> Vec<Detected> {
     KNOWN_AGENTS
         .iter()
-        .filter_map(|kind| which(kind.bin).map(|path| Detected { kind: kind.clone(), path }))
+        .filter_map(|kind| which_in(kind.bin, path).map(|path| Detected { kind: kind.clone(), path }))
         .collect()
 }
 
@@ -63,8 +70,11 @@ pub fn user_shell() -> String {
 }
 
 pub fn which(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(bin)).find(|p| is_executable(p))
+    which_in(bin, &std::env::var_os("PATH")?)
+}
+
+pub fn which_in(bin: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path).map(|dir| dir.join(bin)).find(|p| is_executable(p))
 }
 
 fn is_executable(p: &Path) -> bool {

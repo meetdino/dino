@@ -62,6 +62,10 @@ pub enum Request {
     Launchers,
     /// Every launcher, allowed or not (for choosing policies).
     AllLaunchers,
+    /// Every agent dino knows, whether it's on this Mac and signed in, and how to get it.
+    AgentSetup,
+    /// Run agent `id`'s own `install` or `sign_in` command in a new shell session.
+    AgentAction { id: String, action: String },
     /// Start a session; with `worktree`, in a new git worktree (and branch) of the repo at `cwd`.
     New {
         launcher: String,
@@ -221,6 +225,7 @@ pub enum Request {
 pub enum Response {
     State { sessions: Vec<SessionInfo>, quotas: Vec<QuotaInfo> },
     Launchers { launchers: Vec<LauncherInfo> },
+    AgentSetup { agents: Vec<AgentSetupInfo> },
     Created { id: String },
     Found { sessions: Vec<crate::found::FoundSession> },
     Conversation { page: crate::history::Page },
@@ -255,6 +260,25 @@ pub enum Response {
     Subagent { subagent: SubagentView },
     Ok,
     Error { message: String },
+}
+
+/// One agent in Settings → Agents. The commands are the agent's own; dino runs them in a shell.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AgentSetupInfo {
+    pub id: String,
+    pub name: String,
+    /// Where it's installed; none when it isn't.
+    pub path: Option<String>,
+    pub version: Option<String>,
+    /// From the agent's own status command; none when it has no quick way to ask.
+    pub signed_in: Option<bool>,
+    /// How it's signed in: "Claude Max", "ChatGPT", "API key".
+    pub account: Option<String>,
+    pub install: String,
+    pub sign_in: Option<String>,
+    /// What to type in the agent once it's open, for ones that sign in from inside ("/login").
+    pub sign_in_hint: Option<String>,
+    pub homepage: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
