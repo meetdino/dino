@@ -42,10 +42,7 @@ fn path() -> PathBuf {
 }
 
 fn store(tasks: &[ScheduledTask]) {
-    let tmp = path().with_extension("json.tmp");
-    if std::fs::write(&tmp, serde_json::to_vec_pretty(tasks).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(tmp, path());
-    }
+    let _ = crate::write_private(&path(), &serde_json::to_vec_pretty(tasks).unwrap_or_default());
 }
 
 /// Check for due tasks now and every 30 seconds after.

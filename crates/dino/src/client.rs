@@ -13,11 +13,15 @@ use dino_term::{Pane, Transport};
 
 /// Connect to dinod, starting it in the background if it isn't running.
 pub fn connect() -> io::Result<UnixStream> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let path = ipc::socket_path();
     if let Ok(s) = UnixStream::connect(&path) {
         return Ok(s);
     }
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(dino_core::config_dir().join("dinod.log"))?;
+    // Private: what dinod logs names sessions, paths and errors.
+    let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dino_core::config_dir().join("dinod.log"))?;
+    // `mode` is only for a new one: an older log may be open to others.
+    let _ = log.set_permissions(std::fs::Permissions::from_mode(0o600));
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("daemon").stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
     // Own session, so it outlives this terminal.
