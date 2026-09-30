@@ -91,7 +91,13 @@ pub struct Shared {
     pub cwd: Mutex<Option<String>>,
     pub last_exit: Mutex<Option<i32>>,
     pub prompts: AtomicU64,
+    /// What the last command printed, between its OSC 133 C and D (see [`OUTPUT_MAX_LINES`]).
+    pub last_output: Mutex<Option<String>>,
 }
+
+/// The most of a command's output kept: its last lines, up to this many characters.
+pub const OUTPUT_MAX_LINES: usize = 200;
+pub const OUTPUT_MAX_CHARS: usize = 16_000;
 
 #[derive(Clone)]
 struct Listener(Arc<Shared>);
@@ -171,6 +177,9 @@ struct Feed {
     left_alt: Option<LeftAlt>,
     /// The start of an OSC dino reads (see [`READ`]) whose end hasn't arrived yet.
     osc: Vec<u8>,
+    /// Where the running command's output began (OSC 133 C), counted from the top of the
+    /// scrollback, and the scrollback size then (so a full scrollback dropping lines is seen).
+    output_from: Option<(usize, usize)>,
 }
 
 /// The alternate screen as it was when the program last left it.
@@ -212,9 +221,10 @@ impl Pane {
             cwd: Mutex::new(None),
             last_exit: Mutex::new(None),
             prompts: AtomicU64::new(0),
+            last_output: Mutex::new(None),
         });
         let term = new_term(&shared, cols, rows);
-        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, osc: Vec::new() };
+        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, osc: Vec::new(), output_from: None };
         Self { term: Arc::new(FairMutex::new(term)), feed: Mutex::new(feed), shared, killer: Mutex::new(None), pid: OnceLock::new() }
     }
 
@@ -315,7 +325,10 @@ impl Pane {
     fn advance(&self, term: &mut Term<Listener>, bytes: &[u8]) {
         let mut guard = self.feed.lock().unwrap();
         let feed = &mut *guard;
-        for (kind, text) in oscs(&mut feed.osc, bytes) {
+        // Up to each command's start and end mark first: where the cursor is then is where its
+        // output begins and ends.
+        let mut fed = 0;
+        for (kind, text, end) in oscs(&mut feed.osc, bytes) {
             let s = &self.shared;
             match kind {
                 // `9;4;…` is a progress report, not a notice.
@@ -332,12 +345,31 @@ impl Pane {
                     ["A", ..] => {
                         s.prompts.fetch_add(1, Ordering::Relaxed);
                     }
-                    ["D", code, ..] => *s.last_exit.lock().unwrap() = code.parse().ok(),
+                    ["C", ..] => {
+                        Self::parse(term, feed, &bytes[fed..end.max(fed)]);
+                        fed = end.max(fed);
+                        let grid = term.grid();
+                        let alt = term.mode().contains(TermMode::ALT_SCREEN);
+                        feed.output_from = (!alt).then(|| (grid.history_size() + grid.cursor.point.line.0.max(0) as usize, grid.history_size()));
+                    }
+                    ["D", ref rest @ ..] => {
+                        *s.last_exit.lock().unwrap() = rest.first().and_then(|c| c.parse().ok());
+                        Self::parse(term, feed, &bytes[fed..end.max(fed)]);
+                        fed = end.max(fed);
+                        if let Some(from) = feed.output_from.take() {
+                            *s.last_output.lock().unwrap() = output_since(term, from);
+                        }
+                    }
                     _ => {}
                 },
                 _ => {}
             }
         }
+        Self::parse(term, feed, &bytes[fed..]);
+    }
+
+    /// Feed the parser, noting what the alternate screen showed each time the program leaves it.
+    fn parse(term: &mut Term<Listener>, feed: &mut Feed, bytes: &[u8]) {
         let mut rest = bytes;
         while let Some((cut, end)) = alt_off(&feed.carry, rest) {
             feed.processor.advance(term, &rest[..cut]);
@@ -455,19 +487,7 @@ impl Pane {
         let cols = grid.columns();
         let mut lines: Vec<String> = Vec::new();
         for line in -hist..grid.screen_lines() as i32 {
-            let row = &grid[Line(line)];
-            let mut text = String::new();
-            for c in 0..cols {
-                let cell = &row[Column(c)];
-                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    continue;
-                }
-                text.push(cell.c);
-                if let Some(extra) = cell.zerowidth() {
-                    text.extend(extra);
-                }
-            }
-            lines.push(text.trim_end().to_string());
+            lines.push(plain_row(&grid[Line(line)], cols));
         }
         while lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
@@ -682,9 +702,11 @@ fn new_term(shared: &Arc<Shared>, cols: u16, rows: u16) -> Term<Listener> {
     Term::new(config, &TermSize { cols: cols as usize, rows: rows as usize }, Listener(shared.clone()))
 }
 
-/// The OSCs dino reads (see [`READ`]) in `bytes`, as their kind and text, with `pending` the
+/// The OSCs dino reads (see [`READ`]) in `bytes`, as their kind, text and where in `bytes` they
+/// end, with `pending` the
 /// unended start of one from earlier chunks, left holding the start of one still unended.
-fn oscs(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<(&'static str, String)> {
+fn oscs(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<(&'static str, String, usize)> {
+    let before = pending.len();
     let joined;
     let data = if pending.is_empty() {
         bytes
@@ -707,10 +729,10 @@ fn oscs(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<(&'static str, String)> {
         };
         let text = String::from_utf8_lossy(&body[..end]);
         let (kind, text) = text.split_once(';').unwrap_or((&text, ""));
-        if let Some(kind) = READ.iter().find(|k| **k == kind) {
-            out.push((*kind, text.trim().to_string()));
-        }
         at = i + OSC.len() + end + stop;
+        if let Some(kind) = READ.iter().find(|k| **k == kind) {
+            out.push((*kind, text.trim().to_string(), at.saturating_sub(before)));
+        }
     }
     pending.clear();
     match rest {
@@ -750,6 +772,54 @@ fn file_url_path(url: &str) -> Option<String> {
 fn alt_off(carry: &[u8], bytes: &[u8]) -> Option<(usize, usize)> {
     let split = ALT_OFF.iter().find_map(|p| (1..p.len()).find(|&k| carry.ends_with(&p[..k]) && bytes.starts_with(&p[k..])).map(|k| (0, p.len() - k)));
     split.or_else(|| ALT_OFF.iter().filter_map(|p| bytes.windows(p.len()).position(|w| w == *p).map(|i| (i, i + p.len()))).min())
+}
+
+/// A row as plain text, without trailing blanks.
+fn plain_row(row: &alacritty_terminal::grid::Row<alacritty_terminal::term::cell::Cell>, cols: usize) -> String {
+    let mut text = String::new();
+    for c in 0..cols {
+        let cell = &row[Column(c)];
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        text.push(cell.c);
+        if let Some(extra) = cell.zerowidth() {
+            text.extend(extra);
+        }
+    }
+    text.trim_end().to_string()
+}
+
+/// What a command printed: the lines from `from` (where its output began, counted from the top
+/// of the scrollback, with the scrollback size then) up to the cursor, its last
+/// [`OUTPUT_MAX_LINES`] and [`OUTPUT_MAX_CHARS`]. None if it ran on the alternate screen (an
+/// editor, a pager) or printed nothing.
+fn output_since(term: &Term<Listener>, (from, history_then): (usize, usize)) -> Option<String> {
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return None;
+    }
+    let grid = term.grid();
+    let history = grid.history_size();
+    // A full scrollback keeps its size as it drops lines; a growing one tells how far it moved.
+    let first = from as i64 - history as i64 - (history as i64 - history_then as i64).min(0);
+    let first = first.max(-(history as i64)) as i32;
+    let last = grid.cursor.point.line.0;
+    let cols = grid.columns();
+    let mut lines: Vec<String> = (first..=last).filter(|l| *l < grid.screen_lines() as i32).map(|l| plain_row(&grid[Line(l)], cols)).collect();
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    while lines.first().is_some_and(|l| l.is_empty()) {
+        lines.remove(0);
+    }
+    let start = lines.len().saturating_sub(OUTPUT_MAX_LINES);
+    let mut text = lines[start..].join("\n");
+    if text.len() > OUTPUT_MAX_CHARS {
+        let cut = text.len() - OUTPUT_MAX_CHARS;
+        let cut = (cut..text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+        text = text[cut..].to_string();
+    }
+    (!text.is_empty()).then_some(text)
 }
 
 /// The screen's rows, styled, without the blank ones at the bottom.
@@ -1011,6 +1081,18 @@ mod tests {
         assert_eq!(p.shared.prompts.load(Ordering::Relaxed), 3);
         // The marks don't show on the screen.
         assert_eq!(p.text(100), "$ true\n$");
+        // What a command printed: from its start mark to its end mark, even in one chunk.
+        p.feed(b"false\r\n\x1b]133;C\x07oops: it broke\r\nsecond line\r\n\x1b]133;D;1\x07\x1b]133;A\x07$ ");
+        assert_eq!(p.shared.last_output.lock().unwrap().as_deref(), Some("oops: it broke\nsecond line"));
+        assert_eq!(*p.shared.last_exit.lock().unwrap(), Some(1));
+        // Marks split across chunks.
+        p.feed(b"make\r\n\x1b]13");
+        p.feed(b"3;C\x07built\r\n\x1b]133;D");
+        p.feed(b";0\x07$ ");
+        assert_eq!(p.shared.last_output.lock().unwrap().as_deref(), Some("built"));
+        // An editor on the alternate screen leaves nothing to report.
+        p.feed(b"vi\r\n\x1b]133;C\x07\x1b[?1049hediting\x1b[?1049l\x1b]133;D;0\x07$ ");
+        assert_eq!(p.shared.last_output.lock().unwrap().as_deref(), None);
         assert_eq!(file_url_path("file://host"), None);
         assert_eq!(file_url_path("http://x/y"), None);
     }
