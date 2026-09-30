@@ -30,34 +30,35 @@ impl Tier {
     }
 }
 
-#[derive(Clone, Debug)]
+/// One of the provider's models.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Model {
-    pub provider: &'static str,
-    pub id: &'static str,
+    pub id: String,
 }
 
 impl Model {
     /// `z-ai/glm-5.3` → `glm-5.3`
-    pub fn short(&self) -> &'static str {
-        self.id.rsplit('/').next().unwrap_or(self.id)
+    pub fn short(&self) -> &str {
+        self.id.rsplit('/').next().unwrap_or(&self.id)
     }
 }
 
-const fn nim(id: &'static str) -> Model {
-    Model { provider: "nvidia", id }
+/// What dino knows about one of the provider's models: what it learned by trying it, and the
+/// provider's own ranking and output limit where the provider publishes them. No table.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Probe {
+    pub id: String,
+    /// It answered a chat request.
+    pub answers: bool,
+    /// It called a tool when given one.
+    pub tools: bool,
+    /// How long its answer took.
+    pub ms: f64,
+    /// Its place in the provider's featured list, best first.
+    pub rank: Option<usize>,
+    /// Most output tokens it takes, as the provider publishes it or as it said when refusing more.
+    pub max_output: Option<u64>,
 }
-
-/// Preference order per tier, from probing tool-call support and latency on NVIDIA's free tier.
-fn pool(tier: Tier) -> Vec<Model> {
-    match tier {
-        Tier::Fast => vec![nim("nvidia/nemotron-3-super-120b-a12b"), nim("openai/gpt-oss-20b")],
-        Tier::Code => vec![nim("z-ai/glm-5.3"), nim("moonshotai/kimi-k3"), nim("nvidia/nemotron-3-super-120b-a12b")],
-        Tier::Complex => vec![nim("moonshotai/kimi-k3"), nim("z-ai/glm-5.3"), nim("nvidia/nemotron-3-ultra-550b-a55b")],
-        Tier::Reason => vec![nim("nvidia/nemotron-3-ultra-550b-a55b"), nim("moonshotai/kimi-k3"), nim("z-ai/glm-5.3")],
-    }
-}
-
-pub const CLASSIFIER: Model = nim("openai/gpt-oss-20b");
 
 #[derive(Default)]
 struct Health {
@@ -69,20 +70,61 @@ struct Health {
 
 #[derive(Default)]
 pub struct Router {
-    health: Mutex<HashMap<&'static str, Health>>,
+    health: Mutex<HashMap<String, Health>>,
+    /// The provider's models as the proxy last found them.
+    probes: Mutex<Vec<Probe>>,
     /// Tier chosen for each session's current turn, keyed by the classifier input it came from.
     sticky: Mutex<HashMap<String, (u64, Tier)>>,
 }
 
 impl Router {
+    pub fn set_probes(&self, probes: Vec<Probe>) {
+        *self.probes.lock().unwrap() = probes;
+    }
+
+    pub fn probes(&self) -> Vec<Probe> {
+        self.probes.lock().unwrap().clone()
+    }
+
+    /// Preference order for `tier`: only models that call tools; quick chores to the quickest,
+    /// everything else by the provider's own ranking, then speed.
+    fn pool(&self, tier: Tier) -> Vec<Model> {
+        let probes = self.probes.lock().unwrap();
+        let mut usable: Vec<&Probe> = probes.iter().filter(|p| p.tools).collect();
+        let by_speed = |a: &&Probe, b: &&Probe| a.ms.total_cmp(&b.ms);
+        match tier {
+            Tier::Fast => usable.sort_by(by_speed),
+            _ => usable.sort_by(|a, b| a.rank.unwrap_or(usize::MAX).cmp(&b.rank.unwrap_or(usize::MAX)).then(by_speed(a, b))),
+        }
+        usable.into_iter().map(|p| Model { id: p.id.clone() }).collect()
+    }
+
+    /// The quickest model that answers, to classify requests with.
+    pub fn classifier(&self) -> Option<Model> {
+        let probes = self.probes.lock().unwrap();
+        probes.iter().filter(|p| p.answers).min_by(|a, b| a.ms.total_cmp(&b.ms)).map(|p| Model { id: p.id.clone() })
+    }
+
+    /// Most output tokens `model` takes, when known.
+    pub fn max_output(&self, model: &Model) -> Option<u64> {
+        self.probes.lock().unwrap().iter().find(|p| p.id == model.id).and_then(|p| p.max_output)
+    }
+
+    /// `model` refused more than `tokens` of output.
+    pub fn learn_max_output(&self, model: &Model, tokens: u64) {
+        if let Some(p) = self.probes.lock().unwrap().iter_mut().find(|p| p.id == model.id) {
+            p.max_output = Some(tokens);
+        }
+    }
+
     /// Models to try for `tier`, best first: healthy before cooling, then preference,
     /// demoting a model that has been much slower than its peers.
     pub fn candidates(&self, tier: Tier) -> Vec<Model> {
+        let mut ranked: Vec<(usize, Model)> = self.pool(tier).into_iter().enumerate().collect();
         let health = self.health.lock().unwrap();
         let now = Instant::now();
-        let mut ranked: Vec<(usize, Model)> = pool(tier).into_iter().enumerate().collect();
         ranked.sort_by_key(|(pref, m)| {
-            let h = health.get(m.id);
+            let h = health.get(&m.id);
             let cooling = h.and_then(|h| h.cool_until).is_some_and(|t| t > now);
             let slow = h.and_then(|h| h.latency_ms).is_some_and(|l| l > 15_000.0);
             (cooling, slow, *pref)
@@ -92,7 +134,7 @@ impl Router {
 
     pub fn record_ok(&self, model: &Model, ttfb: Duration) {
         let mut health = self.health.lock().unwrap();
-        let h = health.entry(model.id).or_default();
+        let h = health.entry(model.id.clone()).or_default();
         let ms = ttfb.as_secs_f64() * 1000.0;
         h.latency_ms = Some(h.latency_ms.map_or(ms, |l| l * 0.7 + ms * 0.3));
         h.failures = 0;
@@ -102,7 +144,7 @@ impl Router {
     /// Back off a failing model: 30s, 60s, 120s… capped at 10 minutes.
     pub fn record_failure(&self, model: &Model) {
         let mut health = self.health.lock().unwrap();
-        let h = health.entry(model.id).or_default();
+        let h = health.entry(model.id.clone()).or_default();
         h.failures += 1;
         let secs = (30u64 << (h.failures - 1).min(5)).min(600);
         h.cool_until = Some(Instant::now() + Duration::from_secs(secs));
@@ -125,9 +167,6 @@ fn hash(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
-}
-
-impl Router {
 }
 
 /// Decide without a model call when the request makes it obvious.
@@ -236,11 +275,11 @@ pub fn parse_jev(resp: &Value) -> Option<(Tier, f64)> {
     Some((if confidence < 0.5 { tier.up() } else { tier }, confidence))
 }
 
-/// OpenAI chat request asking the classifier for a one-word label.
-pub fn classifier_request(user_text: &str) -> Value {
+/// OpenAI chat request asking classifier `model` for a one-word label.
+pub fn classifier_request(model: &Model, user_text: &str) -> Value {
     let text: String = user_text.chars().take(2000).collect();
     json!({
-        "model": CLASSIFIER.id,
+        "model": model.id,
         "max_tokens": 200,
         "temperature": 0,
         "messages": [
@@ -267,6 +306,22 @@ pub fn parse_label(text: &str) -> Option<Tier> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pool_is_what_was_learned() {
+        let r = Router::default();
+        assert!(r.candidates(Tier::Code).is_empty() && r.classifier().is_none(), "nothing known, nothing offered");
+        let p = |id: &str, tools: bool, ms: f64, rank: Option<usize>| Probe { id: id.into(), answers: true, tools, ms, rank, max_output: None };
+        r.set_probes(vec![p("a/slow-top", true, 9000.0, Some(0)), p("b/quick", true, 800.0, None), p("c/no-tools", false, 200.0, None), p("d/mid", true, 2000.0, None)]);
+        let ids = |t| r.candidates(t).into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(ids(Tier::Fast), ["b/quick", "d/mid", "a/slow-top"], "chores to the quickest");
+        assert_eq!(ids(Tier::Complex), ["a/slow-top", "b/quick", "d/mid"], "the provider's pick first");
+        assert_eq!(r.classifier().unwrap().id, "c/no-tools", "classifying needs no tools");
+        r.learn_max_output(&Model { id: "b/quick".into() }, 4096);
+        assert_eq!(r.max_output(&Model { id: "b/quick".into() }), Some(4096));
+        r.record_failure(&Model { id: "b/quick".into() });
+        assert_eq!(ids(Tier::Fast), ["d/mid", "a/slow-top", "b/quick"], "a failing model waits");
+    }
 
     #[test]
     fn jev_response_parsing_and_confidence_bump() {

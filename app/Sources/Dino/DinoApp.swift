@@ -989,14 +989,26 @@ struct AgentBadge: View {
     let agent: String
 
     var body: some View {
-        Text(["codex", "qwen"].contains(agent) ? agent : "claude")
+        Text(["codex", "qwen", "kimi", "pi", "hermes"].contains(base) ? base : "claude")
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
             .padding(.horizontal, 4).padding(.vertical, 1)
             .background(RoundedRectangle(cornerRadius: 3).fill(color.opacity(0.18)))
             .foregroundStyle(color)
     }
 
-    private var color: Color { agent == "codex" ? .blue : agent == "qwen" ? .purple : Brand.spike }
+    /// Free-tier ones ("kimi-free") as their agent.
+    private var base: String { agent.hasSuffix("-free") ? String(agent.dropLast(5)) : agent }
+
+    private var color: Color {
+        switch base {
+        case "codex": .blue
+        case "qwen": .purple
+        case "kimi": .teal
+        case "pi": .mint
+        case "hermes": .indigo
+        default: Brand.spike
+        }
+    }
 }
 
 /// Continue an agent started by hand in a shell as a dino session: same row, conversation resumed.

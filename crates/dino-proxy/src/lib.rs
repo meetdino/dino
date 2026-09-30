@@ -4,6 +4,7 @@
 //! The `free` provider is different: dino itself picks a free model and translates (see `free`).
 //! `or` is OpenRouter with the key dino holds for it (see `openrouter`).
 
+mod catalog;
 mod codex;
 mod free;
 mod openrouter;
@@ -271,6 +272,8 @@ pub struct Proxy {
     pub remote_port: u16,
     /// A remote session's token → its session id.
     remote: Arc<RwLock<HashMap<String, String>>>,
+    state: AppState,
+    runtime: tokio::runtime::Handle,
 }
 
 /// The hook-only listener's state: which tokens stand for which sessions.
@@ -304,8 +307,11 @@ impl Proxy {
         };
 
         let remote_tokens = remote.clone();
+        let kept = state.clone();
+        let (handle_tx, handle_rx) = std::sync::mpsc::channel();
         std::thread::Builder::new().name("dino-proxy".into()).spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+            let _ = handle_tx.send(rt.handle().clone());
             rt.block_on(async move {
                 // What an ssh tunnel reaches: hooks, by a token only that session knows. The
                 // remote port is open to everyone on that machine, so no API routes and no ids.
@@ -325,7 +331,13 @@ impl Proxy {
                 let _ = axum::serve(listener, app).await;
             });
         })?;
-        Ok(Self { port, stats, keys, budget, remote_port, remote })
+        let runtime = handle_rx.recv()?;
+        Ok(Self { port, stats, keys, budget, remote_port, remote, state: kept, runtime })
+    }
+
+    /// Find the free tier's models and keep them current, remembering what was learned in `cache`.
+    pub fn keep_free_models(&self, cache: std::path::PathBuf) {
+        self.runtime.spawn(catalog::keep_fresh(self.state.clone(), cache));
     }
 
     /// Use these keys from the next request on.

@@ -31,6 +31,14 @@ pub fn pids_named(name: &str) -> Vec<u32> {
         .collect()
 }
 
+/// When a process started, in seconds since the epoch, like `ps -o lstart`.
+pub fn started(pid: u32) -> Option<u64> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let n = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size) };
+    (n == size).then_some(info.pbi_start_tvsec)
+}
+
 /// A process's working directory, like lsof's `cwd` entry.
 pub fn cwd_of(pid: u32) -> Option<String> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };

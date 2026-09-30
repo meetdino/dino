@@ -23,6 +23,7 @@ use dino_core::{detect_agents, load_keys, new_uuid, pr, proxy_wiring, ssh, trust
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
+mod agentlog;
 mod codex;
 mod lifecycle;
 mod peers;
@@ -76,6 +77,8 @@ struct Session {
     host: Option<String>,
     /// Codex's rollout: which conversation it's on, where its turn is, its context window.
     rollout: Mutex<codex::Rollout>,
+    /// The record Kimi Code and Pi write of their conversation: where their turn is.
+    log: Mutex<agentlog::Log>,
     /// A shell's: the agent someone started in it by hand.
     inside: Mutex<Inside>,
     /// Once it has ended: its last screen is on disk (see `save`).
@@ -195,6 +198,7 @@ pub fn run() -> anyhow::Result<()> {
     let free_tier = keys.contains_key("NVIDIA_API_KEY");
     let proxy = Proxy::start(keys)?;
     proxy.set_budget(Settings::load().policies.session_token_budget);
+    proxy.keep_free_models(dino_core::config_dir().join("free-models.json"));
     let daemon = new_daemon(proxy, launchers(free_tier));
     // Before sessions restart, so they get the efforts their models take.
     let mut stamps = CatalogStamps::new();
@@ -256,6 +260,7 @@ pub fn run() -> anyhow::Result<()> {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 codex::watch(&d);
+                agentlog::watch(&d);
             }
         });
     }
@@ -364,6 +369,15 @@ fn launchers_from(free_tier: bool, agents: Vec<dino_core::Detected>) -> Vec<Laun
         }
         if d.kind.id == "qwen" && free_tier {
             out.push(LauncherInfo { short: "qwen-free".into(), agent_id: "qwen-free".into(), label: "Qwen Code · free models".into(), program: program.clone(), knobs: Default::default() });
+        }
+        if d.kind.id == "kimi" && free_tier {
+            out.push(LauncherInfo { short: "kimi-free".into(), agent_id: "kimi-free".into(), label: "Kimi Code · free models".into(), program: program.clone(), knobs: Default::default() });
+        }
+        if d.kind.id == "pi" && free_tier {
+            out.push(LauncherInfo { short: "pi-free".into(), agent_id: "pi-free".into(), label: "Pi · free models".into(), program: program.clone(), knobs: Default::default() });
+        }
+        if d.kind.id == "hermes" && free_tier {
+            out.push(LauncherInfo { short: "hermes-free".into(), agent_id: "hermes-free".into(), label: "Hermes Agent · free models".into(), program: program.clone(), knobs: Default::default() });
         }
         out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program, knobs: Default::default() });
     }
@@ -961,6 +975,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         pinned: AtomicBool::new(restore.as_ref().is_some_and(|r| r.pinned)),
         host,
         rollout: Mutex::default(),
+        log: Mutex::default(),
         inside: Mutex::default(),
         screen_saved: AtomicBool::new(false),
         servers: Mutex::new(vec![]),
