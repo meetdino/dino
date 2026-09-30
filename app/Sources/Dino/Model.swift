@@ -240,11 +240,16 @@ final class DinoModel: ObservableObject {
     private func apply(_ next: [SessionInfo], _ quotas: [QuotaInfo]) {
         // The quick terminal's shell is its own, not a session in the sidebar.
         QuickTerminal.shared.sessionAlive = next.contains { $0.id == QuickTerminal.shared.sessionID && !$0.exited }
-        // Output older than 5s all reads as quiet: without this an idle session differs on every
-        // tick and the whole window redraws four times a second.
-        let next = next.filter { $0.id != QuickTerminal.shared.sessionID }.map { s in
+        let raw = next.filter { $0.id != QuickTerminal.shared.sessionID }
+        // Only which side of 1.5s and 5s the last output is matters here. Kept exact, a session
+        // printing anything differs on every tick and the whole window redraws four times a second.
+        // Agents also animate a spinner at the front of their terminal title (Claude cycles
+        // ◐◓◑◒ while it works); dino shows that with the status dot, and each glyph would too.
+        let next = raw.map { s in
             var s = s
-            s.output_ms_ago = s.output_ms_ago.map { min($0, 5000) }
+            s.output_ms_ago = s.output_ms_ago.map { $0 < 1500 ? 0 : $0 < 5000 ? 1500 : 5000 }
+            s.title = s.title.flatMap(Self.undecorated)
+            if let t = s.inside?.title { s.inside?.title = Self.undecorated(t) ?? t }
             return s
         }
         let appActive = NSApp.isActive
@@ -330,11 +335,18 @@ final class DinoModel: ObservableObject {
             // The one selected when the app last quit, else the one that last did something.
             // Through select(), so the terminal also takes keyboard focus on launch.
             let last = UserDefaults.standard.string(forKey: Self.lastSelectedKey).flatMap { live.contains($0) ? $0 : nil }
-            let recent = next.filter { !$0.exited }.min { ($0.output_ms_ago ?? .max) < ($1.output_ms_ago ?? .max) }
+            let recent = raw.filter { !$0.exited }.min { ($0.output_ms_ago ?? .max) < ($1.output_ms_ago ?? .max) }
             select(last ?? recent?.id ?? next.first?.id)
         }
         let waiting = next.filter { status(of: $0) == .needsYou }.count
-        NSApp.dockTile.badgeLabel = waiting > 0 ? "\(waiting)" : nil
+        let badge = waiting > 0 ? "\(waiting)" : nil
+        if NSApp.dockTile.badgeLabel != badge { NSApp.dockTile.badgeLabel = badge }
+    }
+
+    /// A terminal title without the spinner or status glyphs an agent puts before its words.
+    static func undecorated(_ title: String) -> String? {
+        let t = title.drop { !$0.isLetter && !$0.isNumber && $0 != "~" && $0 != "/" && $0 != "." }.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? nil : t
     }
 
     func status(of s: SessionInfo) -> SessionStatus {

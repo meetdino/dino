@@ -126,10 +126,13 @@ final class ProvidersStore: ObservableObject {
                 self.connecting.remove(p.id)
             }
             let running = Set(providers.filter { $0.connected || $0.id == "openrouter" }.map(\.id))
+            // Only what changed: each change redraws every model row.
             for (id, r) in lists {
                 if self.models[id] != r.models { self.models[id] = r.models }
-                self.errors[id] = r.error
-                if r.loading { self.loading.insert(id) } else { self.loading.remove(id) }
+                if self.errors[id] != r.error { self.errors[id] = r.error }
+                if r.loading != self.loading.contains(id) {
+                    if r.loading { self.loading.insert(id) } else { self.loading.remove(id) }
+                }
             }
             for id in self.models.keys where !running.contains(id) { self.models[id] = nil }
         }
@@ -140,11 +143,11 @@ final class ProvidersStore: ObservableObject {
             do {
                 let value = try work(DinoConnection(path: DinoEnvironment.socketPath))
                 await MainActor.run {
-                    self.error = nil
+                    if self.error != nil { self.error = nil }
                     done(value)
                 }
             } catch {
-                await MainActor.run { self.error = "\(error)" }
+                await MainActor.run { if self.error != "\(error)" { self.error = "\(error)" } }
             }
         }
     }
@@ -429,8 +432,18 @@ private struct VerdictChip: View {
 private struct Wrap: Layout {
     var spacing: CGFloat = 5
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let rows = rows(width: proposal.width ?? .infinity, subviews)
+    /// Each child's size, measured once per change rather than on every layout pass: a list of
+    /// models lays out many rows of these.
+    func makeCache(subviews: Subviews) -> [CGSize] {
+        subviews.map { $0.sizeThatFits(.unspecified) }
+    }
+
+    func updateCache(_ cache: inout [CGSize], subviews: Subviews) {
+        cache = makeCache(subviews: subviews)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) -> CGSize {
+        let rows = rows(width: proposal.width ?? .infinity, cache)
         var height: CGFloat = 0
         var width: CGFloat = 0
         for (n, row) in rows.enumerated() {
@@ -443,9 +456,9 @@ private struct Wrap: Layout {
         return CGSize(width: min(width, proposal.width ?? width), height: height)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) {
         var y = bounds.minY
-        for row in rows(width: bounds.width, subviews) {
+        for row in rows(width: bounds.width, cache) {
             var x = bounds.minX
             let height = row.map { $0.1.height }.max() ?? 0
             for (i, size) in row {
@@ -456,11 +469,10 @@ private struct Wrap: Layout {
         }
     }
 
-    private func rows(width: CGFloat, _ subviews: Subviews) -> [[(Int, CGSize)]] {
+    private func rows(width: CGFloat, _ sizes: [CGSize]) -> [[(Int, CGSize)]] {
         var rows: [[(Int, CGSize)]] = [[]]
         var x: CGFloat = 0
-        for (i, s) in subviews.enumerated() {
-            let size = s.sizeThatFits(.unspecified)
+        for (i, size) in sizes.enumerated() {
             if x > 0, x + size.width > width {
                 rows.append([])
                 x = 0
