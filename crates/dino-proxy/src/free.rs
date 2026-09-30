@@ -58,13 +58,13 @@ pub(crate) async fn handle(st: AppState, session: String, rest: &str, body: Byte
         let _ = std::fs::write(std::env::temp_dir().join("dino-last-anthropic.json"), raw.to_string());
     }
     let oai = serde_json::to_value(anthropic_to_openai_request(&req)).unwrap_or_default();
-    let Some((resp, _)) = send(&st, &session, tier, oai, stream, &key).await else {
+    let Some((resp, model)) = send(&st, &session, tier, oai, stream, &key).await else {
         st.stats.update(&session, |s| s.errors += 1);
         // 529 makes Claude Code back off and retry rather than give up.
         return anthropic_error(StatusCode::from_u16(529).unwrap(), "overloaded_error", "dino: every free model for this request is unavailable right now");
     };
     if stream {
-        return stream_back(st, session, resp, original_model, in_flight);
+        return stream_back(st, session, resp, original_model, model, in_flight);
     }
     let parsed = resp.json::<ChatCompletionResponse>().await;
     drop(in_flight);
@@ -94,7 +94,7 @@ async fn chat(st: AppState, session: String, body: Bytes) -> Response<Body> {
         // The usage comes in a last chunk only when asked for.
         oai["stream_options"] = json!({"include_usage": true});
     }
-    let Some((resp, _)) = send(&st, &session, tier, oai, stream, &key).await else {
+    let Some((resp, model)) = send(&st, &session, tier, oai, stream, &key).await else {
         st.stats.update(&session, |s| s.errors += 1);
         return openai_error(StatusCode::SERVICE_UNAVAILABLE, "dino: every free model for this request is unavailable right now");
     };
@@ -119,12 +119,17 @@ async fn chat(st: AppState, session: String, body: Bytes) -> Response<Body> {
                     if v["usage"].is_object() {
                         record_openai_usage(&st, &session, &v["usage"]);
                     }
+                    if v.get("error").is_some() {
+                        // Failed partway: the agent's retry goes to another model.
+                        st.router.record_failure(&model);
+                    }
                 }
             }
             Ok::<Bytes, std::io::Error>(bytes)
         }
         Some(Err(e)) => {
             log(format_args!("{session} free stream error: {e}"));
+            st.router.record_failure(&model);
             guard.take();
             Ok(Bytes::from(format!("data: {}\n\n", json!({"error": {"message": format!("free tier: {e}")}}))))
         }
@@ -346,7 +351,9 @@ async fn llm_classify(st: &AppState, text: &str, key: &str) -> Option<Tier> {
     }
 }
 
-fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: String, in_flight: InFlight) -> Response<Body> {
+/// `answering` is the model the answer comes from: one that fails partway waits, so the agent's
+/// retry goes to another.
+fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: String, answering: Model, in_flight: InFlight) -> Response<Body> {
     let mut translator = new_stream_translator(model);
     let mut line = Vec::<u8>::new();
     let mut guard = Some(in_flight);
@@ -381,6 +388,7 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
                         // Upstream failed mid-answer and said so in the stream.
                         let msg = err["error"]["message"].as_str().unwrap_or("upstream error").to_string();
                         log(format_args!("{session} free stream error: {msg}"));
+                        st.router.record_failure(&answering);
                         out.push_str(&stream_error(&msg));
                         done = true;
                         guard.take();
@@ -392,6 +400,7 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
             // an Anthropic error event lets Claude Code say so and retry.
             Some(Err(e)) if !done => {
                 log(format_args!("{session} free stream error: {e}"));
+                st.router.record_failure(&answering);
                 out.push_str(&stream_error(&e.to_string()));
                 done = true;
                 guard.take();
