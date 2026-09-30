@@ -1,0 +1,45 @@
+[package]
+name = "dino-cloud"
+description = "The dino account and settings-sync server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "dino_cloud"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dino-cloud"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+governor = "0.10"
+hmac = "0.12"
+maud = { version = "0.27", features = ["axum"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate", "macros"] }
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "time"] }
+tower = { version = "0.5", features = ["util", "timeout", "limit"] }
+tower-http = { version = "0.6", features = ["trace", "set-header", "request-id", "timeout", "limit", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+futures = "0.3"
