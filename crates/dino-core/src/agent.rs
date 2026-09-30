@@ -11,6 +11,7 @@ use crate::models::Catalog;
 
 mod claude;
 pub mod codex;
+mod hermes;
 mod kimi;
 mod pi;
 mod qwen;
@@ -33,6 +34,9 @@ pub enum StatusSource {
     /// dino follows the record the agent writes of its conversation as it goes (`log_path`),
     /// reading each new line (`log_event`); see dinod's `agentlog`.
     Log,
+    /// dino asks the agent's own store where its turn is (`turn_now`), a database rather than a
+    /// file it appends to.
+    Polled,
 }
 
 /// What one line of an agent's own record says about where its turn is.
@@ -164,6 +168,15 @@ pub trait Agent: Sync {
     fn new_conversation(&self, _cwd: &Path, _since: u64, _claimed: &[String]) -> Option<String> {
         None
     }
+    /// With `StatusSource::Polled`: whether conversation `session` is on a turn, as its store says now.
+    fn turn_now(&self, _session: &str) -> Option<bool> {
+        None
+    }
+    /// For agents whose conversations aren't files: a page of `session_id`'s turns ending before
+    /// position `before` (the end when `None`), in the agent's own positions.
+    fn page(&self, _session_id: &str, _before: Option<u64>) -> Option<crate::history::Page> {
+        None
+    }
 
     // ---- Its conversations ----
 
@@ -212,20 +225,23 @@ static KIMI: kimi::Kimi = kimi::Kimi { free: false };
 static KIMI_FREE: kimi::Kimi = kimi::Kimi { free: true };
 static PI: pi::Pi = pi::Pi { free: false };
 static PI_FREE: pi::Pi = pi::Pi { free: true };
+static HERMES: hermes::Hermes = hermes::Hermes { free: false };
+static HERMES_FREE: hermes::Hermes = hermes::Hermes { free: true };
 
 /// The agents dino works with, in the order they're listed and looked for.
-pub fn all() -> [&'static dyn Agent; 5] {
-    [&CLAUDE, &CODEX, &QWEN, &KIMI, &PI]
+pub fn all() -> [&'static dyn Agent; 6] {
+    [&CLAUDE, &CODEX, &QWEN, &KIMI, &PI, &HERMES]
 }
 
-/// The adapter for launcher agent id `id` (the free-tier ones, "claude-free", "qwen-free",
-/// "kimi-free" and "pi-free", too); `None` for shells and agents dino only launches.
+/// The adapter for launcher agent id `id` (the free-tier ones, "<agent>-free", too); `None` for
+/// shells and agents dino only launches.
 pub fn agent(id: &str) -> Option<&'static dyn Agent> {
     match id {
         "claude-free" => Some(&CLAUDE_FREE),
         "qwen-free" => Some(&QWEN_FREE),
         "kimi-free" => Some(&KIMI_FREE),
         "pi-free" => Some(&PI_FREE),
+        "hermes-free" => Some(&HERMES_FREE),
         _ => all().into_iter().find(|a| a.id() == id),
     }
 }
