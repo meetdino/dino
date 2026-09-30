@@ -375,10 +375,11 @@ private struct PDFPreview: NSViewRepresentable {
     let url: URL
     let revision: Int
 
-    func makeNSView(context _: Context) -> PDFView {
+    func makeNSView(context: Context) -> PDFView {
         let v = PDFView()
         v.autoScales = true
         v.backgroundColor = .textBackgroundColor
+        v.delegate = context.coordinator
         v.document = PDFDocument(url: url)
         return v
     }
@@ -392,9 +393,14 @@ private struct PDFPreview: NSViewRepresentable {
 
     func makeCoordinator() -> Box { Box(revision: revision) }
 
-    final class Box {
+    final class Box: NSObject, PDFViewDelegate {
         var revision: Int
         init(revision: Int) { self.revision = revision }
+
+        /// A link in the document: as one in agent text, not straight to whatever app claims it.
+        func pdfViewWillClick(onLink _: PDFView, with url: URL) {
+            MainActor.assumeIsolated { LinkPolicy.openElsewhere(url) }
+        }
     }
 }
 

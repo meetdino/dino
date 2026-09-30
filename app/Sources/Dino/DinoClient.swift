@@ -437,6 +437,8 @@ struct PreviewConfig: Codable, Equatable, Identifiable {
     var name: String
     var argv: [String]
     var cwd: String
+    /// Variables set for it, on top of dinod's own.
+    var env: [String: String]?
     var port: UInt16?
     var url: String?
     /// The launch file it came from, relative to the session's folder.
