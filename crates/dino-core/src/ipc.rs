@@ -93,6 +93,8 @@ pub enum Request {
     /// mid-turn, that waits until the turn is over. Each field replaces the session's, so `None`
     /// goes back to the agent's own default.
     SetControls { id: String, controls: Controls },
+    /// Stop a background command session `id`'s agent left serving (see `SessionInfo::servers`).
+    StopServer { id: String, task: String },
     /// Switch this connection to a live terminal stream for session `id`. `wait`: if its agent
     /// has ended, wait until it runs again (see `Resume`) rather than answer right away.
     Attach {
@@ -322,7 +324,8 @@ pub struct SessionInfo {
     pub last_model: Option<String>,
     pub tier: Option<String>,
     /// "working", "done", "needs:<what>", or "waiting:<what>" when the turn ended on background
-    /// work that still runs ("waiting:1 agent, 2 commands").
+    /// work that still runs ("waiting:1 agent, 2 commands"), or "server:<ports>" when all that runs
+    /// is a server ("server:3000, 8080").
     pub activity: Option<String>,
     /// The fan-out group this session belongs to.
     #[serde(default)]
@@ -391,6 +394,18 @@ pub struct SessionInfo {
     pub shell_cwd: Option<String>,
     #[serde(default)]
     pub last_exit: Option<i32>,
+    /// Background commands its agent left running that listen on a port: a dev server, not work
+    /// to wait on. With nothing else left running, `activity` is "server:<ports>".
+    #[serde(default)]
+    pub servers: Vec<ServerInfo>,
+}
+
+/// A background command that serves: the agent's task id for it, and where it listens.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ServerInfo {
+    pub task: String,
+    pub command: String,
+    pub ports: Vec<u16>,
 }
 
 /// From the agent's hooks, so Claude only for now; empty for agents that don't report them.

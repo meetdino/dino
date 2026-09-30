@@ -28,6 +28,7 @@ mod lifecycle;
 mod peers;
 mod preview;
 mod schedule;
+mod servers;
 mod shell;
 
 /// Scrollback lines replayed to a newly attached client.
@@ -78,6 +79,8 @@ struct Session {
     inside: Mutex<Inside>,
     /// Once it has ended: its last screen is on disk (see `save`).
     screen_saved: AtomicBool,
+    /// Background commands its agent left serving, as last looked at (see `servers`).
+    servers: Mutex<Vec<servers::Server>>,
 }
 
 /// What a shell is running in the foreground, as last looked at.
@@ -234,6 +237,15 @@ pub fn run() -> anyhow::Result<()> {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 watch_shells(&d);
+            }
+        });
+    }
+    {
+        let d = daemon.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                servers::watch(&d);
             }
         });
     }
@@ -523,6 +535,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     Some(s) => attach(d, &s, stream, cols, rows),
                     None => ipc::write_json(&mut stream, &Response::Error { message: format!("no session {id}") }),
                 };
+            }
+            Request::StopServer { id, task } => {
+                let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
+                match s.map(|s| servers::stop(d, &s, &task)) {
+                    Some(Ok(())) => Response::Ok,
+                    Some(Err(e)) => Response::Error { message: e.to_string() },
+                    None => Response::Error { message: format!("no session {id}") },
+                }
             }
             Request::Resume { id } => match resume(d, &id) {
                 Ok(()) => Response::Ok,
@@ -892,6 +912,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         rollout: Mutex::default(),
         inside: Mutex::default(),
         screen_saved: AtomicBool::new(false),
+        servers: Mutex::new(vec![]),
     }));
     Ok(id)
 }
@@ -1175,6 +1196,10 @@ fn restartable(d: &Daemon, s: &Session) -> bool {
 }
 
 /// "1 agent", "2 commands", "1 agent, 1 command": what a turn ended on and still runs.
+fn ports(servers: &[servers::Server]) -> String {
+    servers.iter().flat_map(|x| x.ports.iter().map(u16::to_string)).collect::<Vec<_>>().join(", ")
+}
+
 fn waiting_words(agents: usize, commands: usize) -> String {
     let n = |k: usize, one: &str| (k > 0).then(|| format!("{k} {one}{}", if k == 1 { "" } else { "s" }));
     [n(agents, "agent"), n(commands, "command")].into_iter().flatten().collect::<Vec<_>>().join(", ")
@@ -1206,6 +1231,9 @@ fn state(d: &Daemon) -> Response {
             let label = s.label.lock().unwrap().clone();
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
             let waiting = st.waiting();
+            let serving = s.servers.lock().unwrap().clone();
+            // A server isn't work to wait on: once it's all that runs, the turn is over.
+            let serving_waited = serving.iter().filter(|x| st.waits_on(&x.task)).count();
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -1223,7 +1251,8 @@ fn state(d: &Daemon) -> Response {
                 tier: st.tier,
                 activity: st.activity.map(|a| match a {
                     Activity::Working => "working".into(),
-                    Activity::Done => match waiting {
+                    Activity::Done => match (waiting.0, waiting.1.saturating_sub(serving_waited)) {
+                        (0, 0) if serving_waited > 0 => format!("server:{}", ports(&serving)),
                         (0, 0) => "done".into(),
                         (agents, commands) => format!("waiting:{}", waiting_words(agents, commands)),
                     },
@@ -1251,6 +1280,7 @@ fn state(d: &Daemon) -> Response {
                 inside: s.inside.lock().unwrap().found.clone(),
                 shell_cwd: s.pane.shared.cwd.lock().unwrap().clone(),
                 last_exit: *s.pane.shared.last_exit.lock().unwrap(),
+                servers: serving.into_iter().map(|x| ipc::ServerInfo { task: x.task, command: x.command, ports: x.ports }).collect(),
             }
         })
         .collect();

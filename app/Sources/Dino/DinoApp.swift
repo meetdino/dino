@@ -773,6 +773,9 @@ struct SessionRow: View {
                 } else if status == .waiting, let on = session.waitingOn {
                     Text("waiting on \(on)").font(.caption).foregroundStyle(status.color).lineLimit(1)
                         .help("Its turn ended while these still run; it carries on when they finish")
+                } else if status == .idle || status == .done, let ports = session.serving {
+                    Text("serving :\(ports.replacingOccurrences(of: ", ", with: " :"))").font(.caption).foregroundStyle(SessionStatus.working.color).lineLimit(1)
+                        .help("Its turn is over; a server it started keeps running. Stop it from the session's menu.")
                 } else {
                     Text(status.label).font(.caption).foregroundStyle(status.color)
                 }

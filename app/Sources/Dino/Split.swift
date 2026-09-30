@@ -267,6 +267,10 @@ struct SessionMenu: View {
         if model.splits.contains(where: { $0.contains(session.id) }) {
             Button("Close Pane") { model.closePane(session.id) }
         }
+        ForEach(session.servers ?? [], id: \.self) { server in
+            Button("Stop Server \(server.where_)") { model.stopServer(session.id, server) }
+                .help(server.command)
+        }
         if session.exited {
             Button(session.agent_id == "shell" ? "Restart" : "Resume") { model.resume(session.id) }
         }
