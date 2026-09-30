@@ -37,6 +37,12 @@ const ALT_OFF: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"];
 /// what it showed there, not on the main screen it switched back to on the way out.
 const KEEP_ALT_WITHIN: Duration = Duration::from_secs(10);
 
+/// A desktop notification (OSC 9), which the parser drops: `ESC ] 9 ; text`, ended by BEL or ST.
+const NOTICE: &[u8] = b"\x1b]9;";
+
+/// Longer than any notice worth reading: an unended one this long is dropped, not kept waiting.
+const NOTICE_MAX: usize = 4096;
+
 pub struct SpawnSpec {
     pub program: String,
     pub args: Vec<String>,
@@ -74,6 +80,10 @@ pub struct Shared {
     /// At exit the screen became the alternate screen as last seen (see [`KEEP_ALT_WITHIN`]),
     /// so what clients streamed no longer matches it.
     pub kept_alt: AtomicBool,
+    /// Desktop notifications the program sent (OSC 9), counted for observers that poll, and the
+    /// last one's text. Codex sends one when it waits on the user.
+    pub notices: AtomicU64,
+    pub notice: Mutex<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -152,6 +162,8 @@ struct Feed {
     /// The end of the last chunk, for a switch back split across two.
     carry: Vec<u8>,
     left_alt: Option<LeftAlt>,
+    /// The start of a notice (see [`NOTICE`]) whose end hasn't arrived yet.
+    notice: Vec<u8>,
 }
 
 /// The alternate screen as it was when the program last left it.
@@ -188,9 +200,11 @@ impl Pane {
             size: Mutex::new((cols, rows)),
             drained: AtomicBool::new(false),
             kept_alt: AtomicBool::new(false),
+            notices: AtomicU64::new(0),
+            notice: Mutex::new(None),
         });
         let term = new_term(&shared, cols, rows);
-        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None };
+        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, notice: Vec::new() };
         Self { term: Arc::new(FairMutex::new(term)), feed: Mutex::new(feed), shared, killer: Mutex::new(None), pid: OnceLock::new() }
     }
 
@@ -291,6 +305,10 @@ impl Pane {
     fn advance(&self, term: &mut Term<Listener>, bytes: &[u8]) {
         let mut guard = self.feed.lock().unwrap();
         let feed = &mut *guard;
+        for text in notices(&mut feed.notice, bytes) {
+            *self.shared.notice.lock().unwrap() = Some(text);
+            self.shared.notices.fetch_add(1, Ordering::Relaxed);
+        }
         let mut rest = bytes;
         while let Some((cut, end)) = alt_off(&feed.carry, rest) {
             feed.processor.advance(term, &rest[..cut]);
@@ -635,6 +653,48 @@ fn new_term(shared: &Arc<Shared>, cols: u16, rows: u16) -> Term<Listener> {
     Term::new(config, &TermSize { cols: cols as usize, rows: rows as usize }, Listener(shared.clone()))
 }
 
+/// The notices (OSC 9) in `bytes`, with `pending` the unended start of one from earlier chunks,
+/// left holding the start of one still unended. `ESC ] 9 ; 4 ;` is a progress report, not a notice.
+fn notices(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
+    let joined;
+    let data = if pending.is_empty() {
+        bytes
+    } else {
+        joined = [pending.as_slice(), bytes].concat();
+        &joined
+    };
+    let mut out = vec![];
+    let mut at = 0;
+    let mut rest = None;
+    while let Some(i) = data[at..].windows(NOTICE.len()).position(|w| w == NOTICE).map(|i| at + i) {
+        let body = &data[i + NOTICE.len()..];
+        let Some((end, stop)) = body.iter().enumerate().find_map(|(k, &b)| match b {
+            0x07 => Some((k, 1)),
+            0x1b if body.get(k + 1) == Some(&b'\\') => Some((k, 2)),
+            _ => None,
+        }) else {
+            rest = Some(i);
+            break;
+        };
+        let text = String::from_utf8_lossy(&body[..end]).trim().to_string();
+        if !text.is_empty() && !text.starts_with("4;") {
+            out.push(text);
+        }
+        at = i + NOTICE.len() + end + stop;
+    }
+    pending.clear();
+    match rest {
+        Some(i) if data.len() - i <= NOTICE_MAX => pending.extend_from_slice(&data[i..]),
+        Some(_) => {}
+        // A notice may begin at the very end.
+        None => {
+            let tail = (1..NOTICE.len()).rev().find(|&k| data.len() >= k && data.ends_with(&NOTICE[..k])).unwrap_or(0);
+            pending.extend_from_slice(&data[data.len() - tail..]);
+        }
+    }
+    out
+}
+
 /// Where `bytes` switch back from the alternate screen, as the range to cut out; it starts at 0
 /// when the switch began at the end of the last chunk (`carry`).
 fn alt_off(carry: &[u8], bytes: &[u8]) -> Option<(usize, usize)> {
@@ -856,5 +916,28 @@ mod tests {
         exit(&p);
         assert_eq!(p.text(100), "$ vim\n$ exit");
         assert!(!p.shared.kept_alt.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn notices_are_read_even_split_across_chunks() {
+        let p = pane();
+        p.feed(b"working\x1b]9;Approval requested: touch x\x07more");
+        assert_eq!(p.shared.notices.load(Ordering::Relaxed), 1);
+        assert_eq!(p.shared.notice.lock().unwrap().as_deref(), Some("Approval requested: touch x"));
+        // Split in the introducer, then in the text, ended by ST.
+        p.feed(b"\x1b]");
+        p.feed(b"9;Plan qu");
+        assert_eq!(p.shared.notices.load(Ordering::Relaxed), 1);
+        p.feed(b"estion\x1b\\after");
+        assert_eq!(p.shared.notices.load(Ordering::Relaxed), 2);
+        assert_eq!(p.shared.notice.lock().unwrap().as_deref(), Some("Plan question"));
+        // Progress reports and titles aren't notices; the text around them still reaches the screen.
+        p.feed(b"\x1b]9;4;1;50\x07\x1b]0;title\x07");
+        assert_eq!(p.shared.notices.load(Ordering::Relaxed), 2);
+        assert!(p.text(100).contains("workingmore"));
+        // One that never ends isn't kept forever.
+        let mut pending = vec![];
+        assert!(notices(&mut pending, &[b"\x1b]9;".as_slice(), &[b'x'; NOTICE_MAX]].concat()).is_empty());
+        assert!(pending.is_empty());
     }
 }
