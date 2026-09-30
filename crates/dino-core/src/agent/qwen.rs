@@ -50,13 +50,23 @@ fn hook_layer(hook_url: &str) -> Option<PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     // One file per session (`…/s/<id>/hook`), rewritten each start whatever the proxy's port.
     let session = hook_url.split("/s/").nth(1).and_then(|r| r.split('/').next()).unwrap_or("session");
-    let name: String = session.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let path = dir.join(format!("{name}.json"));
+    let path = layer_path(session);
     let own = std::env::var_os("QWEN_CODE_SYSTEM_DEFAULTS_PATH").map(PathBuf::from).filter(|p| !p.starts_with(&dir));
     let theirs = std::fs::read_to_string(own.unwrap_or_else(|| PathBuf::from(SYSTEM_DEFAULTS))).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
     let hooks: Value = serde_json::from_str(&crate::claude_hook_settings(hook_url, None)).ok()?;
     std::fs::write(&path, serde_json::to_vec_pretty(&with_hooks(theirs, &hooks)).ok()?).ok()?;
     Some(path)
+}
+
+/// Where dino session `session`'s settings layer is written.
+fn layer_path(session: &str) -> PathBuf {
+    let name: String = session.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    crate::config_dir().join("qwen").join(format!("{name}.json"))
+}
+
+/// Remove dino session `session`'s settings layer, once the session is gone for good.
+pub fn forget(session: &str) {
+    let _ = std::fs::remove_file(layer_path(session));
 }
 
 /// Every conversation file: `projects/<cwd>/chats/<id>.jsonl`.
