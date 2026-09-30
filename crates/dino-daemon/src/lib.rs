@@ -191,6 +191,7 @@ pub fn run() -> anyhow::Result<()> {
     let free_tier = keys.contains_key("NVIDIA_API_KEY");
     let proxy = Proxy::start(keys)?;
     proxy.set_budget(Settings::load().policies.session_token_budget);
+    proxy.keep_free_models(dino_core::config_dir().join("free-models.json"));
     let daemon = new_daemon(proxy, launchers(free_tier));
     // Before sessions restart, so they get the efforts their models take.
     let mut stamps = CatalogStamps::new();
