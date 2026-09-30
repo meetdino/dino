@@ -2,9 +2,11 @@
 //! `http://127.0.0.1:<port>/s/<session>/<provider>`; we forward to the real API untouched
 //! (auth included) and observe usage, in-flight state and quota headers on the way back.
 //! The `free` provider is different: dino itself picks a free model and translates (see `free`).
+//! `or` is OpenRouter with the key dino holds for it (see `openrouter`).
 
 mod codex;
 mod free;
+mod openrouter;
 pub mod tasks;
 
 use std::collections::HashMap;
@@ -389,8 +391,15 @@ async fn forward(
         };
         return free::handle(st, session, &rest, body).await;
     }
-    let Some(&(_, upstream)) = PROVIDERS.iter().find(|(p, _)| *p == provider) else {
-        return error(StatusCode::NOT_FOUND, format!("unknown provider {provider}"));
+    // OpenRouter goes out with dino's key, not the agent's.
+    let openrouter = (provider == openrouter::PROVIDER).then(|| openrouter::headers(&st.keys.read().unwrap()));
+    if let Some(None) = openrouter {
+        return error(StatusCode::UNAUTHORIZED, "OpenRouter isn't connected: connect it in dino's Settings → Providers".into());
+    }
+    let upstream = match PROVIDERS.iter().find(|(p, _)| *p == provider) {
+        Some(&(_, upstream)) => upstream,
+        None if openrouter.is_some() => openrouter::UPSTREAM,
+        None => return error(StatusCode::NOT_FOUND, format!("unknown provider {provider}")),
     };
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
     let url = format!("{upstream}/{rest}{query}");
@@ -423,7 +432,13 @@ async fn forward(
     let send = |body: Bytes| {
         let mut up = st.client.request(method.clone(), &url).body(body);
         for (name, value) in parts.headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
+            if openrouter.is_some() && openrouter::is_credential(name.as_str()) {
+                continue;
+            }
             up = up.header(name, value);
+        }
+        for (name, value) in openrouter.iter().flatten().flatten() {
+            up = up.header(*name, value);
         }
         up.send()
     };

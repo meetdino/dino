@@ -78,6 +78,17 @@ extension DinoConnection {
     fileprivate func models(_ provider: String) throws -> ModelsResponse {
         try JSONDecoder().decode(ModelsResponse.self, from: send(["type": "models", "provider": provider]))
     }
+
+    /// The sign-in page for `provider`; dinod waits for the browser to come back and keeps the key.
+    fileprivate func connect(_ provider: String) throws -> URL? {
+        try (JSONSerialization.jsonObject(with: send(["type": "connect_provider", "provider": provider])) as? [String: Any])?["url"]
+            .flatMap { $0 as? String }
+            .flatMap(URL.init(string:))
+    }
+
+    fileprivate func disconnect(_ provider: String) throws {
+        _ = try send(["type": "disconnect_provider", "provider": provider])
+    }
 }
 
 /// Settings → Providers' view of dinod: asks now and then while the pane is open.
@@ -88,6 +99,19 @@ final class ProvidersStore: ObservableObject {
     @Published var loading: Set<String> = []
     @Published var errors: [String: String] = [:]
     @Published var error: String?
+    /// Providers whose sign-in page is open in the browser.
+    @Published var connecting: Set<String> = []
+
+    func connect(_ id: String) {
+        connecting.insert(id)
+        run { c in try c.connect(id) } done: { url in
+            if let url { NSWorkspace.shared.open(url) }
+        }
+    }
+
+    func disconnect(_ id: String) {
+        run { c in try c.disconnect(id) } done: { self.load() }
+    }
 
     func load() {
         run { c in
@@ -97,6 +121,10 @@ final class ProvidersStore: ObservableObject {
             return (providers, try asked.map { ($0, try c.models($0)) })
         } done: { providers, lists in
             if self.providers != providers { self.providers = providers }
+            // Done once it's connected, or said why not.
+            for p in providers where self.connecting.contains(p.id) && (p.connected || p.error != nil) {
+                self.connecting.remove(p.id)
+            }
             let running = Set(providers.filter { $0.connected || $0.id == "openrouter" }.map(\.id))
             for (id, r) in lists {
                 if self.models[id] != r.models { self.models[id] = r.models }
@@ -157,15 +185,19 @@ struct ProvidersPane: View {
     var body: some View {
         Form {
             Section {
-                ForEach(store.providers) { p in ProviderRow(provider: p, count: store.models[p.id]?.count, loading: store.loading.contains(p.id), error: store.errors[p.id] ?? p.error) }
+                ForEach(store.providers) { p in
+                    ProviderRow(provider: p, count: store.models[p.id]?.count, loading: store.loading.contains(p.id), error: store.errors[p.id] ?? p.error,
+                                connecting: store.connecting.contains(p.id), connect: { store.connect(p.id) }, disconnect: { store.disconnect(p.id) })
+                }
             } header: {
                 Text("Providers")
             } footer: {
-                Footnote("dino asks each provider which APIs it serves and what its models can do, and reads model servers on this Mac at their usual ports. Nothing here comes from a list dino keeps.")
+                Footnote("Connect opens OpenRouter's sign-in in your browser; the key it makes is yours (see openrouter.ai/keys), stays on this Mac, and dino never shows it. dino reads model servers on this Mac at their usual ports, and asks every provider which APIs it serves and what its models can do: nothing here comes from a list dino keeps.")
             }
             Section {
                 HStack(spacing: 8) {
-                    TextField("Search models", text: $search)
+                    TextField("Search models", text: $search, prompt: Text("Search models"))
+                        .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                     Picker("Works in", selection: $worksIn) {
                         Text("Any agent").tag("")
@@ -198,7 +230,7 @@ struct ProvidersPane: View {
         // A task, not a timer publisher: fresh lists arrive while dinod fetches them.
         .task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(store.loading.isEmpty ? 10 : 1))
+                try? await Task.sleep(for: .seconds(store.loading.isEmpty && store.connecting.isEmpty ? 10 : 1))
                 store.load()
             }
         }
@@ -210,6 +242,10 @@ private struct ProviderRow: View {
     let count: Int?
     let loading: Bool
     let error: String?
+    let connecting: Bool
+    let connect: () -> Void
+    let disconnect: () -> Void
+    @State private var confirming = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -228,12 +264,28 @@ private struct ProviderRow: View {
                 Circle().fill(dot).frame(width: 7, height: 7)
                 Text(state).font(.callout).foregroundStyle(.secondary)
             }
+            if provider.key != nil {
+                if connecting {
+                    ProgressView().controlSize(.small).help("Finish connecting in your browser")
+                } else if provider.connected {
+                    Button("Disconnect…") { confirming = true }
+                } else {
+                    Button("Connect…", action: connect)
+                        .help("Sign in to \(provider.name) in your browser")
+                }
+            }
         }
         .padding(.vertical, 2)
+        .confirmationDialog("Disconnect \(provider.name)?", isPresented: $confirming) {
+            Button("Disconnect", role: .destructive, action: disconnect)
+        } message: {
+            Text("dino forgets the key. It stays on your \(provider.name) account until you delete it there.")
+        }
     }
 
     private var state: String {
         if provider.local { return provider.connected ? "Running" : "Not running" }
+        if connecting { return "Waiting for your browser" }
         return provider.connected ? "Connected" : "Not connected"
     }
 
@@ -280,7 +332,17 @@ private struct ModelRowView: View {
                 Spacer()
                 Text(facts).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
             }
-            HStack(spacing: 5) {
+            if let r = model.recommended {
+                Label {
+                    Text("Run in \(r.name)").fontWeight(.medium) + Text(r.reasons.first.map { " — \($0.text)" } ?? "").foregroundColor(.secondary)
+                } icon: {
+                    Image(systemName: "star.fill").foregroundStyle(.green)
+                }
+                .font(.callout)
+                .lineLimit(2)
+                .help(r.reasons.first?.source ?? "")
+            }
+            Wrap(spacing: 5) {
                 ForEach(chips) { v in VerdictChip(verdict: v) }
             }
         }
@@ -319,10 +381,9 @@ private struct VerdictChip: View {
         HStack(spacing: 3) {
             Text(mark).fontWeight(.semibold)
             Text(verdict.name)
-            if verdict.recommended {
-                Text("· Recommended").fontWeight(.medium)
-            }
         }
+        .lineLimit(1)
+        .fixedSize()
         .font(.caption)
         .padding(.horizontal, 7)
         .padding(.vertical, 2)
@@ -352,5 +413,52 @@ private struct VerdictChip: View {
         var lines = verdict.reasons.map { r in r.source.map { "\(r.text) (\($0))" } ?? r.text }
         if let via = verdict.via { lines.append("Talks to it in \(formatName(via))\(verdict.translated ? ", translated by dino" : "")") }
         return lines.isEmpty ? "\(verdict.name) works with it" : lines.joined(separator: "\n")
+    }
+}
+
+/// Its children in rows, as many to a row as fit.
+private struct Wrap: Layout {
+    var spacing: CGFloat = 5
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = rows(width: proposal.width ?? .infinity, subviews)
+        var height: CGFloat = 0
+        var width: CGFloat = 0
+        for (n, row) in rows.enumerated() {
+            let tallest: CGFloat = row.map { $0.1.height }.max() ?? 0
+            height += tallest + (n > 0 ? spacing : 0)
+            var w: CGFloat = 0
+            for (i, item) in row.enumerated() { w += item.1.width + (i > 0 ? spacing : 0) }
+            width = max(width, w)
+        }
+        return CGSize(width: min(width, proposal.width ?? width), height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(width: bounds.width, subviews) {
+            var x = bounds.minX
+            let height = row.map { $0.1.height }.max() ?? 0
+            for (i, size) in row {
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += height + spacing
+        }
+    }
+
+    private func rows(width: CGFloat, _ subviews: Subviews) -> [[(Int, CGSize)]] {
+        var rows: [[(Int, CGSize)]] = [[]]
+        var x: CGFloat = 0
+        for (i, s) in subviews.enumerated() {
+            let size = s.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width {
+                rows.append([])
+                x = 0
+            }
+            rows[rows.count - 1].append((i, size))
+            x += size.width + spacing
+        }
+        return rows
     }
 }

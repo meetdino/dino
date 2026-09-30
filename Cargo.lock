@@ -558,6 +558,7 @@ name = "dino-daemon"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "dino-core",
  "dino-proxy",
  "dino-term",
@@ -565,6 +566,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

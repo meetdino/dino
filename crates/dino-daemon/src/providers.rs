@@ -140,7 +140,8 @@ pub fn refresh(now: bool) {
         }
         Some(_) => or.account.clone(),
         None => {
-            or.error = None;
+            // An error from connecting stays until the next try.
+            or.error = cache().lock().unwrap().providers.get("openrouter").and_then(|(_, p)| p.error.clone());
             None
         }
     };
@@ -239,6 +240,133 @@ fn account(key: &str) -> Result<dino_core::providers::Account, String> {
     Ok(providers::openrouter_account(&key_info, credits.as_ref()))
 }
 
+/// Connect OpenRouter without pasting a key: OpenRouter's OAuth PKCE. Returns the page to open;
+/// when the browser comes back to dinod's one-off listener, the code is exchanged for a key the
+/// user controls (on openrouter.ai/keys), which `save` stores. Nothing is shown or logged.
+pub fn connect_openrouter(save: impl FnOnce(String) -> anyhow::Result<()> + Send + 'static) -> anyhow::Result<String> {
+    connect_with("https://openrouter.ai/auth", &format!("{OPENROUTER}/v1/auth/keys"), save)
+}
+
+/// How long the sign-in page may take before the listener gives up.
+const CONNECT_WAIT: Duration = Duration::from_secs(10 * 60);
+
+fn connect_with(authorize: &str, exchange: &str, save: impl FnOnce(String) -> anyhow::Result<()> + Send + 'static) -> anyhow::Result<String> {
+    use base64::Engine;
+    use sha2::Digest;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let callback = format!("http://127.0.0.1:{port}/callback");
+    let mut bytes = [0u8; 32];
+    std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut bytes)?;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let verifier = b64.encode(bytes);
+    let challenge = b64.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    let url = format!("{authorize}?callback_url={}&code_challenge={challenge}&code_challenge_method=S256", percent(&callback));
+    let exchange = exchange.to_string();
+    set_error("openrouter", None);
+    std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<()> {
+            let code = wait_for_code(&listener)?;
+            let r = http()
+                .post(&exchange)
+                .timeout(Duration::from_secs(30))
+                .json(&serde_json::json!({"code": code, "code_verifier": verifier, "code_challenge_method": "S256"}))
+                .send()?;
+            let status = r.status();
+            let v: Value = r.json().unwrap_or(Value::Null);
+            let key = v["key"].as_str().filter(|k| !k.is_empty()).ok_or_else(|| anyhow::anyhow!("OpenRouter didn't give a key ({status})"))?;
+            save(key.to_string())
+        })();
+        if let Err(e) = result {
+            set_error("openrouter", Some(format!("Connecting didn't finish: {e}")));
+        }
+        refresh(true);
+    });
+    Ok(url)
+}
+
+/// The `code` the browser brings back to the listener, answering it with a page to close.
+fn wait_for_code(listener: &std::net::TcpListener) -> anyhow::Result<String> {
+    use std::io::{BufRead, Write};
+    listener.set_nonblocking(true)?;
+    let until = Instant::now() + CONNECT_WAIT;
+    loop {
+        let (stream, _) = match listener.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => anyhow::bail!("the sign-in page wasn't finished within 10 minutes"),
+            Err(e) => return Err(e.into()),
+        };
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let mut line = String::new();
+        std::io::BufReader::new(&stream).read_line(&mut line)?;
+        // "GET /callback?code=…&… HTTP/1.1"
+        let target = line.split_whitespace().nth(1).unwrap_or("");
+        let Some(query) = target.strip_prefix("/callback?").or_else(|| target.strip_prefix("/callback/?")) else {
+            // A favicon or a stray request: not the one.
+            let _ = (&stream).write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            continue;
+        };
+        let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(&format!("{name}="))).map(unpercent);
+        let (title, body, got) = match param("code") {
+            Some(code) if !code.is_empty() => ("dino is connected to OpenRouter", "You can close this tab and go back to dino.", Ok(code)),
+            _ => ("OpenRouter wasn't connected", "Nothing was changed. You can close this tab.", Err(anyhow::anyhow!("OpenRouter said {}", param("error").unwrap_or_else(|| "no".into())))),
+        };
+        let page = format!("<!doctype html><meta charset=utf-8><title>{title}</title><body style=\"font:15px -apple-system,sans-serif;margin:15vh auto;max-width:28em;text-align:center\"><h2>{title}</h2><p>{body}</p>");
+        let _ = (&stream).write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len()).as_bytes());
+        return got;
+    }
+}
+
+fn percent(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+fn unpercent(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => {
+                out.push(u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("00"), 16).unwrap_or(b'?'));
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A hosted provider was disconnected: its account and any old error go with its key.
+pub fn forget(id: &str) {
+    let mut c = cache().lock().unwrap();
+    if let Some((_, p)) = c.providers.get_mut(id) {
+        p.account = None;
+        p.error = None;
+        p.connected = false;
+    }
+}
+
+/// Say why `id` isn't usable (or stop saying it).
+fn set_error(id: &str, error: Option<String>) {
+    let mut c = cache().lock().unwrap();
+    if let Some((_, p)) = c.providers.get_mut(id) {
+        p.error = error;
+    }
+}
+
 fn fetch_models(id: &str) {
     let base = find(id).map(|p| p.base).unwrap_or_default();
     let got: Result<Vec<ProviderModel>, String> = match id {
@@ -273,4 +401,73 @@ fn fetch_models(id: &str) {
         Err(e) => (c.models.get(id).map(|f| f.models.clone()).unwrap_or_default(), Some(e)),
     };
     c.models.insert(id.to_string(), Fetched { at: Instant::now(), models, error });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// OpenRouter's key exchange, as a local stand-in: answers once and says what it was sent.
+    fn exchange_server() -> (String, std::sync::mpsc::Receiver<Value>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/api/v1/auth/keys", l.local_addr().unwrap().port());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut buf = vec![0; 8192];
+            let n = s.read(&mut buf).unwrap();
+            let text = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+            tx.send(serde_json::from_str::<Value>(body).unwrap_or(Value::Null)).unwrap();
+            let reply = r#"{"key":"sk-or-v1-test","user_id":"u"}"#;
+            write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len()).unwrap();
+        });
+        (url, rx)
+    }
+
+    #[test]
+    fn connecting_openrouter_trades_the_code_for_a_key() {
+        use base64::Engine;
+        use sha2::Digest;
+        let (exchange, sent) = exchange_server();
+        let (tx, saved) = std::sync::mpsc::channel();
+        let url = connect_with("https://openrouter.ai/auth", &exchange, move |k| {
+            tx.send(k).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert!(url.starts_with("https://openrouter.ai/auth?callback_url=http%3A%2F%2F127.0.0.1%3A"), "{url}");
+        assert!(url.contains("code_challenge_method=S256"));
+        let q = |name: &str| url.split(['?', '&']).find_map(|kv| kv.strip_prefix(&format!("{name}="))).map(unpercent).unwrap();
+        let callback = q("callback_url");
+        let challenge = q("code_challenge");
+
+        // A stray request first, then the browser coming back.
+        let _ = http().get(format!("{}/../favicon.ico", callback.trim_end_matches("/callback"))).send();
+        let page = http().get(format!("{callback}?code=abc%20123")).send().unwrap().text().unwrap();
+        assert!(page.contains("connected to OpenRouter"), "{page}");
+
+        let body = sent.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(body["code"], "abc 123");
+        assert_eq!(body["code_challenge_method"], "S256");
+        let verifier = body["code_verifier"].as_str().unwrap();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        assert_eq!(b64.encode(sha2::Sha256::digest(verifier.as_bytes())), challenge, "the verifier matches the challenge");
+        assert_eq!(saved.recv_timeout(Duration::from_secs(5)).unwrap(), "sk-or-v1-test");
+    }
+
+    #[test]
+    fn a_refused_sign_in_saves_nothing() {
+        let (tx, saved) = std::sync::mpsc::channel::<String>();
+        let url = connect_with("https://openrouter.ai/auth", "http://127.0.0.1:9/unused", move |k| {
+            tx.send(k).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let callback = url.split(['?', '&']).find_map(|kv| kv.strip_prefix("callback_url=")).map(unpercent).unwrap();
+        let page = http().get(format!("{callback}?error=access_denied")).send().unwrap().text().unwrap();
+        assert!(page.contains("wasn't connected"));
+        assert!(saved.recv_timeout(Duration::from_millis(500)).is_err());
+    }
 }
