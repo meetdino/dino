@@ -61,6 +61,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var last_exit: Int?
     /// Background commands its agent left serving (a dev server); nil from an older dinod.
     var servers: [ServerInfo]?
+    /// The provider and model it runs on, when it isn't its agent's own account.
+    var route: ProviderRoute?
 
     /// All its turn left running is a server: the ports it listens on ("3000, 8080").
     var serving: String? {
@@ -218,6 +220,19 @@ struct LauncherInfo: Codable, Identifiable, Equatable {
 
 /// A session's permission mode, model and effort (see crates/dino-core/src/controls.rs).
 /// Nil is the agent's own default.
+/// A session on a provider's model (Settings → Providers) instead of its agent's own account.
+struct ProviderRoute: Codable, Equatable, Hashable {
+    var provider: String
+    var model: String
+    /// "anthropic", "chat", "responses": how the agent and the provider talk.
+    var format: String?
+    /// The provider as people know it: "Ollama".
+    var name: String?
+
+    /// "Ollama · qwen3:4b".
+    var label: String { "\(name ?? provider) · \(model)" }
+}
+
 struct Controls: Codable, Equatable, Hashable {
     var mode: String?
     var model: String?
