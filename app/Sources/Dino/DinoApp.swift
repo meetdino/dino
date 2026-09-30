@@ -39,6 +39,9 @@ struct DinoApp: App {
                     .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandMenu("Session") {
+                Button("New Shell") { model.newShell() }
+                    .keyboardShortcut("t")
+                    .disabled(model.launchers.isEmpty)
                 Menu("New Session") {
                     // dinod lists the default agent first: ⌘N starts it.
                     ForEach(model.launchers) { l in
@@ -229,6 +232,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return choice
     }
+}
+
+/// What opening dino shows: the session you left (a shell if there's none), or always a new shell.
+enum StartWith: String {
+    case last, shell
+    static let key = "startWith"
+    static var current: StartWith { UserDefaults.standard.string(forKey: key).flatMap(StartWith.init) ?? .last }
 }
 
 enum QuitChoice: String {
