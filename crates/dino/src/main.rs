@@ -1,5 +1,8 @@
+mod ai;
 mod client;
 mod mcp;
+mod search;
+mod shell;
 
 use std::io;
 use std::sync::atomic::Ordering;
@@ -149,6 +152,8 @@ impl App {
             worktree: false,
             controls: Default::default(),
             host: None,
+            prompt: None,
+            by: None,
         };
         match client::request(&req) {
             Ok(Response::Created { id }) => {
@@ -771,7 +776,9 @@ const USAGE: &str = "usage: dino [agent [args...]] | --welcome
        dino ls | new [--worktree] <agent> [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
        dino found | continue <session-id prefix>
        dino mcp [--read-only]   (MCP server on stdio: agents list, read, message and start sessions)
-       dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>";
+       dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>
+       dino ai suggest|agent -- <request>   (the shell's AI line) | search [--json|--pick]
+       dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]";
 
 fn main() -> anyhow::Result<()> {
     let mut cli: Vec<String> = std::env::args().skip(1).collect();
@@ -783,6 +790,10 @@ fn main() -> anyhow::Result<()> {
         // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
         Some("statusline") => std::process::exit(dino_core::statusline::run(cli.get(1).map(String::as_str))),
         Some("found") => return cmd_found(),
+        Some("ai") => return ai::run(&cli[1..]),
+        Some("search") => return search::run(&cli[1..]),
+        Some("init") => return shell::init(cli.get(1).map(String::as_str)),
+        Some("shell") => return shell::run(&cli[1..]),
         Some("fan") => return cmd_fan(&cli[1..]),
         Some("groups") => return cmd_groups(),
         Some("diff") => {
@@ -806,7 +817,7 @@ fn main() -> anyhow::Result<()> {
             let agent = rest.first().ok_or_else(|| anyhow::anyhow!(USAGE))?.clone();
             let (cols, rows) = terminal::size().unwrap_or((120, 40));
             let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
-            let req = Request::New { launcher: agent, args: rest[1..].to_vec(), cwd, cols, rows, worktree, controls: Default::default(), host: None };
+            let req = Request::New { launcher: agent, args: rest[1..].to_vec(), cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None };
             return print_response(client::request(&req)?);
         }
         Some("kill") => return print_response(client::request(&Request::Kill { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),

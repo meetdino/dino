@@ -562,6 +562,11 @@ final class DinoConnection: @unchecked Sendable {
         _ = try send(["type": "send_input", "id": session, "text": text, "submit": submit])
     }
 
+    /// Write `text` to a session as typed keys, not a paste.
+    func sendKeys(session: String, text: String) throws {
+        _ = try send(["type": "send_keys", "id": session, "text": text])
+    }
+
     func prDraft(session: String) throws -> PrDraft {
         try JSONDecoder().decode(PrDraftResponse.self, from: send(["type": "pr_draft", "id": session])).draft
     }
