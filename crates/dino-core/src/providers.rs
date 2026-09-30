@@ -213,6 +213,34 @@ pub fn vllm_models(v: &Value) -> Vec<ProviderModel> {
         .collect()
 }
 
+/// The models a ChatGPT sign-in may use: the account's own `/v1/models`. That list can come back
+/// empty; then the catalog Codex keeps for the same ChatGPT account (`models_cache.json`) says
+/// which models there are, with their context. Codex lists the models it runs with its tools.
+pub fn chatgpt_models(api: &Value, codex_cache: Option<&str>) -> Vec<ProviderModel> {
+    let plan = |id: String| ProviderModel { name: id.clone(), provider: "chatgpt".into(), id, ..Default::default() };
+    let listed: Vec<ProviderModel> = openai_ids(api).into_iter().map(plan).collect();
+    if !listed.is_empty() {
+        return listed;
+    }
+    let Some(cache) = codex_cache.and_then(|c| serde_json::from_str::<Value>(c).ok()) else { return vec![] };
+    cache["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"].as_str().is_none_or(|v| v == "list"))
+        .filter_map(|m| {
+            let id = m["slug"].as_str()?.to_string();
+            Some(ProviderModel {
+                name: m["display_name"].as_str().unwrap_or(&id).to_string(),
+                context: m["context_window"].as_u64(),
+                tools: Some(true),
+                reasoning: m["supported_reasoning_levels"].as_array().map(|l| !l.is_empty()),
+                ..plan(id)
+            })
+        })
+        .collect()
+}
+
 fn openai_ids(v: &Value) -> Vec<String> {
     v["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect()
 }
@@ -275,5 +303,20 @@ mod tests {
     fn a_probe_tells_a_route_from_none() {
         assert!(serves(400) && serves(401) && serves(422) && serves(200));
         assert!(!serves(404) && !serves(405) && !serves(0));
+    }
+
+    #[test]
+    fn a_chatgpt_sign_in_lists_its_models_or_codexs() {
+        let api = json!({"object": "list", "data": [{"id": "gpt-5.5", "object": "model"}]});
+        let m = chatgpt_models(&api, None);
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].id.as_str(), m[0].provider.as_str(), m[0].tools), ("gpt-5.5", "chatgpt", None));
+
+        // Empty, as it came back for a real sign-in: Codex's catalog for the same account.
+        let cache = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-models.json")).unwrap();
+        let empty = json!({"object": "list", "data": []});
+        let m = chatgpt_models(&empty, Some(&cache));
+        assert!(!m.is_empty() && m.iter().all(|m| m.provider == "chatgpt" && m.tools == Some(true) && m.context.is_some()), "{m:?}");
+        assert!(chatgpt_models(&empty, None).is_empty());
     }
 }

@@ -122,6 +122,11 @@ pub fn codex(cache: &str, config: Option<&str>) -> Option<Catalog> {
     Some(Catalog { models: listed.into_iter().map(|(_, m)| m).collect(), default_model })
 }
 
+/// Codex's model cache as it's on disk (the models its ChatGPT account may use).
+pub fn codex_cache() -> Option<String> {
+    std::fs::read_to_string(codex_home().join("models_cache.json")).ok()
+}
+
 pub fn codex_from_files() -> Option<Catalog> {
     let cache = std::fs::read_to_string(codex_home().join("models_cache.json")).ok()?;
     codex(&cache, std::fs::read_to_string(codex_home().join("config.toml")).ok().as_deref())

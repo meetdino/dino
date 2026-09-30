@@ -2,11 +2,13 @@
 //! `http://127.0.0.1:<port>/s/<session>/<provider>`; we forward to the real API untouched
 //! (auth included) and observe usage, in-flight state and quota headers on the way back.
 //! The `free` provider is different: dino itself picks a free model and translates (see `free`).
-//! `or` is OpenRouter with the key dino holds for it (see `openrouter`).
+//! `or` is OpenRouter with the key dino holds for it (see `openrouter`), `siwc` the ChatGPT plan
+//! through Sign in with ChatGPT (see `siwc`).
 
 mod codex;
 mod free;
 mod openrouter;
+mod siwc;
 pub mod tasks;
 
 use std::collections::HashMap;
@@ -396,14 +398,27 @@ async fn forward(
         };
         return free::handle(st, session, &rest, body).await;
     }
-    // OpenRouter goes out with dino's key, not the agent's.
-    let openrouter = (provider == openrouter::PROVIDER).then(|| openrouter::headers(&st.keys.read().unwrap()));
-    if let Some(None) = openrouter {
-        return error(StatusCode::UNAUTHORIZED, "OpenRouter isn't connected: connect it in dino's Settings → Providers".into());
-    }
+    // Providers dino signs in to (OpenRouter, the ChatGPT plan) go out with dino's credentials,
+    // not the agent's: (what to add, which of the agent's to drop, where).
+    type Hosted = (Vec<(&'static str, String)>, fn(&str) -> bool, &'static str);
+    let hosted: Option<Hosted> = {
+        let keys = st.keys.read().unwrap();
+        match provider.as_str() {
+            openrouter::PROVIDER => match openrouter::headers(&keys) {
+                Some(h) => Some((h.to_vec(), openrouter::is_credential, openrouter::UPSTREAM)),
+                None => return error(StatusCode::UNAUTHORIZED, "OpenRouter isn't connected: connect it in dino's Settings → Providers".into()),
+            },
+            siwc::PROVIDER if !siwc::allowed(&rest) => return error(StatusCode::NOT_FOUND, "the ChatGPT plan only takes the Responses API (v1/responses)".into()),
+            siwc::PROVIDER => match siwc::headers(&keys) {
+                Ok(h) => Some((h.to_vec(), siwc::is_credential, siwc::upstream())),
+                Err(why) => return error(StatusCode::UNAUTHORIZED, why.into()),
+            },
+            _ => None,
+        }
+    };
     let upstream = match PROVIDERS.iter().find(|(p, _)| *p == provider) {
         Some(&(_, upstream)) => upstream,
-        None if openrouter.is_some() => openrouter::UPSTREAM,
+        None if hosted.is_some() => hosted.as_ref().map(|h| h.2).unwrap_or_default(),
         None => return error(StatusCode::NOT_FOUND, format!("unknown provider {provider}")),
     };
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
@@ -413,6 +428,11 @@ async fn forward(
         return error(StatusCode::BAD_REQUEST, "unreadable body".into());
     };
     let requested = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["model"].as_str().map(String::from));
+    // The ChatGPT plan streams; an agent that asked for one JSON answer gets it put together.
+    let collect = provider == siwc::PROVIDER && is_model_call && !siwc::wants_stream(&body);
+    if provider == siwc::PROVIDER && is_model_call && let Some(b) = siwc::shape(&body) {
+        body = Bytes::from(b);
+    }
     // A Codex model the backend already rejected: go straight to the one that answered instead.
     if provider == "chatgpt" {
         let sub = requested.as_ref().and_then(|m| st.substitutes.lock().unwrap().get(m).cloned());
@@ -437,12 +457,12 @@ async fn forward(
     let send = |body: Bytes| {
         let mut up = st.client.request(method.clone(), &url).body(body);
         for (name, value) in parts.headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
-            if openrouter.is_some() && openrouter::is_credential(name.as_str()) {
+            if hosted.as_ref().is_some_and(|h| h.1(name.as_str())) {
                 continue;
             }
             up = up.header(name, value);
         }
-        for (name, value) in openrouter.iter().flatten().flatten() {
+        for (name, value) in hosted.iter().flat_map(|h| &h.0) {
             up = up.header(*name, value);
         }
         up.send()
@@ -485,7 +505,10 @@ async fn forward(
             }
             log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
             record_quota(&st.stats, &provider, &headers);
-            let msg = format!("{} {}", status.as_u16(), codex::error_message(&text));
+            let msg = match provider.as_str() {
+                siwc::PROVIDER => siwc::refused(status.as_u16(), &codex::error_message(&text)),
+                _ => format!("{} {}", status.as_u16(), codex::error_message(&text)),
+            };
             st.stats.update(&session, |s| {
                 s.errors += 1;
                 s.call_failed(msg);
@@ -518,8 +541,16 @@ async fn forward(
     }
 
     let mut builder = Response::builder().status(status.as_u16());
-    for (name, value) in resp.headers().iter().filter(|(n, _)| !hop_by_hop(n)) {
+    // Put together into one answer: its content type is JSON, not the stream's.
+    for (name, value) in resp.headers().iter().filter(|(n, _)| !hop_by_hop(n) && !(collect && n.as_str() == "content-type")) {
         builder = builder.header(name, value);
+    }
+    if collect && status.is_success() {
+        let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, _in_flight: guard };
+        let whole = resp.bytes().await.unwrap_or_default();
+        tap.meter.feed(&whole);
+        let answer = siwc::collect(&whole).unwrap_or_else(|| whole.to_vec());
+        return builder.header("content-type", "application/json").body(Body::from(answer)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()));
     }
 
     // Tee the body: pass every chunk through immediately, scan a copy for usage.
