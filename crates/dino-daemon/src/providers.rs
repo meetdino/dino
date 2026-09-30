@@ -7,6 +7,8 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use dino_core::compat::Compat;
+use dino_core::ipc::ModelRow;
 use dino_core::providers::{self, Format, ProviderInfo, ProviderModel};
 use serde_json::Value;
 
@@ -77,8 +79,22 @@ pub fn find(id: &str) -> Option<ProviderInfo> {
     list().into_iter().find(|p| p.id == id)
 }
 
+/// `compat.json`, read once.
+fn compat() -> &'static Compat {
+    static COMPAT: OnceLock<Compat> = OnceLock::new();
+    COMPAT.get_or_init(Compat::load)
+}
+
+/// What `id` serves, each with what every agent can make of it.
+pub fn rows(id: &str) -> (Vec<ModelRow>, bool, Option<String>) {
+    let (models, loading, error) = models(id);
+    let p = find(id).unwrap_or_default();
+    let rows = models.into_iter().map(|m| ModelRow { agents: compat().judge(&m, &p), model: m }).collect();
+    (rows, loading, error)
+}
+
 /// What `id` serves as last fetched; a stale or missing list is asked for again, off this thread.
-pub fn models(id: &str) -> (Vec<ProviderModel>, bool, Option<String>) {
+fn models(id: &str) -> (Vec<ProviderModel>, bool, Option<String>) {
     let every = if id == "openrouter" { HOSTED_EVERY } else { LOCAL_EVERY };
     let mut c = cache().lock().unwrap();
     let (models, error, stale) = match c.models.get(id) {

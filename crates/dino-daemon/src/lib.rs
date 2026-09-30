@@ -490,7 +490,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             },
             Request::Providers => Response::Providers { providers: providers::list() },
             Request::Models { provider } => {
-                let (models, loading, error) = providers::models(&provider);
+                let (models, loading, error) = providers::rows(&provider);
                 Response::Models { provider, models, loading, error }
             }
             Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by } => {

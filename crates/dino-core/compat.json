@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "updated": "2026-09-30",
+  "agents": {
+    "claude": {
+      "formats": ["anthropic"],
+      "min_context": 64000,
+      "min_context_hard": 32000,
+      "needs": ["tools"],
+      "notes": "Its system prompt and tools are about 15–20k tokens, and it asks for up to 32k back.",
+      "source": "https://docs.ollama.com/api/anthropic-compatibility"
+    },
+    "codex": {
+      "formats": ["responses"],
+      "min_context": 32000,
+      "needs": ["tools"],
+      "notes": "Only speaks the Responses API since Codex dropped wire_api = \"chat\".",
+      "source": "https://github.com/openai/codex/discussions/7782"
+    },
+    "qwen": {
+      "formats": ["anthropic", "chat", "responses"],
+      "min_context": 32000,
+      "needs": ["tools"]
+    },
+    "kimi": {
+      "formats": ["anthropic", "chat", "responses"],
+      "min_context": 32000,
+      "needs": ["tools"]
+    },
+    "pi": {
+      "formats": ["anthropic", "chat", "responses"],
+      "min_context": 32000,
+      "needs": ["tools"]
+    },
+    "hermes": {
+      "formats": ["chat", "anthropic", "responses"],
+      "min_context": 64000,
+      "min_context_hard": 64000,
+      "needs": ["tools"],
+      "notes": "Hermes refuses models under 64k context.",
+      "source": "https://hermes-agent.nousresearch.com/docs/integrations/providers"
+    }
+  },
+  "models": [
+    {
+      "match": "qwen/qwen3.8-27b*|qwen3.8:27b*|*qwen3.8-27b*",
+      "recommend": ["qwen", "claude"],
+      "why": "Qwen Code is built around Qwen's own tool-call format; Claude Code runs it well too.",
+      "source": "https://codersera.com/blog/qwen-3-8-27b-local-claude-code-replacement-2026/",
+      "agents": {
+        "codex": {
+          "status": "caveat",
+          "why": "Works, but tool calls come through awkwardly: it needs odd nudging to call them.",
+          "source": "https://www.betterclaw.io/blog/qwen-3-8-27b-tool-calling-fails-agents-fix",
+          "verified_by": "tried by hand in Codex, 2026-09-30"
+        }
+      }
+    },
+    {
+      "match": "*qwen3.8-27b*gguf*|*Qwen3.8-27B*GGUF*",
+      "where": ["llamacpp", "ollama", "lmstudio"],
+      "agents": {
+        "claude": {
+          "status": "caveat",
+          "why": "Some GGUF chat templates fail with Claude Code (\"System message must be at the beginning\"); llama.cpp needs --jinja.",
+          "source": "https://github.com/ggml-org/llama.cpp/discussions/27281"
+        }
+      }
+    },
+    {
+      "match": "qwen/*|qwen*|*/qwen*",
+      "recommend": ["qwen", "claude"],
+      "why": "Qwen Code is made for Qwen models and their tool calls."
+    },
+    {
+      "match": "moonshotai/*|kimi*|*/kimi*",
+      "recommend": ["kimi", "claude"],
+      "why": "Kimi Code is made for Kimi models."
+    },
+    {
+      "match": "anthropic/*|claude*",
+      "recommend": ["claude"],
+      "why": "Claude models run best in Claude Code."
+    },
+    {
+      "match": "openai/gpt-*|gpt-*",
+      "recommend": ["codex"],
+      "why": "Codex is made for OpenAI's models."
+    }
+  ],
+  "runtimes": [
+    {
+      "runtime": "ollama",
+      "agent": "claude",
+      "status": "caveat",
+      "why": "Ollama loads models with a small context unless told otherwise: set OLLAMA_CONTEXT_LENGTH to 64k or more.",
+      "source": "https://docs.ollama.com/api/anthropic-compatibility"
+    },
+    {
+      "runtime": "vllm",
+      "agent": "claude",
+      "status": "caveat",
+      "why": "vLLM rejects message roles newer Claude Code versions send, and Claude Code's 32k max_tokens crowds 128k deployments.",
+      "source": "https://github.com/vllm-project/vllm/issues/44000"
+    },
+    {
+      "runtime": "llamacpp",
+      "agent": "*",
+      "status": "caveat",
+      "why": "llama.cpp only calls tools when started with --jinja.",
+      "source": "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md"
+    }
+  ]
+}
