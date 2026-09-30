@@ -1,0 +1,48 @@
+{
+  "about": "dino-sync test vectors. Records are PASETO v4.local with footer {\"kid\":…} and implicit assertion JSON [account, collection, key, schema].",
+  "account_key": {
+    "id": "k_0102030405060708",
+    "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  },
+  "records": [
+    {
+      "account": "acct_0001",
+      "collection": "agents",
+      "key": "claude.mode",
+      "schema": 1,
+      "plaintext": "\"plan\"",
+      "token": "v4.local.M-BcQ45loHQrEIQIUia9Ci5CHi3qW5ptLWrt4jbN8IwIId4wv7hnvsCRE5hyYijJa6VU3PGjA0UywyQOLOcdSwpYuT4X-Q.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ"
+    },
+    {
+      "account": "acct_0001",
+      "collection": "keys",
+      "key": "OPENROUTER_API_KEY",
+      "schema": 1,
+      "plaintext": "\"sk-or-v1-example\"",
+      "token": "v4.local.j-vBm_0mNQCv49sMDiBpTkx4cc8F8r18SOtO2jWIZeBxR1M-83nSHz-CMZBhvux9Z1QfuvP0gtlGfKOn8Wet_rjX8q_ffBwnRdG4OoRBdSrZGg.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ"
+    }
+  ],
+  "approval": {
+    "account": "acct_0001",
+    "approver_secret_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "approver_public": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo",
+    "new_device_secret_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "new_device_public": "ST6C_HRGSlkmiBdiPSBTxeuOLMSpiLT-4XnsawENUx0",
+    "code": "25-33-07",
+    "grant": {
+      "from": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo",
+      "nonce": "8qdpgN_HpJJLMmoSnp58fuOB_4yqLk_R",
+      "sealed": "64zV0wStTz6PoSeAPGsmof0xyu8g4C0kVO396_OVOL9mT3ljeHi9n64lizFZE1sC_gHd-BX-uStvKPL7R1qJx168npnbFCijntHTnfuKBm4wlD_q9ouqxZoq-c1fRGINxZStPg_HBaLWUY14zOlOkiiLEGoiTw"
+    }
+  },
+  "recovery": {
+    "account": "acct_0001",
+    "display": "D1-7M02-97GN-XAYS-0H9X-B1QA-PB6Y-BGCN",
+    "also_accepted": [
+      "d1-7m02-97gn-xays-0h9x-b1qa-pb6y-bgcn",
+      "D1 7M02 97GN XAYS 0H9X B1QA PB6Y BGCN",
+      "D1-7MO2-97GN-XAYS-OH9X-B1QA-PB6Y-BGCN"
+    ],
+    "wrapped": "v4.local.cHZ3hMwViFP5MnaUzWD13pm7hAH20o7WgQ5D-MrYng1PDla5XSHJzZaRb5iJj7h6pUUT2HZvQEhMQG6JWoieSLNa8BZolcp8M8fcsR0xr2qJPpl6bSrxteTOuurs3liXTNGen5aOb7bQCLWqEvt2OixlYsX47B-5J_fdzKq1aUvut_g4i_Qbvbj8tYJoan_z"
+  }
+}
