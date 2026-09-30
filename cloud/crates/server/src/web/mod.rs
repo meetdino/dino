@@ -53,7 +53,7 @@ pub async fn security_headers(State(s): State<AppState>, req: Request, next: Nex
     let turnstile = if s.cfg.turnstile.is_some() { " https://challenges.cloudflare.com" } else { "" };
     let csp = format!(
         "default-src 'none'; style-src 'self'; img-src 'self' data:; script-src 'self'{turnstile}; frame-src{f}; connect-src 'self'{turnstile}; \
-         form-action 'self' http://127.0.0.1:* http://[::1]:*; frame-ancestors 'none'; base-uri 'none'",
+         form-action 'self' http://127.0.0.1:*; frame-ancestors 'none'; base-uri 'none'",
         f = if turnstile.is_empty() { " 'none'" } else { turnstile }
     );
     let h = res.headers_mut();

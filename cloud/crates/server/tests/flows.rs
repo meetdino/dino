@@ -1,5 +1,5 @@
 //! End to end against a real Postgres (DINO_TEST_DATABASE_URL, default
-//! postgres://dino@127.0.0.1:55432/postgres; see the README), with GitHub, Google and mail faked.
+//! postgres://dino:dino@127.0.0.1:55432/postgres; see the README), with GitHub, Google and mail faked.
 
 mod common;
 

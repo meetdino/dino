@@ -44,14 +44,16 @@ pub fn scope(requested: Option<&str>) -> Option<String> {
 }
 
 impl Client {
-    /// Whether `uri` is a redirect this client registered. Native: `http` to a loopback IP literal
-    /// (not `localhost`, RFC 8252 §8.3), any port, the registered path, no fragment. Web: exact.
+    /// Whether `uri` is a redirect this client registered. Native: `http` to the loopback IP literal
+    /// 127.0.0.1 (not `localhost`, RFC 8252 §8.3), any port, the registered path, no fragment. Not
+    /// `[::1]`: browsers don't accept IPv6 literals in the CSP that lets the consent form land
+    /// there. Web: exact.
     pub fn allows_redirect(&self, cfg: &Config, uri: &str) -> bool {
         match self.kind {
             Kind::Web => uri == cfg.url(self.redirect_path),
             Kind::Native => {
                 let Ok(u) = Url::parse(uri) else { return false };
-                let loopback = matches!(u.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback()) || matches!(u.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback());
+                let loopback = matches!(u.host(), Some(url::Host::Ipv4(ip)) if ip == std::net::Ipv4Addr::LOCALHOST);
                 u.scheme() == "http" && loopback && u.path() == self.redirect_path && u.fragment().is_none() && u.username().is_empty() && u.password().is_none()
             }
         }
@@ -76,6 +78,8 @@ mod tests {
             turnstile: None,
             introspect_secret: None,
             json_logs: false,
+            ip_limit: (30, 120),
+            account_limit: (20, 60),
         }
     }
 
@@ -84,7 +88,7 @@ mod tests {
         let c = find("dino").unwrap();
         let cfg = cfg();
         assert!(c.allows_redirect(&cfg, "http://127.0.0.1:49152/callback"));
-        assert!(c.allows_redirect(&cfg, "http://[::1]:8080/callback"));
+        assert!(!c.allows_redirect(&cfg, "http://[::1]:8080/callback"));
         assert!(!c.allows_redirect(&cfg, "http://localhost:49152/callback"));
         assert!(!c.allows_redirect(&cfg, "https://evil.example/callback"));
         assert!(!c.allows_redirect(&cfg, "http://127.0.0.1:1/other"));

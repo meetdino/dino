@@ -79,7 +79,7 @@ async fn upstream_mock() -> SocketAddr {
 
 pub async fn start() -> Server {
     init_logs();
-    let admin_url = std::env::var("DINO_TEST_DATABASE_URL").unwrap_or_else(|_| "postgres://dino@127.0.0.1:55432/postgres".into());
+    let admin_url = std::env::var("DINO_TEST_DATABASE_URL").unwrap_or_else(|_| "postgres://dino:dino@127.0.0.1:55432/postgres".into());
     let db_name = format!("dino_test_{}", uuid::Uuid::new_v4().simple());
     let admin = PgPoolOptions::new().max_connections(1).connect(&admin_url).await.expect("test Postgres (see README)");
     // The name is ours: a fixed prefix and a UUID.
@@ -112,6 +112,8 @@ pub async fn start() -> Server {
         turnstile: None,
         introspect_secret: Some(INTROSPECT_SECRET.into()),
         json_logs: true,
+        ip_limit: (30, 120),
+        account_limit: (20, 60),
     };
     let pool = PgPoolOptions::new().max_connections(16).connect(&db_url).await.unwrap();
     let state = AppState::with_pool(cfg, pool).await.unwrap();
