@@ -793,6 +793,11 @@ fn main() -> anyhow::Result<()> {
     let mut cli: Vec<String> = std::env::args().skip(1).collect();
     match cli.first().map(String::as_str) {
         Some("daemon") => return dino_daemon::run(),
+        Some("lid-watchdog") => {
+            dino_daemon::lid_watchdog(cli.get(1).and_then(|p| p.parse().ok()).unwrap_or(0));
+            return Ok(());
+        }
+        Some("power") => return cmd_power(cli.get(1).map(String::as_str).unwrap_or("status")),
         Some("attach") => return client::attach_raw(cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?),
         Some("ls") => return cmd_ls(),
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
@@ -948,6 +953,34 @@ fn cmd_ls() -> anyhow::Result<()> {
         let state = if s.exited { "exited".to_string() } else { printable(&s.activity.unwrap_or_else(|| "idle".into())) };
         let title = printable(&s.title.unwrap_or_default());
         println!("{:>3}  {:<16} {:<10} ↑{} ↓{}  {title}", printable(&s.id), truncate(&printable(&s.name), 16), state, tokens(s.input_tokens), tokens(s.output_tokens));
+    }
+    Ok(())
+}
+
+/// `dino power [status|setup|remove]`: keeping agents running with the lid closed.
+fn cmd_power(action: &str) -> anyhow::Result<()> {
+    if !matches!(action, "status" | "setup" | "remove") {
+        println!("usage: dino power [status|setup|remove]\n\nsetup asks for an administrator's password once, so dino can keep the Mac awake with its lid closed while agents work (Settings → General).");
+        return Ok(());
+    }
+    let p = match client::request(&Request::Power { action: action.into() })? {
+        Response::Power { power } => power,
+        Response::Error { message } => anyhow::bail!(message),
+        _ => anyhow::bail!("unexpected reply"),
+    };
+    let lid = dino_core::settings::Settings::load().machine.lid;
+    println!("keep agents running with the lid closed: {}", if lid.enabled { "on" } else { "off" });
+    println!("permission set up: {}", if p.ready == Some(true) { "yes" } else { "no (dino power setup)" });
+    if p.holding {
+        println!("now: awake with the lid closed");
+    } else if p.external {
+        println!("now: sleep is off, but not by dino; dino leaves it alone");
+    }
+    if let Some(note) = p.note {
+        println!("last: {note}");
+    }
+    if let Some(e) = p.error {
+        println!("error: {e}");
     }
     Ok(())
 }

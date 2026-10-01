@@ -28,6 +28,7 @@ mod agentlog;
 mod chatgpt;
 mod cloud;
 mod codex;
+mod lid;
 mod lifecycle;
 mod peers;
 mod preview;
@@ -171,6 +172,8 @@ struct Daemon {
     /// Worktree path → its git summary and when it was read; git is too slow for every tree poll.
     summaries: Mutex<HashMap<String, (Instant, Option<worktree::Summary>)>>,
     schedule: schedule::Scheduler,
+    /// Keeping agents running with the lid closed.
+    lid: lid::Lid,
     /// Stopped sessions kept to start again, newest first.
     archived: Mutex<Vec<lifecycle::Archived>>,
     /// Worktree path → its size on disk and when it was measured.
@@ -185,6 +188,11 @@ struct Daemon {
     tree_gen: AtomicU64,
     next_id: AtomicU64,
     next_sub: AtomicU64,
+}
+
+/// `dino lid-watchdog <pid>`: see [`lid`].
+pub fn lid_watchdog(pid: i32) {
+    lid::watchdog(pid)
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -210,6 +218,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut stamps = CatalogStamps::new();
     read_catalogs(&daemon, &mut stamps);
     restore(&daemon, saved);
+    lid::start(daemon.clone());
     {
         // Pick up late-discovered agent ids (Codex) and sessions that exited on their own.
         let d = daemon.clone();
@@ -440,6 +449,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         subagents: Mutex::new(load_subagents()),
         summaries: Mutex::default(),
         schedule: schedule::Scheduler::load(),
+        lid: lid::Lid::default(),
         archived: Mutex::new(lifecycle::load_archived()),
         sizes: Mutex::default(),
         pushed: Mutex::default(),
@@ -631,6 +641,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     Response::Ok
                 }
                 Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Power { action } => match lid::serve(d, &action) {
+                Ok(power) => Response::Power { power },
+                Err(message) => Response::Error { message },
             },
             Request::Sync { action, value } => {
                 let done = match action.as_str() {
@@ -994,6 +1008,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::Shutdown => {
                 // Saved first: `dino stop` pauses sessions, the next dinod resumes them.
                 save(d);
+                lid::stop(d);
                 ipc::write_json(&mut stream, &Response::Ok)?;
                 for s in d.sessions.lock().unwrap().drain(..) {
                     s.pane.kill();
@@ -1598,7 +1613,7 @@ fn state(d: &Daemon) -> Response {
             })
         })
         .collect();
-    Response::State { sessions, quotas, approvals: sync::approvals() }
+    Response::State { sessions, quotas, approvals: sync::approvals(), power: Some(d.lid.info()) }
 }
 
 // ---- Persistence: sessions survive dinod restarts (and reboots) by resuming each agent. ----

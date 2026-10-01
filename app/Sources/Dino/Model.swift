@@ -48,6 +48,8 @@ final class DinoModel: ObservableObject {
     @Published var approvals: [ApprovalRequest] = []
     /// The request whose approve sheet is open.
     @Published var approving: ApprovalRequest?
+    /// Kept awake with the lid closed, and why sleep came back last; nil from an older dinod.
+    @Published var power: PowerInfo?
     @Published var launchers: [LauncherInfo] = []
     @Published var selected: String? {
         // Remembered per dinod, so reopening the app comes back to the same session.
@@ -199,6 +201,7 @@ final class DinoModel: ObservableObject {
                 if let resp {
                     self.apply(resp.sessions ?? [], resp.quotas ?? [])
                     self.applyApprovals(resp.approvals ?? [])
+                    self.applyPower(resp.power)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.poll() }
                 } else {
                     self.lostDaemon()
@@ -241,6 +244,15 @@ final class DinoModel: ObservableObject {
     /// Saves and stops every session; the next dinod resumes them. Blocks: used while quitting.
     func stopDaemon() {
         _ = try? DinoConnection(path: DinoEnvironment.socketPath).request(["type": "shutdown"])
+    }
+
+    private func applyPower(_ next: PowerInfo?) {
+        guard next != power else { return }
+        // A safety stop (battery, heat, time) is worth a notification; the first state isn't.
+        if let note = next?.note, let at = next?.note_at, power != nil, at != power?.note_at {
+            Notifier.post(key: "lid", title: "Closing the lid sleeps the Mac again", body: note)
+        }
+        power = next
     }
 
     private func apply(_ next: [SessionInfo], _ quotas: [QuotaInfo]) {
