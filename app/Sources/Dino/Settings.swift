@@ -27,6 +27,18 @@ struct DinoSettings: Codable, Equatable {
         var keep_awake: Bool?
         /// Shells mark their prompts and say where they are; nil from an older dinod (on there).
         var shell_integration: Bool?
+        /// Keeping agents running with the lid closed; nil from an older dinod.
+        var lid: Lid?
+    }
+    struct Lid: Codable, Equatable {
+        var enabled: Bool
+        /// "working" (an agent is working) or "open" (an agent session is open).
+        var when: String
+        var on_battery: Bool
+        var min_battery: Int
+        /// 0: no limit.
+        var max_hours: Double
+        static let standard = Lid(enabled: false, when: "working", on_battery: false, min_battery: 30, max_hours: 8)
     }
     struct Repo: Codable, Equatable { var env: [String: String] }
     struct SshHost: Codable, Equatable { var folder: String }
@@ -521,8 +533,9 @@ private struct GeneralPane: View {
                 .disabled(store.settings == nil)
                 .orgLocked("machine.keep_awake")
             } footer: {
-                Footnote("So scheduled tasks run on time. Closing the lid still sleeps it; missed tasks run once when it wakes.")
+                Footnote("So scheduled tasks run on time. Closing the lid still sleeps it, unless Lid closed below keeps it awake; missed tasks run once when it wakes.")
             }
+            LidSection()
             Section {
                 LabeledContent("Settings and keys") {
                     HStack {
