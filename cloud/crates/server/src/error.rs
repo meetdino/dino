@@ -20,6 +20,10 @@ pub enum Error {
     RateLimited { retry_after: u64 },
     #[error("forbidden: {0}")]
     Forbidden(String),
+    /// The database can't be reached right now (a connection timed out, Neon waking up): the
+    /// client tries again shortly.
+    #[error("database unavailable: {0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -39,7 +43,24 @@ impl Error {
 
 impl From<sqlx::Error> for Error {
     fn from(e: sqlx::Error) -> Self {
-        Error::Internal(e.into())
+        if transient(&e) { Error::Unavailable(e.to_string()) } else { Error::Internal(e.into()) }
+    }
+}
+
+/// Whether `e` is the database being out of reach for a moment, rather than a mistake: no
+/// connection to be had in time, the connection dropped, or the server not taking connections yet
+/// (Neon's "Authentication timed out" while it wakes, Postgres starting or shutting down).
+pub fn transient(e: &sqlx::Error) -> bool {
+    match e {
+        sqlx::Error::PoolTimedOut | sqlx::Error::Io(_) | sqlx::Error::Tls(_) | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed => true,
+        sqlx::Error::Protocol(m) => m.contains("timed out") || m.contains("closed"),
+        sqlx::Error::Database(d) => {
+            // Class 08 (connection exception), 57P01-57P03 (shutting down, can't connect now),
+            // 53300 (too many connections); Neon reports a slow wake as XX000 with this text.
+            let code = d.code().unwrap_or_default();
+            code.starts_with("08") || matches!(&*code, "57P01" | "57P02" | "57P03" | "53300") || d.message().contains("timed out")
+        }
+        _ => false,
     }
 }
 
@@ -56,6 +77,13 @@ impl IntoResponse for Error {
                 return r;
             }
             Error::Forbidden(m) => (StatusCode::FORBIDDEN, json!({"error": "forbidden", "message": m})),
+            Error::Unavailable(e) => {
+                tracing::warn!(error = %e, "database unavailable");
+                metrics::counter!("db_unavailable_total").increment(1);
+                let mut r = (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({"error": "unavailable", "message": "Busy for a moment. Try again shortly."}))).into_response();
+                r.headers_mut().insert("retry-after", "5".parse().unwrap());
+                return r;
+            }
             Error::Internal(e) => {
                 tracing::error!(error = %e, "internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "server_error"}))

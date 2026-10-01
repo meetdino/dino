@@ -39,6 +39,7 @@ pub async fn cleanup(s: &AppState) -> anyhow::Result<()> {
         "DELETE FROM auth_codes WHERE expires_at < now() - interval '1 day'",
         "DELETE FROM device_codes WHERE expires_at < now() - interval '1 day'",
         "DELETE FROM email_codes WHERE expires_at < now() - interval '1 day'",
+        "DELETE FROM email_links WHERE expires_at < now() - interval '1 day'",
         "DELETE FROM web_sessions WHERE expires_at < now()",
         "DELETE FROM idempotency WHERE created_at < now() - interval '1 day'",
         "DELETE FROM rate_counters WHERE window_start < now() - interval '1 day'",

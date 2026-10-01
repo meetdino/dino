@@ -5,8 +5,8 @@
 mod common;
 
 use common::*;
-use dino_sync::{AccountKey, Clock, PullResponse, PushRequest, RecordId};
-use serde_json::{Map, Value};
+use dino_sync::{Clock, PullResponse, PushRequest, Record, RecordId};
+use serde_json::{Map, Value, json};
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
@@ -46,28 +46,18 @@ async fn sync_works_by_request_alone() {
     s.email_signin(&b, "stateless@example.com").await;
     let ta = s.native_login(&b, "dino", "Mac A").await;
     let tb = s.native_login(&b, "dino", "Mac B").await;
-    let me: Value = app().get(s.url("/v1/me")).bearer_auth(ta["access_token"].as_str().unwrap()).send().await.unwrap().json().await.unwrap();
-    let account = me["account_id"].as_str().unwrap();
-    let key = AccountKey::generate();
     let device = ta["device_id"].as_str().unwrap().to_owned();
     let mut clock = Clock::new(device.clone());
-    let rec = key.seal_record(account, RecordId::new("agents", "claude.mode"), clock.now(now_ms()), 1, Some("plan")).unwrap();
+    let rec = Record { id: RecordId::new("agents", "claude.mode"), hlc: clock.now(now_ms()), schema: 1, value: json!("plan"), deleted: false, seq: None, extra: Map::new() };
     let req = PushRequest { device_id: device, records: vec![rec], extra: Map::new() };
     let r = app().post(s.url("/v1/sync")).bearer_auth(ta["access_token"].as_str().unwrap()).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).json(&req).send().await.unwrap();
     assert_eq!(r.status(), 200, "push");
 
     let pulled: PullResponse = app().get(s.url("/v1/sync?since=0")).bearer_auth(tb["access_token"].as_str().unwrap()).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).send().await.unwrap().json().await.unwrap();
     assert_eq!(pulled.records.len(), 1);
-    assert_eq!(key.open_record(account, &pulled.records[0]).unwrap().as_deref(), Some("plan"));
+    assert_eq!(pulled.records[0].value, json!("plan"));
     let counted: i64 = sqlx::query_scalar("SELECT count(*) FROM rate_counters WHERE key LIKE 'sync:%'").fetch_one(&s.state.db).await.unwrap();
     assert_eq!(counted, 1, "sync writes counted in Postgres");
-
-    // A reset shows as a new generation in the next pull: how a device without a socket hears of it.
-    let g0 = pulled.extra["generation"].as_i64().unwrap();
-    let r = app().post(s.url("/v1/sync/reset")).bearer_auth(ta["access_token"].as_str().unwrap()).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).send().await.unwrap();
-    assert_eq!(r.status(), 200, "reset");
-    let after: PullResponse = app().get(s.url(&format!("/v1/sync?since={}", pulled.seq))).bearer_auth(tb["access_token"].as_str().unwrap()).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).send().await.unwrap().json().await.unwrap();
-    assert_eq!(after.extra["generation"].as_i64().unwrap(), g0 + 1, "the generation moved on");
 }
 
 #[tokio::test]

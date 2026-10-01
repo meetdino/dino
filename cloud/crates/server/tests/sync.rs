@@ -1,14 +1,12 @@
-//! Settings sync end to end: devices sealing values with `dino-sync`, the server ordering and
-//! relaying them, nudges across two nodes, key approval, recovery, and a database dump that holds
-//! no plaintext.
+//! Settings sync end to end: devices writing plain JSON records with `dino-sync`, the server
+//! ordering and relaying them, nudges across two nodes, and older clients told to update.
 
 mod common;
 
 use std::time::Duration;
 
 use common::*;
-use dino_sync::approval::{Commitment, Response as Answer, Reveal, verify_reveal};
-use dino_sync::{AccountKey, Clock, DeviceKeys, Grant, Hlc, PullResponse, PushRequest, PushResponse, Record, RecordId, RecoveryKey, Store, approval_code};
+use dino_sync::{Clock, Hlc, PullResponse, PushRequest, PushResponse, Record, RecordId, Store};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Map, Value, json};
 use tokio_tungstenite::tungstenite::Message;
@@ -32,14 +30,9 @@ async fn device(s: &Server, b: &reqwest::Client, name: &str) -> Dev {
     Dev { at: t["access_token"].as_str().unwrap().to_owned(), clock: Clock::new(id.clone()), id, store: Store::new(), seq: 0 }
 }
 
-async fn account(s: &Server, d: &Dev) -> String {
-    let me: Value = app().get(s.url("/v1/me")).bearer_auth(&d.at).send().await.unwrap().json().await.unwrap();
-    me["account_id"].as_str().unwrap().to_owned()
-}
-
-fn sealed(key: &AccountKey, account: &str, d: &mut Dev, collection: &str, k: &str, value: Option<&str>, at_ms: u64) -> Record {
+fn write(d: &mut Dev, collection: &str, k: &str, value: Option<Value>, at_ms: u64) -> Record {
     let hlc = d.clock.now(at_ms);
-    key.seal_record(account, RecordId::new(collection, k), hlc, 1, value).unwrap()
+    Record { id: RecordId::new(collection, k), hlc, schema: 1, deleted: value.is_none(), value: value.unwrap_or(Value::Null), seq: None, extra: Map::new() }
 }
 
 async fn push(s: &Server, d: &Dev, records: Vec<Record>) -> (reqwest::StatusCode, Value) {
@@ -57,7 +50,8 @@ async fn pull_all(s: &Server, d: &mut Dev, page: u32) -> usize {
         for rec in &r.records {
             let _ = d.clock.observe(&rec.hlc, now_ms());
         }
-        d.store.apply_all_unverified(r.records);
+        let (_, refused) = d.store.apply_all_remote(r.records, now_ms());
+        assert!(refused.is_empty());
         d.seq = r.seq;
         if !r.more {
             return pages;
@@ -65,26 +59,21 @@ async fn pull_all(s: &Server, d: &mut Dev, page: u32) -> usize {
     }
 }
 
-fn open(key: &AccountKey, account: &str, d: &Dev, collection: &str, k: &str) -> Option<String> {
-    let id = RecordId::new(collection, k);
-    key.open_record(account, d.store.get(&id)?).unwrap()
+fn value<'a>(d: &'a Dev, collection: &str, k: &str) -> Option<&'a Value> {
+    d.store.get(&RecordId::new(collection, k)).filter(|r| !r.deleted).map(|r| &r.value)
 }
 
-const PLAIN: [&str; 4] = ["MODE-PLAN-7f3a", "MODE-AUTO-1b2c", "nvapi-PLAINTEXT-SECRET-123", "HOST-BUILDBOX-9c2"];
-
 #[tokio::test]
-async fn two_devices_converge_through_the_server_which_sees_no_plaintext() {
+async fn two_devices_converge_through_the_server() {
     let s = start().await;
     let b = browser();
     s.email_signin(&b, "sync@example.com").await;
     let mut a = device(&s, &b, "Mac A").await;
     let mut bd = device(&s, &b, "Mac B").await;
-    let acct = account(&s, &a).await;
-    let key = AccountKey::generate();
     let t0 = now_ms();
 
-    let first = sealed(&key, &acct, &mut a, "agents", "claude.mode", Some(PLAIN[0]), t0);
-    let recs = vec![first.clone(), sealed(&key, &acct, &mut a, "keys", "NVIDIA_API_KEY", Some(PLAIN[2]), t0), sealed(&key, &acct, &mut a, "ssh", "build-box", Some(PLAIN[3]), t0)];
+    let first = write(&mut a, "agents", "claude.mode", Some(json!("plan")), t0);
+    let recs = vec![first.clone(), write(&mut a, "policies", "allowed_agents", Some(json!(["claude", "codex"])), t0), write(&mut a, "ssh", "build-box", Some(json!({"folder": "~/src"})), t0)];
     let (st, r) = push(&s, &a, recs).await;
     assert_eq!(st, 200);
     let r: PushResponse = serde_json::from_value(r).unwrap();
@@ -94,29 +83,29 @@ async fn two_devices_converge_through_the_server_which_sees_no_plaintext() {
     let (_, r) = push(&s, &a, vec![first.clone()]).await;
     assert_eq!((r["seq"].as_u64(), r["accepted"].as_array().unwrap().len()), (Some(3), 1));
     // B changes the same setting later: it wins, everywhere.
-    let later = sealed(&key, &acct, &mut bd, "agents", "claude.mode", Some(PLAIN[1]), t0 + 50);
+    let later = write(&mut bd, "agents", "claude.mode", Some(json!("auto")), t0 + 50);
     let (_, r) = push(&s, &bd, vec![later]).await;
     assert_eq!(r["seq"], 4);
     // An older stamp for the same setting loses.
     let stale = Record { hlc: Hlc { wall_ms: t0 - 10_000, counter: 0, device: a.id.clone() }, ..first.clone() };
     let (_, r) = push(&s, &a, vec![stale]).await;
     assert_eq!(r["superseded"][0]["key"], "claude.mode");
-    // A clock an hour ahead, and a value that isn't sealed: refused.
-    let future = sealed(&key, &acct, &mut Dev { clock: Clock::new("skewed"), ..device(&s, &b, "Skewed Mac").await }, "agents", "x", Some("y"), t0 + 3_600_000);
-    let plain = Record { value: "not sealed".into(), hlc: a.clock.now(now_ms()), ..first.clone() };
-    let (_, r) = push(&s, &a, vec![future, plain]).await;
+    // A clock an hour ahead, and a delete that carries a value: refused.
+    let future = write(&mut Dev { clock: Clock::new("skewed"), ..device(&s, &b, "Skewed Mac").await }, "agents", "x", Some(json!("y")), t0 + 3_600_000);
+    let odd_delete = Record { deleted: true, hlc: a.clock.now(now_ms()), ..first.clone() };
+    let (_, r) = push(&s, &a, vec![future, odd_delete]).await;
     let codes: Vec<&str> = r["rejected"].as_array().unwrap().iter().map(|x| x["error"]["code"].as_str().unwrap()).collect();
     assert_eq!(codes, ["future_stamp", "malformed"]);
     assert_eq!(r["seq"], 4);
 
-    // A protocol 1 client is told to update, and its push isn't taken.
+    // A client on the encrypted protocol (2) is told to update, and its push isn't taken.
     let req = PushRequest { device_id: a.id.clone(), records: vec![], extra: Map::new() };
-    let old = app().post(s.url("/v1/sync")).bearer_auth(&a.at).header("dino-sync-version", "1").json(&req).send().await.unwrap();
+    let old = app().post(s.url("/v1/sync")).bearer_auth(&a.at).header("dino-sync-version", "2").json(&req).send().await.unwrap();
     assert_eq!(old.status(), 426);
     assert_eq!(old.json::<Value>().await.unwrap()["code"], "upgrade_required");
 
-    // B deletes the SSH host: a tombstone, sealed like any value.
-    let gone = sealed(&key, &acct, &mut bd, "ssh", "build-box", None, now_ms());
+    // B deletes the SSH host: a tombstone.
+    let gone = write(&mut bd, "ssh", "build-box", None, now_ms());
     push(&s, &bd, vec![gone]).await;
 
     // Both pull, a page of two at a time, and end up with the same store.
@@ -125,13 +114,13 @@ async fn two_devices_converge_through_the_server_which_sees_no_plaintext() {
     assert_eq!(a.store, bd.store, "converged");
     assert_eq!(a.seq, bd.seq);
     for d in [&a, &bd] {
-        assert_eq!(open(&key, &acct, d, "agents", "claude.mode").as_deref(), Some(PLAIN[1]));
-        assert_eq!(open(&key, &acct, d, "keys", "NVIDIA_API_KEY").as_deref(), Some(PLAIN[2]));
+        assert_eq!(value(d, "agents", "claude.mode"), Some(&json!("auto")));
+        assert_eq!(value(d, "policies", "allowed_agents"), Some(&json!(["claude", "codex"])));
         assert!(d.store.get(&RecordId::new("ssh", "build-box")).unwrap().is_tombstone());
     }
 
     // Many writes, small pages: every one arrives, in order, and `more` stops at the end.
-    let many: Vec<Record> = (0..25).map(|i| sealed(&key, &acct, &mut a, "repos", &format!("r{i}"), Some(&format!("ENV-{i}")), now_ms())).collect();
+    let many: Vec<Record> = (0..25).map(|i| write(&mut a, "repos", &format!("r{i}"), Some(json!(format!("ENV-{i}"))), now_ms())).collect();
     let (_, r) = push(&s, &a, many).await;
     let head = r["seq"].as_u64().unwrap();
     let pages = pull_all(&s, &mut bd, 7).await;
@@ -141,29 +130,22 @@ async fn two_devices_converge_through_the_server_which_sees_no_plaintext() {
     // Unknown fields a newer client sends come back unchanged.
     let mut extra = Map::new();
     extra.insert("future_field".into(), json!({"kept": true}));
-    let odd = Record { extra, ..sealed(&key, &acct, &mut a, "agents", "codex.mode", Some("MODE-X"), now_ms()) };
+    let odd = Record { extra, ..write(&mut a, "agents", "codex.mode", Some(json!("MODE-X")), now_ms()) };
     push(&s, &a, vec![odd]).await;
     pull_all(&s, &mut bd, 100).await;
     assert_eq!(bd.store.get(&RecordId::new("agents", "codex.mode")).unwrap().extra["future_field"], json!({"kept": true}));
 
-    // The export has the records, still sealed.
+    // The export has every record, values as written.
     let ex: Value = app().get(s.url("/v1/export")).bearer_auth(&a.at).send().await.unwrap().json().await.unwrap();
     assert_eq!(ex["records"].as_array().unwrap().len(), 3 + 25 + 1);
-    assert!(ex["records"][0]["value"].as_str().unwrap().starts_with("v4.local."));
+    assert!(ex["records"].as_array().unwrap().iter().any(|r| r["value"] == json!(["claude", "codex"])));
+    assert!(ex.get("recovery_wrapped_key").is_none());
 
-    // What the database holds: no value, no key.
-    let dump = s.dump().await;
-    assert!(dump.contains("claude.mode"), "the dump is real");
-    for p in PLAIN.iter().chain(&["ENV-3", "MODE-X"]) {
-        assert!(!dump.contains(p), "plaintext {p} in the database");
-    }
-    use base64::Engine;
-    assert!(!dump.contains(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.bytes())));
-    assert!(!dump.contains(&base64::engine::general_purpose::STANDARD.encode(key.bytes())));
-
-    // The account page shows counts, not values.
+    // The account page shows the settings themselves.
     let page = b.get(s.url("/account")).send().await.unwrap().text().await.unwrap();
-    assert!(page.contains("Encrypted") && page.contains("repos") && !page.contains(PLAIN[2]));
+    assert!(page.contains("agents.claude.mode") && page.contains("auto") && page.contains("repos.r3") && page.contains("ENV-3"));
+    assert!(!page.contains("ssh.build-box"), "deleted settings aren't listed");
+    assert!(!page.contains("Encrypted"));
 }
 
 async fn socket(s: &Server, d: &Dev) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
@@ -189,8 +171,6 @@ async fn nudges_reach_devices_on_another_node() {
     s1.email_signin(&b, "nudge@example.com").await;
     let mut a = device(&s1, &b, "Mac A").await;
     let mut bd = device(&s1, &b, "Mac B").await;
-    let acct = account(&s1, &a).await;
-    let key = AccountKey::generate();
 
     // B is connected to the other node.
     let mut ws = socket(&s2, &bd).await;
@@ -198,28 +178,25 @@ async fn nudges_reach_devices_on_another_node() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(s2.state.hub.connected(), 1);
 
-    let r = sealed(&key, &acct, &mut a, "agents", "claude.mode", Some(PLAIN[0]), now_ms());
+    let r = write(&mut a, "agents", "claude.mode", Some(json!("plan")), now_ms());
     push(&s1, &a, vec![r]).await;
     assert_eq!(next_text(&mut ws).await, json!({"type": "advanced", "seq": 1}));
-    let r = sealed(&key, &acct, &mut a, "agents", "claude.effort", Some("E"), now_ms());
+    let r = write(&mut a, "agents", "claude.effort", Some(json!("high")), now_ms());
     push(&s1, &a, vec![r]).await;
     assert_eq!(next_text(&mut ws).await, json!({"type": "advanced", "seq": 2}));
     pull_all(&s2, &mut bd, 100).await;
-    assert_eq!(open(&key, &acct, &bd, "agents", "claude.mode").as_deref(), Some(PLAIN[0]));
+    assert_eq!(value(&bd, "agents", "claude.mode"), Some(&json!("plan")));
 
     // A write that changes nothing sends nothing.
     let same = bd.store.get(&RecordId::new("agents", "claude.mode")).unwrap().clone();
     push(&s1, &a, vec![Record { seq: None, ..same }]).await;
     assert!(tokio::time::timeout(Duration::from_millis(500), ws.next()).await.is_err(), "no nudge for a no-op");
 
-    // Reset: every device hears it and starts over.
-    app().post(s1.url("/v1/sync/reset")).bearer_auth(&a.at).send().await.unwrap();
-    assert_eq!(next_text(&mut ws).await, json!({"type": "reset"}));
-    let r: PullResponse = app().get(s2.url("/v1/sync?since=0")).bearer_auth(&bd.at).send().await.unwrap().json().await.unwrap();
-    assert!(r.records.is_empty());
-    let r = sealed(&key, &acct, &mut a, "agents", "claude.mode", Some(PLAIN[1]), now_ms());
-    let (_, p) = push(&s1, &a, vec![r]).await;
-    assert_eq!(p["seq"], 3, "the sequence keeps counting after a reset");
+    // The encrypted protocol's routes are gone.
+    for path in ["/v1/sync/reset", "/v1/sync/approvals", "/v1/sync/recovery"] {
+        let st = app().post(s1.url(path)).bearer_auth(&a.at).send().await.unwrap().status();
+        assert!(st == 404 || st == 405, "{path}: {st}");
+    }
 
     ws.send(Message::Close(None)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -228,105 +205,6 @@ async fn nudges_reach_devices_on_another_node() {
     let mut req = s2.url("/v1/sync/ws").replace("http://", "ws://").into_client_request().unwrap();
     req.headers_mut().insert("authorization", "Bearer dino_at_nope".parse().unwrap());
     assert!(tokio_tungstenite::connect_async(req).await.is_err());
-    let _ = &mut a;
-}
-
-#[tokio::test]
-async fn a_new_device_gets_the_key_by_approval_or_recovery_key() {
-    let s = start().await;
-    let b = browser();
-    s.email_signin(&b, "approve@example.com").await;
-    let mut a = device(&s, &b, "Mac A").await;
-    let acct = account(&s, &a).await;
-    let key = AccountKey::generate();
-    let r = sealed(&key, &acct, &mut a, "keys", "NVIDIA_API_KEY", Some(PLAIN[2]), now_ms());
-    push(&s, &a, vec![r]).await;
-
-    // C asks with a commitment; A answers; only then does C reveal. Both show the same code.
-    let mut c = device(&s, &b, "Mac C").await;
-    let c_keys = DeviceKeys::generate();
-    let (commitment, c_reveal) = c_keys.commit(&acct, &mut rand_core::OsRng);
-    let asked: Value = app().post(s.url("/v1/sync/approvals")).bearer_auth(&c.at).json(&json!({"commitment": commitment})).send().await.unwrap().json().await.unwrap();
-    let id = asked["id"].as_str().unwrap().to_owned();
-    let mine: Value = app().get(s.url("/v1/sync/approvals")).bearer_auth(&c.at).send().await.unwrap().json().await.unwrap();
-    assert!(mine["approvals"].as_array().unwrap().is_empty(), "a device doesn't see its own request");
-    let list: Value = app().get(s.url("/v1/sync/approvals")).bearer_auth(&a.at).send().await.unwrap().json().await.unwrap();
-    let req = &list["approvals"][0];
-    assert_eq!(req["device"]["name"], "Mac C");
-    let seen_commitment: Commitment = serde_json::from_value(req["commitment"].clone()).unwrap();
-    assert!(req["reveal"].is_null(), "nothing revealed before an answer");
-    // C can't reveal before anyone answered, and can't answer itself.
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/reveal"))).bearer_auth(&c.at).json(&json!({"reveal": c_reveal})).send().await.unwrap().status(), 404, "no reveal before the answer");
-    let c_answer = c_keys.respond(&mut rand_core::OsRng);
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/claim"))).bearer_auth(&c.at).json(&json!({"response": c_answer})).send().await.unwrap().status(), 404, "can't approve itself");
-    let a_keys = DeviceKeys::generate();
-    let answer = a_keys.respond(&mut rand_core::OsRng);
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/claim"))).bearer_auth(&a.at).json(&json!({"response": answer})).send().await.unwrap().status(), 200);
-    let other = device(&s, &b, "Mac D").await;
-    let late = DeviceKeys::generate().respond(&mut rand_core::OsRng);
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/claim"))).bearer_auth(&other.at).json(&json!({"response": late})).send().await.unwrap().status(), 404, "one answer per request");
-    let theirs: Value = app().get(s.url("/v1/sync/approvals")).bearer_auth(&other.at).send().await.unwrap().json().await.unwrap();
-    assert!(theirs["approvals"].as_array().unwrap().is_empty(), "another Mac's request in progress isn't listed elsewhere");
-    let seen: Value = app().get(s.url(&format!("/v1/sync/approvals/{id}"))).bearer_auth(&c.at).send().await.unwrap().json().await.unwrap();
-    assert_eq!(seen["status"], "responded");
-    let got_answer: Answer = serde_json::from_value(seen["response"].clone()).unwrap();
-    assert_eq!(got_answer, answer);
-    // Granting before the reveal: refused.
-    let early = a_keys.grant(&c_keys.public(), &acct, &key, &mut rand_core::OsRng).unwrap();
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/grant"))).bearer_auth(&a.at).json(&json!({"grant": early})).send().await.unwrap().status(), 404, "no grant before the reveal");
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/reveal"))).bearer_auth(&c.at).json(&json!({"reveal": c_reveal})).send().await.unwrap().status(), 200);
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/reveal"))).bearer_auth(&c.at).json(&json!({"reveal": c_reveal})).send().await.unwrap().status(), 404, "one reveal per request");
-    let list: Value = app().get(s.url("/v1/sync/approvals")).bearer_auth(&a.at).send().await.unwrap().json().await.unwrap();
-    let revealed: Reveal = serde_json::from_value(list["approvals"][0]["reveal"].clone()).unwrap();
-    verify_reveal(&acct, &seen_commitment, &revealed).expect("the reveal is what C committed to");
-    assert_eq!(approval_code(&acct, &revealed, &answer).unwrap(), approval_code(&acct, &c_reveal, &got_answer).unwrap(), "same code on both screens");
-
-    // Only the answering device can grant, and only from the key it answered with.
-    let g = a_keys.grant(&revealed.public, &acct, &key, &mut rand_core::OsRng).unwrap();
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/grant"))).bearer_auth(&other.at).json(&json!({"grant": g})).send().await.unwrap().status(), 404);
-    let forged = DeviceKeys::generate().grant(&revealed.public, &acct, &key, &mut rand_core::OsRng).unwrap();
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/grant"))).bearer_auth(&a.at).json(&json!({"grant": forged})).send().await.unwrap().status(), 404, "a grant from another key");
-    let r = app().post(s.url(&format!("/v1/sync/approvals/{id}/grant"))).bearer_auth(&a.at).json(&json!({"grant": g})).send().await.unwrap();
-    assert_eq!(r.status(), 200);
-    let done: Value = app().get(s.url(&format!("/v1/sync/approvals/{id}"))).bearer_auth(&c.at).send().await.unwrap().json().await.unwrap();
-    assert_eq!(done["status"], "granted");
-    let grant: Grant = serde_json::from_value(done["grant"].clone()).unwrap();
-    let got = c_keys.accept(&grant, &got_answer.public, &acct).unwrap();
-    assert_eq!(got.bytes(), key.bytes());
-    pull_all(&s, &mut c, 100).await;
-    assert_eq!(open(&got, &acct, &c, "keys", "NVIDIA_API_KEY").as_deref(), Some(PLAIN[2]));
-
-    // Deny, at any step before the grant.
-    let d_keys = DeviceKeys::generate();
-    let (dc, _) = d_keys.commit(&acct, &mut rand_core::OsRng);
-    let asked: Value = app().post(s.url("/v1/sync/approvals")).bearer_auth(&other.at).json(&json!({"commitment": dc})).send().await.unwrap().json().await.unwrap();
-    let did = asked["id"].as_str().unwrap();
-    app().post(s.url(&format!("/v1/sync/approvals/{did}/deny"))).bearer_auth(&a.at).send().await.unwrap();
-    let denied: Value = app().get(s.url(&format!("/v1/sync/approvals/{did}"))).bearer_auth(&other.at).send().await.unwrap().json().await.unwrap();
-    assert_eq!(denied["status"], "denied");
-    assert_eq!(app().post(s.url("/v1/sync/approvals")).bearer_auth(&other.at).json(&json!({"commitment": {"hash": 7}})).send().await.unwrap().status(), 400);
-
-    // Recovery key: the account key wrapped by A, unwrapped by a device with the typed key.
-    let rk = RecoveryKey::generate();
-    let shown = rk.display();
-    let wrapped = rk.wrap(&acct, &key).unwrap();
-    assert_eq!(app().put(s.url("/v1/sync/recovery")).bearer_auth(&a.at).json(&json!({"wrapped": wrapped})).send().await.unwrap().status(), 200);
-    assert_eq!(app().put(s.url("/v1/sync/recovery")).bearer_auth(&a.at).json(&json!({"wrapped": "plaintext"})).send().await.unwrap().status(), 400);
-    let mut e = device(&s, &b, "Mac E").await;
-    let back: Value = app().get(s.url("/v1/sync/recovery")).bearer_auth(&e.at).send().await.unwrap().json().await.unwrap();
-    let typed = RecoveryKey::parse(&shown.to_lowercase()).unwrap();
-    let got = typed.unwrap(&acct, back["wrapped"].as_str().unwrap()).unwrap();
-    pull_all(&s, &mut e, 100).await;
-    assert_eq!(open(&got, &acct, &e, "keys", "NVIDIA_API_KEY").as_deref(), Some(PLAIN[2]));
-
-    // Neither the grant nor the wrapped key gave the server anything it can read.
-    let dump = s.dump().await;
-    use base64::Engine;
-    for leak in [base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.bytes()), base64::engine::general_purpose::STANDARD.encode(key.bytes()), shown.clone(), shown.replace('-', ""), PLAIN[2].to_owned()] {
-        assert!(!dump.contains(&leak), "the database holds something readable");
-    }
-    assert!(dump.contains(&c_keys.public()), "public keys are relayed, as designed");
-    let _ = &commitment;
 }
 
 #[tokio::test]
@@ -334,17 +212,15 @@ async fn concurrent_pushes_get_a_gapless_sequence() {
     let s = start().await;
     let b = browser();
     s.email_signin(&b, "busy-sync@example.com").await;
-    let key = AccountKey::generate();
     let mut devices = Vec::new();
     for i in 0..5 {
         devices.push(device(&s, &b, &format!("Mac {i}")).await);
     }
-    let acct = account(&s, &devices[0]).await;
     let batches: Vec<(String, String, Vec<Record>)> = devices
         .iter_mut()
         .enumerate()
         .map(|(i, d)| {
-            let recs = (0..20).map(|j| sealed(&key, &acct, d, "repos", &format!("d{i}-r{j}"), Some("v"), now_ms())).collect();
+            let recs = (0..20).map(|j| write(d, "repos", &format!("d{i}-r{j}"), Some(json!("v")), now_ms())).collect();
             (d.at.clone(), d.id.clone(), recs)
         })
         .collect();

@@ -6,6 +6,7 @@
 pub mod authorize;
 pub mod clients;
 pub mod device;
+pub mod link;
 pub mod tokens;
 
 use axum::extract::{Form, State};
@@ -32,6 +33,7 @@ pub fn routes() -> Router<AppState> {
         .route("/oauth/device_authorization", post(device::authorization))
         .route("/device", get(device::enter).post(device::lookup))
         .route("/device/decide", post(device::decide))
+        .route("/login/{token}", get(link::page).post(link::open))
         .route("/oauth/revoke", post(revoke))
         .route("/oauth/introspect", post(introspect))
         .route("/oauth/userinfo", get(userinfo))

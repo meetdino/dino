@@ -1,6 +1,11 @@
 //! Authorization code with PKCE. A native client opens the browser here with a loopback
 //! redirect; after sign-in the person confirms on a page naming the device (a local program can't
 //! quietly borrow a signed-in browser), and the code goes back to the loopback listener.
+//!
+//! With `provider=github` it's one click, like VS Code's "Sign in with GitHub": straight to
+//! GitHub's authorize page, and back to the app once GitHub says who it is, without our sign-in
+//! or confirm pages. GitHub's own page (or its remembered consent for dino) stands in for the
+//! confirmation.
 
 use axum::extract::{Form, Query, State};
 use axum::http::HeaderMap;
@@ -16,6 +21,7 @@ use crate::crypto;
 use crate::error::{Error, Result};
 use crate::oauth::clients::{self, Client};
 use crate::oauth::tokens::{self, DeviceInfo, TokenResponse};
+use crate::identity::upstream::Provider;
 use crate::web::pages;
 use crate::web::session::Session;
 
@@ -33,6 +39,8 @@ pub struct Params {
     device_name: Option<String>,
     device_os: Option<String>,
     dino_version: Option<String>,
+    /// `github`: sign in with GitHub, without dino's own sign-in and confirm pages.
+    provider: Option<String>,
 }
 
 /// Back to the client with an error, once its redirect is known to be its own.
@@ -69,6 +77,14 @@ pub async fn start(State(s): State<AppState>, headers: HeaderMap, Query(p): Quer
     }
     let mut session = Session::get(&s, &headers).await?;
     session.set("authorize", serde_json::to_value(&p).map_err(anyhow::Error::from)?);
+    let one_click = p.provider.as_deref().and_then(Provider::parse).filter(|pr| pr.config(&s).is_some());
+    if let Some(pr) = one_click {
+        session.set("after_signin", json!("/oauth/authorize/confirm"));
+        session.set("one_click", json!(true));
+        session.save(&s).await?;
+        return Ok(session.attach(Redirect::to(&format!("/signin/{}", pr.id())).into_response()));
+    }
+    session.take("one_click");
     let to = if session.account_id.is_some() {
         "/oauth/authorize/confirm"
     } else {
@@ -137,6 +153,26 @@ pub async fn decide(State(s): State<AppState>, headers: HeaderMap, Form(d): Form
     if d.decision != "allow" {
         return Ok(error_redirect(&s, &redirect, p.state.as_deref(), "access_denied", "Cancelled."));
     }
+    issue(&s, account, &p, client).await
+}
+
+/// After a one-click sign-in (`provider`): the code goes straight back to the app, which started
+/// this sign-in a moment ago in the same browser session.
+pub async fn finish_one_click(s: &AppState, session: &mut Session, account: Uuid) -> Result<Option<Response>> {
+    if session.take("one_click").is_none() {
+        return Ok(None);
+    }
+    let Some((p, client)) = pending(session) else { return Ok(None) };
+    session.take("authorize");
+    if !p.redirect_uri.as_deref().is_some_and(|r| client.allows_redirect(&s.cfg, r)) {
+        return Err(Error::BadRequest("redirect".into()));
+    }
+    Ok(Some(issue(s, account, &p, client).await?))
+}
+
+/// A code for `account`, back to the client's redirect.
+async fn issue(s: &AppState, account: Uuid, p: &Params, client: &'static Client) -> Result<Response> {
+    let redirect = p.redirect_uri.clone().expect("checked at start");
     let code = crypto::token("dino_ac");
     let device = DeviceInfo::new(p.device_name.as_deref(), p.device_os.as_deref(), p.dino_version.as_deref());
     sqlx::query(
