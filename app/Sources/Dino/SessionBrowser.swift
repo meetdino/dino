@@ -257,7 +257,7 @@ private struct SessionDetail: View {
     private var actions: some View {
         switch session.source {
         case "running":
-            Button("Move Here") {
+            Button("Continue in dino…") {
                 model.showContinue = false
                 model.confirmMove = session
             }
@@ -269,7 +269,7 @@ private struct SessionDetail: View {
             }
             Button(session.session_id.isEmpty ? "Pick a Web Session…" : "Continue in dino") { model.adopt(session) }
         default:
-            Button("Resume Here") { model.adopt(session) }
+            Button("Continue in dino") { model.adopt(session) }
                 .keyboardShortcut(.defaultAction)
                 .help("Continues this conversation as a dino session in \(session.cwd.map(shortPath) ?? "your home folder")")
         }
@@ -280,6 +280,7 @@ private struct SessionDetail: View {
                 Image(systemName: "doc.text.magnifyingglass")
             }
             .help("Show the transcript file in Finder")
+            .accessibilityLabel("Show the transcript file in Finder")
         }
     }
 }
