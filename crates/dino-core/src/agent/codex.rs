@@ -31,6 +31,11 @@ pub fn open_rollout(pid: u32) -> Option<PathBuf> {
         .find(|p| !history::codex_meta(p).hidden)
 }
 
+/// The provider's header that carries the proxy's secret, from the environment (`keyed_urls`).
+fn key_header() -> String {
+    format!(r#"model_providers.dino.env_http_headers={{"{}"="{}"}}"#, super::KEY_HEADER, super::KEY_ENV)
+}
+
 /// `"chatgpt"` or `"apikey"`, from `~/.codex/auth.json`.
 fn auth_mode() -> Option<String> {
     let home = std::env::var_os("HOME")?;
@@ -137,6 +142,11 @@ impl Agent for Codex {
         models::codex_from_files().or_else(|| models::codex_from_program(program))
     }
 
+    // `-c` puts the proxy's URLs on its command line.
+    fn keyed_urls(&self) -> bool {
+        true
+    }
+
     // A custom provider rather than `openai_base_url`: Codex otherwise tries WebSockets first,
     // which the proxy doesn't carry. `requires_openai_auth` keeps the user's own login.
     fn wiring(&self, route: bool, base: &dyn Fn(&str) -> String, _status_line: Option<String>) -> Wiring {
@@ -154,6 +164,7 @@ impl Agent for Codex {
             "model_providers.dino.wire_api=\"responses\"".into(),
             "model_providers.dino.requires_openai_auth=true".into(),
             "model_providers.dino.supports_websockets=false".into(),
+            key_header(),
         ];
         (vec![], args.into_iter().flat_map(|a| ["-c".to_string(), a]).collect())
     }
@@ -179,6 +190,7 @@ impl Agent for Codex {
             "model_providers.dino.wire_api=\"responses\"".into(),
             "model_providers.dino.env_key=\"DINO_PROVIDER_KEY\"".into(),
             "model_providers.dino.supports_websockets=false".into(),
+            key_header(),
         ];
         let mut args: Vec<String> = config.into_iter().flat_map(|a| ["-c".to_string(), a]).collect();
         args.extend(strings(&["-m", model]));
