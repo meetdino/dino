@@ -7,6 +7,7 @@ mod common;
 use std::time::Duration;
 
 use common::*;
+use dino_sync::approval::{Commitment, Response as Answer, Reveal, verify_reveal};
 use dino_sync::{AccountKey, Clock, DeviceKeys, Grant, Hlc, PullResponse, PushRequest, PushResponse, Record, RecordId, RecoveryKey, Store, approval_code};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Map, Value, json};
@@ -37,14 +38,13 @@ async fn account(s: &Server, d: &Dev) -> String {
 }
 
 fn sealed(key: &AccountKey, account: &str, d: &mut Dev, collection: &str, k: &str, value: Option<&str>, at_ms: u64) -> Record {
-    let id = RecordId::new(collection, k);
-    let value = value.map(|v| key.seal(account, &id, 1, v).unwrap());
-    Record { hlc: d.clock.now(at_ms), id, schema: 1, value, seq: None, extra: Map::new() }
+    let hlc = d.clock.now(at_ms);
+    key.seal_record(account, RecordId::new(collection, k), hlc, 1, value).unwrap()
 }
 
 async fn push(s: &Server, d: &Dev, records: Vec<Record>) -> (reqwest::StatusCode, Value) {
     let req = PushRequest { device_id: d.id.clone(), records, extra: Map::new() };
-    let r = app().post(s.url("/v1/sync")).bearer_auth(&d.at).header("dino-sync-version", "1").json(&req).send().await.unwrap();
+    let r = app().post(s.url("/v1/sync")).bearer_auth(&d.at).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).json(&req).send().await.unwrap();
     (r.status(), r.json().await.unwrap())
 }
 
@@ -55,9 +55,9 @@ async fn pull_all(s: &Server, d: &mut Dev, page: u32) -> usize {
         let r: PullResponse = app().get(s.url(&format!("/v1/sync?since={}&limit={page}", d.seq))).bearer_auth(&d.at).send().await.unwrap().json().await.unwrap();
         pages += 1;
         for rec in &r.records {
-            d.clock.observe(&rec.hlc, now_ms());
+            let _ = d.clock.observe(&rec.hlc, now_ms());
         }
-        d.store.apply_all(r.records);
+        d.store.apply_all_unverified(r.records);
         d.seq = r.seq;
         if !r.more {
             return pages;
@@ -67,8 +67,7 @@ async fn pull_all(s: &Server, d: &mut Dev, page: u32) -> usize {
 
 fn open(key: &AccountKey, account: &str, d: &Dev, collection: &str, k: &str) -> Option<String> {
     let id = RecordId::new(collection, k);
-    let r = d.store.get(&id)?;
-    r.value.as_ref().map(|v| key.open(account, &id, r.schema, v).unwrap())
+    key.open_record(account, d.store.get(&id)?).unwrap()
 }
 
 const PLAIN: [&str; 4] = ["MODE-PLAN-7f3a", "MODE-AUTO-1b2c", "nvapi-PLAINTEXT-SECRET-123", "HOST-BUILDBOX-9c2"];
@@ -104,13 +103,19 @@ async fn two_devices_converge_through_the_server_which_sees_no_plaintext() {
     assert_eq!(r["superseded"][0]["key"], "claude.mode");
     // A clock an hour ahead, and a value that isn't sealed: refused.
     let future = sealed(&key, &acct, &mut Dev { clock: Clock::new("skewed"), ..device(&s, &b, "Skewed Mac").await }, "agents", "x", Some("y"), t0 + 3_600_000);
-    let plain = Record { value: Some("not sealed".into()), hlc: a.clock.now(now_ms()), ..first.clone() };
+    let plain = Record { value: "not sealed".into(), hlc: a.clock.now(now_ms()), ..first.clone() };
     let (_, r) = push(&s, &a, vec![future, plain]).await;
     let codes: Vec<&str> = r["rejected"].as_array().unwrap().iter().map(|x| x["error"]["code"].as_str().unwrap()).collect();
     assert_eq!(codes, ["future_stamp", "malformed"]);
     assert_eq!(r["seq"], 4);
 
-    // B deletes the SSH host: a tombstone.
+    // A protocol 1 client is told to update, and its push isn't taken.
+    let req = PushRequest { device_id: a.id.clone(), records: vec![], extra: Map::new() };
+    let old = app().post(s.url("/v1/sync")).bearer_auth(&a.at).header("dino-sync-version", "1").json(&req).send().await.unwrap();
+    assert_eq!(old.status(), 426);
+    assert_eq!(old.json::<Value>().await.unwrap()["code"], "upgrade_required");
+
+    // B deletes the SSH host: a tombstone, sealed like any value.
     let gone = sealed(&key, &acct, &mut bd, "ssh", "build-box", None, now_ms());
     push(&s, &bd, vec![gone]).await;
 
@@ -237,46 +242,69 @@ async fn a_new_device_gets_the_key_by_approval_or_recovery_key() {
     let r = sealed(&key, &acct, &mut a, "keys", "NVIDIA_API_KEY", Some(PLAIN[2]), now_ms());
     push(&s, &a, vec![r]).await;
 
-    // C asks, A claims: both screens show the same code before anything moves.
+    // C asks with a commitment; A answers; only then does C reveal. Both show the same code.
     let mut c = device(&s, &b, "Mac C").await;
     let c_keys = DeviceKeys::generate();
-    let asked: Value = app().post(s.url("/v1/sync/approvals")).bearer_auth(&c.at).json(&json!({"public_key": c_keys.public()})).send().await.unwrap().json().await.unwrap();
+    let (commitment, c_reveal) = c_keys.commit(&acct, &mut rand_core::OsRng);
+    let asked: Value = app().post(s.url("/v1/sync/approvals")).bearer_auth(&c.at).json(&json!({"commitment": commitment})).send().await.unwrap().json().await.unwrap();
     let id = asked["id"].as_str().unwrap().to_owned();
     let mine: Value = app().get(s.url("/v1/sync/approvals")).bearer_auth(&c.at).send().await.unwrap().json().await.unwrap();
     assert!(mine["approvals"].as_array().unwrap().is_empty(), "a device doesn't see its own request");
     let list: Value = app().get(s.url("/v1/sync/approvals")).bearer_auth(&a.at).send().await.unwrap().json().await.unwrap();
     let req = &list["approvals"][0];
-    assert_eq!((req["device"]["name"].as_str(), req["public_key"].as_str()), (Some("Mac C"), Some(c_keys.public().as_str())));
-    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/claim"))).bearer_auth(&c.at).json(&json!({"public_key": c_keys.public()})).send().await.unwrap().status(), 404, "can't approve itself");
+    assert_eq!(req["device"]["name"], "Mac C");
+    let seen_commitment: Commitment = serde_json::from_value(req["commitment"].clone()).unwrap();
+    assert!(req["reveal"].is_null(), "nothing revealed before an answer");
+    // C can't reveal before anyone answered, and can't answer itself.
+    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/reveal"))).bearer_auth(&c.at).json(&json!({"reveal": c_reveal})).send().await.unwrap().status(), 404, "no reveal before the answer");
+    let c_answer = c_keys.respond(&mut rand_core::OsRng);
+    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/claim"))).bearer_auth(&c.at).json(&json!({"response": c_answer})).send().await.unwrap().status(), 404, "can't approve itself");
     let a_keys = DeviceKeys::generate();
-    app().post(s.url(&format!("/v1/sync/approvals/{id}/claim"))).bearer_auth(&a.at).json(&json!({"public_key": a_keys.public()})).send().await.unwrap();
-    let seen: Value = app().get(s.url(&format!("/v1/sync/approvals/{id}"))).bearer_auth(&c.at).send().await.unwrap().json().await.unwrap();
-    assert_eq!(seen["status"], "claimed");
-    let approver = seen["approver_key"].as_str().unwrap().to_owned();
-    assert_eq!(approval_code(&acct, &c_keys.public(), &approver), approval_code(&acct, &c_keys.public(), &a_keys.public()), "same code on both screens");
-
-    // Only the claiming device can grant, and only from the key it claimed with.
-    let g = a_keys.grant(&c_keys.public(), &acct, &key, &mut rand_core::OsRng).unwrap();
+    let answer = a_keys.respond(&mut rand_core::OsRng);
+    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/claim"))).bearer_auth(&a.at).json(&json!({"response": answer})).send().await.unwrap().status(), 200);
     let other = device(&s, &b, "Mac D").await;
+    let late = DeviceKeys::generate().respond(&mut rand_core::OsRng);
+    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/claim"))).bearer_auth(&other.at).json(&json!({"response": late})).send().await.unwrap().status(), 404, "one answer per request");
+    let theirs: Value = app().get(s.url("/v1/sync/approvals")).bearer_auth(&other.at).send().await.unwrap().json().await.unwrap();
+    assert!(theirs["approvals"].as_array().unwrap().is_empty(), "another Mac's request in progress isn't listed elsewhere");
+    let seen: Value = app().get(s.url(&format!("/v1/sync/approvals/{id}"))).bearer_auth(&c.at).send().await.unwrap().json().await.unwrap();
+    assert_eq!(seen["status"], "responded");
+    let got_answer: Answer = serde_json::from_value(seen["response"].clone()).unwrap();
+    assert_eq!(got_answer, answer);
+    // Granting before the reveal: refused.
+    let early = a_keys.grant(&c_keys.public(), &acct, &key, &mut rand_core::OsRng).unwrap();
+    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/grant"))).bearer_auth(&a.at).json(&json!({"grant": early})).send().await.unwrap().status(), 404, "no grant before the reveal");
+    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/reveal"))).bearer_auth(&c.at).json(&json!({"reveal": c_reveal})).send().await.unwrap().status(), 200);
+    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/reveal"))).bearer_auth(&c.at).json(&json!({"reveal": c_reveal})).send().await.unwrap().status(), 404, "one reveal per request");
+    let list: Value = app().get(s.url("/v1/sync/approvals")).bearer_auth(&a.at).send().await.unwrap().json().await.unwrap();
+    let revealed: Reveal = serde_json::from_value(list["approvals"][0]["reveal"].clone()).unwrap();
+    verify_reveal(&acct, &seen_commitment, &revealed).expect("the reveal is what C committed to");
+    assert_eq!(approval_code(&acct, &revealed, &answer).unwrap(), approval_code(&acct, &c_reveal, &got_answer).unwrap(), "same code on both screens");
+
+    // Only the answering device can grant, and only from the key it answered with.
+    let g = a_keys.grant(&revealed.public, &acct, &key, &mut rand_core::OsRng).unwrap();
     assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/grant"))).bearer_auth(&other.at).json(&json!({"grant": g})).send().await.unwrap().status(), 404);
+    let forged = DeviceKeys::generate().grant(&revealed.public, &acct, &key, &mut rand_core::OsRng).unwrap();
+    assert_eq!(app().post(s.url(&format!("/v1/sync/approvals/{id}/grant"))).bearer_auth(&a.at).json(&json!({"grant": forged})).send().await.unwrap().status(), 404, "a grant from another key");
     let r = app().post(s.url(&format!("/v1/sync/approvals/{id}/grant"))).bearer_auth(&a.at).json(&json!({"grant": g})).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let done: Value = app().get(s.url(&format!("/v1/sync/approvals/{id}"))).bearer_auth(&c.at).send().await.unwrap().json().await.unwrap();
     assert_eq!(done["status"], "granted");
     let grant: Grant = serde_json::from_value(done["grant"].clone()).unwrap();
-    let got = c_keys.accept(&grant, &approver, &acct).unwrap();
+    let got = c_keys.accept(&grant, &got_answer.public, &acct).unwrap();
     assert_eq!(got.bytes(), key.bytes());
     pull_all(&s, &mut c, 100).await;
     assert_eq!(open(&got, &acct, &c, "keys", "NVIDIA_API_KEY").as_deref(), Some(PLAIN[2]));
 
-    // Deny.
+    // Deny, at any step before the grant.
     let d_keys = DeviceKeys::generate();
-    let asked: Value = app().post(s.url("/v1/sync/approvals")).bearer_auth(&other.at).json(&json!({"public_key": d_keys.public()})).send().await.unwrap().json().await.unwrap();
+    let (dc, _) = d_keys.commit(&acct, &mut rand_core::OsRng);
+    let asked: Value = app().post(s.url("/v1/sync/approvals")).bearer_auth(&other.at).json(&json!({"commitment": dc})).send().await.unwrap().json().await.unwrap();
     let did = asked["id"].as_str().unwrap();
     app().post(s.url(&format!("/v1/sync/approvals/{did}/deny"))).bearer_auth(&a.at).send().await.unwrap();
     let denied: Value = app().get(s.url(&format!("/v1/sync/approvals/{did}"))).bearer_auth(&other.at).send().await.unwrap().json().await.unwrap();
     assert_eq!(denied["status"], "denied");
-    assert_eq!(app().post(s.url("/v1/sync/approvals")).bearer_auth(&other.at).json(&json!({"public_key": "short"})).send().await.unwrap().status(), 400);
+    assert_eq!(app().post(s.url("/v1/sync/approvals")).bearer_auth(&other.at).json(&json!({"commitment": {"hash": 7}})).send().await.unwrap().status(), 400);
 
     // Recovery key: the account key wrapped by A, unwrapped by a device with the typed key.
     let rk = RecoveryKey::generate();
@@ -298,6 +326,7 @@ async fn a_new_device_gets_the_key_by_approval_or_recovery_key() {
         assert!(!dump.contains(&leak), "the database holds something readable");
     }
     assert!(dump.contains(&c_keys.public()), "public keys are relayed, as designed");
+    let _ = &commitment;
 }
 
 #[tokio::test]
