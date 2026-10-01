@@ -258,7 +258,7 @@ final class SettingsStore: ObservableObject {
 
 /// Settings' sections, in sidebar order.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case account, general, agents, providers, policies, repos, worktrees, environments, routing, keys
+    case account, general, agents, models, workspaces, policies
     var id: String { rawValue }
 
     var title: String {
@@ -266,13 +266,9 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .account: "Dino Account"
         case .general: "General"
         case .agents: "Agents"
-        case .providers: "Providers"
+        case .models: "Models & Providers"
+        case .workspaces: "Workspaces"
         case .policies: "Policies"
-        case .repos: "Repositories"
-        case .worktrees: "Worktrees"
-        case .environments: "Environments"
-        case .routing: "Routing"
-        case .keys: "Keys"
         }
     }
 
@@ -281,13 +277,9 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .account: "person.crop.circle.fill"
         case .general: "gearshape.fill"
         case .agents: "cpu.fill"
-        case .providers: "cube.fill"
+        case .models: "cube.fill"
+        case .workspaces: "folder.fill"
         case .policies: "checkmark.shield.fill"
-        case .repos: "folder.fill"
-        case .worktrees: "square.stack.3d.up.fill"
-        case .environments: "server.rack"
-        case .routing: "arrow.triangle.branch"
-        case .keys: "key.fill"
         }
     }
 
@@ -296,14 +288,51 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .account: .blue
         case .general: .gray
         case .agents: .purple
-        case .providers: .pink
+        case .models: .pink
+        case .workspaces: .teal
         case .policies: .indigo
-        case .repos: .teal
-        case .worktrees: .teal
-        case .environments: .blue
-        case .routing: .green
-        case .keys: .orange
         }
+    }
+
+    /// The parts a pane is split into, shown as tabs at its top; none for a single-part pane.
+    var parts: [SettingsPart] {
+        switch self {
+        case .models: [.providers, .keys]
+        case .workspaces: [.worktrees, .repos, .ssh]
+        default: []
+        }
+    }
+}
+
+/// A part of a Settings pane. The raw values are stable: other places open Settings at one.
+enum SettingsPart: String, Identifiable {
+    case providers, keys, worktrees, repos, ssh
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .providers: "Providers"
+        case .keys: "API Keys"
+        case .worktrees: "Worktrees"
+        case .repos: "Repositories"
+        case .ssh: "SSH Hosts"
+        }
+    }
+
+    var pane: SettingsPane {
+        switch self {
+        case .providers, .keys: .models
+        case .worktrees, .repos, .ssh: .workspaces
+        }
+    }
+
+    /// The defaults key for the part a pane last showed.
+    static func key(_ pane: SettingsPane) -> String { "settingsPart.\(pane.rawValue)" }
+
+    /// Open Settings at this part next time it shows.
+    func select() {
+        UserDefaults.standard.set(pane.rawValue, forKey: "settingsTab")
+        UserDefaults.standard.set(rawValue, forKey: Self.key(pane))
     }
 }
 
@@ -340,21 +369,53 @@ struct SettingsView: View {
                 case .account: AccountPane()
                 case .general: GeneralPane()
                 case .agents: AgentsPane()
-                case .providers: ProvidersPane()
+                case .models, .workspaces: PartedPane(pane: pane)
                 case .policies: PoliciesPane()
-                case .repos: ReposPane()
-                case .worktrees: WorktreesPane()
-                case .environments: EnvironmentsPane()
-                case .routing: RoutingPane()
-                case .keys: KeysPane()
                 }
                 StoreError()
             }
             .navigationTitle(pane.title)
         }
         .environmentObject(store)
-        .frame(width: 715, height: 470)
+        // Resizable: the model list and the storage list use the room.
+        .frame(minWidth: 715, idealWidth: 820, minHeight: 470, idealHeight: 620)
         .onAppear { store.load() }
+    }
+}
+
+/// A pane made of parts, with tabs to switch between them: each part is a full pane of its own,
+/// so a long list (models, worktrees on disk) never pushes the short ones out of sight.
+private struct PartedPane: View {
+    let pane: SettingsPane
+    @AppStorage private var stored: String
+
+    init(pane: SettingsPane) {
+        self.pane = pane
+        _stored = AppStorage(wrappedValue: pane.parts.first?.rawValue ?? "", SettingsPart.key(pane))
+    }
+
+    private var part: SettingsPart {
+        SettingsPart(rawValue: stored).flatMap { pane.parts.contains($0) ? $0 : nil } ?? pane.parts[0]
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Show", selection: Binding(get: { part }, set: { stored = $0.rawValue })) {
+                ForEach(pane.parts) { p in Text(p.title).tag(p) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .padding(.top, 12)
+            .padding(.bottom, 2)
+            switch part {
+            case .providers: ProvidersPane()
+            case .keys: KeysPane()
+            case .worktrees: WorktreesPane()
+            case .repos: ReposPane()
+            case .ssh: EnvironmentsPane()
+            }
+        }
     }
 }
 
@@ -394,6 +455,7 @@ struct OrgLock: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .help("Set by your organization")
+            .accessibilityLabel("Set by your organization")
     }
 }
 
@@ -633,7 +695,7 @@ private struct PoliciesPane: View {
             } header: {
                 Text("Pull requests")
             } footer: {
-                Footnote("When a session's PR merges or is closed, dino archives it once its agent is idle, so the conversation can be picked up again. After a merge, the worktree dino made for it is removed too if nothing in it would be lost; after a close it stays (see Worktrees → Storage), since the work never landed. Unarchive it to pick up where it left off, worktree and all. Sessions outside a dino worktree stay open.")
+                Footnote("When a session's PR merges or is closed, dino archives it once its agent is idle, so the conversation can be picked up again. After a merge, the worktree dino made for it is removed too if nothing in it would be lost; after a close it stays (see Workspaces → Worktrees), since the work never landed. Unarchive it to pick up where it left off, worktree and all. Sessions outside a dino worktree stay open.")
             }
             Section {
                 Toggle("Allow bypass permissions mode", isOn: Binding(
@@ -682,7 +744,7 @@ private struct PoliciesPane: View {
             } header: {
                 Text("Budget")
             } footer: {
-                Footnote("Counts input, cached and output tokens, like the sidebar. A session over its budget gets an error on its next model call. Only sessions routed through dino (see Routing); applies to running ones too.")
+                Footnote("Counts input, cached and output tokens, like the sidebar. A session over its budget gets an error on its next model call. Only sessions routed through dino (see Models & Providers → Providers); applies to running ones too.")
             }
         }
         .formStyle(.grouped)
@@ -702,35 +764,32 @@ private struct PoliciesPane: View {
     }
 }
 
-private struct RoutingPane: View {
+/// Whether agents' traffic goes through dino, and the free tier: the top of Models & Providers.
+/// Sections only, for the providers' form to hold.
+struct RoutingSections: View {
     @EnvironmentObject var store: SettingsStore
 
     private func has(_ key: String) -> Bool { store.keys.contains { $0.name == key && $0.source != nil } }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section {
-                    Toggle("Route agent traffic through dino", isOn: Binding(
-                        get: { store.settings?.routing.proxy ?? true },
-                        set: { on in store.update { $0.routing.proxy = on } }
-                    ))
-                    .disabled(store.settings == nil)
-                    .orgLocked("routing.proxy")
-                } footer: {
-                    Footnote("dino's local proxy counts tokens per session and serves the free tier. Off, agents talk to their providers directly. Applies to sessions you start from now on.")
-                }
-                Section("Free tier") {
-                    LabeledContent("Models") {
-                        Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (see Keys)")
-                            .foregroundStyle(has("NVIDIA_API_KEY") ? .primary : .secondary)
-                    }
-                    LabeledContent("Picks the model per turn") {
-                        Text(has("TYPESAFE_API_KEY") ? "Jev, then built-in rules" : "Built-in rules")
-                    }
-                }
+        Section {
+            Toggle("Route agent traffic through dino", isOn: Binding(
+                get: { store.settings?.routing.proxy ?? true },
+                set: { on in store.update { $0.routing.proxy = on } }
+            ))
+            .disabled(store.settings == nil)
+            .orgLocked("routing.proxy")
+            LabeledContent("Free tier models") {
+                Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (see API Keys)")
+                    .foregroundStyle(has("NVIDIA_API_KEY") ? .primary : .secondary)
             }
-            .formStyle(.grouped)
+            LabeledContent("Free tier picks the model per turn") {
+                Text(has("TYPESAFE_API_KEY") ? "Jev, then built-in rules" : "Built-in rules")
+            }
+        } header: {
+            Text("Routing")
+        } footer: {
+            Footnote("dino's local proxy counts tokens per session, serves the free tier and connects agents to the providers below. Off, agents talk to their providers directly. Applies to sessions you start from now on.")
         }
     }
 }
@@ -749,7 +808,7 @@ private struct KeysPane: View {
                         row(key)
                     }
                 } footer: {
-                    Footnote("Keys stay on this Mac in \(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)/keys, readable only by you, and dino never shows them again. They take effect immediately. Keychain storage comes with signed releases.")
+                    Footnote("Keys stay on this Mac in \(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)/keys, readable only by you, and dino never shows them again or syncs them to your other Macs. They take effect immediately. Keychain storage comes with signed releases.")
                 }
             }
             .formStyle(.grouped)
@@ -1027,7 +1086,7 @@ private struct ReposPane: View {
             } header: {
                 Text("Environment")
             } footer: {
-                Footnote("Set for every session dino starts in the repo or one of its worktrees, from the next start or restart. Values are kept in settings.toml, readable only by you.")
+                Footnote("Set for every session dino starts in the repo or one of its worktrees, from the next start or restart. Values are kept in settings.toml, readable only by you, and when you're signed in they sync to your other Macs, matched by the repo's remote. Keep passwords and tokens out of them.")
             }
             ForEach(shown, id: \.self) { path in
                 let env = repos[path]?.env ?? [:]
@@ -1124,6 +1183,7 @@ private struct EnvironmentsPane: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Remove \(host)")
+                        .accessibilityLabel("Remove \(host)")
                     }
                     .orgLocked("ssh.\(host)")
                 }
@@ -1221,10 +1281,12 @@ private struct EnvRow: View {
                 Button { shown.toggle() } label: { Image(systemName: shown ? "eye.slash" : "eye") }
                     .buttonStyle(.borderless)
                     .help(shown ? "Hide the value" : "Show the value")
+                    .accessibilityLabel(shown ? "Hide the value" : "Show the value")
                 Button("Edit") { draft = value }
                 Button(action: remove) { Image(systemName: "minus.circle") }
                     .buttonStyle(.borderless)
                     .help("Remove \(key)")
+                    .accessibilityLabel("Remove \(key)")
             }
         }
     }

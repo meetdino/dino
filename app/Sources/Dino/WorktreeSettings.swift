@@ -13,7 +13,7 @@ extension DinoSettings {
     }
 }
 
-/// Settings → Worktrees: where they go, and the ones on disk.
+/// Settings → Workspaces → Worktrees: where they go, and the ones on disk.
 struct WorktreesPane: View {
     @EnvironmentObject var store: SettingsStore
     @State private var location = ""
@@ -142,6 +142,7 @@ struct WorktreesPane: View {
             Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: w.path)]) } label: { Image(systemName: "magnifyingglass") }
                 .buttonStyle(.borderless)
                 .help("Show in Finder")
+                .accessibilityLabel("Show \(w.branch) in Finder")
             if removing.contains(w.path) {
                 ProgressView().controlSize(.small)
             } else {
