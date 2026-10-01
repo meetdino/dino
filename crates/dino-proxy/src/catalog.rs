@@ -148,7 +148,7 @@ async fn refresh(st: &AppState, key: &str, path: &Path) -> bool {
 }
 
 async fn get(st: &AppState, url: &str, key: Option<&str>) -> Option<Value> {
-    let mut req = st.client.get(url).timeout(Duration::from_secs(20));
+    let mut req = st.client().get(url).timeout(Duration::from_secs(20));
     if let Some(key) = key {
         req = req.bearer_auth(key);
     }
@@ -169,7 +169,7 @@ async fn try_model(st: &AppState, key: &str, id: &str) -> Option<Tried> {
         "max_tokens": 512,
     });
     let started = Instant::now();
-    let sent = st.client.post(format!("{NIM_BASE}/chat/completions")).bearer_auth(key).timeout(Duration::from_secs(45)).json(&body).send().await;
+    let sent = st.client().post(format!("{NIM_BASE}/chat/completions")).bearer_auth(key).timeout(Duration::from_secs(45)).json(&body).send().await;
     let ms = started.elapsed().as_secs_f64() * 1000.0;
     let at = now();
     let r = match sent {
