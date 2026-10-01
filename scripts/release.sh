@@ -1,0 +1,143 @@
+#!/bin/bash
+# Build a dino release into dist/: Dino.app (with the dino CLI and dinod inside), a DMG, a CLI
+# tarball, SHA-256 sums, Homebrew cask/formula files, and a download/ tree laid out the way
+# scripts/install.sh fetches it. Nothing is uploaded.
+#
+#   scripts/release.sh                 # host architecture
+#   ARCHS="arm64 x86_64" scripts/release.sh   # universal, when both Rust targets are installed
+#
+# Signing and notarization run only when their credentials are set:
+#   DEVELOPER_ID_APP   "Developer ID Application: Name (TEAMID)", a codesigning identity in the keychain
+#   NOTARY_PROFILE     a profile saved with `xcrun notarytool store-credentials`, or
+#   APPLE_ID, TEAM_ID, APPLE_PASSWORD (app-specific password), or
+#   NOTARY_KEY, NOTARY_KEY_ID, NOTARY_ISSUER (App Store Connect API key, for CI)
+# Without them the app is signed ad hoc, which Gatekeeper refuses for downloads.
+#   RELEASES_REPO      the binaries-only GitHub repository the files are published to
+#                      (default asdf9384/dino-releases); the tap's URLs point at its releases
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+RELEASES_REPO="${RELEASES_REPO:-asdf9384/dino-releases}"
+ARCHS="${ARCHS:-$(uname -m)}"
+DIST="$ROOT/dist"
+APP="$DIST/Dino.app"
+say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
+
+rust_target() { case "$1" in arm64) echo aarch64-apple-darwin ;; x86_64) echo x86_64-apple-darwin ;; *) echo "unknown arch $1" >&2; exit 1 ;; esac; }
+read -r -a arch_list <<<"$ARCHS"
+if [ "${#arch_list[@]}" -gt 1 ]; then LABEL=universal; else LABEL="${arch_list[0]}"; fi
+
+rm -rf "$DIST"
+mkdir -p "$DIST"
+
+say "dino $VERSION ($BUILD) for $ARCHS"
+
+# The CLI and dinod: one binary, one per architecture, joined with lipo.
+bins=()
+for a in "${arch_list[@]}"; do
+    t="$(rust_target "$a")"
+    cargo build --release -q -p dino --target "$t"
+    bins+=("target/$t/release/dino")
+done
+if [ "${#bins[@]}" -gt 1 ]; then
+    lipo -create -output "$DIST/dino" "${bins[@]}"
+else
+    cp "${bins[0]}" "$DIST/dino"
+fi
+strip -x "$DIST/dino" 2>/dev/null || true
+
+# The app.
+say "Dino.app"
+swift_arch=()
+for a in "${arch_list[@]}"; do swift_arch+=(--arch "$a"); done
+(cd app && swift build -c release "${swift_arch[@]}" -q)
+SWIFT_BIN="$(cd app && swift build -c release "${swift_arch[@]}" --show-bin-path)"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers"
+cp "$SWIFT_BIN/Dino" "$APP/Contents/MacOS/Dino"
+cp -R "$SWIFT_BIN"/*.bundle "$APP/Contents/Resources/" 2>/dev/null || true
+cp app/AppIcon.icns "$APP/Contents/Resources/"
+cp "$DIST/dino" "$APP/Contents/Helpers/dino"
+cp app/Info.plist "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
+
+# Signing: inside out, never --deep (Apple's guidance), always with the hardened runtime as
+# app/build.sh does (no library injection into dino); a Developer ID and a timestamp when given,
+# ad hoc otherwise.
+sign() {
+    if [ -n "${DEVELOPER_ID_APP:-}" ]; then
+        codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID_APP" "$@"
+    else
+        codesign --force --options runtime --sign - "$@"
+    fi
+}
+say "signing (${DEVELOPER_ID_APP:-ad hoc})"
+while IFS= read -r -d '' f; do
+    if file -b "$f" | grep -q 'Mach-O'; then sign "$f"; fi
+done < <(find "$APP/Contents/Resources" -type f -print0)
+sign "$APP/Contents/Helpers/dino"
+sign "$APP"
+codesign --verify --strict --verbose=1 "$APP"
+
+# The DMG: the app beside a link to /Applications.
+say "DMG"
+DMG="$DIST/Dino-$VERSION-$LABEL.dmg"
+STAGE="$DIST/dmg"
+mkdir -p "$STAGE"
+cp -R "$APP" "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+hdiutil create -quiet -volname "dino $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG"
+rm -rf "$STAGE"
+if [ -n "${DEVELOPER_ID_APP:-}" ]; then codesign --force --timestamp --sign "$DEVELOPER_ID_APP" "$DMG"; fi
+
+notary=()
+if [ -n "${NOTARY_PROFILE:-}" ]; then notary=(--keychain-profile "$NOTARY_PROFILE")
+elif [ -n "${APPLE_ID:-}" ] && [ -n "${TEAM_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ]; then notary=(--apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APPLE_PASSWORD")
+elif [ -n "${NOTARY_KEY:-}" ] && [ -n "${NOTARY_KEY_ID:-}" ] && [ -n "${NOTARY_ISSUER:-}" ]; then notary=(--key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
+fi
+if [ -n "${DEVELOPER_ID_APP:-}" ] && [ "${#notary[@]}" -gt 0 ]; then
+    say "notarizing"
+    xcrun notarytool submit "$DMG" "${notary[@]}" --wait
+    xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG"
+    spctl --assess --type open --context context:primary-signature --verbose "$DMG"
+else
+    say "not notarized: set DEVELOPER_ID_APP and notary credentials to notarize"
+fi
+
+# The CLI on its own, for scripts/install.sh and the formula.
+say "CLI tarball"
+TAR="dino-$VERSION-darwin-$LABEL.tar.gz"
+CLI="$DIST/cli"
+mkdir -p "$CLI"
+cp "$APP/Contents/Helpers/dino" "$CLI/dino"
+cp LICENSE "$CLI/"
+tar -C "$CLI" -czf "$DIST/$TAR" dino LICENSE
+rm -rf "$CLI"
+
+(cd "$DIST" && shasum -a 256 "$(basename "$DMG")" "$TAR" > SHA256SUMS)
+DMG_SHA="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
+TAR_SHA="$(shasum -a 256 "$DIST/$TAR" | cut -d' ' -f1)"
+
+# The tap: the cask for the app (CLI included) and the formula for the CLI alone, filled in.
+mkdir -p "$DIST/tap/Casks" "$DIST/tap/Formula"
+fill() {
+    sed -e "s|@VERSION@|$VERSION|g" -e "s|@DMG_SHA256@|$DMG_SHA|g" -e "s|@TAR_SHA256@|$TAR_SHA|g" \
+        -e "s|@RELEASES_REPO@|$RELEASES_REPO|g" -e "s|@LABEL@|$LABEL|g" "$1" > "$2"
+}
+fill packaging/homebrew/dino.rb "$DIST/tap/Casks/dino.rb"
+fill packaging/homebrew/dino-cli.rb "$DIST/tap/Formula/dino-cli.rb"
+cp packaging/homebrew/README.md "$DIST/tap/README.md"
+
+# The same files laid out for a plain web server (install.sh's DINO_DOWNLOAD_BASE mode).
+D="$DIST/download/dino/$VERSION"
+mkdir -p "$D"
+cp "$DMG" "$DIST/$TAR" "$DIST/SHA256SUMS" "$D/"
+echo "$VERSION" > "$DIST/download/dino/latest"
+cp scripts/install.sh "$DIST/download/install.sh"
+
+say "done: dino $VERSION"
+ls -lh "$DMG" "$DIST/$TAR" | awk '{print "  " $5 "  " $9}'
+echo "  publish with scripts/publish.sh (GitHub release in $RELEASES_REPO, then the tap)"
