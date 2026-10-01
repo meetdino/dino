@@ -179,6 +179,10 @@ struct Daemon {
     pushed: Mutex<HashMap<String, bool>>,
     /// A thread is measuring sizes.
     measuring: AtomicBool,
+    /// The last tree for each set of folders asked about, so a request never waits on git.
+    trees: Mutex<HashMap<Vec<String>, TreeCache>>,
+    /// Bumped when what the tree shows changes: a read that started before is dropped.
+    tree_gen: AtomicU64,
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -440,6 +444,8 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         sizes: Mutex::default(),
         pushed: Mutex::default(),
         measuring: AtomicBool::new(false),
+        trees: Mutex::default(),
+        tree_gen: AtomicU64::new(0),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
@@ -582,6 +588,22 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 continue;
             }
         };
+        // What the sidebar's tree shows changes: the next ask reads git again instead of the cache.
+        let reshapes = matches!(
+            req,
+            Request::New { .. }
+                | Request::Start { .. }
+                | Request::Fanout { .. }
+                | Request::Kill { .. }
+                | Request::Keep { .. }
+                | Request::Discard { .. }
+                | Request::RemoveWorktree { .. }
+                | Request::CleanWorktree { .. }
+                | Request::Archive { .. }
+                | Request::Unarchive { .. }
+                | Request::RemoveStored { .. }
+                | Request::FreeUpSpace
+        );
         let resp = match req {
             Request::State => state(d),
             Request::Launchers => Response::Launchers { launchers: d.offered() },
@@ -790,7 +812,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Groups => Response::Groups { groups: groups(d) },
-            Request::Tree { folders } => Response::Tree { repos: tree(d, folders) },
+            Request::Tree { folders } => Response::Tree { repos: cached_tree(d, folders) },
             Request::Diff { session } => match member_diff(d, &session) {
                 Ok((stat, text)) => Response::Diff { stat, text },
                 Err(e) => Response::Error { message: e.to_string() },
@@ -983,6 +1005,11 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 std::process::exit(0);
             }
         };
+        if reshapes {
+            let mut trees = d.trees.lock().unwrap();
+            d.tree_gen.fetch_add(1, Ordering::Relaxed);
+            trees.clear();
+        }
         ipc::write_json(&mut stream, &resp)?;
     }
 }
@@ -2121,6 +2148,66 @@ fn real(p: &Path) -> String {
 }
 
 /// Every repo a session runs in (or a fan-out came from), and each extra folder, once.
+struct TreeCache {
+    repos: Vec<ipc::RepoInfo>,
+    at: Instant,
+    refreshing: bool,
+}
+
+/// How old a tree may be before a request starts reading a new one. The app asks every few
+/// seconds, so what it shows is at most this much plus one of its polls behind git.
+const TREE_FRESH: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// The tree for `folders`, from the last read: git runs (worktree lists, summaries) take tens to
+/// hundreds of ms while agents make worktrees, so they happen off the request. The first ask for a
+/// set of folders reads it in place.
+fn cached_tree(d: &Arc<Daemon>, mut folders: Vec<String>) -> Vec<ipc::RepoInfo> {
+    folders.sort();
+    let stale = {
+        let mut trees = d.trees.lock().unwrap();
+        match trees.get_mut(&folders) {
+            Some(c) => {
+                let stale = c.at.elapsed() >= TREE_FRESH && !c.refreshing;
+                if stale {
+                    c.refreshing = true;
+                }
+                Some((c.repos.clone(), stale))
+            }
+            None => None,
+        }
+    };
+    match stale {
+        Some((repos, refresh)) => {
+            if refresh {
+                let d = d.clone();
+                let asked = d.tree_gen.load(Ordering::Relaxed);
+                std::thread::spawn(move || {
+                    let repos = tree(&d, folders.clone());
+                    let mut trees = d.trees.lock().unwrap();
+                    if d.tree_gen.load(Ordering::Relaxed) == asked {
+                        trees.insert(folders, TreeCache { repos, at: Instant::now(), refreshing: false });
+                    }
+                });
+            }
+            repos
+        }
+        None => {
+            let asked = d.tree_gen.load(Ordering::Relaxed);
+            let repos = tree(d, folders.clone());
+            let mut trees = d.trees.lock().unwrap();
+            if d.tree_gen.load(Ordering::Relaxed) != asked {
+                return repos;
+            }
+            // Only the folders asked about lately: the app's current one and a few others.
+            if trees.len() > 16 {
+                trees.retain(|_, c| c.at.elapsed() < std::time::Duration::from_secs(60));
+            }
+            trees.insert(folders, TreeCache { repos: repos.clone(), at: Instant::now(), refreshing: false });
+            repos
+        }
+    }
+}
+
 fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
     let mut dirs: Vec<String> = d.sessions.lock().unwrap().iter().filter(|s| s.host.is_none()).map(|s| real(&s.cwd)).collect();
     dirs.extend(d.groups.lock().unwrap().iter().map(|g| real(Path::new(&g.repo))));
