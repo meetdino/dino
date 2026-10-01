@@ -39,7 +39,7 @@ pub struct AuthorizationForm {
 }
 
 pub async fn authorization(State(s): State<AppState>, ClientIp(ip): ClientIp, Form(f): Form<AuthorizationForm>) -> Result<Response> {
-    limits::auth(&s, ip)?;
+    limits::auth(&s, ip).await?;
     let client = clients::find(&f.client_id).filter(|c| c.kind == Kind::Native).ok_or_else(|| Error::oauth("invalid_client", "Unknown client."))?;
     let scope = clients::scope(f.scope.as_deref()).ok_or_else(|| Error::oauth("invalid_scope", "Unknown scope."))?;
     let device = DeviceInfo::new(f.device_name.as_deref(), f.device_os.as_deref(), f.dino_version.as_deref());
@@ -169,7 +169,7 @@ async fn find_pending(s: &AppState, code: &str) -> Result<Option<Pending>> {
 }
 
 pub async fn lookup(State(s): State<AppState>, headers: HeaderMap, ClientIp(ip): ClientIp, Form(f): Form<CodeForm>) -> Result<Response> {
-    limits::auth(&s, ip)?;
+    limits::auth(&s, ip).await?;
     let Some(session) = Session::load(&s, &headers).await? else { return Ok(Redirect::to("/device").into_response()) };
     if !session.check_csrf(&s, &f.csrf) {
         return Err(Error::Forbidden("The form expired. Go back and try again.".into()));
@@ -222,7 +222,7 @@ pub struct DecideForm {
 }
 
 pub async fn decide(State(s): State<AppState>, headers: HeaderMap, ClientIp(ip): ClientIp, Form(f): Form<DecideForm>) -> Result<Response> {
-    limits::auth(&s, ip)?;
+    limits::auth(&s, ip).await?;
     let Some(session) = Session::load(&s, &headers).await? else { return Err(Error::Forbidden("No session.".into())) };
     if !session.check_csrf(&s, &f.csrf) {
         return Err(Error::Forbidden("The form expired. Go back and try again.".into()));

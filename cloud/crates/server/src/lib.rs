@@ -38,16 +38,31 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new(cfg: Config) -> anyhow::Result<Self> {
+        // Migrations take a session advisory lock (so instances starting together don't race),
+        // which needs a direct connection: through a transaction-mode pooler the lock and the
+        // statements can land on different backends. One short connection, then the pool.
+        if let Some(direct) = &cfg.platform.migrate_url {
+            let one = PgPoolOptions::new().max_connections(1).acquire_timeout(Duration::from_secs(10)).connect(direct).await?;
+            sqlx::migrate!("./migrations").run(&one).await?;
+            one.close().await;
+        }
         let db = PgPoolOptions::new()
-            .max_connections(32)
+            .max_connections(cfg.platform.db_max_connections)
             .acquire_timeout(Duration::from_secs(3))
             .connect(&cfg.database_url)
             .await?;
+        if cfg.platform.migrate_url.is_some() {
+            return Self::with_migrated_pool(cfg, db);
+        }
         Self::with_pool(cfg, db).await
     }
 
     pub async fn with_pool(cfg: Config, db: PgPool) -> anyhow::Result<Self> {
         sqlx::migrate!("./migrations").run(&db).await?;
+        Self::with_migrated_pool(cfg, db)
+    }
+
+    fn with_migrated_pool(cfg: Config, db: PgPool) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .user_agent(concat!("dino-cloud/", env!("CARGO_PKG_VERSION")))
@@ -64,7 +79,8 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(ready))
         .merge(web::routes())
         .merge(oauth::routes())
-        .nest("/v1", api::routes())
+        .route("/internal/cron", get(jobs::cron))
+        .nest("/v1", api::routes(state.cfg.platform.push))
         .layer(axum::middleware::from_fn_with_state(state.clone(), limits::per_ip))
         .layer(axum::middleware::from_fn_with_state(state.clone(), web::security_headers))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -81,12 +97,13 @@ async fn ready(axum::extract::State(s): axum::extract::State<AppState>) -> axum:
 
 /// Serve until SIGTERM or Ctrl-C, letting requests in flight finish.
 pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-    let jobs = jobs::spawn(state.clone());
-    let nudges = api::sync::listen(state.clone());
+    let jobs = state.cfg.platform.background_jobs.then(|| jobs::spawn(state.clone()));
+    let nudges = state.cfg.platform.push.then(|| api::sync::listen(state.clone()));
     let app = router(state);
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal()).await?;
-    jobs.abort();
-    nudges.abort();
+    for task in jobs.into_iter().chain(nudges) {
+        task.abort();
+    }
     Ok(())
 }
 

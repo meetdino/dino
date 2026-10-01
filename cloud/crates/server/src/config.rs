@@ -33,6 +33,36 @@ pub struct Config {
     pub ip_limit: (u32, u32),
     /// `/v1` requests per second and burst, per account (`DINO_ACCOUNT_LIMIT=20,60`).
     pub account_limit: (u32, u32),
+    /// How it's hosted: a long-running server, or a serverless platform.
+    pub platform: Platform,
+}
+
+/// What changes between a long-running server (dev.sh, Docker, a VM) and a serverless host
+/// (Vercel), where many short-lived instances share nothing but the database.
+#[derive(Clone, Debug)]
+pub struct Platform {
+    /// Nudge devices over a WebSocket, fanned out between nodes with Postgres LISTEN/NOTIFY.
+    /// Off, devices look every minute on their own (`/v1/meta` says which).
+    pub push: bool,
+    /// Keep the limits that must hold across instances (sign-in attempts, sync writes) in
+    /// Postgres instead of each instance's memory.
+    pub shared_limits: bool,
+    /// Run the cleanup job inside the server every ten minutes. Off, it runs when
+    /// `/internal/cron` is called (Vercel Cron) with `cron_secret`.
+    pub background_jobs: bool,
+    /// The bearer token `/internal/cron` wants (`CRON_SECRET`, which Vercel Cron sends).
+    pub cron_secret: Option<String>,
+    /// A direct, unpooled database URL for migrations: they hold a session advisory lock, which a
+    /// transaction-mode pooler can't keep (Neon's `DATABASE_URL_UNPOOLED`).
+    pub migrate_url: Option<String>,
+    pub db_max_connections: u32,
+}
+
+impl Default for Platform {
+    /// A long-running server.
+    fn default() -> Self {
+        Platform { push: true, shared_limits: false, background_jobs: true, cron_secret: None, migrate_url: None, db_max_connections: 32 }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -122,7 +152,20 @@ impl Config {
                 emails_url: emails.map(|e| var(&format!("DINO_{p}_EMAILS_URL")).unwrap_or_else(|| e.into())),
             })
         };
-        let mail = match (var("DINO_MAIL_URL"), var("DINO_MAIL_KEY")) {
+        // Vercel sets VERCEL=1 for every deployment and function.
+        let serverless = var("VERCEL").is_some();
+        let flag = |name: &str, default: bool| var(name).map_or(default, |v| v == "1" || v == "true");
+        let platform = Platform {
+            push: flag("DINO_PUSH", !serverless),
+            shared_limits: flag("DINO_SHARED_LIMITS", serverless),
+            background_jobs: flag("DINO_BACKGROUND_JOBS", !serverless),
+            cron_secret: var("CRON_SECRET"),
+            migrate_url: var("DATABASE_URL_UNPOOLED"),
+            db_max_connections: var("DINO_DB_MAX_CONNECTIONS").map(|v| v.parse()).transpose().context("DINO_DB_MAX_CONNECTIONS")?.unwrap_or(if serverless { 5 } else { 32 }),
+        };
+        // A key alone means Resend, whose free tier covers a few thousand codes a month.
+        let mail_url = var("DINO_MAIL_URL").or_else(|| var("DINO_MAIL_KEY").map(|_| "https://api.resend.com/emails".into()));
+        let mail = match (mail_url, var("DINO_MAIL_KEY")) {
             (Some(url), Some(key)) => MailConfig::Http { url, key, from: var("DINO_MAIL_FROM").unwrap_or_else(|| "dino <no-reply@localhost>".into()) },
             _ if production => bail!("DINO_MAIL_URL and DINO_MAIL_KEY are required in production"),
             _ => MailConfig::File(var("DINO_MAIL_LOG").unwrap_or_else(|| "dino-cloud-mail.log".into()).into()),
@@ -137,11 +180,14 @@ impl Config {
         };
         Ok(Config {
             public_url,
-            bind: var("DINO_BIND").unwrap_or_else(|| "127.0.0.1:8787".into()).parse().context("DINO_BIND")?,
+            // A host that assigns the port (Vercel, most container platforms) sets PORT and
+            // expects the server on every interface.
+            bind: var("DINO_BIND").or_else(|| var("PORT").map(|p| format!("0.0.0.0:{p}"))).unwrap_or_else(|| "127.0.0.1:8787".into()).parse().context("DINO_BIND")?,
             metrics_bind: var("DINO_METRICS_BIND").map(|v| v.parse()).transpose().context("DINO_METRICS_BIND")?,
             database_url: var("DATABASE_URL").context("DATABASE_URL isn't set")?,
             secret,
-            trust_proxy: var("DINO_TRUST_PROXY").as_deref() == Some("1"),
+            // Vercel's edge sets the client address; nothing else can reach the function.
+            trust_proxy: flag("DINO_TRUST_PROXY", serverless),
             github: upstream("GITHUB", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", "https://api.github.com/user", Some("https://api.github.com/user/emails")),
             google: upstream("GOOGLE", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://openidconnect.googleapis.com/v1/userinfo", None),
             mail,
@@ -150,6 +196,7 @@ impl Config {
             json_logs: production || var("DINO_JSON_LOGS").as_deref() == Some("1"),
             ip_limit: pair("DINO_IP_LIMIT", (30, 120))?,
             account_limit: pair("DINO_ACCOUNT_LIMIT", (20, 60))?,
+            platform,
         })
     }
 

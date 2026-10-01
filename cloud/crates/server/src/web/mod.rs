@@ -153,7 +153,7 @@ struct Callback {
 }
 
 async fn provider_callback(State(s): State<AppState>, headers: HeaderMap, ClientIp(ip): ClientIp, Path(provider): Path<String>, Query(c): Query<Callback>) -> Result<Response> {
-    limits::auth(&s, ip)?;
+    limits::auth(&s, ip).await?;
     let p = Provider::parse(&provider).ok_or(Error::NotFound)?;
     let Some(mut session) = Session::load(&s, &headers).await? else { return Ok(Redirect::to("/signin").into_response()) };
     let pending = session.take("oauth_state");
@@ -190,7 +190,7 @@ struct EmailForm {
 }
 
 async fn email_send(State(s): State<AppState>, headers: HeaderMap, ClientIp(ip): ClientIp, Form(f): Form<EmailForm>) -> Result<Response> {
-    limits::auth(&s, ip)?;
+    limits::auth(&s, ip).await?;
     let Some(mut session) = Session::load(&s, &headers).await? else { return Ok(Redirect::to("/signin").into_response()) };
     check_form(&s, &session, &headers, &f.csrf)?;
     let Some(address) = email::normalize(&f.email) else {
@@ -227,7 +227,7 @@ struct CodeForm {
 }
 
 async fn email_verify(State(s): State<AppState>, headers: HeaderMap, ClientIp(ip): ClientIp, Form(f): Form<CodeForm>) -> Result<Response> {
-    limits::auth(&s, ip)?;
+    limits::auth(&s, ip).await?;
     let Some(session) = Session::load(&s, &headers).await? else { return Ok(Redirect::to("/signin").into_response()) };
     check_form(&s, &session, &headers, &f.csrf)?;
     let Some(address) = session.get_str("email") else { return Ok(Redirect::to("/signin").into_response()) };

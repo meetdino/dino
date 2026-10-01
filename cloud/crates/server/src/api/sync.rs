@@ -48,11 +48,14 @@ const MAX_NAME: usize = 200;
 const APPROVAL_TTL: chrono::Duration = chrono::Duration::minutes(10);
 pub const CHANNEL: &str = "dino_sync";
 
-pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/sync", get(pull).post(push).layer(DefaultBodyLimit::max(8 * 1024 * 1024)))
-        .route("/sync/ws", get(ws))
-        .route("/sync/reset", post(reset))
+/// `push`: serve `/sync/ws`. Without it the route isn't there, and `/v1/meta` tells devices to look
+/// on their own.
+pub fn routes(push: bool) -> Router<AppState> {
+    let r = Router::new()
+        .route("/meta", get(meta))
+        .route("/sync", get(pull).post(push_records).layer(DefaultBodyLimit::max(8 * 1024 * 1024)));
+    let r = if push { r.route("/sync/ws", get(ws)) } else { r };
+    r.route("/sync/reset", post(reset))
         .route("/sync/recovery", get(get_recovery).put(put_recovery))
         .route("/sync/approvals", get(list_approvals).post(request_approval))
         .route("/sync/approvals/{id}", get(get_approval))
@@ -121,14 +124,25 @@ async fn pull(State(s): State<AppState>, a: Authed, headers: HeaderMap, Query(q)
     let more = rows.len() as i64 > limit;
     let records: Vec<Record> = rows.into_iter().take(limit as usize).map(record).collect();
     let seq = records.last().and_then(|r| r.seq).unwrap_or(since);
-    Ok(Json(PullResponse { seq, records, more, extra: Map::new() }).into_response())
+    // Which reset of this account's sync the records belong to (an extra field: older devices
+    // ignore it and keep relying on the Reset nudge).
+    let generation: i64 = sqlx::query_scalar("SELECT generation FROM sync_heads WHERE account_id = $1").bind(a.account_id).fetch_optional(&s.db).await?.unwrap_or(0);
+    let mut extra = Map::new();
+    extra.insert("generation".into(), json!(generation));
+    Ok(Json(PullResponse { seq, records, more, extra }).into_response())
 }
 
 fn malformed(id: &RecordId, reason: &str) -> Rejection {
     Rejection { id: id.clone(), error: SyncError::Malformed { reason: reason.into() } }
 }
 
-async fn push(State(s): State<AppState>, a: Authed, headers: HeaderMap, Json(req): Json<PushRequest>) -> Result<Response> {
+/// `GET /v1/meta`: what this server offers, before signing in. Without push, devices look every
+/// `poll_secs` (and sooner when something happens on their side).
+async fn meta(State(s): State<AppState>) -> Response {
+    Json(json!({"protocol": PROTOCOL, "push": s.cfg.platform.push, "poll_secs": 60})).into_response()
+}
+
+async fn push_records(State(s): State<AppState>, a: Authed, headers: HeaderMap, Json(req): Json<PushRequest>) -> Result<Response> {
     if let Some(r) = check_version(&headers) {
         return Ok(r);
     }
@@ -140,7 +154,7 @@ async fn push(State(s): State<AppState>, a: Authed, headers: HeaderMap, Json(req
         return Ok(refuse(StatusCode::PAYLOAD_TOO_LARGE, e));
     }
     if let Some(n) = NonZeroU32::new(req.records.len() as u32) {
-        if let Err(retry) = crate::limits::sync_writes(&s, device, n) {
+        if let Err(retry) = crate::limits::sync_writes(&s, device, n).await? {
             return Ok(refuse(StatusCode::TOO_MANY_REQUESTS, SyncError::RateLimited { retry_after_s: retry }));
         }
     }
@@ -245,7 +259,8 @@ async fn reset(State(s): State<AppState>, a: Authed) -> Result<Response> {
     sqlx::query("DELETE FROM sync_keys WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM sync_approvals WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
     // The sequence keeps counting up, so nothing a device saw before can be mistaken for new.
-    sqlx::query("UPDATE sync_heads SET bytes = 0, updated_at = now() WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
+    // A new generation: devices that look rather than listen see it change in their next pull.
+    sqlx::query("UPDATE sync_heads SET bytes = 0, generation = generation + 1, updated_at = now() WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
     notify(&mut tx, a.account_id, &Nudge::Reset).await?;
     tx.commit().await?;
     Ok(Json(json!({"reset": true})).into_response())

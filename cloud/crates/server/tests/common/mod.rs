@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use axum::Json;
 use axum::routing::{get, post};
 use base64::Engine;
-use dino_cloud::config::{Config, MailConfig, Upstream};
+use dino_cloud::config::{Config, MailConfig, Platform, Upstream};
 use dino_cloud::{AppState, serve};
 use serde_json::{Value, json};
 use sha2::Digest;
@@ -77,7 +77,19 @@ async fn upstream_mock() -> SocketAddr {
     addr
 }
 
+pub const CRON_SECRET: &str = "cron-secret-for-tests";
+
 pub async fn start() -> Server {
+    start_with(Platform::default()).await
+}
+
+/// As on Vercel: no push socket or LISTEN, limits counted in Postgres, cleanup only through
+/// `/internal/cron`.
+pub async fn start_serverless() -> Server {
+    start_with(Platform { push: false, shared_limits: true, background_jobs: false, cron_secret: Some(CRON_SECRET.into()), migrate_url: None, db_max_connections: 5 }).await
+}
+
+pub async fn start_with(platform: Platform) -> Server {
     init_logs();
     let admin_url = std::env::var("DINO_TEST_DATABASE_URL").unwrap_or_else(|_| "postgres://dino:dino@127.0.0.1:55432/postgres".into());
     let db_name = format!("dino_test_{}", uuid::Uuid::new_v4().simple());
@@ -114,6 +126,7 @@ pub async fn start() -> Server {
         json_logs: true,
         ip_limit: (30, 120),
         account_limit: (20, 60),
+        platform,
     };
     let pool = PgPoolOptions::new().max_connections(16).connect(&db_url).await.unwrap();
     let state = AppState::with_pool(cfg, pool).await.unwrap();

@@ -80,6 +80,7 @@ mod tests {
             json_logs: false,
             ip_limit: (30, 120),
             account_limit: (20, 60),
+            platform: Default::default(),
         }
     }
 
