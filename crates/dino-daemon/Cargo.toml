@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+memchr = "2"
 anyhow.workspace = true
 dino-core.workspace = true
 dino-term.workspace = true
