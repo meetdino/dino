@@ -39,10 +39,7 @@ pub(crate) fn load_archived() -> Vec<Archived> {
 }
 
 fn save_archived(all: &[Archived]) {
-    let tmp = archived_path().with_extension("json.tmp");
-    if std::fs::write(&tmp, serde_json::to_vec_pretty(all).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(tmp, archived_path());
-    }
+    let _ = super::write_private(&archived_path(), &serde_json::to_vec_pretty(all).unwrap_or_default());
 }
 
 /// Answer a lifecycle request.

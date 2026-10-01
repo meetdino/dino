@@ -165,15 +165,36 @@ pub fn summary(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<S
     }
     // New files aren't in the diff without touching the index: count their lines.
     for path in status.lines().filter_map(|l| l.strip_prefix("?? ")) {
-        let file = dir.join(path.trim_matches('"'));
-        if std::fs::metadata(&file).is_ok_and(|m| m.len() < 1 << 20) {
-            added += std::fs::read(&file).map_or(0, |b| b.iter().filter(|&&c| c == b'\n').count() as u32);
-        }
+        added += untracked_lines(&dir.join(path.trim_matches('"')));
     }
     let label = h.subject.clone().filter(|s| !s.is_empty()).or_else(|| branch.map(readable_branch)).unwrap_or_else(|| base_name(dir));
     let summary = Summary { label, added, removed, dirty, ahead: h.ahead, state: state(dirty, h.ahead, h.had_commits, h.same_as_base).into() };
     HISTORY.lock().unwrap().get_or_insert_default().insert(key, h);
     Ok(summary)
+}
+
+/// Lines in the untracked file at `file`, when it's a plain file under 1 MiB. Not through a
+/// symlink, a FIFO or a device: an agent's worktree may hold one to `/dev/zero`, which never ends,
+/// or a pipe, which waits forever.
+fn untracked_lines(file: &Path) -> u32 {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    const MAX: u64 = 1 << 20;
+    let plain = |m: std::fs::Metadata| m.file_type().is_file() && m.len() < MAX;
+    if !std::fs::symlink_metadata(file).is_ok_and(plain) {
+        return 0;
+    }
+    // Swapped since? Opened without following a link or waiting on a pipe, and checked again.
+    let open = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(file);
+    let Ok(f) = open else { return 0 };
+    if !f.metadata().is_ok_and(plain) {
+        return 0;
+    }
+    let mut b = Vec::new();
+    if f.take(MAX).read_to_end(&mut b).is_err() {
+        return 0;
+    }
+    b.iter().filter(|&&c| c == b'\n').count() as u32
 }
 
 fn history(dir: &Path, branch: Option<&str>, base: &str, tips: String) -> anyhow::Result<History> {
@@ -722,6 +743,26 @@ mod tests {
         assert_eq!(slug("  Übersicht  ").as_deref(), Some("bersicht"));
         assert_eq!(slug("…"), None);
         assert_eq!(slug(&"abcd ".repeat(20)).map(|s| s.len()), Some(39));
+    }
+
+    #[test]
+    fn untracked_lines_only_read_plain_files() {
+        let tmp = std::env::temp_dir().join(format!("dino-untracked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.txt"), "one\ntwo\n").unwrap();
+        assert_eq!(untracked_lines(&tmp.join("a.txt")), 2);
+        std::fs::write(tmp.join("big.txt"), vec![b'\n'; 1 << 20]).unwrap();
+        assert_eq!(untracked_lines(&tmp.join("big.txt")), 0);
+        // Neither returns, read whole: they'd hang the daemon.
+        std::os::unix::fs::symlink("/dev/zero", tmp.join("zero")).unwrap();
+        assert_eq!(untracked_lines(&tmp.join("zero")), 0);
+        assert!(Command::new("mkfifo").arg(tmp.join("pipe")).status().unwrap().success());
+        assert_eq!(untracked_lines(&tmp.join("pipe")), 0);
+        std::os::unix::fs::symlink(tmp.join("a.txt"), tmp.join("link.txt")).unwrap();
+        assert_eq!(untracked_lines(&tmp.join("link.txt")), 0);
+        assert_eq!(untracked_lines(&tmp.join("missing.txt")), 0);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

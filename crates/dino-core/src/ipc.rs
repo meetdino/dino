@@ -30,10 +30,17 @@ pub fn write_frame(w: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<(
     w.write_all(&buf)
 }
 
+/// The longest payload `read_frame` takes: far past any screen, conversation page or diff, but
+/// a peer can't make it set aside 4 GiB just by saying so.
+pub const MAX_FRAME: usize = 256 << 20;
+
 pub fn read_frame(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     let mut head = [0u8; 5];
     r.read_exact(&mut head)?;
     let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+    if len > MAX_FRAME {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("a {len}-byte frame is over the {MAX_FRAME}-byte limit")));
+    }
     let mut payload = vec![0; len];
     r.read_exact(&mut payload)?;
     Ok((head[0], payload))
@@ -671,4 +678,25 @@ pub struct ModelRow {
     #[serde(flatten)]
     pub model: crate::providers::ProviderModel,
     pub agents: Vec<crate::compat::Verdict>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_round_trip_up_to_the_limit() {
+        let mut buf = vec![];
+        write_frame(&mut buf, DATA, b"hello").unwrap();
+        assert_eq!(read_frame(&mut buf.as_slice()).unwrap(), (DATA, b"hello".to_vec()));
+
+        // Refused from the header alone, before anything is allocated or read.
+        let mut huge = vec![JSON];
+        huge.extend_from_slice(&(MAX_FRAME as u32 + 1).to_be_bytes());
+        let err = read_frame(&mut huge.as_slice()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let mut most = vec![JSON];
+        most.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(read_frame(&mut most.as_slice()).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
 }
