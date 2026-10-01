@@ -108,9 +108,15 @@ pub enum Program<'a> {
     Shell,
 }
 
+/// The variable that carries the Claude subscription token to the host: in `ssh`'s environment,
+/// never its command line. `LC_` because sshd accepts those by default (`AcceptEnv LANG LC_*` on
+/// macOS, Debian, Ubuntu, Fedora); the remote command moves it to `CLAUDE_CODE_OAUTH_TOKEN` for
+/// Claude Code alone. On a host that doesn't accept it, Claude Code uses its own sign-in there.
+pub const TOKEN_ENV: &str = "LC_DINO_CLAUDE_TOKEN";
+
 /// `ssh`'s arguments for a session on `host`. `tunnel` is (port on the remote loopback, local
-/// port) for hooks; `command` comes from `remote_command`.
-pub fn ssh_args(host: &str, tunnel: Option<(u16, u16)>, command: &str) -> Vec<String> {
+/// port) for hooks; `command` comes from `remote_command`; `send_token` passes `TOKEN_ENV` on.
+pub fn ssh_args(host: &str, tunnel: Option<(u16, u16)>, command: &str, send_token: bool) -> Vec<String> {
     let mut args: Vec<String> = vec!["-t".into()];
     let opts = [
         "ControlMaster=auto".to_string(),
@@ -129,6 +135,9 @@ pub fn ssh_args(host: &str, tunnel: Option<(u16, u16)>, command: &str) -> Vec<St
     if let Some((remote, local)) = tunnel {
         args.extend(["-R".into(), format!("127.0.0.1:{remote}:127.0.0.1:{local}")]);
     }
+    if send_token {
+        args.extend(["-o".into(), format!("SendEnv={TOKEN_ENV}")]);
+    }
     args.extend(["--".into(), host.into(), command.into()]);
     args
 }
@@ -138,12 +147,17 @@ pub fn ssh_args(host: &str, tunnel: Option<(u16, u16)>, command: &str) -> Vec<St
 pub fn remote_command(host: &str, folder: &str, program: &Program, args: &[String]) -> String {
     let say = |msg: String| format!("{{ printf '\\n%s\\n\\n' {}; exit", quote(&msg));
     let mut script = String::from("PATH=\"$HOME/.local/bin:$PATH\"\n");
+    if !matches!(program, Program::Claude { .. }) {
+        script += &format!("unset {TOKEN_ENV}\n");
+    }
     let shown = if folder.is_empty() { "~" } else { folder };
     script += &format!("cd {} 2>/dev/null || {} 1; }}\n", folder_expr(folder), say(format!("dino: {host} has no folder {shown}")));
     let exec = match program {
         Program::Shell => "exec \"${SHELL:-/bin/sh}\" -l".to_string(),
         Program::Claude { session, resume } => {
             script += &missing_check("claude", "Claude Code", host, &say);
+            // The Claude subscription token, if dino sent one: Claude Code's to read, no one else's.
+            script += &format!("if [ -n \"${{{TOKEN_ENV}:-}}\" ]; then CLAUDE_CODE_OAUTH_TOKEN=\"${TOKEN_ENV}\"; export CLAUDE_CODE_OAUTH_TOKEN; fi\nunset {TOKEN_ENV}\n");
             let s = quote(session);
             if *resume {
                 script += &format!("if ls \"$HOME\"/.claude/projects/*/{s}.jsonl >/dev/null 2>&1; then set -- --resume {s}; else set -- --session-id {s}; fi\n");
@@ -224,10 +238,39 @@ mod tests {
 
     #[test]
     fn ssh_args_forward_hooks_on_loopback() {
-        let a = ssh_args("devbox", Some((30001, 5555)), "cmd");
+        let a = ssh_args("devbox", Some((30001, 5555)), "cmd", false);
         assert_eq!(a[0], "-t");
         assert!(a.windows(2).any(|w| w == ["-R", "127.0.0.1:30001:127.0.0.1:5555"]));
         assert_eq!(a[a.len() - 3..], ["--", "devbox", "cmd"]);
+        assert!(!a.iter().any(|x| x.contains(TOKEN_ENV)));
+        // The token's variable is named for sending, its value never on the command line.
+        let a = ssh_args("devbox", None, "cmd", true);
+        assert!(a.windows(2).any(|w| w == ["-o".to_string(), format!("SendEnv={TOKEN_ENV}")]));
+    }
+
+    #[test]
+    fn the_token_reaches_claude_code_and_nothing_else_there() {
+        let home = std::env::temp_dir().join(format!("dino-ssh-token-{}", std::process::id()));
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["claude", "codex"] {
+            let fake = bin.join(name);
+            std::fs::write(&fake, "#!/bin/sh\necho \"oauth=${CLAUDE_CODE_OAUTH_TOKEN:-none} lc=${LC_DINO_CLAUDE_TOKEN:-none}\"\n").unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let sent = |cmd: &str| {
+            let out = Command::new("/bin/sh").arg("-c").arg(cmd).env("HOME", &home).env("SHELL", "/bin/sh").env("PATH", "/usr/bin:/bin").env(TOKEN_ENV, "tok-123").output().unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let claude = Program::Claude { session: "abc", resume: false };
+        assert!(sent(&remote_command("devbox", "", &claude, &[])).contains("oauth=tok-123 lc=none"));
+        let codex = Program::Agent { bin: "codex", name: "Codex" };
+        assert!(sent(&remote_command("devbox", "", &codex, &[])).contains("oauth=none lc=none"));
+        // Not sent: Claude Code keeps its own sign-in there.
+        let (_, out) = run(&remote_command("devbox", "", &claude, &[]), &home);
+        assert!(out.contains("oauth=none"), "{out}");
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     /// Runs the command as sshd would: through the user's shell, here with a made-up home.
