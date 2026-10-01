@@ -722,11 +722,11 @@ fn oscs(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<(&'static str, String, usize
     let mut out = vec![];
     let mut at = 0;
     let mut rest = None;
-    while let Some(i) = data[at..].windows(OSC.len()).position(|w| w == OSC).map(|i| at + i) {
+    while let Some(i) = memchr::memmem::find(&data[at..], OSC).map(|i| at + i) {
         let body = &data[i + OSC.len()..];
-        let Some((end, stop)) = body.iter().enumerate().find_map(|(k, &b)| match b {
+        let Some((end, stop)) = memchr::memchr2_iter(0x07, 0x1b, body).find_map(|k| match body[k] {
             0x07 => Some((k, 1)),
-            0x1b if body.get(k + 1) == Some(&b'\\') => Some((k, 2)),
+            _ if body.get(k + 1) == Some(&b'\\') => Some((k, 2)),
             _ => None,
         }) else {
             rest = Some(i);
@@ -776,7 +776,8 @@ fn file_url_path(url: &str) -> Option<String> {
 /// when the switch began at the end of the last chunk (`carry`).
 fn alt_off(carry: &[u8], bytes: &[u8]) -> Option<(usize, usize)> {
     let split = ALT_OFF.iter().find_map(|p| (1..p.len()).find(|&k| carry.ends_with(&p[..k]) && bytes.starts_with(&p[k..])).map(|k| (0, p.len() - k)));
-    split.or_else(|| ALT_OFF.iter().filter_map(|p| bytes.windows(p.len()).position(|w| w == *p).map(|i| (i, i + p.len()))).min())
+    // Every one starts with ESC, rare in most output: only look where there is one.
+    split.or_else(|| memchr::memchr_iter(0x1b, bytes).find_map(|i| ALT_OFF.iter().find(|p| bytes[i..].starts_with(p)).map(|p| (i, i + p.len()))))
 }
 
 /// A row as plain text, without trailing blanks.
