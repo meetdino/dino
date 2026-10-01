@@ -26,6 +26,7 @@ use dino_term::{Pane, SpawnSpec};
 
 mod agentlog;
 mod chatgpt;
+mod cloud;
 mod codex;
 mod lifecycle;
 mod peers;
@@ -34,6 +35,7 @@ mod providers;
 mod schedule;
 mod servers;
 mod shell;
+mod sync;
 
 /// Scrollback lines replayed to a newly attached client.
 const REPLAY_HISTORY: usize = 2000;
@@ -270,6 +272,23 @@ pub fn run() -> anyhow::Result<()> {
     }
     schedule::start(&daemon);
     providers::start();
+    {
+        let (d, d2) = (daemon.clone(), daemon.clone());
+        sync::start(
+            Box::new(move || {
+                let mut out: Vec<String> = d.worktrees.lock().unwrap().iter().map(|w| w.repo.display().to_string()).collect();
+                out.extend(d.sessions.lock().unwrap().iter().filter_map(|s| worktree::repo_root(&s.cwd).ok()).map(|p| p.display().to_string()));
+                out.sort();
+                out.dedup();
+                out
+            }),
+            Box::new(move || {
+                d2.proxy.set_budget(Settings::load().policies.session_token_budget);
+                schedule::keep_awake(&d2);
+                keys_changed(&d2);
+            }),
+        );
+    }
     {
         // The ChatGPT sign-in's access token lasts an hour: a new one before it runs out.
         let d = daemon.clone();
@@ -533,10 +552,32 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => {
                     d.proxy.set_budget(Settings::load().policies.session_token_budget);
                     schedule::keep_awake(d);
+                    sync::kick();
                     Response::Ok
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::Sync { action, value } => {
+                let done = match action.as_str() {
+                    "status" => Ok(None),
+                    "login" => sync::login(value).map(Some),
+                    "login_device" => sync::login_device(value).map(|()| None),
+                    "join" => sync::join(value.as_deref().unwrap_or("")).map(|()| None),
+                    "resolve" => sync::resolve(value.as_deref().unwrap_or("")).map(|()| None),
+                    "now" => Ok(sync::now()).map(|()| None),
+                    "reset" => sync::reset().map(|()| None),
+                    "undo" => sync::undo().map(|()| None),
+                    "keys" => Ok(sync::set_key_sync(value.as_deref() != Some("off"))).map(|()| None),
+                    "ack_recovery" => Ok(sync::ack_recovery()).map(|()| None),
+                    "logout" => Ok(sync::logout()).map(|()| None),
+                    other => Err(anyhow::anyhow!("no sync action {other}")),
+                };
+                match done {
+                    Ok(Some(url)) => Response::Connect { url },
+                    Ok(None) => Response::Sync { status: sync::status() },
+                    Err(e) => Response::Error { message: e.to_string() },
+                }
+            }
             Request::ScheduleList => Response::Schedule { tasks: schedule::list(d) },
             Request::SchedulePut { task } => match schedule::put(d, task) {
                 Ok(_) => Response::Schedule { tasks: schedule::list(d) },
@@ -558,6 +599,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::SetKey { name, value } => match settings::set_key(&name, value.as_deref()) {
                 Ok(()) => {
                     keys_changed(d);
+                    sync::kick();
                     Response::Ok
                 }
                 Err(e) => Response::Error { message: e.to_string() },

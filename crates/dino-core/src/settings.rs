@@ -26,6 +26,28 @@ pub struct Settings {
     /// Machines to run sessions on over SSH, by the host as `ssh` takes it (an alias from
     /// `~/.ssh/config`, or `user@host`).
     pub ssh: BTreeMap<String, SshHost>,
+    pub terminal: Terminal,
+}
+
+/// How the terminal itself behaves: the app's choices, kept here so they follow the person to
+/// their other Macs. The values are the app's own names for them.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct Terminal {
+    /// What opening dino shows: "last" (the session you left) or "shell" (a new shell).
+    pub start_with: String,
+    /// The quick terminal's shortcut, by the app's name for it ("off" for none).
+    pub quick_key: String,
+    /// Hide the quick terminal when something else is clicked.
+    pub quick_autohide: bool,
+    /// What quitting does with running agents: empty asks, else the choice the app remembered.
+    pub on_quit: String,
+}
+
+impl Default for Terminal {
+    fn default() -> Self {
+        Self { start_with: "last".into(), quick_key: "cmd-grave".into(), quick_autohide: true, on_quit: String::new() }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -334,7 +356,8 @@ pub struct KeyInfo {
     pub source: Option<String>,
 }
 
-fn stored() -> Vec<(String, String)> {
+/// What the key store holds, without the environment's keys (`load_keys` adds those).
+pub fn stored() -> Vec<(String, String)> {
     std::fs::read_to_string(keys_file())
         .unwrap_or_default()
         .lines()
