@@ -256,14 +256,24 @@ pub fn worktrees_dir(repo: &Path) -> PathBuf {
 
 /// `location` relative to `repo` (blank: the default), or, absolute or under `~`, a folder per repo in it.
 pub fn worktrees_dir_at(repo: &Path, location: &str) -> PathBuf {
+    worktrees_dir_in(repo, location, std::env::var_os("DINO_HOME").map(PathBuf::from).filter(|h| !h.as_os_str().is_empty()))
+}
+
+/// As `worktrees_dir_at`, for a dinod whose home is `dino_home` (set: `DINO_HOME`). A dinod with
+/// its own home (a test one, say) keeps the default worktrees in that home, not the user's
+/// `~/.dino/worktrees`; a location set in Settings still wins.
+fn worktrees_dir_in(repo: &Path, location: &str, dino_home: Option<PathBuf>) -> PathBuf {
     let location = location.trim().trim_end_matches('/');
     let name = || repo.file_name().map(PathBuf::from).unwrap_or_default();
+    if let Some(home) = dino_home.filter(|_| location.is_empty() || location == crate::settings::DEFAULT_WORKTREE_LOCATION) {
+        return home.join("worktrees").join(name());
+    }
     if let Some(rest) = location.strip_prefix("~/").or((location == "~").then_some("")) {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         return home.join(rest).join(name());
     }
     match location {
-        "" => worktrees_dir_at(repo, crate::settings::DEFAULT_WORKTREE_LOCATION),
+        "" => worktrees_dir_in(repo, crate::settings::DEFAULT_WORKTREE_LOCATION, None),
         l if l.starts_with('/') => Path::new(l).join(name()),
         l => repo.join(l),
     }
@@ -1004,11 +1014,20 @@ mod tests {
     #[test]
     fn worktree_locations() {
         let repo = Path::new("/src/app");
-        assert_eq!(worktrees_dir_at(repo, ".dino/worktrees"), PathBuf::from("/src/app/.dino/worktrees"));
+        let at = |l: &str| worktrees_dir_in(repo, l, None);
+        assert_eq!(at(".dino/worktrees"), PathBuf::from("/src/app/.dino/worktrees"));
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-        assert_eq!(worktrees_dir_at(repo, ""), home.join(".dino/worktrees/app"));
-        assert_eq!(worktrees_dir_at(repo, "/Volumes/big/wt/"), PathBuf::from("/Volumes/big/wt/app"));
-        assert_eq!(worktrees_dir_at(repo, "~/worktrees"), home.join("worktrees/app"));
+        // The user's own dinod (no DINO_HOME): the default stays ~/.dino/worktrees/<repo>.
+        assert_eq!(at(""), home.join(".dino/worktrees/app"));
+        assert_eq!(at(crate::settings::DEFAULT_WORKTREE_LOCATION), home.join(".dino/worktrees/app"));
+        assert_eq!(at("/Volumes/big/wt/"), PathBuf::from("/Volumes/big/wt/app"));
+        assert_eq!(at("~/worktrees"), home.join("worktrees/app"));
+        // A dinod with its own home keeps default worktrees there; a chosen location still wins.
+        let own = Some(PathBuf::from("/tmp/dino-test"));
+        assert_eq!(worktrees_dir_in(repo, "", own.clone()), PathBuf::from("/tmp/dino-test/worktrees/app"));
+        assert_eq!(worktrees_dir_in(repo, crate::settings::DEFAULT_WORKTREE_LOCATION, own.clone()), PathBuf::from("/tmp/dino-test/worktrees/app"));
+        assert_eq!(worktrees_dir_in(repo, "/Volumes/big/wt", own.clone()), PathBuf::from("/Volumes/big/wt/app"));
+        assert_eq!(worktrees_dir_in(repo, ".trees", own), PathBuf::from("/src/app/.trees"));
         assert_eq!(inner_dir(repo, &repo.join(".trees/x")).as_deref(), Some(".trees"));
         assert_eq!(inner_dir(repo, Path::new("/elsewhere/app")), None);
     }
