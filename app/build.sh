@@ -12,5 +12,8 @@ cp "$BIN/Dino" "$APP/Contents/MacOS/Dino"
 cp -R "$BIN"/*.bundle "$APP/Contents/Resources/"
 cp Info.plist "$APP/Contents/Info.plist"
 [ -f AppIcon.icns ] && cp AppIcon.icns "$APP/Contents/Resources/"
-codesign --force --deep --sign - "$APP" >/dev/null
+# Hardened runtime: no DYLD_INSERT_LIBRARIES or other injection into dino, which holds your
+# folder and automation grants. The only code is the main executable (the .bundle holds data),
+# so no --deep; sign anything nested separately, first, if that changes.
+codesign --force --options runtime --sign - "$APP" >/dev/null
 echo "$PWD/$APP"

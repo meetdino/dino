@@ -36,7 +36,8 @@ enum Opening {
     static func manPage(_ url: URL) -> [String]? {
         let rest = url.absoluteString.dropFirst("x-man-page:".count).drop { $0 == "/" }
         let parts = rest.split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
-        let ok = { (s: String) in !s.isEmpty && s.allSatisfy { $0.isLetter || $0.isNumber || "._+-:".contains($0) } }
+        // Not an option: `x-man-page://-Pbash/ls` would make `man` run a pager of the link's choosing.
+        let ok = { (s: String) in !s.isEmpty && !s.hasPrefix("-") && s.allSatisfy { $0.isLetter || $0.isNumber || "._+-:".contains($0) } }
         switch parts.count {
         case 1 where ok(parts[0]): return [parts[0]]
         case 2 where ok(parts[0]) && ok(parts[1]): return parts
@@ -88,7 +89,7 @@ extension DinoModel {
             if url.scheme == "x-man-page" {
                 guard let args = Opening.manPage(url) else { continue }
                 // Quitting the pager closes the shell, as closing Terminal's man window would.
-                newSession(shell, in: NSHomeDirectory(), line: "man \(args.map(Opening.quoted).joined(separator: " ")); exit", label: "man \(args.last ?? "")")
+                newSession(shell, in: NSHomeDirectory(), line: "man -- \(args.map(Opening.quoted).joined(separator: " ")); exit", label: "man \(args.last ?? "")")
             } else if url.isFileURL {
                 var dir: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: url.path, isDirectory: &dir) else { continue }
