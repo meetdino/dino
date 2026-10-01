@@ -74,6 +74,8 @@ struct PlaceNode: Identifiable, Equatable {
     var git: WorktreeGit?
     var owner: WorktreeOwner?
     var id: String { path }
+    /// Its identity as a sidebar row: a plain row and one that opens to sessions aren't the same row.
+    var rowID: String { sessions.isEmpty ? path : path + "#open" }
 
     /// Nothing in it would be lost by removing it: no uncommitted work, nobody in it.
     var cleanable: Bool {
@@ -98,14 +100,6 @@ struct RepoNode: Identifiable, Equatable {
     /// One checkout and no fan-outs: list its sessions right under the repo.
     var flat: Bool { places.count == 1 && groups.isEmpty && others.isEmpty && merged.isEmpty }
     var sessionCount: Int { places.reduce(0) { $0 + $1.sessions.count } }
-    /// Changes when rows switch between plain rows and disclosure groups; part of the key
-    /// the sidebar rebuilds its List on (see `Sidebar.rowsKey`).
-    var shape: String {
-        ([repo.path, flat ? "flat" : "tree"] + places.map { "\($0.path)=\($0.sessions.isEmpty)" } + groups.map(\.id)
-            + subagents.keys.sorted().map { "\($0)>\(subagents[$0]!.map(\.path).joined(separator: ","))" }
-            + ["others=\(others.map(\.path).joined(separator: ","))", "merged=\(merged.map(\.path).joined(separator: ","))"])
-            .joined(separator: "|")
-    }
 }
 
 enum SessionTree {
@@ -462,7 +456,9 @@ struct RepoRows: View {
             if node.flat {
                 sessionRows(node.places[0].sessions)
             } else {
-                ForEach(Array(node.places.enumerated()), id: \.element.id) { i, place in
+                // A folder that gains or loses sessions changes kind (a row, or one that opens):
+                // a new identity then, so the list replaces the row instead of morphing it.
+                ForEach(Array(node.places.enumerated()), id: \.element.rowID) { i, place in
                     Group {
                         if place.sessions.isEmpty {
                             placeRow(place, main: i == 0)
@@ -519,7 +515,8 @@ struct RepoRows: View {
                 detail: node.flat && node.isGit ? node.places[0].label : nil
             )
         }
-        .tag("dir:\(node.repo.path)")
+        // Not "dir:": its main checkout's row has that tag, and two rows with one tag confuse the list.
+        .tag("repo:\(node.repo.path)")
         .contextMenu {
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()
@@ -554,7 +551,9 @@ struct RepoRows: View {
 
     /// A session's rows, each with the worktrees its subagents made under it.
     private func sessionRows(_ sessions: [SessionInfo]) -> some View {
-        ForEach(sessions) { s in
+        // With or without subagents' worktrees under it, as for folders.
+        ForEach(sessions.map { (key: node.subagents[$0.id] == nil ? $0.id : "\($0.id)#sub", session: $0) }, id: \.key) { row in
+            let s = row.session
             if let children = node.subagents[s.id] {
                 DisclosureGroup(isExpanded: expanded("subagents:\(s.id)")) {
                     worktreeRows(children)
