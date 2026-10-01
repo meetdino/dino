@@ -658,7 +658,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             },
             Request::Sync { action, value } => {
                 let done = match action.as_str() {
-                    "status" => Ok(None),
+                    "status" => {
+                        sync::looking();
+                        Ok(None)
+                    }
                     "login" => sync::login(value).map(Some),
                     "login_device" => sync::login_device(value).map(|()| None),
                     "join" => sync::join(value.as_deref().unwrap_or("")).map(|()| None),

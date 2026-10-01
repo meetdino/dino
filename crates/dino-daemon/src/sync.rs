@@ -2,7 +2,10 @@
 //! in its key store) become records sealed with the account's key before they leave, so the
 //! server holds nothing it can read. Every change made here, by the app, the CLI or an editor on
 //! `settings.toml`, is noticed within a second and pushed; changes from the account's other Macs
-//! arrive on a nudge (or a look every ten minutes) and go through the same save as the app's own.
+//! are pulled through the same save as the app's own. A server that offers push (a self-hosted or
+//! local one) nudges over a WebSocket; otherwise this Mac looks every minute, right away on wake,
+//! a network change or the app coming to the front, and every few seconds while a Mac is being
+//! approved or the Account pane is open.
 //!
 //! State lives in `DINO_HOME/sync/`: `state.json` (the records, what was last in step, the clock,
 //! what's waiting to go) and `account-key`, both 0600. The last 20 `settings.toml`s a sync
@@ -12,7 +15,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,8 +32,14 @@ use crate::cloud;
 
 /// How many replaced `settings.toml`s to keep.
 const SNAPSHOTS: usize = 20;
-/// A look at the server when nothing nudged.
-const PULL_EVERY: Duration = Duration::from_secs(10 * 60);
+/// A look at the server while its push socket is up, in case a nudge was missed.
+const PULL_EVERY_PUSHED: Duration = Duration::from_secs(10 * 60);
+/// A look at the server without push.
+const PULL_EVERY: Duration = Duration::from_secs(60);
+/// While a Mac is being approved or the Account pane is open.
+const PULL_EVERY_FAST: Duration = Duration::from_secs(3);
+/// The Account pane asked for the status this recently: it's open.
+const PANE_OPEN: Duration = Duration::from_secs(5);
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(default)]
@@ -57,6 +66,9 @@ struct State {
     message: Option<String>,
     /// Repo variables for remotes not checked out here yet.
     pending_repos: Vec<(String, String, String)>,
+    /// Which reset of the account's sync this Mac is in step with (from pulls): a different one
+    /// means another Mac reset it, for Macs that look rather than get the Reset nudge.
+    generation: Option<i64>,
 }
 
 /// What only this run of dinod knows.
@@ -141,6 +153,27 @@ static APPROVALS: AtomicBool = AtomicBool::new(false);
 /// How often to look at key requests without a nudge: while asking, and while signed in.
 const ASKING_EVERY: Duration = Duration::from_secs(2);
 const APPROVALS_EVERY: Duration = Duration::from_secs(60);
+/// The push socket is connected: nudges arrive, so the looks above can be slow.
+static SOCKET_UP: AtomicBool = AtomicBool::new(false);
+/// Whether the server offers push: 0 not known yet, 1 no, 2 yes.
+static PUSH: AtomicU8 = AtomicU8::new(0);
+/// When the Account pane (or the CLI) last asked for the status, in ms since the epoch.
+static LAST_STATUS: AtomicU64 = AtomicU64::new(0);
+
+/// How long to wait between looks, by what's going on.
+fn every(socket_up: bool, fast: bool, slow: Duration) -> Duration {
+    match (socket_up, fast) {
+        (true, _) => slow,
+        (false, true) => PULL_EVERY_FAST,
+        (false, false) => PULL_EVERY,
+    }
+}
+
+/// A Mac is being approved (this one asking is handled apart), or someone is looking at the pane.
+fn fast() -> bool {
+    let pane = now_ms().saturating_sub(LAST_STATUS.load(Ordering::Relaxed)) < PANE_OPEN.as_millis() as u64;
+    pane || !live().lock().unwrap().approvals.is_empty()
+}
 
 fn save_state(s: &State) {
     if let Ok(b) = serde_json::to_vec(s) {
@@ -290,15 +323,21 @@ fn run() {
     let mut last_approvals = None::<Instant>;
     let mut stamp = None;
     let mut last_wall = now_ms();
+    let mut failures: u32 = 0;
+    let network = NetworkChanges::new();
     PULL.store(true, Ordering::Relaxed);
     loop {
         std::thread::sleep(Duration::from_millis(250));
         let wall = now_ms();
-        // Woke from sleep: the other Macs may have moved on.
-        if wall.saturating_sub(last_wall) > 30_000 {
+        // Woke from sleep, or the network changed: the other Macs may have moved on.
+        if wall.saturating_sub(last_wall) > 30_000 || network.changed() {
             PULL.store(true, Ordering::Relaxed);
+            APPROVALS.store(true, Ordering::Relaxed);
+            failures = 0;
         }
         last_wall = wall;
+        let socket_up = SOCKET_UP.load(Ordering::Relaxed);
+        let fast = !socket_up && fast();
         let phase = state().lock().unwrap().phase.clone();
         if phase == "needs_key" {
             if APPROVALS.swap(false, Ordering::Relaxed) || last_asked.is_none_or(|t: Instant| t.elapsed() >= ASKING_EVERY) {
@@ -312,7 +351,7 @@ fn run() {
         if phase != "ready" {
             continue;
         }
-        if APPROVALS.swap(false, Ordering::Relaxed) || last_approvals.is_none_or(|t: Instant| t.elapsed() >= APPROVALS_EVERY) {
+        if APPROVALS.swap(false, Ordering::Relaxed) || last_approvals.is_none_or(|t: Instant| t.elapsed() >= every(socket_up, fast, APPROVALS_EVERY)) {
             last_approvals = Some(Instant::now());
             if let Err(e) = refresh_approvals() {
                 note_error(e);
@@ -320,7 +359,11 @@ fn run() {
         }
         let files = files_stamp();
         let changed = KICK.swap(false, Ordering::Relaxed) || stamp.as_ref() != Some(&files);
-        let due = PULL.swap(false, Ordering::Relaxed) || last_pull.is_none_or(|t: Instant| t.elapsed() >= PULL_EVERY);
+        // After failures, wait longer before trying again (up to the normal look), not every pass.
+        let backoff = Duration::from_secs(2u64.saturating_pow(failures.min(5))).min(PULL_EVERY);
+        let retry_ok = failures == 0 || last_pull.is_none_or(|t: Instant| t.elapsed() >= backoff);
+        let due = (PULL.load(Ordering::Relaxed) && retry_ok && PULL.swap(false, Ordering::Relaxed))
+            || last_pull.is_none_or(|t: Instant| t.elapsed() >= every(socket_up, fast, PULL_EVERY_PUSHED));
         if !changed && !due && !has_pending() {
             continue;
         }
@@ -334,12 +377,13 @@ fn run() {
             }
         }
         if due {
+            last_pull = Some(Instant::now());
             match pull() {
-                Ok(()) => last_pull = Some(Instant::now()),
+                Ok(()) => failures = 0,
                 Err(e) => {
                     note_error(e);
+                    failures += 1;
                     PULL.store(true, Ordering::Relaxed);
-                    std::thread::sleep(Duration::from_secs(2));
                 }
             }
         }
@@ -484,6 +528,21 @@ fn pull() -> anyhow::Result<()> {
         let v = cloud::get(&server, &format!("/v1/sync?since={since}"))?.ok_or_else(|| anyhow::anyhow!("no sync on this server"))?;
         let page: PullResponse = serde_json::from_value(v)?;
         let more = page.more;
+        if let Some(g) = page.extra.get("generation").and_then(Value::as_i64) {
+            let mut s = state().lock().unwrap();
+            match s.generation {
+                Some(known) if known != g => {
+                    drop(s);
+                    reset_elsewhere();
+                    return Ok(());
+                }
+                Some(_) => {}
+                None => {
+                    s.generation = Some(g);
+                    save_state(&s);
+                }
+            }
+        }
         apply_remote(page.records)?;
         let mut s = state().lock().unwrap();
         s.seq = s.seq.max(page.seq);
@@ -579,19 +638,44 @@ fn snapshots() -> Vec<PathBuf> {
     all
 }
 
-/// The WebSocket that says when the account moved on. Reconnects, slower each time it fails.
+/// The WebSocket that says when the account moved on, when the server offers one. Reconnects,
+/// slower each time it fails; without it, the sync loop looks on its own.
 fn nudges() {
     let mut wait = Duration::from_secs(1);
+    let mut asked: Option<(String, Instant)> = None;
     loop {
         let server = {
             let s = state().lock().unwrap();
             matches!(s.phase.as_str(), "ready" | "conflict" | "needs_key").then(|| s.server.clone())
         };
         let Some(server) = server else {
+            PUSH.store(0, Ordering::Relaxed);
+            asked = None;
             std::thread::sleep(Duration::from_secs(1));
             continue;
         };
-        match listen(&server) {
+        // Whether this server pushes at all: asked once, and again now and then (it may change).
+        let stale = asked.as_ref().is_none_or(|(s, at)| *s != server || at.elapsed() >= Duration::from_secs(10 * 60));
+        if stale {
+            match cloud::meta(&server) {
+                Ok(m) => {
+                    PUSH.store(if m.push { 2 } else { 1 }, Ordering::Relaxed);
+                    asked = Some((server.clone(), Instant::now()));
+                }
+                Err(_) => {
+                    std::thread::sleep(wait);
+                    wait = (wait * 2).min(Duration::from_secs(60));
+                    continue;
+                }
+            }
+        }
+        if PUSH.load(Ordering::Relaxed) != 2 {
+            std::thread::sleep(Duration::from_secs(5));
+            continue;
+        }
+        let r = listen(&server);
+        SOCKET_UP.store(false, Ordering::Relaxed);
+        match r {
             Ok(()) => wait = Duration::from_secs(1),
             Err(e) => {
                 if e.is::<cloud::SignedOut>() {
@@ -604,6 +688,44 @@ fn nudges() {
     }
 }
 
+/// macOS posts `com.apple.system.config.network_change` when the network changes (Wi-Fi joined,
+/// VPN up, cable in): a cheap check of a shared counter, no thread or callback.
+struct NetworkChanges {
+    #[cfg(target_os = "macos")]
+    token: Option<i32>,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn notify_register_check(name: *const std::ffi::c_char, out_token: *mut i32) -> u32;
+    fn notify_check(token: i32, check: *mut i32) -> u32;
+}
+
+impl NetworkChanges {
+    fn new() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            let mut token = 0;
+            let ok = unsafe { notify_register_check(c"com.apple.system.config.network_change".as_ptr(), &mut token) } == 0;
+            let n = NetworkChanges { token: ok.then_some(token) };
+            // The first check always reports a change.
+            let _ = n.changed();
+            n
+        }
+        #[cfg(not(target_os = "macos"))]
+        NetworkChanges {}
+    }
+
+    fn changed(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(token) = self.token {
+            let mut check = 0;
+            return unsafe { notify_check(token, &mut check) } == 0 && check != 0;
+        }
+        false
+    }
+}
+
 fn listen(server: &str) -> anyhow::Result<()> {
     use tungstenite::client::IntoClientRequest;
     let at = cloud::access(server)?;
@@ -613,6 +735,7 @@ fn listen(server: &str) -> anyhow::Result<()> {
     if let tungstenite::stream::MaybeTlsStream::Plain(s) = ws.get_ref() {
         s.set_read_timeout(Some(Duration::from_secs(30)))?;
     }
+    SOCKET_UP.store(true, Ordering::Relaxed);
     // Something may have happened while the socket was down.
     PULL.store(true, Ordering::Relaxed);
     APPROVALS.store(true, Ordering::Relaxed);
@@ -644,6 +767,7 @@ fn reset_elsewhere() {
     if s.phase != "ready" {
         return;
     }
+    s.generation = None;
     forget_account_key();
     s.records.clear();
     s.pending.clear();
@@ -658,6 +782,11 @@ fn reset_elsewhere() {
 }
 
 // ── What the app and the CLI ask for ──
+
+/// The Account pane (or `dino sync status`) is looking: look at the server more often for a bit.
+pub fn looking() {
+    LAST_STATUS.store(now_ms(), Ordering::Relaxed);
+}
 
 pub fn status() -> SyncStatus {
     let s = state().lock().unwrap();
@@ -818,6 +947,7 @@ fn take_key(server: &str, key: AccountKey) -> anyhow::Result<()> {
     {
         let mut s = state().lock().unwrap();
         s.seq = 0;
+        s.generation = None;
         s.records.clear();
         s.pending.clear();
         s.wrapped = None;
@@ -1188,6 +1318,8 @@ pub fn reset() -> anyhow::Result<()> {
     cloud::send(&server, reqwest::Method::POST, "/v1/sync/reset", &json!({}))?;
     {
         let mut s = state().lock().unwrap();
+        // This Mac's own reset: it learns the new generation from its next pull.
+        s.generation = None;
         s.records.clear();
         s.pending.clear();
         s.baseline.clear();
