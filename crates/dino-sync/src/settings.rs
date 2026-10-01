@@ -10,7 +10,7 @@
 //! | `agents`   | `<agent>.<mode/model/effort>` | `agents`                       |
 //! | `ssh`      | the host               | `ssh`                                 |
 //! | `repos`    | `<git remote> <VAR>`   | `repos.<path>.env`, by remote: paths differ between Macs |
-//! | `terminal` | `shell_integration`    | `machine.shell_integration`           |
+//! | `terminal` | `shell_integration`, and a field name | `machine.shell_integration`, `terminal` |
 //! | `keys`     | the key's name         | the key store, only when the person turned key sync on |
 //!
 //! Only values that differ from the defaults are records, so a missing record means "default".
@@ -20,7 +20,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 use dino_core::controls::Controls;
-use dino_core::settings::{Machine, Policies, Repo, Routing, Settings, SshHost, Worktrees};
+use dino_core::settings::{Machine, Policies, Repo, Routing, Settings, SshHost, Terminal, Worktrees};
 
 use crate::record::RecordId;
 
@@ -56,6 +56,7 @@ pub fn flatten(settings: &Settings, remote_of: &dyn Fn(&str) -> Option<String>, 
     if settings.machine.shell_integration != Machine::default().shell_integration {
         out.insert(RecordId::new("terminal", "shell_integration"), Value::Bool(settings.machine.shell_integration));
     }
+    fields(&mut out, "terminal", &settings.terminal, &Terminal::default());
     for (name, v) in keys.into_iter().flatten() {
         out.insert(RecordId::new("keys", name.clone()), Value::String(v.clone()));
     }
@@ -91,6 +92,7 @@ pub fn unflatten(local: &Settings, entries: &Entries, path_of: &dyn Fn(&str) -> 
         Some(Value::Bool(b)) => *b,
         _ => Machine::default().shell_integration,
     };
+    s.terminal = rebuild(entries, "terminal", Terminal::default());
 
     s.agents = BTreeMap::new();
     for (id, v) in in_collection(entries, "agents") {

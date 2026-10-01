@@ -177,6 +177,7 @@ final class DinoModel: ObservableObject {
                     self.watchGroups()
                     self.watchTree()
                     self.watchGhosttyConfig()
+                    self.watchTerminalSettings()
                 }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
@@ -422,6 +423,35 @@ final class DinoModel: ObservableObject {
                 if GhosttyConfig.changed { GhosttyConfig.apply(to: Self.terminals, overrides: Self.menuKeys) }
             }
         }
+    }
+
+    /// The terminal's own settings as dinod and the app last agreed on them.
+    private var agreedTerminal: DinoSettings.Terminal?
+
+    /// The app reads its terminal settings itself (at launch, before dinod answers), and dinod keeps
+    /// them in `settings.toml` so they sync: whichever side changed since they last agreed wins.
+    private func watchTerminalSettings() {
+        let check: @Sendable () -> Void = {
+            Task.detached {
+                guard let conn = try? DinoConnection(path: DinoEnvironment.socketPath),
+                      var settings = try? conn.settings(), let there = settings.terminal else { return }
+                let (here, agreed) = await MainActor.run { (DinoSettings.Terminal.mirrored, self.agreedTerminal) }
+                // First look: an app that had these before dinod kept them hands them over once.
+                let fromApp = agreed.map { here != $0 && there == $0 } ?? (there == .defaults && here != .defaults)
+                if fromApp {
+                    settings.terminal = here
+                    try? conn.setSettings(settings)
+                    await MainActor.run { self.agreedTerminal = here }
+                } else {
+                    await MainActor.run {
+                        there.mirror()
+                        self.agreedTerminal = there
+                    }
+                }
+            }
+        }
+        check()
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in check() }
     }
 
     func terminal(for id: String) -> TerminalViewState {

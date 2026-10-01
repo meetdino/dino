@@ -40,6 +40,41 @@ struct DinoSettings: Codable, Equatable {
     var worktrees: Worktrees?
     /// Machines to run sessions on over SSH, by host; nil from an older dinod.
     var ssh: [String: SshHost]?
+    /// The terminal's own choices, kept by dinod so they sync; nil from an older dinod.
+    var terminal: Terminal?
+
+    struct Terminal: Codable, Equatable {
+        var start_with: String
+        var quick_key: String
+        var quick_autohide: Bool
+        var on_quit: String
+
+        /// dinod's defaults: StartWith.last, QuickTerminal.Key.commandGrave, hide on click, ask on quit.
+        static let defaults = Terminal(start_with: "last", quick_key: "cmd-grave", quick_autohide: true, on_quit: "")
+
+        /// As the app keeps them for itself (it reads them there at launch, before dinod answers).
+        @MainActor static var mirrored: Terminal {
+            let d = UserDefaults.standard
+            return Terminal(
+                start_with: d.string(forKey: StartWith.key) ?? defaults.start_with,
+                quick_key: d.string(forKey: QuickTerminal.Key.storageKey) ?? defaults.quick_key,
+                quick_autohide: d.object(forKey: QuickTerminal.autohideKey) as? Bool ?? defaults.quick_autohide,
+                on_quit: d.string(forKey: QuitChoice.key) ?? defaults.on_quit
+            )
+        }
+
+        /// Make the app's copy these, and claim a changed shortcut.
+        @MainActor func mirror() {
+            let before = Terminal.mirrored
+            guard before != self else { return }
+            let d = UserDefaults.standard
+            d.set(start_with, forKey: StartWith.key)
+            d.set(quick_key, forKey: QuickTerminal.Key.storageKey)
+            d.set(quick_autohide, forKey: QuickTerminal.autohideKey)
+            d.set(on_quit, forKey: QuitChoice.key)
+            if before.quick_key != quick_key { QuickTerminal.shared.registerKey() }
+        }
+    }
 }
 
 /// A provider key's name and where it comes from; dinod never sends values.
@@ -318,50 +353,6 @@ private struct SettingsIcon: View {
     }
 }
 
-private struct AccountRow: View {
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "person.crop.circle.fill")
-                .font(.system(size: 30))
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Log In").fontWeight(.semibold)
-                Text("with your Dino Account").font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-private struct AccountPane: View {
-    var body: some View {
-        Form {
-            Section {
-                VStack(spacing: 10) {
-                    Image(systemName: "person.crop.circle.fill")
-                        .font(.system(size: 56))
-                        .foregroundStyle(.secondary)
-                    Text("Dino Account").font(.title2.weight(.semibold))
-                    Text("Log in to keep your settings, policies and keys the same on every Mac you use dino on.")
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Log In…") {}
-                        .controlSize(.large)
-                        .disabled(true)
-                        .padding(.top, 4)
-                    Text("Not available yet. dino works fully without an account, and nothing leaves this Mac.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
 /// A section's explanation, left-aligned like System Settings'.
 struct Footnote: View {
     let text: String
@@ -546,6 +537,10 @@ private struct GeneralPane: View {
             }
         }
         .formStyle(.grouped)
+        // dinod keeps them too, so they sync to your other Macs.
+        .onChange(of: DinoSettings.Terminal(start_with: startWith, quick_key: quickKey, quick_autohide: quickAutohide, on_quit: quitChoice)) { _, t in
+            if store.settings?.terminal != t { store.update { $0.terminal = t } }
+        }
     }
 }
 
