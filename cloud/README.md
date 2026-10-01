@@ -1,21 +1,21 @@
 # dino-cloud
 
-The dino account server: sign-in, devices, and end-to-end encrypted settings sync. Rust (axum,
-tokio, sqlx) on Postgres.
+The dino account server: sign-in (GitHub first, or a link by email), devices, and settings sync.
+Rust (axum, tokio, sqlx) on Postgres.
 
 It never sees agent traffic, sessions or terminal content: those stay on the Mac, where dinod is
-the only proxy. It stores accounts, the devices signed in to them, and settings that are sealed on
-the device with a key this server never has. The account page shows everything it holds, and the
-export returns all of it.
+the only proxy. It stores accounts, the devices signed in to them, and dino's settings as plain
+JSON, like VS Code's settings sync. Secrets (API keys, tokens) never sync: they stay on each Mac.
+The account page shows everything it holds, settings included, and the export returns all of it.
 
 ## What's here
 
 | Area | Endpoints |
 |---|---|
-| OAuth 2 server | `GET /oauth/authorize` (code + PKCE S256, loopback redirects for native apps), `POST /oauth/token` (`authorization_code`, `refresh_token`, `urn:ietf:params:oauth:grant-type:device_code`), `POST /oauth/device_authorization`, `POST /oauth/revoke`, `POST /oauth/introspect`, `GET /oauth/userinfo`, `/.well-known/oauth-authorization-server` (also at `openid-configuration`) |
+| OAuth 2 server | `GET /oauth/authorize` (code + PKCE S256, loopback redirects for native apps), `POST /oauth/token` (`authorization_code`, `refresh_token`, `urn:ietf:params:oauth:grant-type:device_code`), `POST /oauth/device_authorization` (with `email`: a sign-in link by mail, opened at `/login/{token}`), `POST /oauth/revoke`, `POST /oauth/introspect`, `GET /oauth/userinfo`, `/.well-known/oauth-authorization-server` (also at `openid-configuration`) |
 | Sign-in pages | `/signin` (GitHub, Google, emailed code), `/device` (approve a device-flow code), `/account` (devices, synced data, export, sign out everywhere, delete) |
 | Account API (`/v1`, bearer) | `GET /me`, `GET /devices`, `DELETE /devices/{id}`, `POST /signout-everywhere`, `DELETE /account`, `GET /export` |
-| Sync (`/v1/sync`, bearer) | `GET ?since=&limit=`, `POST` (a `dino_sync::PushRequest`), `GET /ws` (nudges), `POST /reset`, `GET`/`PUT /recovery`, `POST`/`GET /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/claim`, `/reveal`, `/grant`, `/deny` |
+| Sync (`/v1/sync`, bearer) | `GET ?since=&limit=`, `POST` (a `dino_sync::PushRequest`), `GET /ws` (nudges) |
 | Operations | `/healthz`, `/readyz`, Prometheus `/metrics` on `DINO_METRICS_BIND` |
 
 Clients: `dino` (the app and CLI) and `dino-harness` are native (loopback `http://127.0.0.1:<any
@@ -31,8 +31,14 @@ tokens carry audience `dino-harness` and don't open the `/v1` API; the harness c
 - **Refresh tokens** rotate on every use, one family per device (RFC 9700 §4.14.2). A spent token
   presented again within 30 s returns the same replacement (it's derived from the spent one), so a
   client that lost a response isn't signed out; after that, reuse signs the device out.
-- **Native sign-in** always shows a confirmation naming the device, so a program on the machine
-  can't quietly use a signed-in browser. The redirect carries `iss` (RFC 9207).
+- **Native sign-in** shows a confirmation naming the device, so a program on the machine can't
+  quietly use a signed-in browser. The redirect carries `iss` (RFC 9207). With `provider=github`
+  (dino's "Sign in with GitHub") it's one click: straight to GitHub, and the code goes back to the
+  app after GitHub's answer, with GitHub's own consent standing in for the confirmation.
+- **Sign-in links** (`dino login --email`, the app's "Use email instead"): a device-code request
+  with an address mails a link; opening it shows a button, and pressing it approves that request
+  (a mail scanner fetching the link uses nothing up). Random, stored hashed, used once, 15 minutes,
+  5 per address per hour, and the device's answer is the same whether an account exists or not.
 - **Device flow** (RFC 8628 §5.4, draft-ietf-oauth-cross-device-security): the consent page names
   the app and device, shows the code large, warns when the request came from another network,
   needs a sign-in from the last 10 minutes, and code entry is rate limited.
@@ -40,18 +46,13 @@ tokens carry audience `dino-harness` and don't open the `/v1` API; the harness c
 - **Accounts** link a new identity by verified email only. Deletion revokes everything at once and
   erases the rows after 30 days.
 - **Sync** follows `dino-sync`: per-key last-writer-wins by hybrid logical clock, the same record
-  twice accepted once, stamps over 10 minutes ahead refused, only PASETO `v4.local` values stored
-  (5 MB per account). Writes to an account are serialized on its head row, so sequence numbers
+  twice accepted once, stamps over 10 minutes ahead refused, values stored as JSON (5 MB per
+  account). A client on an older protocol (the encrypted protocol 2) is told to upgrade (426). Writes to an account are serialized on its head row, so sequence numbers
   have no gaps. Devices look for changes on their own (see [Push](#push-optional)); with push on,
   nudges go through Postgres `LISTEN`/`NOTIFY`, so every node's sockets hear pushes made on any
   node.
-- **Key approval** (sync protocol 2, `dino_sync::approval`): the new device posts a commitment to
-  its key and a fresh nonce; a signed-in device answers with its own (`claim`); only then does the
-  new device reveal what it committed to (`reveal`, once); both screens show a code made from all
-  four, which neither side nor this server can steer; the signed-in device then posts the account
-  key sealed to the new one (`grant`, only from the key it answered with). The asking device can
-  withdraw its request. The server stores each message as sent and only relays. The
-  recovery-wrapped key is stored as sent. A client older than protocol 2 is told to upgrade.
+- **The database out of reach** (Neon waking up, Postgres restarting): requests answer 503 with
+  `Retry-After` instead of failing, and the server waits for it at start rather than exiting.
 - **Hardening**: per-address and per-account rate limits (GCRA), `Idempotency-Key` on `/v1`
   mutations, CSRF tokens and Origin checks on forms, a strict CSP, `__Host-` cookies on https, no
   query strings, bodies or tokens in logs.
@@ -102,10 +103,10 @@ faked. They cover the full PKCE sign-in, code replay, bad clients and redirects,
 with the grace window, concurrent refreshes and reuse detection, the device flow with consent and
 fresh sign-in, GitHub and Google linking to one account, sign-out everywhere, idempotency,
 deletion and erasure, CSRF and Origin checks, rate limits, introspection, two devices converging
-through sync, paging, nudges across two nodes, key approval (the four-message commit-then-reveal
-exchange of sync protocol 2) and recovery, protocol 1 clients told to upgrade, gapless sequences under
-concurrent pushes, and that neither the logs nor a full database dump contain a token or any
-plaintext value.
+through sync, paging, nudges across two nodes, older clients told to upgrade, gapless sequences
+under concurrent pushes, sign-in links (single use, expiry, per-address limits, no enumeration),
+one-click GitHub joining an email account, a 503 when the database is out of reach, and that the
+logs contain no token.
 
 ## Where it runs
 
@@ -157,7 +158,7 @@ Check it from a Mac: `DINO_HOME=/tmp/dino-try dino login https://cloud.meetdino.
 ## Push (optional)
 
 By default a device looks for changes every minute, right away when the Mac wakes, changes network
-or comes back to the app, and every few seconds while another Mac is being approved or the
+or comes back to the app, and every few seconds while the
 Account pane is open. That needs nothing from the server but plain requests, so it runs anywhere,
 serverless included.
 
