@@ -16,9 +16,9 @@ pub mod record;
 pub mod recovery;
 pub mod settings;
 
-pub use approval::{DeviceKeys, Grant, approval_code};
+pub use approval::{Commitment, DeviceKeys, Grant, Response, Reveal, approval_code, verify_reveal};
 pub use crypto::{AccountKey, CryptoError};
-pub use hlc::{Clock, Hlc};
-pub use merge::Store;
+pub use hlc::{Clock, FutureStamp, Hlc};
+pub use merge::{ApplyError, Store};
 pub use record::{Nudge, PullResponse, PushRequest, PushResponse, Record, RecordId, SyncError};
 pub use recovery::RecoveryKey;

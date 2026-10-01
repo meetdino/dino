@@ -8,9 +8,8 @@ use serde_json::Value;
 
 use crate::providers::{percent, unpercent};
 
-/// Where the account server is until dino has a public one: `DINO_CLOUD_URL` or `dino login <url>`
-/// choose another.
-pub const PLACEHOLDER: &str = "https://cloud.dino.invalid";
+/// dino's own account server; `DINO_CLOUD_URL` or `dino login <url>` choose another (self-hosted).
+pub const DEFAULT_SERVER: &str = "https://cloud.meetdino.com";
 /// dino's app and CLI, as the server knows them.
 const CLIENT: &str = "dino";
 const SCOPE: &str = "account sync";
@@ -23,7 +22,7 @@ pub const PRIVATE_PREFIXES: [&str; 2] = ["DINO_CLOUD_", "CHATGPT_"];
 
 /// The server to use when none was chosen at sign-in.
 pub fn default_server() -> String {
-    std::env::var("DINO_CLOUD_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| PLACEHOLDER.into())
+    std::env::var("DINO_CLOUD_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| DEFAULT_SERVER.into())
 }
 
 fn now() -> u64 {

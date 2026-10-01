@@ -3,12 +3,12 @@
 use dino_core::controls::Controls;
 use dino_core::settings::{Repo, Settings, SshHost};
 use dino_sync::record::RecordId;
-use dino_sync::settings::{diff, flatten, unflatten};
+use dino_sync::settings::{Entries, diff, flatten, syncable_env, unflatten};
 use serde_json::json;
 use std::collections::BTreeMap;
 
 /// A Mac's repos: its checkout paths and their remotes.
-fn mac(repos: &[(&str, &str)]) -> (impl Fn(&str) -> Option<String>, impl Fn(&str) -> Option<String>) {
+fn mac(repos: &[(&str, &str)]) -> (impl Fn(&str) -> Option<String> + use<>, impl Fn(&str) -> Option<String> + use<>) {
     let by_path: BTreeMap<String, String> = repos.iter().map(|(p, r)| (p.to_string(), r.to_string())).collect();
     let by_remote: BTreeMap<String, String> = repos.iter().map(|(p, r)| (r.to_string(), p.to_string())).collect();
     (move |p: &str| by_path.get(p).cloned(), move |r: &str| by_remote.get(r).cloned())
@@ -109,4 +109,40 @@ fn values_a_newer_dino_shapes_differently_are_skipped() {
     let got = unflatten(&Settings::default(), &entries, &p, &r);
     assert_eq!(got.settings.policies.session_token_budget, 0, "a value that doesn't fit leaves the default");
     assert!(!got.settings.policies.allow_bypass, "the rest still apply");
+}
+
+#[test]
+fn repo_variables_that_run_code_never_sync() {
+    let remote = "git@github.com:acme/api.git";
+    let hostile = [
+        "NODE_OPTIONS", "BASH_ENV", "GIT_SSH_COMMAND", "GIT_CONFIG_COUNT", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "PATH", "PYTHONSTARTUP", "PERL5OPT", "RUBYOPT",
+        "ZDOTDIR", "ENV", "PROMPT_COMMAND", "node_options", "Path", "ANTHROPIC_BASE_URL", "HTTPS_PROXY", "BASH_FUNC_ls%%", "A=B", "1X", "",
+    ];
+    for var in hostile {
+        assert!(!syncable_env(var), "{var} must not sync");
+    }
+    for var in ["AWS_PROFILE", "RUST_LOG", "_PRIVATE", "DATABASE_URL"] {
+        assert!(syncable_env(var), "{var} syncs");
+    }
+
+    // A compromised Mac writes them anyway: the others ignore them, cloned there or not.
+    let mut entries: Entries = hostile.iter().map(|var| (RecordId::new("repos", format!("{remote} {var}")), json!("/tmp/evil"))).collect();
+    entries.insert(RecordId::new("repos", format!("{remote} AWS_PROFILE")), json!("client-x"));
+    let (b_remote, b_path) = mac(&[("/Users/b/w/api", remote)]);
+    let got = unflatten(&Settings::default(), &entries, &b_path, &b_remote);
+    assert_eq!(got.settings.repos["/Users/b/w/api"].env, [("AWS_PROFILE".to_string(), "client-x".to_string())].into());
+    let (c_remote, c_path) = mac(&[]);
+    let c = unflatten(&Settings::default(), &entries, &c_path, &c_remote);
+    assert_eq!(c.pending, vec![(remote.to_string(), "AWS_PROFILE".to_string(), "client-x".to_string())]);
+
+    // One set on this Mac stays on this Mac: never a record, and kept when records apply.
+    let mut local = Settings::default();
+    local.repos.insert("/Users/b/w/api".into(), Repo { env: [("NODE_OPTIONS".to_string(), "--inspect".to_string()), ("STALE".to_string(), "1".to_string())].into() });
+    let mine = flatten(&local, &b_remote, None);
+    assert_eq!(mine.keys().collect::<Vec<_>>(), vec![&RecordId::new("repos", format!("{remote} STALE"))]);
+    let got = unflatten(&local, &entries, &b_path, &b_remote);
+    let env = &got.settings.repos["/Users/b/w/api"].env;
+    assert_eq!(env.get("NODE_OPTIONS").map(String::as_str), Some("--inspect"));
+    assert_eq!(env.get("AWS_PROFILE").map(String::as_str), Some("client-x"));
+    assert!(!env.contains_key("STALE"), "synced variables come from the records");
 }

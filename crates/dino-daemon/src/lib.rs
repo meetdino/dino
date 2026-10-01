@@ -622,6 +622,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     "undo" => sync::undo().map(|()| None),
                     "keys" => Ok(sync::set_key_sync(value.as_deref() != Some("off"))).map(|()| None),
                     "ack_recovery" => Ok(sync::ack_recovery()).map(|()| None),
+                    "ask" => sync::ask().map(|()| None),
+                    "claim" => sync::claim(value.as_deref().unwrap_or("")).map(|()| None),
+                    "grant" => sync::grant(value.as_deref().unwrap_or("")).map(|()| None),
+                    "deny" => sync::deny(value.as_deref().unwrap_or("")).map(|()| None),
                     "logout" => Ok(sync::logout()).map(|()| None),
                     other => Err(anyhow::anyhow!("no sync action {other}")),
                 };
@@ -1567,7 +1571,7 @@ fn state(d: &Daemon) -> Response {
             })
         })
         .collect();
-    Response::State { sessions, quotas }
+    Response::State { sessions, quotas, approvals: sync::approvals() }
 }
 
 // ---- Persistence: sessions survive dinod restarts (and reboots) by resuming each agent. ----
