@@ -131,6 +131,7 @@ struct DinoApp: App {
             CommandGroup(replacing: .help) {
                 Button("Keyboard Shortcuts") { model.showShortcuts = true }
                     .keyboardShortcut("/")
+                Button("Show Welcome") { model.showWelcome = true }
             }
         }
         Window("Settings", id: SettingsView.windowID) {
@@ -722,7 +723,10 @@ struct Sidebar: View {
             // up to seconds while agents made worktrees): rows keep unique tags and stable
             // identities instead, so the list's own diff stays right.
             .listStyle(.sidebar)
-            UsagePanel()
+            WelcomeCard()
+            if !model.welcomeShowing {
+                UsagePanel()
+            }
         }
         .safeAreaInset(edge: .top) {
             VStack(alignment: .leading, spacing: 8) {
