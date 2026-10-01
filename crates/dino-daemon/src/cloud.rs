@@ -291,6 +291,23 @@ pub fn logout(server: &str) {
     forget_tokens();
 }
 
+/// What the server offers, from `/v1/meta` (no sign-in needed).
+pub struct Meta {
+    /// It nudges over a WebSocket; otherwise the client looks on its own.
+    pub push: bool,
+}
+
+/// A server from before `/v1/meta` always had the socket.
+pub fn meta(server: &str) -> anyhow::Result<Meta> {
+    let r = http().get(format!("{server}/v1/meta")).timeout(Duration::from_secs(10)).send()?;
+    if r.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(Meta { push: true });
+    }
+    anyhow::ensure!(r.status().is_success(), "the account server said {}", r.status().as_u16());
+    let v: Value = r.json()?;
+    Ok(Meta { push: v["push"].as_bool().unwrap_or(false) })
+}
+
 /// The nudge socket, as a WebSocket URL.
 pub fn ws_url(server: &str) -> String {
     let base = server.strip_prefix("https://").map(|r| format!("wss://{r}")).or_else(|| server.strip_prefix("http://").map(|r| format!("ws://{r}"))).unwrap_or_else(|| server.to_string());
