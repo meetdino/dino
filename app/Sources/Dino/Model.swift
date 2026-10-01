@@ -44,6 +44,10 @@ enum Brand {
 final class DinoModel: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     @Published var quotas: [QuotaInfo] = []
+    /// Other Macs asking this one for the sync key (dinod lists them with the state).
+    @Published var approvals: [ApprovalRequest] = []
+    /// The request whose approve sheet is open.
+    @Published var approving: ApprovalRequest?
     @Published var launchers: [LauncherInfo] = []
     @Published var selected: String? {
         // Remembered per dinod, so reopening the app comes back to the same session.
@@ -194,6 +198,7 @@ final class DinoModel: ObservableObject {
             await MainActor.run {
                 if let resp {
                     self.apply(resp.sessions ?? [], resp.quotas ?? [])
+                    self.applyApprovals(resp.approvals ?? [])
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.poll() }
                 } else {
                     self.lostDaemon()

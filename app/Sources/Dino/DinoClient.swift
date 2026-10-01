@@ -495,7 +495,7 @@ struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
 
-    enum CodingKeys: String, CodingKey { case type, sessions, quotas, launchers, id, message }
+    enum CodingKeys: String, CodingKey { case type, sessions, quotas, launchers, id, message, approvals }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -503,11 +503,14 @@ struct Response: Decodable {
         // `sessions` means SessionInfo only in a state reply.
         sessions = type == "state" ? try c.decodeIfPresent([SessionInfo].self, forKey: .sessions) : nil
         quotas = try c.decodeIfPresent([QuotaInfo].self, forKey: .quotas)
+        approvals = try c.decodeIfPresent([ApprovalRequest].self, forKey: .approvals)
         launchers = try c.decodeIfPresent([LauncherInfo].self, forKey: .launchers)
         id = try c.decodeIfPresent(String.self, forKey: .id)
         message = try c.decodeIfPresent(String.self, forKey: .message)
     }
     var quotas: [QuotaInfo]?
+    /// Other Macs asking this one for the sync key.
+    var approvals: [ApprovalRequest]?
     var launchers: [LauncherInfo]?
     var id: String?
     var message: String?

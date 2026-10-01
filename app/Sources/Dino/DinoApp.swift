@@ -301,6 +301,7 @@ struct ContentView: View {
         } detail: {
             HSplitView {
                 Terminals()
+                    .safeAreaInset(edge: .top, spacing: 0) { ApprovalBanner() }
                 if let pane = model.sidePane {
                     SidePaneView(pane: pane)
                         .frame(minWidth: 320, idealWidth: 520, maxWidth: .infinity)
@@ -312,6 +313,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
+        .sheet(item: $model.approving) { ApproveSheet(request: $0) }
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
         .sheet(isPresented: $model.showNewSession) { NewSessionSheet() }
         .sheet(isPresented: $model.showShortcuts) { ShortcutSheet() }

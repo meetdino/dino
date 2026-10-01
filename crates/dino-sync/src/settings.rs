@@ -14,7 +14,9 @@
 //! | `keys`     | the key's name         | the key store, only when the person turned key sync on |
 //!
 //! Only values that differ from the defaults are records, so a missing record means "default".
-//! The rest of `machine` stays on each Mac, and a repo without a remote isn't synced.
+//! The rest of `machine` stays on each Mac, and a repo without a remote isn't synced. Neither are
+//! repo variables that could make a session run code (`syncable_env`): dinod sets repo variables
+//! in every session in the repo, so one device could otherwise run code on all the others.
 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -49,7 +51,7 @@ pub fn flatten(settings: &Settings, remote_of: &dyn Fn(&str) -> Option<String>, 
     }
     for (path, repo) in &settings.repos {
         let Some(remote) = remote_of(path) else { continue };
-        for (var, v) in &repo.env {
+        for (var, v) in repo.env.iter().filter(|(var, _)| syncable_env(var.as_str())) {
             out.insert(RecordId::new("repos", repo_key(&remote, var)), Value::String(v.clone()));
         }
     }
@@ -108,11 +110,20 @@ pub fn unflatten(local: &Settings, entries: &Entries, path_of: &dyn Fn(&str) -> 
 
     s.ssh = in_collection(entries, "ssh").filter_map(|(id, v)| Some((id.key.clone(), serde_json::from_value::<SshHost>(v.clone()).ok()?))).collect();
 
-    // Repos with a remote come from the records; those without stay as this Mac has them.
-    s.repos.retain(|path, _| remote_of(path).is_none());
+    // Repos with a remote come from the records; those without stay as this Mac has them, and so
+    // do variables that never sync.
+    for (path, repo) in s.repos.iter_mut() {
+        if remote_of(path).is_some() {
+            repo.env.retain(|var, _| !syncable_env(var));
+        }
+    }
+    s.repos.retain(|path, repo| remote_of(path).is_none() || !repo.env.is_empty());
     let mut pending = vec![];
     for (id, v) in in_collection(entries, "repos") {
         let (Some((remote, var)), Value::String(v)) = (id.key.rsplit_once(' '), v) else { continue };
+        if !syncable_env(var) {
+            continue;
+        }
         match path_of(remote) {
             Some(path) => {
                 s.repos.entry(path).or_insert_with(Repo::default).env.insert(var.to_string(), v.clone());
@@ -123,6 +134,36 @@ pub fn unflatten(local: &Settings, entries: &Entries, path_of: &dyn Fn(&str) -> 
 
     let keys = in_collection(entries, "keys").filter_map(|(id, v)| Some((id.key.clone(), v.as_str()?.to_string()))).collect();
     Applied { settings: s, keys, pending }
+}
+
+/// Variables that make a shell, interpreter, loader, git or an agent run code or trust something
+/// of the setter's choosing, or change which programs run. They stay on the Mac that set them.
+const UNSYNCED_ENV: &[&str] = &[
+    // Where programs, shells and their startup files are found.
+    "PATH", "HOME", "SHELL", "ENV", "BASH_ENV", "ZDOTDIR", "PROMPT_COMMAND", "PS0", "PS1", "PS2", "PS4", "IFS", "CDPATH",
+    // Programs other tools run.
+    "EDITOR", "VISUAL", "PAGER", "MANPAGER", "BROWSER", "LESSOPEN", "LESSCLOSE", "SSH_ASKPASS", "SUDO_ASKPASS",
+    // Interpreters' startup code and module paths.
+    "NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PERL5OPT", "PERL5LIB", "PERLLIB", "PERL5DB",
+    "RUBYOPT", "RUBYLIB", "GEM_HOME", "GEM_PATH", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH", "LUA_INIT", "LUA_PATH",
+    "LUA_CPATH", "PHPRC", "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOC", "RUSTFLAGS",
+    // Who is trusted, and where traffic (and the keys in it) goes.
+    "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "NO_PROXY", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE",
+];
+
+/// Prefixes of whole families of such variables: the dynamic loader's, git's, exported bash
+/// functions and npm's configuration.
+const UNSYNCED_ENV_PREFIXES: &[&str] = &["DYLD_", "LD_", "GIT_", "BASH_FUNC_", "NPM_CONFIG_"];
+
+/// Whether a repo variable may travel between Macs: a well-formed name (`[A-Za-z_][A-Za-z0-9_]*`)
+/// that isn't one that could make a session run code (compared ignoring case, as some tools read
+/// lowercase variants).
+pub fn syncable_env(var: &str) -> bool {
+    let mut chars = var.chars();
+    let well_formed = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let upper = var.to_ascii_uppercase();
+    well_formed && !UNSYNCED_ENV.contains(&upper.as_str()) && !UNSYNCED_ENV_PREFIXES.iter().any(|p| upper.starts_with(p))
 }
 
 fn repo_key(remote: &str, var: &str) -> String {

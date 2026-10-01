@@ -17,6 +17,24 @@ struct SyncStatus: Codable, Equatable {
     var conflict: [Int]?
     var snapshots: Int
     var message: String?
+    /// While this Mac needs the key: its request to the account's other Macs.
+    var join: JoinRequest?
+    var approvals: [ApprovalRequest]?
+}
+
+/// This Mac asking another for the key; `code` once one has answered.
+struct JoinRequest: Codable, Equatable {
+    var expires_at: UInt64
+    var code: String?
+}
+
+/// Another Mac asking this one for the key; `code` once this Mac answered and it revealed.
+struct ApprovalRequest: Codable, Equatable, Identifiable {
+    var id: String
+    var device: String
+    var os: String
+    var expires_at: UInt64
+    var code: String?
 }
 
 private struct SyncResponse: Decodable {
@@ -208,10 +226,45 @@ private struct NeedsKey: View {
     @ObservedObject private var sync = SyncStore.shared
     @State private var key = ""
     @State private var confirmReset = false
+    @State private var useRecovery = false
 
     var body: some View {
+        if !useRecovery {
+            Section {
+                VStack(spacing: 12) {
+                    Hero(title: "Approve this Mac", text: "This account already syncs from another Mac. Its settings are encrypted with a key only your Macs have: approve this one from a Mac that's signed in.")
+                    if let code = sync.status?.join?.code {
+                        Text("Check the other Mac shows").foregroundStyle(.secondary)
+                        Text(code)
+                            .font(.system(size: 34, weight: .semibold, design: .monospaced))
+                            .textSelection(.enabled)
+                            .accessibilityLabel("Approval code \(code.replacingOccurrences(of: "-", with: " "))")
+                    } else if sync.status?.join != nil {
+                        ProgressView().controlSize(.small)
+                        Text("Open dino on another of your Macs and choose Approve. A code shows here once it does.")
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Button("Ask My Other Macs") { sync.act("ask") }.keyboardShortcut(.defaultAction)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                HStack {
+                    Spacer()
+                    Button("Use Recovery Key Instead") { useRecovery = true }.buttonStyle(.link)
+                }
+            } footer: {
+                Footnote("The code is the same on both Macs only when nobody swapped keys on the way. Nothing is shared until you approve on the other Mac.")
+            }
+        } else {
+            recovery
+        }
+    }
+
+    @ViewBuilder private var recovery: some View {
         Section {
-            Hero(title: "Enter your recovery key", text: "This account already syncs from another Mac. Its settings are encrypted with a key only your Macs have; the recovery key you saved when you set it up opens them here.")
+            Hero(title: "Enter your recovery key", text: "The recovery key you saved when you set up sync opens your settings here, without another Mac.")
             LabeledContent("Recovery key") {
                 TextField("Recovery key", text: $key, prompt: Text("D1-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"))
                     .labelsHidden()
@@ -221,6 +274,7 @@ private struct NeedsKey: View {
             HStack {
                 Button("Lost it? Reset Sync…", role: .destructive) { confirmReset = true }
                 Spacer()
+                Button("Approve from Another Mac") { useRecovery = false }
                 Button("Continue", action: join)
                     .keyboardShortcut(.defaultAction)
                     .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -337,4 +391,130 @@ private struct Ready: View {
 
 private extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
+
+// MARK: - Another Mac asking this one for the key
+
+extension DinoModel {
+    /// One sync action in dinod, off the main thread; `done` gets the error, if any.
+    private func syncAction(_ action: String, _ value: String, done: (@MainActor (String?) -> Void)? = nil) {
+        Task.detached {
+            let failure: String?
+            do {
+                let (status, _) = try DinoConnection(path: DinoEnvironment.socketPath).sync(action, value)
+                if let status { await MainActor.run { SyncStore.shared.status = status } }
+                failure = nil
+            } catch {
+                failure = error.localizedDescription
+            }
+            let result = failure
+            await MainActor.run { done?(result) }
+        }
+    }
+
+    /// Take the request so both Macs can show the code. Gives nothing yet.
+    func claimApproval(_ r: ApprovalRequest) {
+        guard r.code == nil else { return }
+        syncAction("claim", r.id) { e in if let e { self.error = e } }
+    }
+
+    func grantApproval(_ r: ApprovalRequest, done: @escaping @MainActor (String?) -> Void) {
+        syncAction("grant", r.id, done: done)
+    }
+
+    func denyApproval(_ r: ApprovalRequest) {
+        approvals.removeAll { $0.id == r.id }
+        syncAction("deny", r.id)
+    }
+
+    /// What dinod reports with each state: published only when it changes, and a notification the
+    /// first time a request shows up.
+    func applyApprovals(_ next: [ApprovalRequest]) {
+        guard next != approvals else { return }
+        for r in next where !approvals.contains(where: { $0.id == r.id }) {
+            Notifier.post(key: "approval-\(r.id)", title: "\(r.device) wants to sync your settings", body: "Open dino to compare codes and approve it.")
+        }
+        approvals = next
+        if let open = approving, let now = next.first(where: { $0.id == open.id }) {
+            if now != open { approving = now }
+        }
+    }
+}
+
+/// A slim bar over the terminals while another Mac waits for this one's approval.
+struct ApprovalBanner: View {
+    @EnvironmentObject var model: DinoModel
+
+    var body: some View {
+        if let r = model.approvals.first {
+            HStack(spacing: 10) {
+                Image(systemName: "laptopcomputer.and.arrow.down").foregroundStyle(Brand.green)
+                Text("**\(r.device)** wants to sync your settings").lineLimit(1)
+                Spacer()
+                Button("Deny") { model.denyApproval(r) }
+                // No default-key shortcut: Return belongs to the terminal under the bar.
+                Button("Approve…") { model.approving = r }
+            }
+            .font(.callout)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(.bar)
+            .overlay(alignment: .bottom) { Divider() }
+        }
+    }
+}
+
+/// Approving another Mac: take its request, show the code, and only on "they match" give it the key.
+struct ApproveSheet: View {
+    let request: ApprovalRequest
+    @EnvironmentObject var model: DinoModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var error: String?
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "laptopcomputer.and.arrow.down")
+                .font(.system(size: 40))
+                .foregroundStyle(Brand.green)
+            Text("Approve \(request.device)?").font(.title2.weight(.semibold))
+            Text("It gets the key to your synced settings. Approve only if it shows the same code.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Group {
+                if let code = request.code {
+                    Text(code)
+                        .font(.system(size: 34, weight: .semibold, design: .monospaced))
+                        .textSelection(.enabled)
+                        .accessibilityLabel("Approval code \(code.replacingOccurrences(of: "-", with: " "))")
+                } else {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Waiting for \(request.device)…").foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(height: 44)
+            if let error { Text(error).foregroundStyle(.red).font(.callout) }
+            HStack {
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Codes Don't Match") {
+                    model.denyApproval(request)
+                    dismiss()
+                }
+                .disabled(request.code == nil)
+                Button("They Match: Approve") {
+                    model.grantApproval(request) { e in
+                        if let e { error = e } else { dismiss() }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(request.code == nil)
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
+        .onAppear { model.claimApproval(request) }
+    }
 }

@@ -16,11 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use dino_core::ipc::SyncStatus;
+use dino_core::ipc::{ApprovalRequest, JoinRequest, SyncStatus};
 use dino_core::settings::Settings;
 use dino_sync::record::{PullResponse, PushRequest, PushResponse};
 use dino_sync::settings::{Entries, SCHEMA};
-use dino_sync::{AccountKey, Clock, Hlc, Nudge, Record, RecordId, RecoveryKey, Store};
+use dino_sync::approval::{Commitment, Response, Reveal, verify_reveal};
+use dino_sync::{AccountKey, Clock, DeviceKeys, Grant, Hlc, Nudge, Record, RecordId, RecoveryKey, Store, approval_code};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -65,6 +66,39 @@ struct Live {
     recovery: Option<String>,
     device_code: Option<(String, String)>,
     signing_in: bool,
+    /// This Mac asking the account's other Macs for the key.
+    join: Option<Join>,
+    /// Asked once since this Mac came to need the key (after a lapse or a no, the person asks again).
+    asked: bool,
+    /// Other Macs asking this one, as the server last listed them.
+    approvals: Vec<Pending>,
+    /// The answers this Mac gave, by request: its nonce is only good if it's the one it made.
+    responses: BTreeMap<String, Response>,
+}
+
+/// This Mac's request, kept in memory only: the reveal stays secret until another Mac has
+/// answered the commitment.
+struct Join {
+    id: String,
+    expires_at: u64,
+    reveal: Reveal,
+    /// The answer of the Mac that took the request, once one has.
+    response: Option<Response>,
+    /// The reveal went out (once per request).
+    revealed: bool,
+}
+
+/// Another Mac's request, as the server last listed it.
+#[derive(Clone)]
+struct Pending {
+    id: String,
+    device: String,
+    os: String,
+    expires_at: u64,
+    commitment: Commitment,
+    /// The answer some Mac sent, as the server has it.
+    response: Option<Response>,
+    reveal: Option<Reveal>,
 }
 
 fn dir() -> PathBuf {
@@ -102,6 +136,11 @@ fn live() -> &'static Mutex<Live> {
 static KICK: AtomicBool = AtomicBool::new(false);
 /// A nudge said there's more on the server.
 static PULL: AtomicBool = AtomicBool::new(false);
+/// A nudge said a Mac asked for the key, or a request moved on.
+static APPROVALS: AtomicBool = AtomicBool::new(false);
+/// How often to look at key requests without a nudge: while asking, and while signed in.
+const ASKING_EVERY: Duration = Duration::from_secs(2);
+const APPROVALS_EVERY: Duration = Duration::from_secs(60);
 
 fn save_state(s: &State) {
     if let Ok(b) = serde_json::to_vec(s) {
@@ -124,6 +163,24 @@ fn save_account_key(k: &AccountKey) -> anyhow::Result<()> {
 
 fn forget_account_key() {
     let _ = std::fs::remove_file(dir().join("account-key"));
+}
+
+/// This Mac's key pair for handing the account's key between Macs, one per sign-in:
+/// `sync/device-key`, 0600. The secret never leaves this Mac.
+fn device_keys() -> anyhow::Result<DeviceKeys> {
+    use base64::Engine;
+    let path = dir().join("device-key");
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    if let Some(bytes) = std::fs::read_to_string(&path).ok().and_then(|t| b64.decode(t.trim()).ok()).and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+        return Ok(DeviceKeys::from_secret(bytes));
+    }
+    let k = DeviceKeys::generate();
+    write_private(&path, b64.encode(*k.secret_bytes()).as_bytes())?;
+    Ok(k)
+}
+
+fn forget_device_keys() {
+    let _ = std::fs::remove_file(dir().join("device-key"));
 }
 
 /// Where a setting lives, as the server sees it: its collection, and its name keyed with the
@@ -229,6 +286,8 @@ pub fn kick() {
 
 fn run() {
     let mut last_pull = None::<Instant>;
+    let mut last_asked = None::<Instant>;
+    let mut last_approvals = None::<Instant>;
     let mut stamp = None;
     let mut last_wall = now_ms();
     PULL.store(true, Ordering::Relaxed);
@@ -240,9 +299,24 @@ fn run() {
             PULL.store(true, Ordering::Relaxed);
         }
         last_wall = wall;
-        let ready = state().lock().unwrap().phase == "ready";
-        if !ready {
+        let phase = state().lock().unwrap().phase.clone();
+        if phase == "needs_key" {
+            if APPROVALS.swap(false, Ordering::Relaxed) || last_asked.is_none_or(|t: Instant| t.elapsed() >= ASKING_EVERY) {
+                last_asked = Some(Instant::now());
+                if let Err(e) = asking() {
+                    note_error(e);
+                }
+            }
             continue;
+        }
+        if phase != "ready" {
+            continue;
+        }
+        if APPROVALS.swap(false, Ordering::Relaxed) || last_approvals.is_none_or(|t: Instant| t.elapsed() >= APPROVALS_EVERY) {
+            last_approvals = Some(Instant::now());
+            if let Err(e) = refresh_approvals() {
+                note_error(e);
+            }
         }
         let files = files_stamp();
         let changed = KICK.swap(false, Ordering::Relaxed) || stamp.as_ref() != Some(&files);
@@ -295,6 +369,13 @@ fn note_error(e: anyhow::Error) {
 fn signed_out_elsewhere(why: &str) {
     cloud::forget_tokens();
     forget_account_key();
+    forget_device_keys();
+    {
+        let mut l = live().lock().unwrap();
+        l.join = None;
+        l.asked = false;
+        l.approvals.clear();
+    }
     let mut s = state().lock().unwrap();
     let server = s.server.clone();
     let key_sync = s.key_sync;
@@ -317,14 +398,11 @@ fn record_local() {
     for (real, value) in changes {
         let hlc = clock.now(now_ms());
         let id = blind(&key, &real);
-        let sealed = match value {
-            Some(v) => match serde_json::to_string(&Sealed { id: real.key.clone(), v }).map_err(anyhow::Error::from).and_then(|text| Ok(key.seal(&s.account, &id, SCHEMA, &text)?)) {
-                Ok(t) => Some(t),
-                Err(_) => continue,
-            },
-            None => None,
+        let text = match value.map(|v| serde_json::to_string(&Sealed { id: real.key.clone(), v })).transpose() {
+            Ok(t) => t,
+            Err(_) => continue,
         };
-        let record = Record { id: id.clone(), hlc, schema: SCHEMA, value: sealed, seq: None, extra: Default::default() };
+        let Ok(record) = key.seal_record(&s.account, id.clone(), hlc, SCHEMA, text.as_deref()) else { continue };
         if store.write_local(record, SCHEMA).is_ok() && !s.pending.contains(&id) {
             s.pending.push(id);
         }
@@ -338,10 +416,30 @@ fn record_local() {
     save_state(&s);
 }
 
+/// The records this Mac holds: each was written here or checked against the key on arrival.
 fn store_of(s: &State) -> Store {
     let mut store = Store::new();
-    store.apply_all(s.records.iter().cloned());
+    store.apply_all_unverified(s.records.iter().cloned());
     store
+}
+
+/// Takes the records from the server that open with the account's key under their own stamp,
+/// place and delete flag: a server can't forge, restamp, move or replay a value or a delete.
+/// Refused ones are left out (and said so, once).
+fn take_verified(s: &mut State, store: &mut Store, key: &AccountKey, records: Vec<Record>) -> Vec<RecordId> {
+    let mut clock = Clock::resume(s.device.clone(), s.clock.clone());
+    let now = now_ms();
+    let (changed, refused) = store.apply_all_verified(key, &s.account, records, now);
+    for id in &changed {
+        if let Some(r) = store.get(id) {
+            let _ = clock.observe(&r.hlc, now);
+        }
+    }
+    if !refused.is_empty() {
+        s.message = Some(format!("{} setting(s) from the server didn't check out against your key and were ignored.", refused.len()));
+    }
+    s.clock = clock.last().cloned();
+    changed
 }
 
 /// Send what's waiting, a batch at a time.
@@ -406,8 +504,7 @@ fn entries_of(store: &Store, account: &str, key: &AccountKey) -> Entries {
         .iter()
         .filter(|r| r.schema <= SCHEMA)
         .filter_map(|r| {
-            let v = r.value.as_ref()?;
-            let text = key.open(account, &r.id, r.schema, v).ok()?;
+            let text = key.open_record(account, r).ok()??;
             let sealed: Sealed = serde_json::from_str(&text).ok()?;
             let real = RecordId::new(r.id.collection.clone(), sealed.id);
             // Only where it says it lives: a value can't be moved to another setting.
@@ -420,12 +517,7 @@ fn apply_remote(records: Vec<Record>) -> anyhow::Result<()> {
     let Some(key) = account_key() else { return Ok(()) };
     let mut s = state().lock().unwrap();
     let mut store = store_of(&s);
-    let mut clock = Clock::resume(s.device.clone(), s.clock.clone());
-    for r in &records {
-        clock.observe(&r.hlc, now_ms());
-    }
-    let changed = store.apply_all(records);
-    s.clock = clock.last().cloned();
+    let changed = take_verified(&mut s, &mut store, &key, records);
     s.records = store.iter().cloned().collect();
     if changed.is_empty() {
         return Ok(());
@@ -493,7 +585,7 @@ fn nudges() {
     loop {
         let server = {
             let s = state().lock().unwrap();
-            (s.phase == "ready" || s.phase == "conflict").then(|| s.server.clone())
+            matches!(s.phase.as_str(), "ready" | "conflict" | "needs_key").then(|| s.server.clone())
         };
         let Some(server) = server else {
             std::thread::sleep(Duration::from_secs(1));
@@ -523,6 +615,7 @@ fn listen(server: &str) -> anyhow::Result<()> {
     }
     // Something may have happened while the socket was down.
     PULL.store(true, Ordering::Relaxed);
+    APPROVALS.store(true, Ordering::Relaxed);
     loop {
         if state().lock().unwrap().server != server {
             return Ok(());
@@ -531,6 +624,7 @@ fn listen(server: &str) -> anyhow::Result<()> {
             Ok(tungstenite::Message::Text(t)) => match serde_json::from_str::<Nudge>(&t) {
                 Ok(Nudge::Advanced { seq }) if seq > state().lock().unwrap().seq => PULL.store(true, Ordering::Relaxed),
                 Ok(Nudge::Reset) => reset_elsewhere(),
+                Ok(Nudge::Approvals) => APPROVALS.store(true, Ordering::Relaxed),
                 _ => {}
             },
             Ok(tungstenite::Message::Close(_)) => return Ok(()),
@@ -556,7 +650,10 @@ fn reset_elsewhere() {
     s.baseline.clear();
     s.wrapped = None;
     s.phase = "needs_key".into();
-    s.message = Some("Sync was reset on another Mac. Enter the new recovery key to sync this one again.".into());
+    s.message = Some("Sync was reset on another Mac. Approve this Mac from that one, or enter the new recovery key.".into());
+    let mut l = live().lock().unwrap();
+    l.join = None;
+    l.asked = false;
     save_state(&s);
 }
 
@@ -590,6 +687,8 @@ pub fn status() -> SyncStatus {
         conflict,
         snapshots: snapshots().len(),
         message: s.message.clone(),
+        join: (s.phase == "needs_key").then(|| l.join.as_ref().map(|j| JoinRequest { expires_at: j.expires_at, code: join_code(&s, j) })).flatten(),
+        approvals: approvals_of(&s, &l),
     }
 }
 
@@ -651,13 +750,20 @@ fn set_up_account(server: &str) -> anyhow::Result<()> {
         save_state(&s);
     }
     forget_account_key();
+    forget_device_keys();
+    {
+        let mut l = live().lock().unwrap();
+        l.join = None;
+        l.asked = false;
+        l.approvals.clear();
+    }
     match wrapped {
         None => start_account(server),
         Some(w) => {
             let mut s = state().lock().unwrap();
             s.wrapped = Some(w);
             s.phase = "needs_key".into();
-            s.message = Some("This account already syncs from another Mac. Enter its recovery key to read its settings.".into());
+            s.message = None;
             save_state(&s);
             Ok(())
         }
@@ -697,7 +803,17 @@ pub fn join(recovery: &str) -> anyhow::Result<()> {
         None => cloud::get(&server, "/v1/sync/recovery")?.and_then(|v| v["wrapped"].as_str().map(String::from)).ok_or_else(|| anyhow::anyhow!("the account has no recovery key yet"))?,
     };
     let key = rk.unwrap(&account, &wrapped).map_err(|_| anyhow::anyhow!("that recovery key doesn't open this account's settings"))?;
+    take_key(&server, key)
+}
+
+/// This Mac has the account's key (from the recovery key or another Mac): read what the account
+/// holds, then take it, or ask when this Mac's settings differ.
+fn take_key(server: &str, key: AccountKey) -> anyhow::Result<()> {
     save_account_key(&key)?;
+    // Asked the other Macs too (the recovery key came first): stop asking.
+    if let Some(j) = live().lock().unwrap().join.take() {
+        let _ = cloud::send(server, reqwest::Method::POST, &format!("/v1/sync/approvals/{}/deny", j.id), &json!({}));
+    }
     // Everything the account holds, before deciding anything.
     {
         let mut s = state().lock().unwrap();
@@ -711,7 +827,7 @@ pub fn join(recovery: &str) -> anyhow::Result<()> {
     let mut records = vec![];
     loop {
         let since = state().lock().unwrap().seq;
-        let v = cloud::get(&server, &format!("/v1/sync?since={since}"))?.ok_or_else(|| anyhow::anyhow!("no sync on this server"))?;
+        let v = cloud::get(server, &format!("/v1/sync?since={since}"))?.ok_or_else(|| anyhow::anyhow!("no sync on this server"))?;
         let page: PullResponse = serde_json::from_value(v)?;
         state().lock().unwrap().seq = page.seq;
         records.extend(page.records);
@@ -721,12 +837,7 @@ pub fn join(recovery: &str) -> anyhow::Result<()> {
     }
     let mut s = state().lock().unwrap();
     let mut store = Store::new();
-    let mut clock = Clock::resume(s.device.clone(), s.clock.clone());
-    for r in &records {
-        clock.observe(&r.hlc, now_ms());
-    }
-    store.apply_all(records);
-    s.clock = clock.last().cloned();
+    take_verified(&mut s, &mut store, &key, records);
     s.records = store.iter().cloned().collect();
     let cloud_entries = without_keys(entries_of(&store, &s.account, &key), s.key_sync);
     let local = local_entries(s.key_sync);
@@ -790,8 +901,251 @@ pub fn ack_recovery() {
     live().lock().unwrap().recovery = None;
 }
 
+// ── Another Mac gives this one the key ──
+//
+// Four messages through the server (dino_sync::approval): the asking Mac sends a commitment to its
+// key and a fresh nonce; a signed-in Mac answers with its own key and nonce; only then does the
+// asking Mac reveal what it committed to. Both show a code made from all four, so neither side,
+// nor the server between them, can steer it. The signed-in Mac seals the account's key to the
+// asking one only after the person says the codes match. Nothing is approved on its own.
+
+/// Unix seconds from the server's RFC 3339 times (`2026-09-30T20:11:00.598Z`).
+fn unix(t: &str) -> Option<u64> {
+    let (date, time) = t.split_once('T')?;
+    let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let time = time.trim_end_matches('Z');
+    let (time, offset) = match time.rfind(['+', '-']) {
+        Some(i) => {
+            let (h, mm) = time[i + 1..].split_once(':')?;
+            let off = h.parse::<i64>().ok()? * 3600 + mm.parse::<i64>().ok()? * 60;
+            (&time[..i], if &time[i..i + 1] == "-" { -off } else { off })
+        }
+        None => (time, 0),
+    };
+    let mut hms = time.split(':');
+    let (h, mi, sec) = (hms.next()?.parse::<i64>().ok()?, hms.next()?.parse::<i64>().ok()?, hms.next()?.split('.').next()?.parse::<i64>().ok()?);
+    // Days since 1970 (Howard Hinnant's days_from_civil).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec - offset).ok()
+}
+
+fn json_of<T: serde::de::DeserializeOwned>(v: &Value) -> Option<T> {
+    (!v.is_null()).then(|| serde_json::from_value(v.clone()).ok()).flatten()
+}
+
+/// The code this Mac shows while it waits, once it has revealed to the Mac that answered.
+fn join_code(s: &State, j: &Join) -> Option<String> {
+    let response = j.response.as_ref().filter(|_| j.revealed)?;
+    approval_code(&s.account, &j.reveal, response).ok()
+}
+
+/// The code for another Mac's request: only once it's this Mac's own answer that was revealed to,
+/// and the reveal is what was committed to.
+fn pending_code(s: &State, l: &Live, p: &Pending) -> Option<String> {
+    let mine = l.responses.get(&p.id)?;
+    let reveal = p.reveal.as_ref()?;
+    (p.response.as_ref() == Some(mine)).then_some(())?;
+    verify_reveal(&s.account, &p.commitment, reveal).ok()?;
+    approval_code(&s.account, reveal, mine).ok()
+}
+
+fn approvals_of(s: &State, l: &Live) -> Vec<ApprovalRequest> {
+    if s.phase != "ready" {
+        return vec![];
+    }
+    let now = now_ms() / 1000;
+    l.approvals
+        .iter()
+        // One another Mac answered is that Mac's to finish.
+        .filter(|p| p.expires_at > now && (p.response.is_none() || l.responses.get(&p.id) == p.response.as_ref()))
+        .map(|p| ApprovalRequest { id: p.id.clone(), device: p.device.clone(), os: p.os.clone(), expires_at: p.expires_at, code: pending_code(s, l, p) })
+        .collect()
+}
+
+/// Other Macs asking for the key that this one can approve (for the app's banner).
+pub fn approvals() -> Vec<ApprovalRequest> {
+    let s = state().lock().unwrap();
+    let l = live().lock().unwrap();
+    approvals_of(&s, &l)
+}
+
+/// `ask`: ask the account's other Macs for the key (again, after a lapse or a no). A fresh nonce
+/// every time, so an earlier request can't be replayed.
+pub fn ask() -> anyhow::Result<()> {
+    let (server, account) = {
+        let s = state().lock().unwrap();
+        anyhow::ensure!(s.phase == "needs_key", "this Mac already has the account's key");
+        (s.server.clone(), s.account.clone())
+    };
+    let (commitment, reveal) = device_keys()?.commit(&account, &mut rand_core::OsRng);
+    let v = cloud::send(&server, reqwest::Method::POST, "/v1/sync/approvals", &json!({"commitment": commitment}))?;
+    let id = v["id"].as_str().ok_or_else(|| anyhow::anyhow!("the account server gave no request"))?.to_string();
+    let expires_at = v["expires_at"].as_str().and_then(unix).unwrap_or(now_ms() / 1000 + 600);
+    {
+        let mut l = live().lock().unwrap();
+        l.join = Some(Join { id, expires_at, reveal, response: None, revealed: false });
+        l.asked = true;
+    }
+    state().lock().unwrap().message = None;
+    Ok(())
+}
+
+/// While this Mac needs the key: ask once on its own, then follow the request: reveal to the Mac
+/// that answers, then wait for its grant, a no, or the lapse.
+fn asking() -> anyhow::Result<()> {
+    let (asked, id) = {
+        let l = live().lock().unwrap();
+        (l.asked, l.join.as_ref().map(|j| j.id.clone()))
+    };
+    let Some(id) = id else {
+        if !asked {
+            ask()?;
+        }
+        return Ok(());
+    };
+    let (server, account) = {
+        let s = state().lock().unwrap();
+        (s.server.clone(), s.account.clone())
+    };
+    let stop = |why: &str| {
+        live().lock().unwrap().join = None;
+        let mut s = state().lock().unwrap();
+        s.message = Some(why.into());
+        save_state(&s);
+    };
+    let Some(v) = cloud::get(&server, &format!("/v1/sync/approvals/{id}"))? else {
+        stop("Nobody approved this Mac in time. Ask again, or use the recovery key.");
+        return Ok(());
+    };
+    let status = v["status"].as_str().unwrap_or("");
+    if status == "denied" {
+        stop("Another Mac said no. Ask again, or use the recovery key.");
+        return Ok(());
+    }
+    let response: Option<Response> = json_of(&v["response"]);
+    // Reveal once, to the first answer, and only after it arrived.
+    let to_reveal = {
+        let mut l = live().lock().unwrap();
+        let Some(j) = l.join.as_mut() else { return Ok(()) };
+        match (&j.response, response) {
+            (None, Some(r)) if !j.revealed => {
+                j.response = Some(r);
+                Some(j.reveal.clone())
+            }
+            // The answer can't change once revealed to: that's a swap.
+            (Some(mine), Some(r)) if *mine != r => {
+                drop(l);
+                stop("The request changed hands midway, so this Mac stopped it. Ask again.");
+                return Ok(());
+            }
+            _ => None,
+        }
+    };
+    if let Some(reveal) = to_reveal {
+        cloud::send(&server, reqwest::Method::POST, &format!("/v1/sync/approvals/{id}/reveal"), &json!({"reveal": reveal}))?;
+        if let Some(j) = live().lock().unwrap().join.as_mut() {
+            j.revealed = true;
+        }
+        return Ok(());
+    }
+    if status == "granted" {
+        let approver = live().lock().unwrap().join.as_ref().and_then(|j| j.response.as_ref().map(|r| r.public.clone()));
+        let grant: Option<Grant> = json_of(&v["grant"]);
+        // The key must come from the Mac whose code was compared, not whoever the server names.
+        let key = match (approver, grant) {
+            (Some(a), Some(g)) => device_keys()?.accept(&g, &a, &account).ok(),
+            _ => None,
+        };
+        match key {
+            Some(key) => take_key(&server, key)?,
+            None => stop("The key that arrived didn't come from the Mac that showed the code, so this Mac didn't take it. Ask again."),
+        }
+    }
+    Ok(())
+}
+
+/// What the server lists now: requests from the account's other Macs.
+fn refresh_approvals() -> anyhow::Result<()> {
+    let server = state().lock().unwrap().server.clone();
+    let v = cloud::get(&server, "/v1/sync/approvals")?.unwrap_or(Value::Null);
+    let list: Vec<Pending> = v["approvals"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| {
+                    Some(Pending {
+                        id: p["id"].as_str()?.into(),
+                        device: p["device"]["name"].as_str().unwrap_or("A Mac").into(),
+                        os: p["device"]["os"].as_str().unwrap_or("").into(),
+                        expires_at: p["expires_at"].as_str().and_then(unix).unwrap_or(0),
+                        commitment: json_of(&p["commitment"])?,
+                        response: json_of(&p["response"]),
+                        reveal: json_of(&p["reveal"]),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut l = live().lock().unwrap();
+    l.responses.retain(|id, _| list.iter().any(|p| &p.id == id));
+    l.approvals = list;
+    Ok(())
+}
+
+fn ready_to_approve() -> anyhow::Result<(String, String, AccountKey)> {
+    let s = state().lock().unwrap();
+    anyhow::ensure!(s.phase == "ready", "this Mac isn't syncing");
+    let key = account_key().ok_or_else(|| anyhow::anyhow!("this Mac doesn't have the account's key"))?;
+    Ok((s.server.clone(), s.account.clone(), key))
+}
+
+/// `claim`: answer another Mac's request, so it reveals and both can show the code. Gives nothing.
+pub fn claim(id: &str) -> anyhow::Result<()> {
+    let (server, ..) = ready_to_approve()?;
+    let response = device_keys()?.respond(&mut rand_core::OsRng);
+    cloud::send(&server, reqwest::Method::POST, &format!("/v1/sync/approvals/{id}/claim"), &json!({"response": response}))
+        .map_err(|_| anyhow::anyhow!("that request is gone: it lapsed, or another Mac took it"))?;
+    live().lock().unwrap().responses.insert(id.to_string(), response);
+    refresh_approvals()
+}
+
+/// `grant`: after the person saw the same code on both Macs, seal the account's key to the asking
+/// one. Refused unless the reveal is what it committed to, to this Mac's own answer.
+pub fn grant(id: &str) -> anyhow::Result<()> {
+    let (server, account, key) = ready_to_approve()?;
+    refresh_approvals()?;
+    let (p, code) = {
+        let s = state().lock().unwrap();
+        let l = live().lock().unwrap();
+        let p = l.approvals.iter().find(|p| p.id == id).cloned().ok_or_else(|| anyhow::anyhow!("that request is gone: it lapsed, or the other Mac stopped asking"))?;
+        let code = pending_code(&s, &l, &p);
+        (p, code)
+    };
+    anyhow::ensure!(code.is_some(), "there's no code to compare yet: take the request, and wait for the other Mac");
+    let reveal = p.reveal.expect("a code means a reveal");
+    let grant = device_keys()?.grant(&reveal.public, &account, &key, &mut rand_core::OsRng)?;
+    cloud::send(&server, reqwest::Method::POST, &format!("/v1/sync/approvals/{id}/grant"), &json!({"grant": grant}))?;
+    live().lock().unwrap().responses.remove(id);
+    refresh_approvals()
+}
+
+/// `deny`: say no to another Mac's request.
+pub fn deny(id: &str) -> anyhow::Result<()> {
+    let server = state().lock().unwrap().server.clone();
+    cloud::send(&server, reqwest::Method::POST, &format!("/v1/sync/approvals/{id}/deny"), &json!({}))?;
+    live().lock().unwrap().responses.remove(id);
+    refresh_approvals()
+}
+
 pub fn now() {
     PULL.store(true, Ordering::Relaxed);
+    APPROVALS.store(true, Ordering::Relaxed);
     kick();
 }
 
@@ -862,6 +1216,7 @@ pub fn logout() {
     }
     cloud::forget_tokens();
     forget_account_key();
+    forget_device_keys();
     let mut s = state().lock().unwrap();
     let key_sync = s.key_sync;
     *s = State { server, key_sync, phase: "signed_out".into(), ..State::default() };
@@ -872,6 +1227,15 @@ pub fn logout() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_times_read_as_unix_seconds() {
+        assert_eq!(unix("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(unix("2026-09-30T20:11:00.598Z"), Some(1790799060));
+        assert_eq!(unix("2026-09-30T22:11:00.5+02:00"), Some(1790799060));
+        assert_eq!(unix("2024-02-29T12:00:00-05:00"), Some(1709226000));
+        assert_eq!(unix("yesterday"), None);
+    }
 
     #[test]
     fn remotes_match_however_they_were_cloned() {
