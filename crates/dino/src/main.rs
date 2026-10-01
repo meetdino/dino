@@ -866,6 +866,11 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {}
     }
+    // The full-screen client inside a dino session would attach to the session it runs in, and its
+    // close kills sessions: refuse rather than nest.
+    if std::env::var_os("DINO_SESSION").is_some_and(|s| !s.is_empty()) {
+        anyhow::bail!("already inside dino: {}\n\n{USAGE}", cli.first().map_or("run a command".into(), |a| format!("unknown command `{a}`")));
+    }
 
     let launchers = match client::request(&Request::Launchers)? {
         Response::Launchers { launchers } => launchers,
