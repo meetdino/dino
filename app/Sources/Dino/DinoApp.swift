@@ -124,7 +124,7 @@ struct DinoApp: App {
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                     .disabled(!model.canArchive(model.selectedSession?.id ?? ""))
                 Button("Show Archived") { model.showArchived() }
-                Button("Kill Session") { if let id = model.selected { model.kill(id) } }
+                Button("Close Session") { if let id = model.selected { model.kill(id) } }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
                     .disabled(model.selected == nil)
             }
@@ -374,11 +374,11 @@ struct ContentView: View {
             Text(model.error ?? "")
         }
         .alert(
-            "Move “\(model.confirmMove?.title ?? "")” into dino?",
+            "Continue “\(model.confirmMove?.title ?? "")” in dino?",
             isPresented: Binding(get: { model.confirmMove != nil }, set: { if !$0 { model.confirmMove = nil } }),
             presenting: model.confirmMove
         ) { f in
-            Button("Move to dino") { model.adopt(f) }
+            Button("Continue in dino") { model.adopt(f) }
                 .keyboardShortcut(.defaultAction)
             Button("Cancel", role: .cancel) {}
         } message: { f in
@@ -1090,9 +1090,9 @@ struct TakeOverButton: View {
     let found: FoundSession
 
     var body: some View {
-        Button("Continue as a \(found.agentName) session") { model.takeOver(session) }
+        Button("Continue in dino") { model.takeOver(session) }
             .controlSize(.small)
-            .help("Restart \(found.agentName) under dino with this conversation, once its turn is over: status, tasks, controls and previews then work. The shell goes.")
+            .help("Continue this \(found.agentName) conversation as a dino session, once its turn is over: status, tasks, controls and previews then work. The shell goes.")
     }
 }
 
@@ -1112,11 +1112,11 @@ struct ElsewhereRow: View {
             }
             Spacer()
             Image(systemName: "arrow.right.circle").foregroundStyle(Brand.green)
-                .help("Click to move this session into dino")
+                .help("Click to continue this session in dino")
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
-        .contextMenu { Button("Move to dino…") { model.confirmMove = session } }
+        .contextMenu { Button("Continue in dino…") { model.confirmMove = session } }
     }
 }
 
@@ -1152,7 +1152,7 @@ struct MovingOverlay: View {
             Color.black.opacity(0.35).ignoresSafeArea()
             VStack(spacing: 12) {
                 ProgressView().controlSize(.large)
-                Text("Moving “\(session.title)” into dino").font(.headline)
+                Text("Continuing “\(session.title)” in dino").font(.headline)
                 if session.source == "running" {
                     Text(session.isBusy
                         ? "Waiting for its current turn to finish, then it continues here."

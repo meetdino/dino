@@ -91,7 +91,7 @@ extension DinoConnection {
     }
 }
 
-/// Settings → Providers' view of dinod: asks now and then while the pane is open.
+/// Settings → Models & Providers' view of dinod: asks now and then while the pane is open.
 @MainActor
 final class ProvidersStore: ObservableObject {
     @Published var providers: [ProviderInfo] = []
@@ -187,6 +187,7 @@ struct ProvidersPane: View {
 
     var body: some View {
         Form {
+            RoutingSections()
             Section {
                 ForEach(store.providers) { p in
                     ProviderRow(provider: p, count: store.models[p.id]?.count, loading: store.loading.contains(p.id), error: store.errors[p.id] ?? p.error,

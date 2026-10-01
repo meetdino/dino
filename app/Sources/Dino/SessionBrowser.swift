@@ -60,7 +60,7 @@ struct ContinueSheet: View {
             Divider()
             footer
         }
-        .frame(width: 1040, height: 660)
+        .sheetSize(width: 1040, height: 660, minWidth: 640, minHeight: 400)
         .onAppear { if selection == nil { selection = visible.first?.id } }
         .onChange(of: visible.map(\.id)) { _, ids in
             if selection.map({ !ids.contains($0) }) ?? true { selection = ids.first }
@@ -129,7 +129,7 @@ struct ContinueSheet: View {
 
     @ViewBuilder
     private func menu(_ f: FoundSession) -> some View {
-        Button(f.source == "running" ? "Move to dino…" : "Resume in dino") { continueIn(f) }
+        Button(f.source == "running" ? "Continue in dino…" : "Continue in dino") { continueIn(f) }
         if let url = f.url.flatMap(URL.init(string:)) {
             Button("Open in Browser") { NSWorkspace.shared.open(url) }
         }
@@ -156,7 +156,7 @@ struct ContinueSheet: View {
     private var footer: some View {
         HStack {
             let local = model.found.filter { $0.source != "cloud" }.count
-            Text("\(local) on this Mac · ↑↓ browse · ↵ \(selected?.source == "running" ? "move here" : "resume") · esc close")
+            Text("\(local) on this Mac · ↑↓ browse · ↵ continue in dino · esc close")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
             Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
