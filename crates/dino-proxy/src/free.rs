@@ -198,7 +198,7 @@ async fn send(st: &AppState, session: &str, tier: Tier, mut oai: Value, stream: 
                 Ok(Ok(r)) => {
                     let status = r.status();
                     let text = r.text().await.unwrap_or_default();
-                    log(format_args!("{session} free {tier:?} {} -> {status} {}", model.id, &text[..text.len().min(600)]));
+                    log(format_args!("{session} free {tier:?} {} -> {status} {}", model.id, clip(&text, 600)));
                     if status.as_u16() == 400 && let Some(n) = output_limit(&text, asked_output(&body)) {
                         st.router.learn_max_output(&model, n);
                         limit = Some(n);
@@ -222,6 +222,15 @@ async fn send(st: &AppState, session: &str, tier: Tier, mut oai: Value, stream: 
         }
     }
     None
+}
+
+/// At most the first `max` bytes of `s`, cut where a character starts (a byte cut could panic).
+fn clip(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// The output budget `body` asks for.
@@ -472,6 +481,15 @@ fn anthropic_error(status: StatusCode, kind: &str, msg: &str) -> Response<Body> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clips_between_characters() {
+        let s = format!("{}é", "a".repeat(599));
+        assert_eq!(clip(&s, 600), "a".repeat(599));
+        assert_eq!(clip(&s, 601), s);
+        assert_eq!(clip("日本", 1), "");
+        assert_eq!(clip("short", 600), "short");
+    }
 
     #[test]
     fn a_refused_budget_says_what_it_takes() {
