@@ -17,16 +17,31 @@ fn claude_config() -> PathBuf {
     }
 }
 
-/// `p` as given and with symlinks resolved (`/tmp` is `/private/tmp`): Claude may use either.
+/// `p` as given and with symlinks resolved (`/tmp` is `/private/tmp`): Claude may use either. A
+/// folder that's gone (a removed worktree) resolves through the part of it that's still there, so
+/// both its spellings are still forgotten.
 fn spellings(p: &Path) -> Vec<String> {
     let mut out = vec![p.to_string_lossy().into_owned()];
-    if let Ok(real) = std::fs::canonicalize(p) {
+    if let Some(real) = resolved(p) {
         let real = real.to_string_lossy().into_owned();
         if real != out[0] {
             out.push(real);
         }
     }
     out
+}
+
+/// `p` with symlinks resolved as far as it exists, the rest as given.
+fn resolved(p: &Path) -> Option<PathBuf> {
+    let mut rest = vec![];
+    let mut here = p;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(here) {
+            return Some(rest.iter().rev().fold(real, |acc, part| acc.join(part)));
+        }
+        rest.push(here.file_name()?.to_owned());
+        here = here.parent()?;
+    }
 }
 
 fn read(path: &Path) -> Option<Value> {
@@ -82,23 +97,38 @@ pub fn claude_forget(dir: &Path) -> anyhow::Result<()> {
     edit(|projects| projects.retain(|k, _| !dirs.iter().any(|d| k == d || k.starts_with(&format!("{d}/")))))
 }
 
-fn edit(change: impl FnOnce(&mut Map<String, Value>)) -> anyhow::Result<()> {
+fn edit(change: impl Fn(&mut Map<String, Value>)) -> anyhow::Result<()> {
     let path = claude_config();
-    // No config means Claude never ran here; it will ask, as it would anyway.
-    let Some(mut config) = read(&path) else { return Ok(()) };
-    let Some(projects) = config.get_mut("projects").and_then(Value::as_object_mut) else { return Ok(()) };
-    let before = projects.clone();
-    change(projects);
-    if *projects == before {
+    // dino's own edits (several threads, another dinod) take turns; Claude's own writes don't take
+    // this lock, so each edit also checks the file didn't change under it before replacing it.
+    let _ = std::fs::create_dir_all(crate::config_dir());
+    let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(crate::config_dir().join("claude-json.lock"))?;
+    // SAFETY: a valid descriptor, held open until the end of this function.
+    unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) };
+    for _ in 0..5 {
+        // No config means Claude never ran here; it will ask, as it would anyway.
+        let Ok(text) = std::fs::read_to_string(&path) else { return Ok(()) };
+        let Ok(mut config) = serde_json::from_str::<Value>(&text) else { return Ok(()) };
+        let Some(projects) = config.get_mut("projects").and_then(Value::as_object_mut) else { return Ok(()) };
+        let before = projects.clone();
+        change(projects);
+        if *projects == before {
+            return Ok(());
+        }
+        // Claude rewrites this file often: write it whole, then rename, so it never reads half of it.
+        let tmp = path.with_extension(format!("json.dino-{}", std::process::id()));
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        f.write_all(serde_json::to_string_pretty(&config)?.as_bytes())?;
+        drop(f);
+        // Changed by Claude while this edit was made: do it again on what it wrote.
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+            let _ = std::fs::remove_file(&tmp);
+            continue;
+        }
+        std::fs::rename(tmp, path)?;
         return Ok(());
     }
-    // Claude rewrites this file often: write it whole, then rename, so it never reads half of it.
-    let tmp = path.with_extension(format!("json.dino-{}", std::process::id()));
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-    f.write_all(serde_json::to_string_pretty(&config)?.as_bytes())?;
-    drop(f);
-    std::fs::rename(tmp, path)?;
-    Ok(())
+    anyhow::bail!("{} kept changing; trust left as it was", path.display())
 }
 
 #[cfg(test)]
@@ -135,7 +165,27 @@ mod tests {
         assert_eq!(v["projects"][real(&repo.join("sub"))]["history"], json!([1]), "other projects untouched");
         assert_eq!(v["projects"].as_object().unwrap().len(), 2);
         assert_eq!(std::fs::metadata(&config).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // A worktree removed before it's forgotten: both spellings still go (/tmp is a symlink).
+        claude_trust(&wt).unwrap();
+        assert!(read(&config).unwrap()["projects"].get(real(&wt)).is_some());
+        let spelled = std::fs::read_to_string(&config).unwrap();
+        assert!(dir.to_string_lossy() == real(&dir) || spelled.contains(&*wt.to_string_lossy()), "both spellings written");
+        std::fs::remove_dir_all(&wt).unwrap();
+        claude_forget(&wt).unwrap();
+        let v = read(&config).unwrap();
+        assert_eq!(v["projects"].as_object().unwrap().len(), 2, "{v}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The real path of a folder that no longer exists, through what's left of it.
+    #[test]
+    fn a_gone_folder_still_resolves() {
+        let base = std::env::temp_dir().join(format!("dino-resolve-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let gone = base.join("a/b");
+        assert_eq!(resolved(&gone), Some(std::fs::canonicalize(&base).unwrap().join("a/b")));
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
