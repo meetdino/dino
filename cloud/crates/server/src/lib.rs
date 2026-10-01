@@ -1,5 +1,5 @@
-//! dino-cloud: accounts, devices, sign-in and end-to-end encrypted settings sync for dino. It never
-//! proxies agent traffic and never holds a key that opens a synced value.
+//! dino-cloud: accounts, devices, sign-in (GitHub, Google, a link or code by email) and settings
+//! sync for dino. It never proxies agent traffic, and secrets (API keys, tokens) never reach it.
 
 pub mod api;
 pub mod config;
@@ -37,24 +37,24 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Connects and migrates, waiting out a database that isn't reachable yet (Neon waking up,
+    /// Postgres restarting) rather than giving up: the server never exits over one.
     pub async fn new(cfg: Config) -> anyhow::Result<Self> {
         // Migrations take a session advisory lock (so instances starting together don't race),
         // which needs a direct connection: through a transaction-mode pooler the lock and the
         // statements can land on different backends. One short connection, then the pool.
-        if let Some(direct) = &cfg.platform.migrate_url {
-            let one = PgPoolOptions::new().max_connections(1).acquire_timeout(Duration::from_secs(10)).connect(direct).await?;
-            sqlx::migrate!("./migrations").run(&one).await?;
+        let target = cfg.platform.migrate_url.clone().unwrap_or_else(|| cfg.database_url.clone());
+        retrying("migrating the database", || async {
+            let one = PgPoolOptions::new().max_connections(1).acquire_timeout(DB_ACQUIRE).connect(&target).await?;
+            let r = sqlx::migrate!("./migrations").run(&one).await;
             one.close().await;
-        }
-        let db = PgPoolOptions::new()
-            .max_connections(cfg.platform.db_max_connections)
-            .acquire_timeout(Duration::from_secs(3))
-            .connect(&cfg.database_url)
-            .await?;
-        if cfg.platform.migrate_url.is_some() {
-            return Self::with_migrated_pool(cfg, db);
-        }
-        Self::with_pool(cfg, db).await
+            r.map_err(anyhow::Error::from)
+        })
+        .await?;
+        // Connections are made when needed, so a database that goes away later only fails the
+        // requests made meanwhile (503, try again), never the server.
+        let db = PgPoolOptions::new().max_connections(cfg.platform.db_max_connections).acquire_timeout(DB_ACQUIRE).connect_lazy(&cfg.database_url)?;
+        Self::with_migrated_pool(cfg, db)
     }
 
     pub async fn with_pool(cfg: Config, db: PgPool) -> anyhow::Result<Self> {
@@ -71,6 +71,42 @@ impl AppState {
         let limits = Arc::new(limits::Limits::new(&cfg));
         Ok(AppState { cfg: Arc::new(cfg), db, http, limits, mailer, hub: Default::default() })
     }
+}
+
+/// How long a request waits for a database connection: long enough for Neon to wake a suspended
+/// compute (a few seconds, occasionally ten), short of the 15-second request timeout.
+const DB_ACQUIRE: Duration = Duration::from_secs(12);
+
+/// `f` again until it works, waiting longer each time (up to 30 seconds), as long as what fails is
+/// the database being out of reach. Any other failure (a migration that doesn't apply) is
+/// returned.
+async fn retrying<F, Fut>(what: &str, f: F) -> anyhow::Result<()>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let mut wait = Duration::from_millis(500);
+    loop {
+        match f().await {
+            Ok(()) => return Ok(()),
+            Err(e) if unreachable(&e) => {
+                tracing::warn!(error = %e, retry_in_ms = wait.as_millis() as u64, "{what}: database not reachable yet");
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(Duration::from_secs(30));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn unreachable(e: &anyhow::Error) -> bool {
+    if let Some(e) = e.downcast_ref::<sqlx::Error>() {
+        return error::transient(e);
+    }
+    if let Some(sqlx::migrate::MigrateError::Execute(e)) = e.downcast_ref::<sqlx::migrate::MigrateError>() {
+        return error::transient(e);
+    }
+    false
 }
 
 pub fn router(state: AppState) -> Router {

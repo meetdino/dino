@@ -128,7 +128,7 @@ pub async fn start_with(platform: Platform) -> Server {
         account_limit: (20, 60),
         platform,
     };
-    let pool = PgPoolOptions::new().max_connections(16).connect(&db_url).await.unwrap();
+    let pool = PgPoolOptions::new().max_connections(16).acquire_timeout(std::time::Duration::from_secs(3)).connect(&db_url).await.unwrap();
     let state = AppState::with_pool(cfg, pool).await.unwrap();
     let s2 = state.clone();
     tokio::spawn(async move { serve(s2, listener).await.unwrap() });
@@ -200,6 +200,14 @@ impl Server {
         let block = text.split("---").filter(|b| b.contains(&format!("To: {email}"))).last().expect("a mail to that address");
         let i = block.find("code is ").unwrap() + 8;
         block[i..i + 6].to_owned()
+    }
+
+    /// The path of the newest sign-in link mailed to `email` (`/login/<token>`).
+    pub fn mailed_link(&self, email: &str) -> String {
+        let text = std::fs::read_to_string(&self.mail).unwrap();
+        let block = text.split("---").filter(|b| b.contains(&format!("To: {email}"))).last().expect("a mail to that address");
+        let i = block.find("/login/").unwrap();
+        block[i..].split_whitespace().next().unwrap().to_owned()
     }
 
     /// Sign `b` in with an emailed code; returns where it was sent after.

@@ -1,4 +1,5 @@
-//! Settings sync, speaking `dino-sync`'s protocol. The server orders and relays; it never decrypts.
+//! Settings sync, speaking `dino-sync`'s protocol. Values are plain JSON (settings, never secrets:
+//! API keys and tokens stay on each Mac); the server orders, stores and relays them.
 //!
 //! - `GET /v1/sync?since=<seq>`: records accepted after `since`, oldest first, a page at a time.
 //! - `POST /v1/sync`: a batch of records. Per setting, the later HLC wins; the same record twice
@@ -6,11 +7,6 @@
 //!   the account's sequence by one (writes to one account are serialized on its head row).
 //! - `GET /v1/sync/ws`: "the sequence moved" nudges. Every node LISTENs on Postgres, so a push to
 //!   any node reaches devices connected to any other.
-//! - `/v1/sync/approvals…`: a new device and a signed-in one run `dino_sync::approval`'s
-//!   commit-then-reveal exchange through here (ask with a commitment, `claim` with a response,
-//!   `reveal`, `grant`), then the sealed grant of the account key. Each message is kept as sent.
-//! - `/v1/sync/recovery`: the account key wrapped with the recovery key.
-//! - `POST /v1/sync/reset`: wipes the records ("Reset sync"), for when every key is lost.
 //!
 //! Request-level refusals answer with a `dino_sync::SyncError` as the body.
 
@@ -21,15 +17,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use dino_sync::record::{PROTOCOL, Rejection, check_push};
-use dino_sync::approval::{Commitment, Response as ApprovalAnswer, Reveal};
-use dino_sync::{Grant, Hlc, Nudge, PullResponse, PushRequest, PushResponse, Record, RecordId, SyncError};
+use dino_sync::{Hlc, Nudge, PullResponse, PushRequest, PushResponse, Record, RecordId, SyncError};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -38,14 +33,13 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::api::Authed;
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Most an account may store, over all its records.
 pub const MAX_ACCOUNT_BYTES: i64 = 5 * 1024 * 1024;
 const PAGE: i64 = 500;
 const MAX_PAGE: i64 = 1000;
 const MAX_NAME: usize = 200;
-const APPROVAL_TTL: chrono::Duration = chrono::Duration::minutes(10);
 pub const CHANNEL: &str = "dino_sync";
 
 /// `push`: serve `/sync/ws`. Without it the route isn't there, and `/v1/meta` tells devices to look
@@ -54,15 +48,7 @@ pub fn routes(push: bool) -> Router<AppState> {
     let r = Router::new()
         .route("/meta", get(meta))
         .route("/sync", get(pull).post(push_records).layer(DefaultBodyLimit::max(8 * 1024 * 1024)));
-    let r = if push { r.route("/sync/ws", get(ws)) } else { r };
-    r.route("/sync/reset", post(reset))
-        .route("/sync/recovery", get(get_recovery).put(put_recovery))
-        .route("/sync/approvals", get(list_approvals).post(request_approval))
-        .route("/sync/approvals/{id}", get(get_approval))
-        .route("/sync/approvals/{id}/claim", post(claim))
-        .route("/sync/approvals/{id}/reveal", post(reveal))
-        .route("/sync/approvals/{id}/grant", post(grant))
-        .route("/sync/approvals/{id}/deny", post(deny))
+    if push { r.route("/sync/ws", get(ws)) } else { r }
 }
 
 fn refuse(status: StatusCode, e: SyncError) -> Response {
@@ -85,7 +71,7 @@ struct PullQuery {
     limit: Option<i64>,
 }
 
-type Row = (String, String, i64, i64, i64, String, i32, String, bool, Value);
+type Row = (String, String, i64, i64, i64, String, i32, Value, bool, Value);
 
 fn record(r: Row) -> Record {
     let (collection, key, seq, wall, counter, dev, schema, value, deleted, extra) = r;
@@ -172,9 +158,8 @@ async fn push_records(State(s): State<AppState>, a: Authed, headers: HeaderMap, 
             out.rejected.push(malformed(id, "collection, key and device must be 1 to 200 bytes"));
             continue;
         }
-        if !r.value.starts_with("v4.local.") {
-            // Values (and deletes) are sealed on the device; anything else would be stored readable.
-            out.rejected.push(malformed(id, "values must be PASETO v4.local tokens"));
+        if r.deleted != r.value.is_null() {
+            out.rejected.push(malformed(id, "a delete has a null value, and only a delete"));
             continue;
         }
         if let Some(ahead_ms) = r.hlc.too_far_ahead(now_ms) {
@@ -200,7 +185,7 @@ async fn push_records(State(s): State<AppState>, a: Authed, headers: HeaderMap, 
                 continue;
             }
         }
-        let size = r.value.len() as i64 + id.collection.len() as i64 + id.key.len() as i64;
+        let size = r.value.to_string().len() as i64 + id.collection.len() as i64 + id.key.len() as i64;
         if bytes - old_bytes + size > MAX_ACCOUNT_BYTES {
             out.rejected.push(Rejection { id: id.clone(), error: SyncError::TooLarge { bytes: (bytes - old_bytes + size) as usize, max: MAX_ACCOUNT_BYTES as usize } });
             continue;
@@ -247,246 +232,6 @@ async fn notify(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, account: Uuid, n
     Ok(())
 }
 
-/// A nudge that isn't a `Nudge` the protocol knows yet; older clients read it as `Unknown`.
-async fn notify_raw(s: &AppState, account: Uuid, kind: &str) -> Result<()> {
-    sqlx::query("SELECT pg_notify($1, $2)").bind(CHANNEL).bind(format!("{account} {}", json!({"type": kind}))).execute(&s.db).await?;
-    Ok(())
-}
-
-async fn reset(State(s): State<AppState>, a: Authed) -> Result<Response> {
-    let mut tx = s.db.begin().await?;
-    sqlx::query("DELETE FROM sync_records WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM sync_keys WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM sync_approvals WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
-    // The sequence keeps counting up, so nothing a device saw before can be mistaken for new.
-    // A new generation: devices that look rather than listen see it change in their next pull.
-    sqlx::query("UPDATE sync_heads SET bytes = 0, generation = generation + 1, updated_at = now() WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
-    notify(&mut tx, a.account_id, &Nudge::Reset).await?;
-    tx.commit().await?;
-    Ok(Json(json!({"reset": true})).into_response())
-}
-
-#[derive(Deserialize)]
-struct Wrapped {
-    wrapped: String,
-}
-
-async fn put_recovery(State(s): State<AppState>, a: Authed, Json(w): Json<Wrapped>) -> Result<Response> {
-    if !w.wrapped.starts_with("v4.local.") || w.wrapped.len() > 4096 {
-        return Ok(refuse(StatusCode::BAD_REQUEST, SyncError::Malformed { reason: "the wrapped key must be a PASETO v4.local token".into() }));
-    }
-    sqlx::query("INSERT INTO sync_keys (account_id, wrapped_recovery) VALUES ($1, $2) ON CONFLICT (account_id) DO UPDATE SET wrapped_recovery = $2, updated_at = now()")
-        .bind(a.account_id)
-        .bind(&w.wrapped)
-        .execute(&s.db)
-        .await?;
-    Ok(Json(json!({"stored": true})).into_response())
-}
-
-async fn get_recovery(State(s): State<AppState>, a: Authed) -> Result<Response> {
-    let row: Option<(String, DateTime<Utc>)> = sqlx::query_as("SELECT wrapped_recovery, updated_at FROM sync_keys WHERE account_id = $1").bind(a.account_id).fetch_optional(&s.db).await?;
-    let (wrapped, at) = row.ok_or(Error::NotFound)?;
-    Ok(Json(json!({"wrapped": wrapped, "updated_at": at})).into_response())
-}
-
-/// A message of the approval exchange, kept as the device sent it. The server only checks it's the
-/// right shape and size; it can't read anything in it that matters.
-fn message<T: serde::de::DeserializeOwned + serde::Serialize>(v: &Value) -> Option<Value> {
-    let parsed: T = serde_json::from_value(v.clone()).ok()?;
-    let back = serde_json::to_value(parsed).ok()?;
-    (back.to_string().len() <= 4096).then_some(back)
-}
-
-fn bad(what: &str) -> Response {
-    refuse(StatusCode::BAD_REQUEST, SyncError::Malformed { reason: format!("{what} isn't what dino-sync sends") })
-}
-
-#[derive(Deserialize)]
-struct AskBody {
-    commitment: Value,
-}
-
-/// 1. A device without the key asks the account's other devices, committing to its key and nonce.
-async fn request_approval(State(s): State<AppState>, a: Authed, Json(b): Json<AskBody>) -> Result<Response> {
-    let device = match device(&a) {
-        Ok(d) => d,
-        Err(r) => return Ok(r),
-    };
-    let Some(commitment) = message::<Commitment>(&b.commitment) else { return Ok(bad("commitment")) };
-    let id = Uuid::now_v7();
-    let mut tx = s.db.begin().await?;
-    // One open request per device: asking again replaces the last one.
-    sqlx::query("DELETE FROM sync_approvals WHERE device_id = $1 AND status IN ('pending', 'responded', 'revealed')").bind(device).execute(&mut *tx).await?;
-    let expires: (DateTime<Utc>,) = sqlx::query_as("INSERT INTO sync_approvals (id, account_id, device_id, commitment, expires_at) VALUES ($1, $2, $3, $4, now() + $5) RETURNING expires_at")
-        .bind(id)
-        .bind(a.account_id)
-        .bind(device)
-        .bind(commitment)
-        .bind(APPROVAL_TTL)
-        .fetch_one(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    notify_raw(&s, a.account_id, "approvals").await?;
-    Ok(Json(json!({"id": id, "expires_at": expires.0})).into_response())
-}
-
-type ApprovalRow = (Uuid, Uuid, String, Value, Option<Value>, Option<Value>, Option<Value>, DateTime<Utc>, DateTime<Utc>, String, String);
-
-const APPROVAL_SELECT: &str = "SELECT p.id, p.device_id, p.status, p.commitment, p.response, p.reveal, p.grant_body, p.created_at, p.expires_at, d.name, d.os
-     FROM sync_approvals p JOIN devices d ON d.id = p.device_id";
-
-fn approval_json(r: &ApprovalRow) -> Value {
-    let (id, device, status, commitment, response, reveal, grant, created_at, expires_at, name, os) = r;
-    json!({
-        "id": id,
-        "device": {"id": device, "name": name, "os": os},
-        "status": status,
-        "commitment": commitment,
-        "response": response,
-        "reveal": reveal,
-        "grant": grant,
-        "created_at": created_at,
-        "expires_at": expires_at,
-    })
-}
-
-/// Requests from the account's other devices, for a signed-in device to answer.
-async fn list_approvals(State(s): State<AppState>, a: Authed) -> Result<Response> {
-    let device = match device(&a) {
-        Ok(d) => d,
-        Err(r) => return Ok(r),
-    };
-    let rows: Vec<ApprovalRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{APPROVAL_SELECT} WHERE p.account_id = $1 AND p.device_id <> $2 AND p.status IN ('pending', 'responded', 'revealed')
-           AND (p.approver_device IS NULL OR p.approver_device = $2) AND p.expires_at > now() AND d.revoked_at IS NULL ORDER BY p.created_at"
-    )))
-    .bind(a.account_id)
-    .bind(device)
-    .fetch_all(&s.db)
-    .await?;
-    Ok(Json(json!({"approvals": rows.iter().map(approval_json).collect::<Vec<_>>()})).into_response())
-}
-
-async fn load_approval(s: &AppState, account: Uuid, id: Uuid) -> Result<ApprovalRow> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!("{APPROVAL_SELECT} WHERE p.id = $1 AND p.account_id = $2 AND p.expires_at > now()")))
-        .bind(id)
-        .bind(account)
-        .fetch_optional(&s.db)
-        .await?
-        .ok_or(Error::NotFound)
-}
-
-/// The asking device follows its request here (and, when granted, takes the sealed key).
-async fn get_approval(State(s): State<AppState>, a: Authed, Path(id): Path<Uuid>) -> Result<Response> {
-    Ok(Json(approval_json(&load_approval(&s, a.account_id, id).await?)).into_response())
-}
-
-#[derive(Deserialize)]
-struct RespondBody {
-    response: Value,
-}
-
-/// 2. A signed-in device takes the request, answering with its public key and a fresh nonce.
-async fn claim(State(s): State<AppState>, a: Authed, Path(id): Path<Uuid>, Json(b): Json<RespondBody>) -> Result<Response> {
-    let device = match device(&a) {
-        Ok(d) => d,
-        Err(r) => return Ok(r),
-    };
-    let Some(response) = message::<ApprovalAnswer>(&b.response) else { return Ok(bad("response")) };
-    let changed = sqlx::query("UPDATE sync_approvals SET status = 'responded', approver_device = $3, response = $4 WHERE id = $1 AND account_id = $2 AND status = 'pending' AND device_id <> $3 AND expires_at > now()")
-        .bind(id)
-        .bind(a.account_id)
-        .bind(device)
-        .bind(response)
-        .execute(&s.db)
-        .await?
-        .rows_affected();
-    if changed == 0 {
-        return Err(Error::NotFound);
-    }
-    notify_raw(&s, a.account_id, "approvals").await?;
-    Ok(Json(approval_json(&load_approval(&s, a.account_id, id).await?)).into_response())
-}
-
-#[derive(Deserialize)]
-struct RevealBody {
-    reveal: Value,
-}
-
-/// 3. The asking device reveals what it committed to, once, after the answer arrived.
-async fn reveal(State(s): State<AppState>, a: Authed, Path(id): Path<Uuid>, Json(b): Json<RevealBody>) -> Result<Response> {
-    let device = match device(&a) {
-        Ok(d) => d,
-        Err(r) => return Ok(r),
-    };
-    let Some(reveal) = message::<Reveal>(&b.reveal) else { return Ok(bad("reveal")) };
-    let changed = sqlx::query("UPDATE sync_approvals SET status = 'revealed', reveal = $4 WHERE id = $1 AND account_id = $2 AND device_id = $3 AND status = 'responded' AND expires_at > now()")
-        .bind(id)
-        .bind(a.account_id)
-        .bind(device)
-        .bind(reveal)
-        .execute(&s.db)
-        .await?
-        .rows_affected();
-    if changed == 0 {
-        return Err(Error::NotFound);
-    }
-    notify_raw(&s, a.account_id, "approvals").await?;
-    Ok(Json(json!({"revealed": true})).into_response())
-}
-
-#[derive(Deserialize)]
-struct GrantBody {
-    grant: Grant,
-}
-
-/// 4. The answering device, after the person compared codes, hands over the account key sealed to
-/// the asking one. Only the device that answered, and only from the key it answered with.
-async fn grant(State(s): State<AppState>, a: Authed, Path(id): Path<Uuid>, Json(b): Json<GrantBody>) -> Result<Response> {
-    let device = match device(&a) {
-        Ok(d) => d,
-        Err(r) => return Ok(r),
-    };
-    let g = &b.grant;
-    if g.sealed.len() > 4096 || g.nonce.len() > 64 {
-        return Ok(refuse(StatusCode::BAD_REQUEST, SyncError::Malformed { reason: "grant too large".into() }));
-    }
-    let changed = sqlx::query("UPDATE sync_approvals SET status = 'granted', grant_body = $4 WHERE id = $1 AND account_id = $2 AND status = 'revealed' AND approver_device = $3 AND response->>'public' = $5 AND expires_at > now()")
-        .bind(id)
-        .bind(a.account_id)
-        .bind(device)
-        .bind(serde_json::to_value(g).map_err(anyhow::Error::from)?)
-        .bind(&g.from)
-        .execute(&s.db)
-        .await?
-        .rows_affected();
-    if changed == 0 {
-        return Err(Error::NotFound);
-    }
-    notify_raw(&s, a.account_id, "approvals").await?;
-    Ok(Json(json!({"granted": true})).into_response())
-}
-
-async fn deny(State(s): State<AppState>, a: Authed, Path(id): Path<Uuid>) -> Result<Response> {
-    let device = match device(&a) {
-        Ok(d) => d,
-        Err(r) => return Ok(r),
-    };
-    // A device that could answer it says no, or the asking device withdraws it.
-    let changed = sqlx::query("UPDATE sync_approvals SET status = 'denied' WHERE id = $1 AND account_id = $2 AND status IN ('pending', 'responded', 'revealed')
-           AND (device_id = $3 OR approver_device IS NULL OR approver_device = $3)")
-        .bind(id)
-        .bind(a.account_id)
-        .bind(device)
-        .execute(&s.db)
-        .await?
-        .rows_affected();
-    if changed == 0 {
-        return Err(Error::NotFound);
-    }
-    notify_raw(&s, a.account_id, "approvals").await?;
-    Ok(Json(json!({"denied": true})).into_response())
-}
 
 /// Connected devices on this node, by account. Nudges are hints (a device also pulls on wake and
 /// every few minutes), so a slow socket just misses some rather than holding anything up.
@@ -594,15 +339,15 @@ async fn serve_socket(s: AppState, account: Uuid, device: Uuid, socket: WebSocke
     s.hub.leave(account, conn);
 }
 
-/// What's synced, per collection, for the account page: counts, sizes and when. Never values.
-pub async fn summary(s: &AppState, account: Uuid) -> Result<Vec<(String, i64, i64, DateTime<Utc>)>> {
-    Ok(sqlx::query_as("SELECT collection, count(*), sum(bytes)::bigint, max(updated_at) FROM sync_records WHERE account_id = $1 AND NOT deleted GROUP BY collection ORDER BY collection")
+/// Every synced setting, for the account page: where it lives, its value and when it changed.
+pub async fn settings(s: &AppState, account: Uuid) -> Result<Vec<(String, String, Value, DateTime<Utc>)>> {
+    Ok(sqlx::query_as("SELECT collection, key, value, updated_at FROM sync_records WHERE account_id = $1 AND NOT deleted ORDER BY collection, key")
         .bind(account)
         .fetch_all(&s.db)
         .await?)
 }
 
-/// Every record, sealed as stored, for the export.
+/// Every record, for the export.
 pub async fn export(s: &AppState, account: Uuid) -> Result<Vec<Record>> {
     let rows: Vec<Row> = sqlx::query_as("SELECT collection, key, seq, hlc_wall, hlc_counter, hlc_device, schema, value, deleted, extra FROM sync_records WHERE account_id = $1 ORDER BY seq")
         .bind(account)

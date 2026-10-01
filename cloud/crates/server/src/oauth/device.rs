@@ -18,6 +18,8 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::crypto;
+use crate::identity::email;
+use crate::oauth::link;
 use crate::error::{Error, Result};
 use crate::limits::{self, ClientIp};
 use crate::oauth::clients::{self, Client, Kind};
@@ -27,6 +29,7 @@ use crate::web::session::Session;
 
 const CODE_TTL: Duration = Duration::minutes(10);
 const INTERVAL: i32 = 5;
+const LINK_INTERVAL: i32 = 2;
 const FRESH_MINUTES: i64 = 10;
 
 #[derive(Deserialize)]
@@ -36,6 +39,8 @@ pub struct AuthorizationForm {
     device_name: Option<String>,
     device_os: Option<String>,
     dino_version: Option<String>,
+    /// Sign in by a link mailed here instead of a code entered elsewhere (`link`).
+    email: Option<String>,
 }
 
 pub async fn authorization(State(s): State<AppState>, ClientIp(ip): ClientIp, Form(f): Form<AuthorizationForm>) -> Result<Response> {
@@ -43,6 +48,13 @@ pub async fn authorization(State(s): State<AppState>, ClientIp(ip): ClientIp, Fo
     let client = clients::find(&f.client_id).filter(|c| c.kind == Kind::Native).ok_or_else(|| Error::oauth("invalid_client", "Unknown client."))?;
     let scope = clients::scope(f.scope.as_deref()).ok_or_else(|| Error::oauth("invalid_scope", "Unknown scope."))?;
     let device = DeviceInfo::new(f.device_name.as_deref(), f.device_os.as_deref(), f.dino_version.as_deref());
+    let email = match f.email.as_deref() {
+        Some(e) => Some(email::normalize(e).ok_or_else(|| Error::oauth("invalid_request", "That doesn't look like an email address."))?),
+        None => None,
+    };
+    // A link is opened in a mail app, maybe after a while; the device looks more often, so it
+    // signs in right after.
+    let (ttl, interval) = if email.is_some() { (link::TTL, LINK_INTERVAL) } else { (CODE_TTL, INTERVAL) };
     let device_code = crypto::token("dino_dc");
     // A clash between live user codes is unlikely (20^8); try again if it happens.
     let mut user_code = crypto::user_code();
@@ -59,20 +71,23 @@ pub async fn authorization(State(s): State<AppState>, ClientIp(ip): ClientIp, Fo
         .bind(&device.os)
         .bind(&device.dino_version)
         .bind(ip.to_string())
-        .bind(CODE_TTL)
-        .bind(INTERVAL)
+        .bind(ttl)
+        .bind(interval)
         .execute(&s.db)
         .await?
         .rows_affected();
         if inserted == 1 {
+            if let Some(e) = &email {
+                link::send(&s, &crypto::hash(&device_code), &device.name, e).await?;
+            }
             let verification = s.cfg.url("/device");
             return Ok(axum::Json(json!({
                 "device_code": device_code,
                 "user_code": user_code,
                 "verification_uri": verification,
                 "verification_uri_complete": format!("{verification}?user_code={user_code}"),
-                "expires_in": CODE_TTL.num_seconds(),
-                "interval": INTERVAL,
+                "expires_in": ttl.num_seconds(),
+                "interval": interval,
             }))
             .into_response());
         }
