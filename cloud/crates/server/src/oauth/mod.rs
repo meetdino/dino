@@ -79,7 +79,7 @@ async fn token(State(s): State<AppState>, ClientIp(ip): ClientIp, Form(f): Form<
     let client = f.client_id.as_deref().and_then(clients::find).ok_or_else(|| Error::oauth("invalid_client", "Unknown client."))?;
     match f.grant_type.as_str() {
         "authorization_code" => {
-            limits::auth(&s, ip)?;
+            limits::auth(&s, ip).await?;
             let (Some(code), Some(redirect), Some(verifier)) = (f.code, f.redirect_uri, f.code_verifier) else {
                 return Err(Error::oauth("invalid_request", "code, redirect_uri and code_verifier are required."));
             };
@@ -106,7 +106,7 @@ struct RevokeForm {
 /// RFC 7009: a refresh token signs its device out; an access token just stops working. Always
 /// 200, whether or not the token was known.
 async fn revoke(State(s): State<AppState>, ClientIp(ip): ClientIp, Form(f): Form<RevokeForm>) -> Result<StatusCode> {
-    limits::auth(&s, ip)?;
+    limits::auth(&s, ip).await?;
     let hash = crypto::hash(&f.token);
     let mut tx = s.db.begin().await?;
     let device: Option<(uuid::Uuid, String)> = sqlx::query_as("SELECT r.device_id, d.client_id FROM refresh_tokens r JOIN devices d ON d.id = r.device_id WHERE r.hash = $1").bind(&hash).fetch_optional(&mut *tx).await?;

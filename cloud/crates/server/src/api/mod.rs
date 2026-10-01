@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::limits;
 use crate::oauth::{self, tokens};
 
-pub fn routes() -> Router<AppState> {
+pub fn routes(push: bool) -> Router<AppState> {
     Router::new()
         .route("/me", get(me))
         .route("/devices", get(devices))
@@ -25,7 +25,7 @@ pub fn routes() -> Router<AppState> {
         .route("/signout-everywhere", post(signout_everywhere))
         .route("/account", delete(delete_account))
         .route("/export", get(export))
-        .merge(sync::routes())
+        .merge(sync::routes(push))
 }
 
 /// A request made with a live dino access token.

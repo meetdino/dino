@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 # The sync protocol shared with dinod (private repo: see the README for fetching it).
-dino-sync = { git = "https://github.com/asdf9384/dino", rev = "1d7c0d9af496c4c5ef6bbc366f62ed018fd21f11" }
+dino-sync = { git = "https://github.com/asdf9384/dino", rev = "4a3e9092b712e88fa81c8c588f9d93877dfe7b13", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 base64 = "0.22"

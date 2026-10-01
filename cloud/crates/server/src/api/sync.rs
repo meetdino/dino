@@ -48,11 +48,14 @@ const MAX_NAME: usize = 200;
 const APPROVAL_TTL: chrono::Duration = chrono::Duration::minutes(10);
 pub const CHANNEL: &str = "dino_sync";
 
-pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/sync", get(pull).post(push).layer(DefaultBodyLimit::max(8 * 1024 * 1024)))
-        .route("/sync/ws", get(ws))
-        .route("/sync/reset", post(reset))
+/// `push`: serve `/sync/ws`. Without it the route isn't there, and `/v1/meta` tells devices to look
+/// on their own.
+pub fn routes(push: bool) -> Router<AppState> {
+    let r = Router::new()
+        .route("/meta", get(meta))
+        .route("/sync", get(pull).post(push_records).layer(DefaultBodyLimit::max(8 * 1024 * 1024)));
+    let r = if push { r.route("/sync/ws", get(ws)) } else { r };
+    r.route("/sync/reset", post(reset))
         .route("/sync/recovery", get(get_recovery).put(put_recovery))
         .route("/sync/approvals", get(list_approvals).post(request_approval))
         .route("/sync/approvals/{id}", get(get_approval))
@@ -128,7 +131,13 @@ fn malformed(id: &RecordId, reason: &str) -> Rejection {
     Rejection { id: id.clone(), error: SyncError::Malformed { reason: reason.into() } }
 }
 
-async fn push(State(s): State<AppState>, a: Authed, headers: HeaderMap, Json(req): Json<PushRequest>) -> Result<Response> {
+/// `GET /v1/meta`: what this server offers, before signing in. Without push, devices look every
+/// `poll_secs` (and sooner when something happens on their side).
+async fn meta(State(s): State<AppState>) -> Response {
+    Json(json!({"protocol": PROTOCOL, "push": s.cfg.platform.push, "poll_secs": 60})).into_response()
+}
+
+async fn push_records(State(s): State<AppState>, a: Authed, headers: HeaderMap, Json(req): Json<PushRequest>) -> Result<Response> {
     if let Some(r) = check_version(&headers) {
         return Ok(r);
     }
@@ -140,7 +149,7 @@ async fn push(State(s): State<AppState>, a: Authed, headers: HeaderMap, Json(req
         return Ok(refuse(StatusCode::PAYLOAD_TOO_LARGE, e));
     }
     if let Some(n) = NonZeroU32::new(req.records.len() as u32) {
-        if let Err(retry) = crate::limits::sync_writes(&s, device, n) {
+        if let Err(retry) = crate::limits::sync_writes(&s, device, n).await? {
             return Ok(refuse(StatusCode::TOO_MANY_REQUESTS, SyncError::RateLimited { retry_after_s: retry }));
         }
     }
