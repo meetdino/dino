@@ -29,6 +29,13 @@ struct DinoSettings: Codable, Equatable {
         var shell_integration: Bool?
         /// Keeping agents running with the lid closed; nil from an older dinod.
         var lid: Lid?
+        /// Which Claude Code sessions get the Claude subscription token; nil from an older dinod.
+        var claude_token: ClaudeTokenUse?
+    }
+    struct ClaudeTokenUse: Codable, Equatable {
+        var ssh: Bool
+        var local: Bool
+        static let standard = ClaudeTokenUse(ssh: true, local: false)
     }
     struct Lid: Codable, Equatable {
         var enabled: Bool
@@ -868,6 +875,9 @@ private struct AgentsPane: View {
             } footer: {
                 Footnote("Install and Sign In run the agent's own commands in a new shell, where you can see them and answer their questions. dino never sees your logins.")
             }
+            if store.setup?.contains(where: { $0.id == "claude" && $0.installed }) == true {
+                ClaudeTokenSection(act: openShell)
+            }
             if agents.isEmpty {
                 Section {
                     Text("No agent dino can start has a mode, model or effort to choose.").foregroundStyle(.secondary)
@@ -911,6 +921,13 @@ private struct AgentsPane: View {
                 if r.action == "install" ? a.installed : a.signed_in == true { running[id] = nil }
             }
         }
+    }
+
+    /// Shows `session`, a shell dinod just opened, in the main window, in front.
+    private func openShell(_ session: String) {
+        model.pendingSelect = session
+        NSApp.windows.first { w in w.isVisible && !(w.identifier?.rawValue.hasPrefix(SettingsView.windowID) ?? false) && w.canBecomeMain }?
+            .makeKeyAndOrderFront(nil)
     }
 
     /// Runs it in a new shell, shown in the main window, where the user watches and answers it.

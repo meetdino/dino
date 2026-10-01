@@ -179,6 +179,14 @@ pub enum Request {
     /// Keeping agents running with the lid closed: `status`, `setup` (installs the one-time
     /// permission, asking for an administrator's password) or `remove`. Replies `Power`.
     Power { action: String },
+    /// The Claude subscription token: `status`, `create` (runs `claude setup-token` in a new
+    /// shell and keeps the token it prints), `set` (`value`: a token to keep) or `remove`.
+    /// Replies `ClaudeToken`.
+    ClaudeToken {
+        action: String,
+        #[serde(default)]
+        value: Option<String>,
+    },
     /// The dino account and settings sync. `action`: `status`, `login` (`value`: the server, else
     /// the configured one), `login_device`, `join` (`value`: the recovery key), `resolve`
     /// (`value`: `cloud`, `local` or `merge`), `now`, `reset`, `undo`, `keys` (`value`: `on`/`off`),
@@ -313,6 +321,7 @@ pub enum Response {
     Connect { url: String },
     Sync { status: SyncStatus },
     Power { power: PowerInfo },
+    ClaudeToken { token: ClaudeTokenInfo },
     /// `loading`: dinod is asking the provider now; ask again for what it says.
     Models { provider: String, models: Vec<ModelRow>, loading: bool, error: Option<String> },
     PrDraft { draft: PrDraft },
@@ -723,6 +732,24 @@ pub struct PowerInfo {
     /// The one-time permission is installed; only filled in for `Power { status }`.
     pub ready: Option<bool>,
     /// The last time turning sleep off or on failed.
+    pub error: Option<String>,
+}
+
+/// The Claude subscription token, as dinod holds it: never the token itself.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct ClaudeTokenInfo {
+    /// Kept, and shaped like one `claude setup-token` makes.
+    pub set: bool,
+    /// Its kind and last four characters.
+    pub masked: Option<String>,
+    /// When it was made and runs out (unix seconds); unknown for a pasted one.
+    pub created: Option<u64>,
+    pub expires: Option<u64>,
+    /// Whether Claude Code on this Mac is signed in on its own, when dinod last looked.
+    pub signed_in: Option<bool>,
+    /// The shell running `claude setup-token`, while dinod waits for the token it prints.
+    pub creating: Option<String>,
+    /// What went wrong with the last attempt.
     pub error: Option<String>,
 }
 
