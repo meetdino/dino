@@ -1,0 +1,3 @@
+crates/dino-sync is a copy of crates/dino-sync from asdf9384/dino at
+4757ad3 (the dino repo is private until v1), without its `settings` module, which
+only dinod uses. Refresh it with scripts/update-dino-sync.sh after the protocol changes there.

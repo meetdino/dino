@@ -1,0 +1,81 @@
+{
+  "about": "dino-sync test vectors, protocol 2. Records are PASETO v4.local with footer {\"kid\":…} and implicit assertion JSON [account, collection, key, schema, wall_ms, counter, device, deleted]; a delete seals the payload \"deleted\". Approval: commitment = BLAKE2b-256 and code = BLAKE2b-64 mod 10^6, each over length-prefixed (u64 LE) parts, as in src/approval.rs.",
+  "account_key": {
+    "id": "k_0102030405060708",
+    "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  },
+  "records": [
+    {
+      "account": "acct_0001",
+      "plaintext": "\"plan\"",
+      "record": {
+        "collection": "agents",
+        "key": "claude.mode",
+        "hlc": {
+          "wall_ms": 1790000000000,
+          "counter": 0,
+          "device": "d_approver"
+        },
+        "schema": 1,
+        "value": "v4.local.HGwHgEC9NvgoUu3hHmVYV2MRSaPrbK8Ll69gVKI0qkFXqxl0PgQ8-zUjRB7XSRcYS5oK0opk6fsRQnPZURxRS3T_NaT5hA.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ"
+      }
+    },
+    {
+      "account": "acct_0001",
+      "plaintext": "\"sk-or-v1-example\"",
+      "record": {
+        "collection": "keys",
+        "key": "OPENROUTER_API_KEY",
+        "hlc": {
+          "wall_ms": 1790000000123,
+          "counter": 2,
+          "device": "d_a"
+        },
+        "schema": 1,
+        "value": "v4.local.3dDPDXLeMTlnO3-DSGvvD2HwTQRdDTUWUnfgZg2A9MJes-fXsCwNROFpHnuKFQgtXm6qWDpwKfKcf1kVa9rU7iqULoqdq2J5Uke_cnt03D36BQ.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ"
+      }
+    },
+    {
+      "account": "acct_0001",
+      "plaintext": null,
+      "record": {
+        "collection": "policies",
+        "key": "allow_bypass",
+        "hlc": {
+          "wall_ms": 1790000000456,
+          "counter": 0,
+          "device": "d_b"
+        },
+        "schema": 1,
+        "value": "v4.local.4HlwMzFk_1WZm2M7ePN_P3rErTCHHODNxp46x-V694Wm4euGUZtKEkE0Jv3leErxpXfxBI93jPvdD2UVQjzSkcaa2JoGEgY.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ",
+        "deleted": true
+      }
+    }
+  ],
+  "approval": {
+    "account": "acct_0001",
+    "approver_secret_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "approver_public": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo",
+    "new_device_secret_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "new_device_public": "ST6C_HRGSlkmiBdiPSBTxeuOLMSpiLT-4XnsawENUx0",
+    "new_device_nonce": "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8",
+    "commitment": "HKs2ZoCotNGIba4-fbM73EXwvmfCVOfol4wl2HkfO-g",
+    "approver_nonce": "wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t8",
+    "code": "95-37-38",
+    "grant": {
+      "from": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo",
+      "nonce": "8qdpgN_HpJJLMmoSnp58fuOB_4yqLk_R",
+      "sealed": "64zV0wStTz6PoSeAPGsmof0xyu8g4C0kVO396_OVOL9mT3ljeHi9n64lizFZE1sC_gHd-BX-uStvKPL7R1qJx168npnbFCijntHTnfuKBm4wlD_q9ouqxZoq-c1fRGINxZStPg_HBaLWUY14zOlOkiiLEGoiTw"
+    }
+  },
+  "recovery": {
+    "account": "acct_0001",
+    "display": "D1-7M02-97GN-XAYS-0H9X-B1QA-PB6Y-BGCN",
+    "also_accepted": [
+      "d1-7m02-97gn-xays-0h9x-b1qa-pb6y-bgcn",
+      "D1 7M02 97GN XAYS 0H9X B1QA PB6Y BGCN",
+      "D1-7MO2-97GN-XAYS-OH9X-B1QA-PB6Y-BGCN"
+    ],
+    "wrapped": "v4.local.cHZ3hMwViFP5MnaUzWD13pm7hAH20o7WgQ5D-MrYng1PDla5XSHJzZaRb5iJj7h6pUUT2HZvQEhMQG6JWoieSLNa8BZolcp8M8fcsR0xr2qJPpl6bSrxteTOuurs3liXTNGen5aOb7bQCLWqEvt2OixlYsX47B-5J_fdzKq1aUvut_g4i_Qbvbj8tYJoan_z"
+  }
+}
