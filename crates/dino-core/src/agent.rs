@@ -75,6 +75,11 @@ pub trait Agent: Sync {
     }
     /// The flags that put it in `mode`, one of its `modes`.
     fn mode_args(&self, mode: &str) -> Vec<String>;
+    /// What the agent itself calls `mode` (Claude says "Manual" where dino says "ask"), for the
+    /// mode chip; `None` keeps dino's word.
+    fn mode_label(&self, _mode: &str) -> Option<&'static str> {
+        None
+    }
     fn model_args(&self, model: &str) -> Vec<String>;
     fn effort_args(&self, effort: &str) -> Vec<String>;
     /// Its flags that take a value, as the next argument or after `=`.

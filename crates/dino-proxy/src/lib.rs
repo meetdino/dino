@@ -786,7 +786,7 @@ fn on_hook(st: &AppState, session: &str, body: &[u8]) -> StatusCode {
         // An interrupted tool, when the agent reports one (Claude often sends nothing; see `end_turn`).
         "PostToolUseFailure" if v["is_interrupt"].as_bool() == Some(true) => Some(Activity::Done),
         "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some(Activity::Working),
-        "PermissionRequest" => Some(Activity::NeedsPermission(tool())),
+        "PermissionRequest" => Some(Activity::NeedsPermission(asking(&tool(), &v["tool_input"]))),
         "Notification" => match v["notification_type"].as_str() {
             Some("permission_prompt" | "elicitation_dialog" | "agent_needs_input") => {
                 let msg = v["message"].as_str().unwrap_or("needs input").to_string();
@@ -817,6 +817,26 @@ fn on_hook(st: &AppState, session: &str, body: &[u8]) -> StatusCode {
 /// the agent's id, SubagentStart says where it runs, SubagentStop when it's finished. A foreground
 /// agent's PostToolUse only comes when it's done, so until then its task is guessed from the
 /// oldest unanswered Agent call of its type.
+/// What a permission prompt asks, in a few words: "Run: npm test?", "Edit src/main.rs?". The
+/// tool's name alone ("Bash") doesn't say what you'd be allowing.
+fn asking(tool: &str, input: &Value) -> String {
+    let field = |k: &str| input[k].as_str().map(|s| s.lines().next().unwrap_or("").trim().to_string()).filter(|s| !s.is_empty());
+    let file = || field("file_path").or_else(|| field("notebook_path")).map(|p| p.rsplit('/').next().unwrap_or(&p).to_string());
+    let what = match tool {
+        "Bash" => field("command").map(|c| format!("Run: {c}")),
+        "Edit" | "MultiEdit" | "NotebookEdit" => file().map(|f| format!("Edit {f}")),
+        "Write" => file().map(|f| format!("Write {f}")),
+        "WebFetch" => field("url").map(|u| format!("Fetch {u}")),
+        "WebSearch" => field("query").map(|q| format!("Search the web for {q}")),
+        _ => None,
+    };
+    let mut s = what.unwrap_or_else(|| format!("Use {tool}"));
+    if s.chars().count() > 120 {
+        s = s.chars().take(119).collect::<String>() + "…";
+    }
+    s + "?"
+}
+
 fn record_subagent(stats: &Stats, session: &str, event: &str, v: &Value) {
     let text = |x: &Value| x.as_str().filter(|s| !s.is_empty()).map(String::from);
     let agent_tool = matches!(v["tool_name"].as_str(), Some("Agent" | "Task")) && v["agent_id"].is_null();
@@ -1102,6 +1122,14 @@ impl Meter {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_permission_prompt_says_what_it_asks() {
+        assert_eq!(asking("Bash", &json!({"command": "touch notes.txt\nls"})), "Run: touch notes.txt?");
+        assert_eq!(asking("Edit", &json!({"file_path": "/repo/src/main.rs"})), "Edit main.rs?");
+        assert_eq!(asking("mcp__x__y", &json!({})), "Use mcp__x__y?");
+        assert_eq!(asking("Bash", &json!({})), "Use Bash?");
+    }
 
     #[test]
     fn hooks_decide_whether_a_turn_failed() {
