@@ -329,10 +329,11 @@ final class DinoModel: ObservableObject {
                 startingShell = newShell()
             }
         }
-        let groupSelected = selected.map { id in groups.contains { "group:\($0.id)" == id } } ?? false
-        let folderSelected = selected?.hasPrefix("dir:") ?? false
-        let subagentSelected = selected?.hasPrefix("agent:") ?? false
-        if !startingShell, !groupSelected, !folderSelected, !subagentSelected, selected == nil || !live.contains(selected!) {
+        // Rows that aren't sessions (folders, worktree lists, fan-outs, subagents, tasks, sessions on
+        // this Mac) carry a "kind:" prefix: one of those stays selected. Only a session that's gone
+        // falls back to another, or a click on "Other worktrees" would jump straight back.
+        let sessionGone = selected.map { !$0.contains(":") && !live.contains($0) } ?? true
+        if !startingShell, sessionGone {
             // The one selected when the app last quit, else the one that last did something.
             // Through select(), so the terminal also takes keyboard focus on launch.
             let last = UserDefaults.standard.string(forKey: Self.lastSelectedKey).flatMap { live.contains($0) ? $0 : nil }
