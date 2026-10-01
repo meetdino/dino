@@ -51,7 +51,7 @@ enum ControlKind: String, Identifiable {
     func options(_ k: Knobs, seen: [String] = [], current: String? = nil, model: String? = nil) -> [ControlOption] {
         switch self {
         case .mode:
-            return k.modes.map { ControlOption(value: $0, label: Mode.label($0), help: Mode.help($0)) }
+            return k.modes.map { ControlOption(value: $0, label: k.modeLabel($0), help: Mode.help($0)) }
         case .model:
             // The agent's own list, then models its sessions have answered with, then one typed by hand.
             var out = k.models.map { ControlOption(value: $0.id, label: $0.label, help: $0.id, group: $0.group) }
@@ -283,7 +283,7 @@ struct SessionControlsBar: View {
         let c = session.shownControls
         HStack(spacing: 2) {
             if ControlKind.mode.offered(by: knobs) {
-                chip(.mode, knobs, icon: ControlKind.icon(mode: c.mode), text: Mode.label(c.mode),
+                chip(.mode, knobs, icon: ControlKind.icon(mode: c.mode), text: knobs.modeLabel(c.mode),
                      tint: c.mode == "bypass" ? .red : nil)
             }
             if let route = session.route {
@@ -304,7 +304,7 @@ struct SessionControlsBar: View {
                     ProviderModelPopover(session: session, route: route)
                 }
             } else if ControlKind.model.offered(by: knobs) {
-                let text = c.model.map(knobs.label) ?? session.last_model.map { "Default · \(knobs.label($0))" } ?? "Default"
+                let text = c.model.map(knobs.label) ?? (session.last_model ?? knobs.default_model).map(knobs.label) ?? "Default"
                 chip(.model, knobs, icon: "cpu", text: text, tint: session.otherModel == nil ? nil : .orange)
             }
             // A model without effort levels (Haiku) has none to show.
@@ -352,7 +352,8 @@ struct SessionControlsBar: View {
             }
             return "Model: \(session.last_model.map { "answering with \($0)" } ?? "the agent's default") (\(key))"
         case .mode:
-            return "\(Mode.label(session.shownControls.mode)): \(session.shownControls.mode.map(Mode.help) ?? "the agent's own setting") (\(key))"
+            let k = model.knobs(for: session) ?? .none
+            return "\(k.modeLabel(session.shownControls.mode)): \(session.shownControls.mode.map(Mode.help) ?? "the agent's own setting") (\(key))"
         case .effort:
             return "How hard the model thinks (\(key))"
         }
@@ -366,6 +367,18 @@ struct ControlPopover: View {
     let session: SessionInfo
     let knobs: Knobs
     @State private var typed = ""
+    @State private var showMore = false
+
+    /// Default, and what it comes to when that's known: "Default (Manual)".
+    private var defaultLabel: String {
+        let resolved: String? = switch kind {
+        // The agent reports its mode; it is its own default only while dino hasn't set one.
+        case .mode: (session.controls?.mode == nil ? session.agent_mode : nil).map(knobs.modeLabel)
+        case .model: (knobs.default_model ?? session.last_model).map(knobs.label)
+        case .effort: knobs.listed(session.shownControls.model ?? knobs.default_model)?.default_effort?.capitalized
+        }
+        return resolved.map { "Default (\($0))" } ?? "Default"
+    }
 
     /// What's chosen, an alias as the model it names so its row is checked.
     private var current: String? {
@@ -375,16 +388,31 @@ struct ControlPopover: View {
 
     var body: some View {
         let listed = kind.options(knobs, seen: model.seenModels(session.agent_id), current: current, model: session.shownControls.model)
-        // Ungrouped first, so the numbers follow what's shown.
-        let ordered = listed.filter { $0.group == nil } + listed.filter { $0.group != nil }
-        let options: [(String?, String, String?)] = [(nil, "Default", defaultHelp)] + ordered.map { ($0.value, $0.label, $0.help) }
+        // Ungrouped first, so the numbers follow what's shown; older models fold away unless
+        // one of them is chosen.
+        let main = listed.filter { $0.group == nil }
+        let more = listed.filter { $0.group != nil }
+        let open = showMore || more.contains { $0.value == current }
+        let options: [(String?, String, String?)] = [(nil, defaultLabel, defaultHelp)] + (main + (open ? more : [])).map { ($0.value, $0.label, $0.help) }
         VStack(alignment: .leading, spacing: 2) {
             Text(kind.title).font(.headline).padding(.bottom, 6)
             ForEach(Array(options.enumerated()), id: \.offset) { i, o in
-                if i > 0, let g = ordered[i - 1].group, i == 1 || ordered[i - 2].group != g {
+                if i == main.count + 1, open, let g = more.first?.group {
                     Text(g).font(.caption).foregroundStyle(.secondary).padding(.top, 6)
                 }
                 row(i, o)
+            }
+            if !more.isEmpty, !open {
+                Button { showMore = true } label: {
+                    Label("\(more.first?.group ?? "More") (\(more.count))", systemImage: "chevron.right")
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 3).padding(.horizontal, 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
             }
             if kind == .model {
                 TextField("Other model", text: $typed, prompt: Text("Other model name"))
