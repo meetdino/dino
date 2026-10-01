@@ -14,6 +14,7 @@ pub mod local;
 mod openrouter;
 mod siwc;
 pub mod tasks;
+mod upstream;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -309,7 +310,7 @@ impl Proxy {
         let budget = Arc::new(AtomicU64::new(0));
         let state = AppState {
             stats: stats.clone(),
-            client: reqwest::Client::builder().build()?,
+            upstream: Arc::default(),
             router: Arc::default(),
             keys: keys.clone(),
             budget: budget.clone(),
@@ -422,7 +423,7 @@ fn clean_path(rest: &str) -> Option<&str> {
 #[derive(Clone)]
 pub(crate) struct AppState {
     stats: Arc<Stats>,
-    client: reqwest::Client,
+    upstream: Arc<upstream::Upstream>,
     router: Arc<dino_router::Router>,
     keys: Arc<RwLock<HashMap<String, String>>>,
     /// The session token budget; 0 means none.
@@ -432,6 +433,13 @@ pub(crate) struct AppState {
     /// The listener's port and the secret its paths must carry (see `admitted`).
     port: u16,
     secret: Arc<str>,
+}
+
+impl AppState {
+    /// The client for hosted APIs (the free tier's provider, its catalog).
+    fn client(&self) -> reqwest::Client {
+        self.upstream.client(false)
+    }
 }
 
 /// Most of a request (or an upstream answer) held at once. Generous: requests carry images.
@@ -537,30 +545,36 @@ async fn forward(
     let guard = is_model_call.then(|| InFlight { stats: st.stats.clone(), session: session.clone() });
 
     let method = parts.method.clone();
+    let on_mac = runtime.is_some();
+    let (headers, hosted_ref, url_ref, method_ref) = (&parts.headers, &hosted, &url, &method);
     let send = |body: Bytes| {
-        let mut up = st.client.request(method.clone(), &url).body(body);
-        for (name, value) in parts.headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
-            if hosted.as_ref().is_some_and(|h| h.1(name.as_str())) {
-                continue;
+        st.upstream.send(on_mac, move |client| {
+            let mut up = client.request(method_ref.clone(), url_ref).body(body.clone());
+            for (name, value) in headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
+                if hosted_ref.as_ref().is_some_and(|h| h.1(name.as_str())) {
+                    continue;
+                }
+                up = up.header(name, value);
             }
-            up = up.header(name, value);
-        }
-        for (name, value) in hosted.iter().flat_map(|h| &h.0) {
-            up = up.header(*name, value);
-        }
-        up.send()
+            for (name, value) in hosted_ref.iter().flat_map(|h| &h.0) {
+                up = up.header(*name, value);
+            }
+            up
+        })
     };
+    // Answered as the provider would when it's briefly unreachable, so the agent's own retries
+    // take over, as they would without dino in between.
     let upstream_error = |e: reqwest::Error| {
         let msg = match &runtime {
             Some((_, name, base)) if e.is_connect() => local::unreachable(name, base),
-            _ => format!("dino proxy: {e}"),
+            _ => format!("dino couldn't reach {}: {}", upstream.trim_start_matches("https://"), reason(&e)),
         };
         st.stats.update(&session, |s| {
             s.errors += 1;
             s.call_failed(msg.clone());
         });
-        log(format_args!("{session} {provider} {method} /{rest} -> upstream error: {e}"));
-        error(StatusCode::BAD_GATEWAY, msg)
+        log(format_args!("{session} {provider} {method} /{rest} -> upstream error: {e:?}"));
+        upstream::unreachable(&rest, &msg)
     };
     let mut resp = match send(body.clone()).await {
         Ok(r) => r,
@@ -571,7 +585,12 @@ async fn forward(
     if is_model_call && !resp.status().is_success() {
         let status = resp.status();
         let headers = resp.headers().clone();
-        let text = read_capped(resp, MAX_BODY).await;
+        // Cut off while it answered: say so the way a dropped connection would read to the agent,
+        // retryable, rather than pass on half an error.
+        let text = match read_capped(resp, MAX_BODY).await {
+            Ok(t) => t,
+            Err(e) => return upstream_error(e),
+        };
         resp = 'retry: {
             if provider == "chatgpt" && status == StatusCode::NOT_FOUND && codex::model_not_found(&text) {
                 let rejected = requested.clone().unwrap_or_default();
@@ -633,8 +652,12 @@ async fn forward(
         builder = builder.header(name, value);
     }
     if collect && status.is_success() {
+        // A stream cut off halfway is no answer: never hand the agent a partial one as complete.
+        let whole = match read_capped(resp, MAX_BODY).await {
+            Ok(w) => w,
+            Err(e) => return upstream_error(e),
+        };
         let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, _in_flight: guard };
-        let whole = read_capped(resp, MAX_BODY).await;
         tap.meter.feed(&whole);
         let answer = siwc::collect(&whole).unwrap_or_else(|| whole.to_vec());
         return builder.header("content-type", "application/json").body(Body::from(answer)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()));
@@ -652,13 +675,15 @@ async fn forward(
 }
 
 /// An upstream answer's body, up to `limit` bytes; the rest isn't read.
-async fn read_capped(mut resp: reqwest::Response, limit: usize) -> Bytes {
+/// The upstream's answer up to `limit` bytes. A connection that breaks partway is an error, never a
+/// shorter answer: the agent must not take half a reply for a whole one.
+async fn read_capped(mut resp: reqwest::Response, limit: usize) -> Result<Bytes, reqwest::Error> {
     let mut out: Vec<u8> = Vec::new();
     while out.len() < limit {
-        let Ok(Some(chunk)) = resp.chunk().await else { break };
+        let Some(chunk) = resp.chunk().await? else { break };
         out.extend_from_slice(&chunk[..chunk.len().min(limit - out.len())]);
     }
-    Bytes::from(out)
+    Ok(Bytes::from(out))
 }
 
 /// Lives as long as the response body; records usage when the stream ends or is dropped.
@@ -868,6 +893,22 @@ fn over_budget(st: &AppState, session: &str, provider: &str) -> Option<Response<
         serde_json::json!({"error": {"type": "invalid_request_error", "code": "dino_budget", "message": msg}})
     };
     Some(Response::builder().status(StatusCode::BAD_REQUEST).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap())
+}
+
+/// What went wrong with a request, in words: reqwest's own text ("error sending request for url")
+/// hides the cause in its source chain.
+fn reason(e: &reqwest::Error) -> String {
+    let mut words = vec![];
+    let mut cause: Option<&dyn std::error::Error> = std::error::Error::source(e);
+    while let Some(c) = cause {
+        words.push(c.to_string());
+        cause = c.source();
+    }
+    let kind = if e.is_connect() { "couldn't connect" } else if e.is_timeout() { "timed out" } else { "the connection failed" };
+    match words.last() {
+        Some(w) => format!("{kind} ({w})"),
+        None => kind.into(),
+    }
 }
 
 fn error(status: StatusCode, msg: String) -> Response<Body> {

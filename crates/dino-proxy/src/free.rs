@@ -178,7 +178,7 @@ async fn send(st: &AppState, session: &str, tier: Tier, mut oai: Value, stream: 
             clamp_output(&mut body, limit);
             let started = Instant::now();
             let sent = st
-                .client
+                .client()
                 .post(format!("{NIM_BASE}/chat/completions"))
                 .bearer_auth(key)
                 .timeout(Duration::from_secs(if stream { 600 } else { 120 }))
@@ -330,7 +330,7 @@ async fn choose_tier(st: &AppState, session: &str, raw: &Value, key: &str) -> Ti
 
 async fn jev(st: &AppState, state: &str) -> Option<(Tier, f64)> {
     let key = st.keys.read().unwrap().get("TYPESAFE_API_KEY").cloned()?;
-    let call = st.client.post(JEV_URL).bearer_auth(key).json(&jev_request(state)).send();
+    let call = st.client().post(JEV_URL).bearer_auth(key).json(&jev_request(state)).send();
     match tokio::time::timeout(Duration::from_millis(2500), call).await {
         Ok(Ok(r)) if r.status().is_success() => parse_jev(&r.json::<Value>().await.ok()?),
         Ok(Ok(r)) => {
@@ -350,7 +350,7 @@ async fn jev(st: &AppState, state: &str) -> Option<(Tier, f64)> {
 
 async fn llm_classify(st: &AppState, text: &str, key: &str) -> Option<Tier> {
     let model = st.router.classifier()?;
-    let call = st.client.post(format!("{NIM_BASE}/chat/completions")).bearer_auth(key).json(&classifier_request(&model, text)).send();
+    let call = st.client().post(format!("{NIM_BASE}/chat/completions")).bearer_auth(key).json(&classifier_request(&model, text)).send();
     match tokio::time::timeout(Duration::from_secs(6), call).await {
         Ok(Ok(r)) if r.status().is_success() => r.json::<Value>().await.ok().and_then(|v| {
             let msg = &v["choices"][0]["message"];
