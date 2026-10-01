@@ -822,16 +822,19 @@ pub fn status() -> SyncStatus {
 }
 
 /// `dino login`: the page to open. The rest happens once the browser comes back.
+/// Which sign-in is the current one: an earlier one that finishes or gives up later is ignored.
+static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn login(server: Option<String>) -> anyhow::Result<String> {
     let server = prepare_login(server)?;
-    let s2 = server.clone();
-    cloud::login(server, move |r| after_login(&s2, r))
+    let (s2, n) = (server.clone(), ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
+    cloud::login(server, move |r| after_login(&s2, n, r))
 }
 
 pub fn login_device(server: Option<String>) -> anyhow::Result<()> {
     let server = prepare_login(server)?;
-    let s2 = server.clone();
-    let code = cloud::login_device(server, move |r| after_login(&s2, r))?;
+    let (s2, n) = (server.clone(), ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
+    let code = cloud::login_device(server, move |r| after_login(&s2, n, r))?;
     live().lock().unwrap().device_code = Some(code);
     Ok(())
 }
@@ -851,7 +854,12 @@ fn prepare_login(server: Option<String>) -> anyhow::Result<String> {
     Ok(server)
 }
 
-fn after_login(server: &str, r: anyhow::Result<()>) {
+fn after_login(server: &str, attempt: u64, r: anyhow::Result<()>) {
+    // A sign-in that was started again since (the page left open, then a new try) is over: it
+    // mustn't sign out the one that went through.
+    if attempt != ATTEMPT.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let result = r.and_then(|()| set_up_account(server));
     let mut l = live().lock().unwrap();
     l.signing_in = false;
