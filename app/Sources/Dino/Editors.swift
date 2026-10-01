@@ -117,7 +117,7 @@ struct OpenInMenuItems: View {
     private static let editors = installedEditors()
 
     var body: some View {
-        let folder = model.selectedSession.flatMap { $0.host == nil ? $0.cwd : nil }
+        let folder = model.selectedSession.flatMap { $0.host == nil ? $0.here : nil }
         Menu("Open In") {
             ForEach(Self.editors) { e in
                 Button(e.name) {
