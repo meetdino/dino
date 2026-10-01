@@ -154,12 +154,42 @@ pub struct Machine {
     pub keep_awake: bool,
     /// Shells dino starts mark their prompts and report their folder, as in Ghostty (new shells only).
     pub shell_integration: bool,
+    /// Keep agents running with the lid closed. Off unless turned on, and for this Mac only.
+    pub lid: Lid,
 }
 
 impl Default for Machine {
     fn default() -> Self {
-        Self { onboarded: false, keep_awake: false, shell_integration: true }
+        Self { onboarded: false, keep_awake: false, shell_integration: true, lid: Lid::default() }
     }
+}
+
+/// When the Mac stays awake with its lid closed (`pmset disablesleep`, see [`crate::power`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct Lid {
+    pub enabled: bool,
+    /// Only while an agent is working, or whenever dino has an agent session open.
+    pub when: LidWhen,
+    /// Also on battery, down to `min_battery` percent; otherwise only on the power adapter.
+    pub on_battery: bool,
+    pub min_battery: u8,
+    /// Sleep comes back after this many hours awake in a row; 0 for no limit.
+    pub max_hours: f64,
+}
+
+impl Default for Lid {
+    fn default() -> Self {
+        Self { enabled: false, when: LidWhen::Working, on_battery: false, min_battery: 30, max_hours: 8.0 }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LidWhen {
+    #[default]
+    Working,
+    Open,
 }
 
 impl Settings {

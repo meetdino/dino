@@ -967,6 +967,12 @@ struct UsagePanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if model.power?.holding == true {
+                Label("Awake with the lid closed", systemImage: "laptopcomputer")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("dino turned system sleep off while agents work; it comes back when they're done (Settings → General)")
+            }
             Text("USAGE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             let labels = ["anthropic": "Claude", "chatgpt": "Codex"]
             ForEach(model.quotas, id: \.provider) { q in

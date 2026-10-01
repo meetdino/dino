@@ -176,6 +176,9 @@ pub enum Request {
     ConnectProvider { provider: String },
     /// Forget the key dino got for it.
     DisconnectProvider { provider: String },
+    /// Keeping agents running with the lid closed: `status`, `setup` (installs the one-time
+    /// permission, asking for an administrator's password) or `remove`. Replies `Power`.
+    Power { action: String },
     /// The dino account and settings sync. `action`: `status`, `login` (`value`: the server, else
     /// the configured one), `login_device`, `join` (`value`: the recovery key), `resolve`
     /// (`value`: `cloud`, `local` or `merge`), `now`, `reset`, `undo`, `keys` (`value`: `on`/`off`),
@@ -272,6 +275,9 @@ pub enum Response {
         /// Other Macs of the account asking this one for the sync key, for the app to show.
         #[serde(default)]
         approvals: Vec<ApprovalRequest>,
+        /// Whether the Mac is being kept awake with its lid closed; absent from an older dinod.
+        #[serde(default)]
+        power: Option<PowerInfo>,
     },
     Launchers { launchers: Vec<LauncherInfo> },
     AgentSetup { agents: Vec<AgentSetupInfo> },
@@ -299,6 +305,7 @@ pub enum Response {
     /// Open this page to go on.
     Connect { url: String },
     Sync { status: SyncStatus },
+    Power { power: PowerInfo },
     /// `loading`: dinod is asking the provider now; ask again for what it says.
     Models { provider: String, models: Vec<ModelRow>, loading: bool, error: Option<String> },
     PrDraft { draft: PrDraft },
@@ -692,6 +699,24 @@ pub struct MemberInfo {
     pub worktree: String,
     /// None when the worktree can't be read (removed by hand).
     pub stat: Option<DiffStat>,
+}
+
+/// Keeping agents running with the lid closed, as dinod sees it.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct PowerInfo {
+    /// System sleep is off now because dino turned it off.
+    pub holding: bool,
+    /// Since when (unix seconds).
+    pub since: Option<u64>,
+    /// Sleep was already off, turned off by someone else: dino leaves it alone.
+    pub external: bool,
+    /// Why it stopped last time, when that's worth saying (battery, heat, time…), and when.
+    pub note: Option<String>,
+    pub note_at: Option<u64>,
+    /// The one-time permission is installed; only filled in for `Power { status }`.
+    pub ready: Option<bool>,
+    /// The last time turning sleep off or on failed.
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

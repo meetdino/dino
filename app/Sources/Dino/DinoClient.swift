@@ -495,7 +495,7 @@ struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
 
-    enum CodingKeys: String, CodingKey { case type, sessions, quotas, launchers, id, message, approvals }
+    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, launchers, id, message, approvals }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -504,6 +504,7 @@ struct Response: Decodable {
         sessions = type == "state" ? try c.decodeIfPresent([SessionInfo].self, forKey: .sessions) : nil
         quotas = try c.decodeIfPresent([QuotaInfo].self, forKey: .quotas)
         approvals = try c.decodeIfPresent([ApprovalRequest].self, forKey: .approvals)
+        power = try c.decodeIfPresent(PowerInfo.self, forKey: .power)
         launchers = try c.decodeIfPresent([LauncherInfo].self, forKey: .launchers)
         id = try c.decodeIfPresent(String.self, forKey: .id)
         message = try c.decodeIfPresent(String.self, forKey: .message)
@@ -511,9 +512,35 @@ struct Response: Decodable {
     var quotas: [QuotaInfo]?
     /// Other Macs asking this one for the sync key.
     var approvals: [ApprovalRequest]?
+    var power: PowerInfo?
     var launchers: [LauncherInfo]?
     var id: String?
     var message: String?
+}
+
+/// Keeping agents running with the lid closed, as dinod sees it.
+struct PowerInfo: Codable, Equatable {
+    var holding: Bool
+    var since: UInt64?
+    /// Sleep is off, but someone else turned it off: dino leaves it alone.
+    var external: Bool
+    /// Why sleep came back last time, when it's worth saying.
+    var note: String?
+    var note_at: UInt64?
+    /// The one-time permission is in place; only in a `power` reply.
+    var ready: Bool?
+    var error: String?
+}
+
+private struct PowerResponse: Decodable {
+    var power: PowerInfo
+}
+
+extension DinoConnection {
+    /// `status`, `setup` (macOS asks for an administrator's password) or `remove`.
+    func power(_ action: String) throws -> PowerInfo {
+        try JSONDecoder().decode(PowerResponse.self, from: send(["type": "power", "action": action])).power
+    }
 }
 
 enum DinoError: Error, LocalizedError {

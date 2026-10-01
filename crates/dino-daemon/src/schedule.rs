@@ -254,10 +254,11 @@ pub(crate) fn type_when_ready(d: &Daemon, id: &str, text: &str) {
     });
 }
 
-/// While the setting is on and any task runs on a schedule, `caffeinate -i` holds an IOPM
-/// assertion against idle sleep. It exits with dinod (`-w`).
+/// While the setting is on and any task runs on a schedule, or while the lid is kept awake for
+/// agents, `caffeinate -i` holds an IOPM assertion against idle sleep. It exits with dinod (`-w`).
 pub(crate) fn keep_awake(d: &Daemon) {
-    let want = Settings::load().machine.keep_awake && d.schedule.tasks.lock().unwrap().iter().any(|t| t.enabled && t.frequency != Frequency::Manual);
+    // Also while the lid is kept awake for agents: idle sleep is the other way to stop them.
+    let want = d.lid.holding() || Settings::load().machine.keep_awake && d.schedule.tasks.lock().unwrap().iter().any(|t| t.enabled && t.frequency != Frequency::Manual);
     let mut awake = d.schedule.awake.lock().unwrap();
     if let Some(c) = awake.as_mut()
         && !matches!(c.try_wait(), Ok(None))
