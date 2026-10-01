@@ -199,6 +199,16 @@ impl Agent for Kimi {
         &["ask", "plan", "auto", "bypass"]
     }
 
+    fn mode_label(&self, mode: &str) -> Option<&'static str> {
+        Some(match mode {
+            "ask" => "Default",
+            "plan" => "Plan",
+            "auto" => "Ask when needed",
+            "bypass" => "Never ask",
+            _ => return None,
+        })
+    }
+
     fn mode_args(&self, mode: &str) -> Vec<String> {
         match mode {
             "plan" => strings(&["--plan"]),

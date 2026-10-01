@@ -160,6 +160,18 @@ impl Agent for Qwen {
         &["ask", "edits", "plan", "auto", "bypass"]
     }
 
+    // Its approval modes, as it names them.
+    fn mode_label(&self, mode: &str) -> Option<&'static str> {
+        Some(match mode {
+            "ask" => "Default",
+            "edits" => "Auto-edit",
+            "plan" => "Plan",
+            "auto" => "Auto",
+            "bypass" => "YOLO",
+            _ => return None,
+        })
+    }
+
     fn mode_args(&self, mode: &str) -> Vec<String> {
         let m = match mode {
             "ask" => "default",

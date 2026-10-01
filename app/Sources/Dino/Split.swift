@@ -306,7 +306,7 @@ struct SplitMenuItems: View {
             .disabled(session == nil)
         Menu("Open Beside") {
             ForEach(model.sessions.filter { $0.id != session?.id }) { s in
-                Button(s.title.map { "\(s.name) — \($0)" } ?? s.name) { model.openBeside(s.id) }
+                Button(s.label == nil ? s.title.map { "\(s.name) — \($0)" } ?? s.name : s.display) { model.openBeside(s.id) }
             }
         }
         .disabled(session == nil || model.sessions.count < 2)

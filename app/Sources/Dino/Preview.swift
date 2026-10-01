@@ -327,15 +327,16 @@ extension DinoModel {
         Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).previewStop(session: session, name: name) }
     }
 
-    /// A starter `.dino/launch.json` for the session's folder, open for editing.
-    func addLaunchFile(in cwd: String) {
+    /// A starter `.dino/launch.json` for the session's folder, open for editing; with `script`, one
+    /// that runs that package.json script, left closed: the pane offers to start it.
+    func addLaunchFile(in cwd: String, script: PackageScript? = nil) {
         let path = (cwd as NSString).appendingPathComponent(".dino/launch.json")
         if !FileManager.default.fileExists(atPath: path) {
             let fm = FileManager.default
             let node = fm.fileExists(atPath: (cwd as NSString).appendingPathComponent("package.json"))
-            let run = node
-                ? #""runtimeExecutable": "npm",\#n      "runtimeArgs": ["run", "dev"]"#
-                : #""runtimeExecutable": "python3",\#n      "runtimeArgs": ["-m", "http.server", "8000"],\#n      "port": 8000"#
+            let pick = script ?? (node ? PackageScript(runner: PackageScript.runner(in: cwd), name: "dev") : nil)
+            let run = pick.map { #""runtimeExecutable": "\#($0.runner)",\#n      "runtimeArgs": ["run", "\#($0.name)"]"# }
+                ?? #""runtimeExecutable": "python3",\#n      "runtimeArgs": ["-m", "http.server", "8000"],\#n      "port": 8000"#
             let text = """
             {
               // Dev servers dino's preview can start (the same shape as .claude/launch.json).
@@ -343,7 +344,7 @@ extension DinoModel {
               "version": "0.0.1",
               "configurations": [
                 {
-                  "name": "\(node ? "dev" : "web")",
+                  "name": "\(pick?.name ?? "web")",
                   \(run)
                 }
               ]
@@ -358,7 +359,35 @@ extension DinoModel {
                 return
             }
         }
-        openFile(path, line: 7)
+        if script == nil { openFile(path, line: 7) }
+    }
+}
+
+/// A package.json script that serves the app, as `npm run dev` (or the lockfile's own runner).
+struct PackageScript: Equatable, Identifiable {
+    var runner: String
+    var name: String
+    var id: String { name }
+    var command: String { "\(runner) run \(name)" }
+
+    /// The ones a preview would want, most likely first.
+    private static let serving = ["dev", "start", "serve", "preview", "develop", "storybook"]
+
+    static func find(in cwd: String) -> [PackageScript] {
+        let url = URL(fileURLWithPath: cwd).appendingPathComponent("package.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let scripts = json["scripts"] as? [String: Any] else { return [] }
+        let runner = runner(in: cwd)
+        return serving.filter { scripts[$0] != nil }.map { PackageScript(runner: runner, name: $0) }
+    }
+
+    static func runner(in cwd: String) -> String {
+        let has = { FileManager.default.fileExists(atPath: (cwd as NSString).appendingPathComponent($0)) }
+        if has("pnpm-lock.yaml") { return "pnpm" }
+        if has("yarn.lock") { return "yarn" }
+        if has("bun.lockb") || has("bun.lock") { return "bun" }
+        return "npm"
     }
 }
 
@@ -420,6 +449,8 @@ private struct PreviewBody: View {
     let session: SessionInfo?
     @State private var configs: [PreviewConfig] = []
     @State private var configError: String?
+    /// package.json scripts to offer when nothing's set up; read with the launch files.
+    @State private var scripts: [PackageScript] = []
     @State private var editing = ""
     @FocusState private var addressFocused: Bool
 
@@ -427,6 +458,33 @@ private struct PreviewBody: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            SidePaneHeader(
+                title: "Preview",
+                subtitle: page.title.isEmpty ? session?.display : page.title,
+                closeHelp: "Close the preview (⌘W or Esc)",
+                close: { model.closeSidePane() }
+            ) {
+                Image(systemName: "globe.americas")
+            } trailing: {
+                Group {
+                    serverMenu
+                    if let u = page.url, u.isFileURL {
+                        Button { model.openFile(u.path, session: session?.id, source: true) } label: {
+                            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        }
+                        .help("Edit the HTML")
+                        .accessibilityLabel("Edit the HTML")
+                    }
+                    Button {
+                        if !page.openInBrowser() { NSSound.beep() }
+                    } label: { Image(systemName: "safari") }
+                        .disabled(page.url == nil)
+                        .help("Open in your browser")
+                        .accessibilityLabel("Open in your browser")
+                }
+                .buttonStyle(.borderless)
+            }
+            Divider()
             bar
             ZStack(alignment: .top) {
                 Divider()
@@ -460,6 +518,8 @@ private struct PreviewBody: View {
                 let (c, e) = await model.previewConfigs(id)
                 if c != configs { configs = c }
                 if e != configError { configError = e }
+                let found = c.isEmpty && session?.host == nil ? (session?.cwd).map(PackageScript.find) ?? [] : []
+                if found != scripts { scripts = found }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
@@ -469,38 +529,26 @@ private struct PreviewBody: View {
     private var bar: some View {
         HStack(spacing: 6) {
             Button { page.view.goBack() } label: { Image(systemName: "chevron.left") }
-                .disabled(!page.canGoBack).help("Back")
+                .disabled(!page.canGoBack).help("Back").accessibilityLabel("Back")
             Button { page.view.goForward() } label: { Image(systemName: "chevron.right") }
-                .disabled(!page.canGoForward).help("Forward")
+                .disabled(!page.canGoForward).help("Forward").accessibilityLabel("Forward")
             Group {
                 if page.loading {
                     Button { page.view.stopLoading() } label: { Image(systemName: "xmark") }.help("Stop loading")
+                        .accessibilityLabel("Stop loading")
                 } else {
                     Button { page.reload() } label: { Image(systemName: "arrow.clockwise") }.help("Reload (⌘R)")
+                        .accessibilityLabel("Reload")
                         .keyboardShortcut("r")
                         .disabled(page.url == nil)
                 }
             }
             .frame(width: 18)
             addressField
-            serverMenu
-            if let u = page.url, u.isFileURL {
-                Button { model.openFile(u.path, session: session?.id, source: true) } label: {
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                }
-                .help("Edit the HTML")
-            }
-            Button {
-                if !page.openInBrowser() { NSSound.beep() }
-            } label: { Image(systemName: "safari") }
-                .disabled(page.url == nil)
-                .help("Open in your browser")
-            Button { model.closeSidePane() } label: { Image(systemName: "xmark") }
-                .help("Close the preview (⌘W or Esc)")
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.vertical, 6)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -508,7 +556,7 @@ private struct PreviewBody: View {
         HStack(spacing: 5) {
             Image(systemName: page.url?.isFileURL == true ? "doc" : page.url?.scheme == "https" ? "lock.fill" : "globe")
                 .font(.caption).foregroundStyle(.tertiary)
-            TextField("localhost:3000, a URL or a file", text: Binding(
+            TextField("Address", text: Binding(
                 get: { addressFocused ? editing : page.address },
                 set: { editing = $0 }
             ))
@@ -524,7 +572,7 @@ private struct PreviewBody: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 4)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
-        .help(page.title.isEmpty ? (page.url?.absoluteString ?? "") : "\(page.title) — \(page.url?.absoluteString ?? "")")
+        .help(page.url == nil ? "A port like localhost:3000, a URL or a file's path" : page.title.isEmpty ? (page.url?.absoluteString ?? "") : "\(page.title) — \(page.url?.absoluteString ?? "")")
     }
 
     private var serverMenu: some View {
@@ -552,8 +600,10 @@ private struct PreviewBody: View {
             }
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .fixedSize()
         .disabled(session == nil)
+        .accessibilityLabel("Dev servers")
         .help(running.isEmpty ? "Dev servers from launch.json" : "Running: \(running.map(\.name).joined(separator: ", "))")
     }
 
@@ -570,7 +620,7 @@ private struct PreviewBody: View {
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
                     .tint(Brand.green)
-                    .help("\(session.name) printed this address")
+                    .help("\(session.display) printed this address")
                 }
                 ForEach(configs) { c in
                     Button { model.startServer(c.name, page: page) } label: {
@@ -586,14 +636,30 @@ private struct PreviewBody: View {
                 if let configError {
                     ErrorLine(message: configError)
                 } else if configs.isEmpty, let cwd = session.cwd {
-                    Text("No dev server set up for \((cwd as NSString).lastPathComponent).")
-                        .font(.callout).foregroundStyle(.secondary)
-                    Button("Add .dino/launch.json…") { model.addLaunchFile(in: cwd) }
+                    if scripts.isEmpty {
+                        Text("No dev server set up for \((cwd as NSString).lastPathComponent).")
+                            .font(.callout).foregroundStyle(.secondary)
+                    } else {
+                        Text("Serve \((cwd as NSString).lastPathComponent) with a script from its package.json:")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        ForEach(scripts.prefix(3)) { p in
+                            Button { model.addLaunchFile(in: cwd, script: p) } label: {
+                                Text(p.command).font(.body.monospaced()).frame(minWidth: 220)
+                            }
+                            .controlSize(.large)
+                            .help("Saves it to .dino/launch.json; you see the command once more before it first runs")
+                        }
+                    }
+                    Button(scripts.isEmpty ? "Add .dino/launch.json…" : "Write .dino/launch.json by Hand…") { model.addLaunchFile(in: cwd) }
+                        .buttonStyle(.link)
                         .help("dino also reads .claude/launch.json")
                 }
             }
-            Text("Or type an address above; ⌘-click a link in the terminal.")
+            Text("Or type an address above, or ⌘-click a link in the terminal.")
                 .font(.caption).foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(30)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

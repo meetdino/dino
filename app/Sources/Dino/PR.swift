@@ -56,7 +56,8 @@ struct PRChip: View {
     }
 }
 
-/// The toolbar's PR button: "Create PR" until the branch has one, then the PR's number and state.
+/// The toolbar's PR button, once the branch has one: its number and state. Creating one is in the
+/// Session menu and the command palette.
 struct PRToolbarButton: View {
     @EnvironmentObject var model: DinoModel
 
@@ -75,12 +76,6 @@ struct PRToolbarButton: View {
                     .labelStyle(.titleAndIcon)
                 }
                 .help("PR #\(pr.number) · \(look.label)")
-            } else {
-                Button { model.showCreatePR = true } label: {
-                    Label("Create PR", systemImage: "arrow.triangle.pull")
-                }
-                .help(session?.remoteReason ?? "Push this session's branch and open a pull request on GitHub")
-                .disabled(session == nil || session?.host != nil)
             }
         }
         .popover(isPresented: $model.showPR, arrowEdge: .bottom) {
@@ -127,8 +122,8 @@ struct PRPopover: View {
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
                 if pr.isOpen, pr.checks.failed > 0, session.agent_id != "shell" {  // a shell has no one to read it
-                    Button("Ask \(session.name) to Fix") { run { try await model.fixPR(session.id) } }
-                        .help("Paste the failing checks' logs into \(session.name) and ask it to fix them")
+                    Button("Ask \(session.display) to Fix") { run { try await model.fixPR(session.id) } }
+                        .help("Paste the failing checks' logs into \(session.display) and ask it to fix them")
                 }
                 if pr.canMerge {
                     Button("Merge") { confirmMerge = true }
@@ -138,7 +133,7 @@ struct PRPopover: View {
                 if !pr.isOpen, let w = model.dinoWorktree(of: session) {
                     Button("Close Worktree…") {
                         model.showPR = false
-                        model.closingWorktree = ClosingWorktree(path: w.path, label: w.branch ?? session.name, apply: false)
+                        model.closingWorktree = ClosingWorktree(path: w.path, label: w.branch ?? session.display, apply: false)
                     }
                     .help("The PR is \(pr.state): stop the session and remove its worktree and branch")
                 }
@@ -172,7 +167,7 @@ struct PRPopover: View {
                 autoRow(
                     "Auto-fix failing checks",
                     detail: auto.flatMap { $0.fix && $0.fixes > 0 ? "\($0.fixes) of 3 asked" : nil },
-                    help: "When checks fail, paste their logs into \(session.name) and ask it to fix them: once per push, up to three times",
+                    help: "When checks fail, paste their logs into \(session.display) and ask it to fix them: once per push, up to three times",
                     isOn: Binding(get: { auto?.fix ?? false }, set: { on in run { try await model.setAutoPR(session.id, fix: on) } })
                 )
             }

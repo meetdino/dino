@@ -273,7 +273,9 @@ struct ArchivedSection: View {
             if model.archived.isEmpty {
                 Text("Nothing archived. Archive a session from its row, its menu or ⇧⌘A: it stops, and waits here to pick up again.")
                     .font(.callout).foregroundStyle(.tertiary)
+                    .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 TextField("Search archived", text: $query)
                     .textFieldStyle(.roundedBorder)
@@ -292,8 +294,6 @@ struct ArchivedSection: View {
                     Text("No archived session matches “\(query)”").font(.callout).foregroundStyle(.tertiary)
                 }
             }
-        } header: {
-            Text("Archived")
         }
         .alert(
             "Delete “\(deleting?.display ?? "")”?",
@@ -317,12 +317,13 @@ struct ArchivedRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "archivebox").foregroundStyle(.tertiary).frame(width: 14)
+            Image(systemName: "archivebox").foregroundStyle(.tertiary).frame(width: 14).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
-                    Text(session.display).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(session.display).font(.body.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
                     if session.pinned == true {
                         Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.tertiary).help("Pinned")
+                            .accessibilityLabel("Pinned")
                     }
                 }
                 Text(detail).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
@@ -333,10 +334,12 @@ struct ArchivedRow: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(Brand.green)
                     .help(session.resumable ? "Unarchive: continue the conversation" : "Unarchive: start \(model.launcherLabel(session.launcher)) again in its folder")
+                    .accessibilityLabel("Unarchive")
                 Button(action: delete) { Image(systemName: "trash") }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .help("Delete…")
+                    .accessibilityLabel("Delete")
             }
         }
         .padding(.vertical, 2)
@@ -464,11 +467,11 @@ struct ShortcutSheet: View {
         }
     }
 
-    private static let systemActions: Set<Selector> = [
+    static let systemActions: Set<Selector> = [
         NSSelectorFromString("startDictation:"), #selector(NSApplication.orderFrontCharacterPalette(_:)),
     ]
 
-    private static func keys(_ item: NSMenuItem) -> String {
+    static func keys(_ item: NSMenuItem) -> String {
         let m = item.keyEquivalentModifierMask
         var s = ""
         if m.contains(.control) { s += "⌃" }

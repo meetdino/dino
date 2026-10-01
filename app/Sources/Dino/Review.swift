@@ -99,14 +99,14 @@ struct ReviewPanel: View {
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Changes").font(.headline)
-                if let c = changes, c.note == nil {
-                    Text("\(shortPath(c.root)) · since \(c.base)").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
-                }
-            }
-            Spacer()
+        SidePaneHeader(
+            title: "Changes",
+            subtitle: changes.flatMap { c in c.note == nil ? "\(session.display) · since \(c.base)" : nil } ?? session.display,
+            closeHelp: "Hide changes (⇧⌘D)",
+            close: { model.showReview = false }
+        ) {
+            Image(systemName: "plusminus.circle")
+        } trailing: {
             if let files = changes?.files, !files.isEmpty {
                 StatText(stat: DiffStat(
                     files: UInt32(files.count),
@@ -116,12 +116,8 @@ struct ReviewPanel: View {
                 .font(.caption.monospacedDigit())
             }
             reviewButton
-            Button { model.showReview = false } label: { Image(systemName: "xmark") }
-                .buttonStyle(.borderless)
-                .help("Hide changes (⇧⌘D)")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .help(changes.map { "\($0.root)\nSince \($0.base)" } ?? "")
     }
 
     private static let reviewHelp = "Claude reads these changes and comments only on likely bugs: code that won't compile, logic errors, security problems. The reviewer is always Claude, whichever agent made the changes."
@@ -179,7 +175,7 @@ struct ReviewPanel: View {
             if let note = c.note {
                 Placeholder(text: note)
             } else if c.files.isEmpty {
-                Placeholder(text: "\(session.name) hasn't changed anything since \(c.base)")
+                Placeholder(text: "\(session.display) hasn't changed anything since \(c.base)")
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
@@ -265,13 +261,13 @@ struct ReviewPanel: View {
                         sending = false
                     }
                 } label: {
-                    Text("Send to \(session.name)")
+                    Text("Send to \(session.display)")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Brand.green)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(sending || session.exited)
-                .help("Type the comments into \(session.name) as one message (⌘↩)")
+                .help("Type the comments into \(session.display) as one message (⌘↩)")
             }
         }
         .padding(12)
