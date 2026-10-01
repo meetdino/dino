@@ -18,7 +18,7 @@ pub struct Config {
     pub database_url: String,
     /// Keys the HMACs (email codes, CSRF, derived refresh tokens). 32 random bytes.
     pub secret: [u8; 32],
-    /// Behind a proxy that sets `X-Forwarded-For` (Fly, Cloudflare): take the client address
+    /// Behind a proxy that sets `X-Forwarded-For` (a load balancer, Cloudflare): take the client address
     /// from it. Off, the header is ignored, since anyone can send it.
     pub trust_proxy: bool,
     pub github: Option<Upstream>,
@@ -75,6 +75,27 @@ fn pair(name: &str, default: (u32, u32)) -> anyhow::Result<(u32, u32)> {
     Ok((a, b))
 }
 
+/// Plain http is for running a copy on this machine: production needs https, and development
+/// only serves http on a loopback address, where sign-in codes and cookies stay on the machine.
+fn check_public_url(url: &url::Url, production: bool) -> anyhow::Result<()> {
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    if production {
+        bail!("DINO_CLOUD_URL must be https in production");
+    }
+    let loopback = match url.host() {
+        Some(url::Host::Domain(d)) => d == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if url.scheme() != "http" || !loopback {
+        bail!("DINO_CLOUD_URL must be https, or http on 127.0.0.1 or localhost for a copy on this machine (got {url})");
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let public_url: url::Url = var("DINO_CLOUD_URL").unwrap_or_else(|| "http://127.0.0.1:8787".into()).parse().context("DINO_CLOUD_URL")?;
@@ -90,9 +111,7 @@ impl Config {
                 crate::crypto::random_bytes()
             }
         };
-        if production && public_url.scheme() != "https" {
-            bail!("DINO_CLOUD_URL must be https in production");
-        }
+        check_public_url(&public_url, production)?;
         let upstream = |p: &str, authorize: &str, token: &str, userinfo: &str, emails: Option<&str>| -> Option<Upstream> {
             Some(Upstream {
                 client_id: var(&format!("DINO_{p}_CLIENT_ID"))?,
@@ -142,5 +161,24 @@ impl Config {
     /// Cookies are `Secure` once the server is served over https.
     pub fn secure_cookies(&self) -> bool {
         self.public_url.scheme() == "https"
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::check_public_url;
+
+    #[test]
+    fn plain_http_only_on_this_machine_and_not_in_production() {
+        let ok = |u: &str, prod| check_public_url(&u.parse().unwrap(), prod).is_ok();
+        assert!(ok("https://cloud.meetdino.com", true));
+        assert!(ok("https://cloud.meetdino.com", false));
+        assert!(ok("http://127.0.0.1:8787", false));
+        assert!(ok("http://localhost:8787", false));
+        assert!(ok("http://[::1]:8787", false));
+        assert!(!ok("http://127.0.0.1:8787", true));
+        assert!(!ok("http://cloud.meetdino.com", false));
+        assert!(!ok("http://10.0.0.5:8787", false));
+        assert!(!ok("ftp://127.0.0.1", false));
     }
 }
