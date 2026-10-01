@@ -1,6 +1,8 @@
 //! Local pass-through proxy. Agents point their base URL at
-//! `http://127.0.0.1:<port>/s/<session>/<provider>`; we forward to the real API untouched
+//! `http://127.0.0.1:<port>/k/<secret>/s/<session>/<provider>`; we forward to the real API untouched
 //! (auth included) and observe usage, in-flight state and quota headers on the way back.
+//! The secret is new each start and only dino's agents are given it: loopback is open to every
+//! user on the Mac, and to web pages through DNS rebinding.
 //! The `free` provider is different: dino itself picks a free model and translates (see `free`).
 //! `or` is OpenRouter with the key dino holds for it (see `openrouter`), `siwc` the ChatGPT plan
 //! through Sign in with ChatGPT (see `siwc`), `local/<runtime>` a model server on this Mac (see `local`).
@@ -20,7 +22,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, HeaderName, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderName, Response, StatusCode, header};
 use axum::routing::{any, post};
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -268,6 +270,9 @@ impl Stats {
 
 pub struct Proxy {
     pub port: u16,
+    /// Where agents reach the proxy, `http://127.0.0.1:<port>/k/<secret>`: without the secret
+    /// nothing is served.
+    pub root: String,
     pub stats: Arc<Stats>,
     keys: Arc<RwLock<HashMap<String, String>>>,
     budget: Arc<AtomicU64>,
@@ -293,6 +298,8 @@ impl Proxy {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         std_listener.set_nonblocking(true)?;
         let port = std_listener.local_addr()?.port();
+        let secret = random_secret()?;
+        let root = format!("http://127.0.0.1:{port}/k/{secret}");
         let remote_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         remote_listener.set_nonblocking(true)?;
         let remote_port = remote_listener.local_addr()?.port();
@@ -307,6 +314,8 @@ impl Proxy {
             keys: keys.clone(),
             budget: budget.clone(),
             substitutes: Arc::default(),
+            port,
+            secret: secret.into(),
         };
 
         let remote_tokens = remote.clone();
@@ -324,10 +333,12 @@ impl Proxy {
                 let remote_listener = tokio::net::TcpListener::from_std(remote_listener).unwrap();
                 tokio::spawn(async move { axum::serve(remote_listener, remote_app).await });
                 let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
-                let app = axum::Router::new().route("/s/{session}/{provider}/{*rest}", any(forward))
-                    .route("/s/{session}/hook", post(hook))
+                let app = axum::Router::new().route("/k/{key}/s/{session}/{provider}/{*rest}", any(forward))
+                    .route("/k/{key}/s/{session}/hook", post(hook))
                     .fallback(|req: Request| async move {
-                        log(format_args!("unrouted {} {}", req.method(), req.uri()));
+                        // Not the secret, should the path carry it.
+                        let path: Vec<&str> = req.uri().path().split('/').enumerate().map(|(i, s)| if i == 2 { "…" } else { s }).collect();
+                        log(format_args!("unrouted {} {}", req.method(), path.join("/")));
                         StatusCode::NOT_FOUND
                     })
                     .with_state(state);
@@ -335,7 +346,7 @@ impl Proxy {
             });
         })?;
         let runtime = handle_rx.recv()?;
-        Ok(Self { port, stats, keys, budget, remote_port, remote, state: kept, runtime })
+        Ok(Self { port, root, stats, keys, budget, remote_port, remote, state: kept, runtime })
     }
 
     /// Find the free tier's models and keep them current, remembering what was learned in `cache`.
@@ -370,8 +381,42 @@ impl Proxy {
 
     /// Base URL an agent should use for `provider`, attributed to `session`.
     pub fn base_url(&self, session: &str, provider: &str) -> String {
-        format!("http://127.0.0.1:{}/s/{session}/{provider}", self.port)
+        format!("{}/s/{session}/{provider}", self.root)
     }
+}
+
+/// 128 random bits as hex, from `/dev/urandom` like the remote hook tokens (`new_uuid`).
+fn random_secret() -> std::io::Result<String> {
+    let mut b = [0u8; 16];
+    std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut b)?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+/// Only dino's own agents get in: the path carries the secret they were given, the Host is this
+/// listener (not some name rebound to it), and no browser sent it (agents send no Origin).
+fn admitted(secret: &str, port: u16, key: &str, headers: &HeaderMap) -> bool {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default();
+    let local = [format!("127.0.0.1:{port}"), format!("localhost:{port}")].iter().any(|l| l.eq_ignore_ascii_case(host));
+    let ok = same(key.as_bytes(), secret.as_bytes()) && local && !headers.contains_key(header::ORIGIN);
+    if !ok {
+        log(format_args!("refused: host {host:?}, origin {:?}", headers.get(header::ORIGIN)));
+    }
+    ok
+}
+
+/// Equal, compared without stopping at the first difference: timing says nothing of a guess.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+/// `rest` as it goes upstream, without a leading or trailing `/`; `None` if it could reach past
+/// the API it names once a URL parser has it: `.`, `..` and empty segments, and what would be
+/// read as a separator or decoded again (`Path` has decoded it once already).
+fn clean_path(rest: &str) -> Option<&str> {
+    let rest = rest.trim_matches('/');
+    let segments = rest.split('/').all(|s| !matches!(s, "" | "." | ".."));
+    let chars = rest.bytes().all(|b| b.is_ascii_graphic() && !matches!(b, b'%' | b'\\' | b'?' | b'#'));
+    (segments && chars).then_some(rest)
 }
 
 #[derive(Clone)]
@@ -384,7 +429,13 @@ pub(crate) struct AppState {
     budget: Arc<AtomicU64>,
     /// Codex models the backend rejected, and the model that answered instead.
     substitutes: Arc<Mutex<HashMap<String, String>>>,
+    /// The listener's port and the secret its paths must carry (see `admitted`).
+    port: u16,
+    secret: Arc<str>,
 }
+
+/// Most of a request (or an upstream answer) held at once. Generous: requests carry images.
+const MAX_BODY: usize = 64 << 20;
 
 /// Headers we must not copy between the two connections.
 fn hop_by_hop(name: &HeaderName) -> bool {
@@ -397,9 +448,17 @@ fn hop_by_hop(name: &HeaderName) -> bool {
 
 async fn forward(
     State(st): State<AppState>,
-    Path((session, provider, mut rest)): Path<(String, String, String)>,
+    Path((key, session, provider, rest)): Path<(String, String, String, String)>,
     req: Request,
 ) -> Response<Body> {
+    if !admitted(&st.secret, st.port, &key, req.headers()) {
+        return error(StatusCode::FORBIDDEN, "dino proxy: not for you".into());
+    }
+    // Checked for every provider: `siwc::allowed` and `is_model_call` see the path that goes out.
+    let mut rest = match clean_path(&rest) {
+        Some(r) => r.to_string(),
+        None => return error(StatusCode::BAD_REQUEST, format!("dino proxy: bad path /{rest}")),
+    };
     // A model server on this Mac: `local/<runtime>/…`.
     let mut runtime = None;
     if provider == local::PROVIDER {
@@ -416,8 +475,8 @@ async fn forward(
         return resp;
     }
     if provider == "free" {
-        let Ok(body) = axum::body::to_bytes(req.into_body(), usize::MAX).await else {
-            return error(StatusCode::BAD_REQUEST, "unreadable body".into());
+        let Ok(body) = axum::body::to_bytes(req.into_body(), MAX_BODY).await else {
+            return error(StatusCode::BAD_REQUEST, "unreadable body, or over 64 MiB".into());
         };
         return free::handle(st, session, &rest, body).await;
     }
@@ -448,8 +507,8 @@ async fn forward(
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
     let url = format!("{upstream}/{rest}{query}");
     let (parts, body) = req.into_parts();
-    let Ok(mut body) = axum::body::to_bytes(body, usize::MAX).await else {
-        return error(StatusCode::BAD_REQUEST, "unreadable body".into());
+    let Ok(mut body) = axum::body::to_bytes(body, MAX_BODY).await else {
+        return error(StatusCode::BAD_REQUEST, "unreadable body, or over 64 MiB".into());
     };
     let requested = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["model"].as_str().map(String::from));
     // The ChatGPT plan streams; an agent that asked for one JSON answer gets it put together.
@@ -512,7 +571,7 @@ async fn forward(
     if is_model_call && !resp.status().is_success() {
         let status = resp.status();
         let headers = resp.headers().clone();
-        let text = resp.bytes().await.unwrap_or_default();
+        let text = read_capped(resp, MAX_BODY).await;
         resp = 'retry: {
             if provider == "chatgpt" && status == StatusCode::NOT_FOUND && codex::model_not_found(&text) {
                 let rejected = requested.clone().unwrap_or_default();
@@ -575,7 +634,7 @@ async fn forward(
     }
     if collect && status.is_success() {
         let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, _in_flight: guard };
-        let whole = resp.bytes().await.unwrap_or_default();
+        let whole = read_capped(resp, MAX_BODY).await;
         tap.meter.feed(&whole);
         let answer = siwc::collect(&whole).unwrap_or_else(|| whole.to_vec());
         return builder.header("content-type", "application/json").body(Body::from(answer)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()));
@@ -592,6 +651,16 @@ async fn forward(
     builder.body(Body::from_stream(stream)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()))
 }
 
+/// An upstream answer's body, up to `limit` bytes; the rest isn't read.
+async fn read_capped(mut resp: reqwest::Response, limit: usize) -> Bytes {
+    let mut out: Vec<u8> = Vec::new();
+    while out.len() < limit {
+        let Ok(Some(chunk)) = resp.chunk().await else { break };
+        out.extend_from_slice(&chunk[..chunk.len().min(limit - out.len())]);
+    }
+    Bytes::from(out)
+}
+
 /// Lives as long as the response body; records usage when the stream ends or is dropped.
 struct Tap {
     meter: Meter,
@@ -602,6 +671,7 @@ struct Tap {
 
 impl Drop for Tap {
     fn drop(&mut self) {
+        self.meter.finish();
         let aborted = self._in_flight.is_some() && !self.meter.complete;
         if aborted {
             log(format_args!("{} model call dropped by the agent", self.session));
@@ -633,24 +703,31 @@ impl Drop for Tap {
 
 async fn remote_hook(State(rs): State<RemoteState>, Path(token): Path<String>, body: Bytes) -> StatusCode {
     let Some(session) = rs.tokens.read().unwrap().get(&token).cloned() else { return StatusCode::NOT_FOUND };
-    hook(State(rs.app), Path(session), body).await
+    on_hook(&rs.app, &session, &body)
 }
 
-async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Bytes) -> StatusCode {
-    let Ok(v) = serde_json::from_slice::<Value>(&body) else { return StatusCode::BAD_REQUEST };
+async fn hook(State(st): State<AppState>, Path((key, session)): Path<(String, String)>, headers: HeaderMap, body: Bytes) -> StatusCode {
+    if !admitted(&st.secret, st.port, &key, &headers) {
+        return StatusCode::FORBIDDEN;
+    }
+    on_hook(&st, &session, &body)
+}
+
+fn on_hook(st: &AppState, session: &str, body: &[u8]) -> StatusCode {
+    let Ok(v) = serde_json::from_slice::<Value>(body) else { return StatusCode::BAD_REQUEST };
     // Not a hook: `dino statusline` passing on what Claude Code gave the statusline, every few
     // seconds (too often to log).
     if v["hook_event_name"].is_null() && v["context_window"].is_object() {
         if let Some(c) = ReportedContext::from_statusline(&v) {
-            st.stats.update(&session, |s| s.reported_context = Some(c));
+            st.stats.update(session, |s| s.reported_context = Some(c));
         }
         return StatusCode::OK;
     }
     log(format_args!("{session} hook {v}"));
     let event = v["hook_event_name"].as_str().unwrap_or_default();
     let tool = || v["tool_name"].as_str().unwrap_or("tool").to_string();
-    record_subagent(&st.stats, &session, event, &v);
-    tasks::record(&st.stats, &session, event, &v);
+    record_subagent(&st.stats, session, event, &v);
+    tasks::record(&st.stats, session, event, &v);
     // A subagent's own tool calls: the parent's turn may be over (background agents), and the
     // subagent's model calls show as the session thinking anyway.
     let from_subagent = v["agent_id"].is_string();
@@ -673,11 +750,11 @@ async fn hook(State(st): State<AppState>, Path(session): Path<String>, body: Byt
         _ => None,
     };
     if !from_subagent {
-        st.stats.update(&session, |s| s.turn_hook(event, &v));
+        st.stats.update(session, |s| s.turn_hook(event, &v));
     }
     if let Some(a) = activity {
         // A notification about the same prompt shouldn't clobber the more specific tool name.
-        st.stats.update(&session, |s| {
+        st.stats.update(session, |s| {
             if !(event == "Notification" && matches!(s.activity, Some(Activity::NeedsPermission(_)))) {
                 s.activity = Some(a);
             }
@@ -852,6 +929,9 @@ fn window_hours(name: &str) -> u64 {
     if unit == "d" { n * 24 } else { n }
 }
 
+/// Most of a plain JSON answer, or of one SSE line, kept to read usage from.
+const METER_LIMIT: usize = 16 << 20;
+
 /// Finds token usage in a response body, whether SSE or plain JSON, across API dialects.
 /// Usage counters within one response are cumulative, so we keep the max of each field.
 #[derive(Default)]
@@ -874,10 +954,13 @@ impl Meter {
     fn feed(&mut self, bytes: &Bytes) {
         let sse = *self.sse.get_or_insert_with(|| bytes.starts_with(b"event:") || bytes.starts_with(b"data:"));
         if !sse {
-            self.body.extend_from_slice(bytes);
-            if let Ok(v) = serde_json::from_slice::<Value>(&self.body) {
-                self.observe(&v);
+            // Read once it's all here (`finish`), not again with every chunk. One too big to hold
+            // isn't read for usage, nor called dropped: whether it all came through can't be told.
+            if self.body.len() + bytes.len() > METER_LIMIT {
+                self.body = Vec::new();
                 self.complete = true;
+            } else if !self.complete {
+                self.body.extend_from_slice(bytes);
             }
             return;
         }
@@ -895,9 +978,20 @@ impl Meter {
                     // Chat Completions.
                     self.complete |= data == b"[DONE]";
                 }
-            } else {
+            } else if self.line.len() < METER_LIMIT {
                 self.line.push(b);
             }
+        }
+    }
+
+    /// The body ended (or the agent hung up): a plain JSON answer is read now.
+    fn finish(&mut self) {
+        if self.sse == Some(false) && !self.body.is_empty() {
+            if let Ok(v) = serde_json::from_slice::<Value>(&self.body) {
+                self.observe(&v);
+                self.complete = true;
+            }
+            self.body = Vec::new();
         }
     }
 
@@ -965,6 +1059,88 @@ mod tests {
         assert_eq!(s.last_error.as_deref(), Some("529 overloaded"));
         s.turn_hook("UserPromptSubmit", &json!({}));
         assert_eq!(s.last_error, None);
+    }
+
+    #[test]
+    fn only_dinos_agents_get_in() {
+        let h = |pairs: &[(&'static str, &str)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(*k, v.parse().unwrap());
+            }
+            m
+        };
+        let here = h(&[("host", "127.0.0.1:5000")]);
+        assert!(admitted("s3cret", 5000, "s3cret", &here));
+        assert!(admitted("s3cret", 5000, "s3cret", &h(&[("host", "localhost:5000")])));
+        assert!(!admitted("s3cret", 5000, "s3cres", &here) && !admitted("s3cret", 5000, "s3cret!", &here) && !admitted("s3cret", 5000, "", &here));
+        // DNS rebinding: the right address under someone else's name.
+        assert!(!admitted("s3cret", 5000, "s3cret", &h(&[("host", "evil.example:5000")])));
+        assert!(!admitted("s3cret", 5000, "s3cret", &h(&[("host", "127.0.0.1:5001")])));
+        assert!(!admitted("s3cret", 5000, "s3cret", &HeaderMap::new()));
+        // A browser.
+        assert!(!admitted("s3cret", 5000, "s3cret", &h(&[("host", "127.0.0.1:5000"), ("origin", "http://evil.example")])));
+    }
+
+    #[test]
+    fn paths_that_stay_inside_the_api() {
+        assert_eq!(clean_path("v1/messages"), Some("v1/messages"));
+        assert_eq!(clean_path("/v1/messages/"), Some("v1/messages"), "a stray slash still counts as a model call");
+        assert_eq!(clean_path("v1/models/gpt-5.5"), Some("v1/models/gpt-5.5"));
+        assert_eq!(clean_path("codex/responses"), Some("codex/responses"));
+        let bad = [
+            "v1/models/../../v1/files", "v1/./messages", "v1//messages", "v1/%2e%2e/files", "v1/%2F/files", "v1/..\\files",
+            "v1/messages?x", "v1/messages#", "v1/mes sages", "v1/.\t./files", "v1/é", "", "/",
+        ];
+        for rest in bad {
+            assert_eq!(clean_path(rest), None, "{rest:?}");
+        }
+    }
+
+    /// Over a real connection: nothing is served without the secret, or to anyone but agents here.
+    #[test]
+    fn the_proxy_wants_its_secret() {
+        use std::io::{Read, Write};
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        let port = proxy.port;
+        let send = |host: &str, path: &str, extra: &str, body: &str| {
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out.split(' ').nth(1).unwrap_or_default().to_string()
+        };
+        let here = format!("127.0.0.1:{port}");
+        let origin = format!("http://{here}");
+        assert!(proxy.root.starts_with(&format!("{origin}/k/")) && proxy.root.len() == origin.len() + 3 + 32);
+        let hook = proxy.base_url("7", "hook");
+        let hook = hook.strip_prefix(&origin).unwrap();
+        assert_eq!(send(&here, "/s/7/hook", "", ""), "404");
+        assert_eq!(send(&here, &format!("/k/{}/s/7/hook", "0".repeat(32)), "", ""), "403");
+        assert_eq!(send("evil.example", hook, "", ""), "403");
+        assert_eq!(send(&here, hook, "Origin: http://evil.example\r\n", ""), "403");
+        assert_eq!(proxy.stats.session("7").reported_context, None);
+        assert_eq!(send(&here, hook, "", r#"{"context_window":{"context_window_size":1000}}"#), "200");
+        assert_eq!(proxy.stats.session("7").reported_context.map(|c| c.window), Some(1000));
+        // The ChatGPT plan's allowlist sees the path that goes out, however it was spelled.
+        let siwc = proxy.base_url("7", "siwc");
+        let siwc = siwc.strip_prefix(&origin).unwrap();
+        assert_eq!(send(&here, &format!("{siwc}/v1/models/%2e%2e/%2e%2e/v1/files"), "", ""), "400");
+        assert_eq!(send(&here, &format!("{siwc}/v1/models/../../v1/files"), "", ""), "400");
+        assert_eq!(send(&here, &format!("{siwc}/v1/files"), "", ""), "404");
+    }
+
+    #[test]
+    fn a_json_answer_in_pieces_is_read_once_it_is_all_there() {
+        let stats = Arc::new(Stats::default());
+        {
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), _in_flight: None };
+            tap.meter.feed(&Bytes::from_static(br#"{"model":"m","usage":{"prompt"#));
+            assert!(tap.meter.seen.is_none());
+            tap.meter.feed(&Bytes::from_static(br#"_tokens":500,"completion_tokens":7}}"#));
+        }
+        let s = stats.session("1");
+        assert_eq!((s.usage.input, s.usage.output), (500, 7));
     }
 
     #[test]
