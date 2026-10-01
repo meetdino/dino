@@ -522,7 +522,7 @@ final class DinoModel: ObservableObject {
     /// `host`: over SSH on that host, in `remoteFolder` there (empty: the host's default folder).
     /// `dir`: where on this Mac, instead of the current folder.
     /// `line`: for a shell, a line typed at its prompt once it's up; `label`: its name in the sidebar.
-    /// `route`: on a provider's model (Settings → Providers) instead of the agent's own account.
+    /// `route`: on a provider's model (Settings → Models & Providers) instead of the agent's own account.
     func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "", in dir: String? = nil, line: String? = nil, label: String? = nil, route: ProviderRoute? = nil) {
         guard let conn = connection else { return }
         var body: [String: Any] = [

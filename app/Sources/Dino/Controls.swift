@@ -570,11 +570,11 @@ struct NewSessionSheet: View {
     @State private var worktree = false
     @State private var controls = Controls()
     @State private var defaults: [String: Controls] = [:]
-    /// Settings → Environments' hosts; an empty `host` is this Mac.
+    /// Settings → Workspaces → SSH Hosts; an empty `host` is this Mac.
     @State private var hosts: [String: DinoSettings.SshHost] = [:]
     @State private var host = ""
     @State private var remoteFolder = ""
-    /// Settings → Providers' providers that can serve now; `provider` empty is the agent's own account.
+    /// Settings → Models & Providers' providers that can serve now; `provider` empty is the agent's own account.
     @State private var providers: [ProviderInfo] = []
     @State private var provider = ""
     @State private var providerModels: [ProviderModel] = []
@@ -678,7 +678,7 @@ struct NewSessionSheet: View {
                         }
                     } footer: {
                         Text(provider.isEmpty
-                            ? "Or run the agent on a model from a provider in Settings → Providers, through dino."
+                            ? "Or run the agent on a model from a provider in Settings → Models & Providers, through dino."
                             : "The agent runs on this model through dino; its own login and settings stay as they are.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -754,10 +754,10 @@ struct NewSessionSheet: View {
         return f.isEmpty ? "~" : f
     }
 
-    /// "Add SSH Host…" opens Settings → Environments instead of choosing.
+    /// "Add SSH Host…" opens Settings → Workspaces → SSH Hosts instead of choosing.
     private func pickHost(_ picked: String) {
         guard picked != Self.addHost else {
-            UserDefaults.standard.set(SettingsPane.environments.rawValue, forKey: "settingsTab")
+            SettingsPart.ssh.select()
             openWindow(id: SettingsView.windowID)
             dismiss()
             return
