@@ -286,7 +286,7 @@ struct SessionMenu: View {
             Button("Archive") { model.archive(session.id) }
                 .help("Stop it and keep it in Archived, to pick up again later")
         }
-        Button("Kill Session", role: .destructive) { model.kill(session.id) }
+        Button("Close Session", role: .destructive) { model.kill(session.id) }
     }
 }
 
