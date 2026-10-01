@@ -1085,6 +1085,12 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
             if check_bypass(&defaults, &settings).is_err() {
                 defaults.mode = None;
             }
+            // One started by another agent (`dino mcp`) never gets bypass from the user's
+            // defaults: what the user chose for sessions they start isn't a choice for those an
+            // agent starts. It runs in the agent's own mode, unless the request names one.
+            if started_by.is_some() && defaults.mode.as_deref() == Some("bypass") {
+                defaults.mode = None;
+            }
             // On a provider's model, the agent's own default model and effort don't apply.
             if route.is_some() {
                 defaults.model = None;
