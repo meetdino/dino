@@ -43,6 +43,18 @@ impl Agent for Claude {
         self.free
     }
 
+    // Claude's own words, as its footer shows them.
+    fn mode_label(&self, mode: &str) -> Option<&'static str> {
+        Some(match mode {
+            "ask" => "Manual",
+            "edits" => "Accept edits",
+            "plan" => "Plan",
+            "auto" => "Auto",
+            "bypass" => "Bypass permissions",
+            _ => return None,
+        })
+    }
+
     fn mode_args(&self, mode: &str) -> Vec<String> {
         let m = match mode {
             "ask" => "manual",

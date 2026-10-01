@@ -75,6 +75,17 @@ impl Agent for Codex {
         &["ask", "edits", "auto", "bypass"]
     }
 
+    // Codex's own approval presets.
+    fn mode_label(&self, mode: &str) -> Option<&'static str> {
+        Some(match mode {
+            "ask" => "Read only",
+            "edits" => "Auto",
+            "auto" => "Approve for me",
+            "bypass" => "Full access",
+            _ => return None,
+        })
+    }
+
     fn mode_args(&self, mode: &str) -> Vec<String> {
         match mode {
             "ask" => strings(&["-s", "read-only", "-a", "on-request"]),

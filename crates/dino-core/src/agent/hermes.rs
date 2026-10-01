@@ -142,6 +142,14 @@ impl Agent for Hermes {
         &["ask", "bypass"]
     }
 
+    fn mode_label(&self, mode: &str) -> Option<&'static str> {
+        Some(match mode {
+            "ask" => "Default",
+            "bypass" => "YOLO",
+            _ => return None,
+        })
+    }
+
     fn mode_args(&self, mode: &str) -> Vec<String> {
         if mode == "bypass" { strings(&["--yolo"]) } else { vec![] }
     }
