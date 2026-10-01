@@ -187,6 +187,9 @@ struct Daemon {
     trees: Mutex<HashMap<Vec<String>, TreeCache>>,
     /// Bumped when what the tree shows changes: a read that started before is dropped.
     tree_gen: AtomicU64,
+    /// Bumped by every request but a state read: clients waiting on `StateChange` look again now
+    /// rather than at their next look, so what a request did shows at once.
+    asked: (Mutex<u64>, std::sync::Condvar),
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -462,6 +465,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         measuring: AtomicBool::new(false),
         trees: Mutex::default(),
         tree_gen: AtomicU64::new(0),
+        asked: Default::default(),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
@@ -620,8 +624,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 | Request::RemoveStored { .. }
                 | Request::FreeUpSpace
         );
+        let reads_state = matches!(req, Request::State | Request::StateChange { .. });
         let resp = match req {
             Request::State => state(d),
+            Request::StateChange { seen } => state_change(d, seen),
             Request::Launchers => Response::Launchers { launchers: d.offered() },
             Request::AllLaunchers => Response::Launchers { launchers: d.all_launchers() },
             Request::AgentSetup => Response::AgentSetup { agents: agent_setup(d) },
@@ -1031,6 +1037,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             let mut trees = d.trees.lock().unwrap();
             d.tree_gen.fetch_add(1, Ordering::Relaxed);
             trees.clear();
+        }
+        if !reads_state {
+            *d.asked.0.lock().unwrap() += 1;
+            d.asked.1.notify_all();
         }
         ipc::write_json(&mut stream, &resp)?;
     }
@@ -1704,7 +1714,43 @@ fn state(d: &Daemon) -> Response {
             })
         })
         .collect();
-    Response::State { sessions, quotas, power: Some(d.lid.info()) }
+    Response::State { sessions, quotas, power: Some(d.lid.info()), version: None }
+}
+
+/// How often a `StateChange` looks at the state, and how long it waits with nothing new.
+const STATE_LOOK: std::time::Duration = std::time::Duration::from_millis(250);
+const STATE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The state once it differs from `seen` (see `Request::StateChange`). How long ago a session last
+/// printed only counts by which side of 1.5 s and 5 s it is, as the app shows it: exact, it would
+/// differ on every look.
+fn state_change(d: &Daemon, seen: Option<u64>) -> Response {
+    let until = Instant::now() + STATE_WAIT;
+    loop {
+        let asked = *d.asked.0.lock().unwrap();
+        let mut resp = state(d);
+        let Response::State { sessions, .. } = &mut resp else { return resp };
+        let exact: Vec<Option<u64>> = sessions.iter().map(|s| s.output_ms_ago).collect();
+        for s in sessions.iter_mut() {
+            s.output_ms_ago = s.output_ms_ago.map(|ms| if ms < 1500 { 0 } else if ms < 5000 { 1500 } else { 5000 });
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hasher::write(&mut h, &serde_json::to_vec(&resp).unwrap_or_default());
+        // Within the integers a JSON number holds exactly everywhere.
+        let tag = std::hash::Hasher::finish(&h) & ((1 << 53) - 1);
+        let Response::State { sessions, version, .. } = &mut resp else { return resp };
+        for (s, ms) in sessions.iter_mut().zip(exact) {
+            s.output_ms_ago = ms;
+        }
+        *version = Some(tag);
+        if seen != Some(tag) || Instant::now() >= until {
+            return resp;
+        }
+        let guard = d.asked.0.lock().unwrap();
+        if *guard == asked {
+            let _ = d.asked.1.wait_timeout(guard, STATE_LOOK.min(until.saturating_duration_since(Instant::now())));
+        }
+    }
 }
 
 // ---- Persistence: sessions survive dinod restarts (and reboots) by resuming each agent. ----

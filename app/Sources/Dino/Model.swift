@@ -193,15 +193,41 @@ final class DinoModel: ObservableObject {
 
     @Published private(set) var daemonDown = false
 
+    /// dinod's tag for the state last applied: it answers once there's something else to show.
+    private var stateSeen: UInt64?
+    /// The waits have a connection of their own: on the shared one, every request would wait too.
+    private var stateConnection: DinoConnection?
+    /// False with a dinod too old to wait for a change: then ask four times a second.
+    private var stateWaits = true
+
     private func poll() {
         guard polling, let conn = connection else { return }
+        if stateWaits, stateConnection == nil { stateConnection = try? DinoConnection(path: DinoEnvironment.socketPath) }
+        let wait = stateWaits ? stateConnection : nil
+        var body: [String: Any] = ["type": wait == nil ? "state" : "state_change"]
+        body["seen"] = stateSeen
+        let request = body
         Task.detached {
-            let resp = try? conn.request(["type": "state"])
+            // An error answer, rather than none: a dinod too old to wait.
+            let (resp, older): (Response?, Bool) = {
+                do { return (try (wait ?? conn).request(request), false) }
+                catch DinoError.daemon { return (nil, wait != nil) }
+                catch { return (nil, false) }
+            }()
             await MainActor.run {
-                if let resp {
+                if older {
+                    self.stateWaits = false
+                    self.stateConnection = nil
+                    self.poll()
+                } else if let resp {
                     self.apply(resp.sessions ?? [], resp.quotas ?? [])
                     self.applyPower(resp.power)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.poll() }
+                    self.stateSeen = resp.version
+                    if wait != nil {
+                        self.poll()
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.poll() }
+                    }
                 } else {
                     self.lostDaemon()
                 }
@@ -212,6 +238,9 @@ final class DinoModel: ObservableObject {
     /// dinod stopped: drop dead panes and wait for it to come back (without restarting it ourselves).
     private func lostDaemon() {
         connection = nil
+        stateConnection = nil
+        stateSeen = nil
+        stateWaits = true
         polling = false
         daemonDown = true
         terminals.removeAll()
