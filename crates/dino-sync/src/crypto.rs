@@ -2,8 +2,10 @@
 //! account's devices in the clear, so the server stores values it can't read.
 //!
 //! - Values: PASETO v4.local (XChaCha20 + BLAKE2b-MAC, <https://github.com/paseto-standard/paseto-spec>),
-//!   with the record's place as the implicit assertion: a value can't be moved to another
-//!   account, setting or schema without failing to open. The footer names the key, for rotation.
+//!   with everything the record says about it as the implicit assertion: its place, its schema, its
+//!   whole stamp and whether it's a delete. A value can't be moved to another account, setting or
+//!   schema, restamped, or turned into a delete without failing to open, and a delete is a token
+//!   too, so only a device with the key can make one. The footer names the key, for rotation.
 //! - A new device gets the key from one already signed in (`approval`), or from the recovery key
 //!   (`recovery`).
 
@@ -14,9 +16,15 @@ use pasetors::Local;
 use pasetors::version4::LocalToken;
 use rand_core::{CryptoRngCore, OsRng};
 use serde::{Deserialize, Serialize};
+use serde_json::Map;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::record::RecordId;
+use crate::hlc::Hlc;
+use crate::record::{Record, RecordId};
+
+/// What a delete's token holds: PASETO payloads can't be empty, and the assertion already says
+/// it's a delete.
+const TOMBSTONE: &str = "deleted";
 
 /// Why a value or key didn't open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,26 +95,44 @@ impl AccountKey {
         SymmetricKey::<V4>::from(&self.bytes).expect("32 bytes")
     }
 
-    /// Encrypts `value` (text: PASETO payloads are UTF-8) for the record at `id` in `account`,
-    /// with the value's `schema`.
-    pub fn seal(&self, account: &str, id: &RecordId, schema: u32, value: &str) -> Result<String, CryptoError> {
-        if value.is_empty() {
-            return Err(CryptoError::Empty);
-        }
-        let footer = serde_json::to_vec(&Footer { kid: self.id.clone() }).expect("footer");
-        LocalToken::encrypt(&self.paseto(), value.as_bytes(), Some(&footer), Some(&assertion(account, id, schema))).map_err(|_| CryptoError::Invalid)
+    /// A record at `id` in `account` stamped `hlc`, holding `value` (text: PASETO payloads are
+    /// UTF-8) in the shape `schema`, or a delete when `value` is None.
+    pub fn seal_record(&self, account: &str, id: RecordId, hlc: Hlc, schema: u32, value: Option<&str>) -> Result<Record, CryptoError> {
+        let token = self.seal(account, &id, &hlc, schema, value)?;
+        Ok(Record { id, hlc, schema, value: token, deleted: value.is_none(), seq: None, extra: Map::new() })
     }
 
-    /// Opens a value sealed for the record at `id` in `account` with `schema`.
-    pub fn open(&self, account: &str, id: &RecordId, schema: u32, token: &str) -> Result<String, CryptoError> {
+    /// The value `record` holds (None: it's a delete), when its token was sealed with this key for
+    /// exactly the account, place, stamp, schema and delete flag the record claims.
+    pub fn open_record(&self, account: &str, record: &Record) -> Result<Option<String>, CryptoError> {
+        self.open(account, &record.id, &record.hlc, record.schema, record.deleted, &record.value)
+    }
+
+    /// Encrypts `value` for the record at `id` in `account`, stamped `hlc`, with the value's
+    /// `schema`; None seals a delete.
+    pub fn seal(&self, account: &str, id: &RecordId, hlc: &Hlc, schema: u32, value: Option<&str>) -> Result<String, CryptoError> {
+        let payload = match value {
+            Some("") => return Err(CryptoError::Empty),
+            Some(v) => v,
+            None => TOMBSTONE,
+        };
+        let footer = serde_json::to_vec(&Footer { kid: self.id.clone() }).expect("footer");
+        let assertion = assertion(account, id, hlc, schema, value.is_none());
+        LocalToken::encrypt(&self.paseto(), payload.as_bytes(), Some(&footer), Some(&assertion)).map_err(|_| CryptoError::Invalid)
+    }
+
+    /// Opens a token sealed for the record at `id` in `account`, stamped `hlc`, with `schema`, as a
+    /// delete or not: the value, or None for a delete.
+    pub fn open(&self, account: &str, id: &RecordId, hlc: &Hlc, schema: u32, deleted: bool, token: &str) -> Result<Option<String>, CryptoError> {
         let kid = key_id(token)?;
         if kid != self.id {
             return Err(CryptoError::UnknownKey(kid));
         }
         let untrusted = UntrustedToken::<Local, V4>::try_from(token).map_err(|_| CryptoError::Invalid)?;
         let footer = untrusted.untrusted_footer().to_vec();
-        let trusted = LocalToken::decrypt(&self.paseto(), &untrusted, Some(&footer), Some(&assertion(account, id, schema))).map_err(|_| CryptoError::Invalid)?;
-        Ok(trusted.payload().to_string())
+        let assertion = assertion(account, id, hlc, schema, deleted);
+        let trusted = LocalToken::decrypt(&self.paseto(), &untrusted, Some(&footer), Some(&assertion)).map_err(|_| CryptoError::Invalid)?;
+        Ok((!deleted).then(|| trusted.payload().to_string()))
     }
 }
 
@@ -117,10 +143,11 @@ pub fn key_id(token: &str) -> Result<String, CryptoError> {
     Ok(footer.kid)
 }
 
-/// The implicit assertion binding a value to its place: a JSON array, so no separator can make
-/// two different places read the same.
-pub(crate) fn assertion(account: &str, id: &RecordId, schema: u32) -> Vec<u8> {
-    serde_json::to_vec(&(account, &id.collection, &id.key, schema)).expect("assertion")
+/// The implicit assertion binding a value to everything its record claims about it:
+/// `[account, collection, key, schema, wall_ms, counter, device, deleted]`. A JSON array, so no
+/// separator can make two different records read the same.
+pub(crate) fn assertion(account: &str, id: &RecordId, hlc: &Hlc, schema: u32, deleted: bool) -> Vec<u8> {
+    serde_json::to_vec(&(account, &id.collection, &id.key, schema, hlc.wall_ms, hlc.counter, &hlc.device, deleted)).expect("assertion")
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

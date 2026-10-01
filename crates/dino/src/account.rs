@@ -76,7 +76,7 @@ fn after(s: &SyncStatus) -> anyhow::Result<()> {
         "signed_out" => anyhow::bail!("{}", s.message.clone().unwrap_or_else(|| "not signed in".into())),
         "needs_key" => {
             println!("Signed in as {}. This account already syncs from another Mac.", s.email.as_deref().unwrap_or("?"));
-            println!("Enter its recovery key:  dino sync join <recovery key>");
+            return wait_for_approval();
         }
         "conflict" => conflict(s),
         _ => {
@@ -89,6 +89,79 @@ fn after(s: &SyncStatus) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The joining side: show the code once another Mac takes the request, and wait for it.
+fn wait_for_approval() -> anyhow::Result<()> {
+    println!("\nOn one of your other Macs, run  dino sync approve  (or open Settings → Dino Account).");
+    println!("Or enter the recovery key instead:  dino sync join <recovery key>\n");
+    let mut shown = None::<String>;
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let s = status()?;
+        match s.phase.as_str() {
+            "needs_key" => {}
+            "signed_out" => anyhow::bail!("{}", s.message.unwrap_or_else(|| "signed out".into())),
+            _ => {
+                println!("This Mac has the key.");
+                return after(&s);
+            }
+        }
+        // dinod asks within a moment of signing in; until then there's no request yet.
+        let Some(join) = s.join else {
+            if let Some(m) = s.message {
+                anyhow::bail!("{m} (`dino sync ask` asks again)");
+            }
+            continue;
+        };
+        if join.code != shown {
+            if let Some(code) = &join.code {
+                println!("Another Mac took the request. Check it shows this code before approving:\n\n  {code}\n");
+            } else {
+                println!("Waiting for another Mac to approve this one…");
+            }
+            shown = join.code;
+        }
+    }
+}
+
+/// `dino sync approve [<n> | <id>]`: list the Macs asking for the key, or take one, show the code
+/// to compare, and give it the key once the person says the codes match.
+fn approve(which: Option<String>) -> anyhow::Result<()> {
+    let s = status()?;
+    anyhow::ensure!(s.phase == "ready", "this Mac isn't syncing, so it has no key to give");
+    if s.approvals.is_empty() {
+        println!("No Mac is asking for the key right now. On the new Mac, sign in with `dino login`.");
+        return Ok(());
+    }
+    let Some(which) = which else {
+        for (i, a) in s.approvals.iter().enumerate() {
+            println!("  {}  {} ({})", i + 1, a.device, a.os);
+        }
+        println!("\n`dino sync approve <number>` to approve one, `dino sync deny <number>` to say no.");
+        return Ok(());
+    };
+    let a = pick(&s, &which)?;
+    let s = expect_status(ask("claim", Some(a.id.clone()))?)?;
+    let code = s.approvals.iter().find(|x| x.id == a.id).and_then(|x| x.code.clone()).ok_or_else(|| anyhow::anyhow!("that request is gone"))?;
+    println!("{} is asking for your settings' key. It should show:\n\n  {code}\n", a.device);
+    print!("Is that the code on {}? [y/N] ", a.device);
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        expect_status(ask("deny", Some(a.id))?)?;
+        println!("Not approved. If the codes differ, someone else may have asked: sign out of that device on your account page.");
+        return Ok(());
+    }
+    expect_status(ask("grant", Some(a.id))?)?;
+    println!("Approved. {} now syncs your settings.", a.device);
+    Ok(())
+}
+
+fn pick(s: &SyncStatus, which: &str) -> anyhow::Result<dino_core::ipc::ApprovalRequest> {
+    let by_number = which.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).and_then(|i| s.approvals.get(i));
+    by_number.or_else(|| s.approvals.iter().find(|a| a.id == which)).cloned().ok_or_else(|| anyhow::anyhow!("no such request: `dino sync approve` lists them"))
 }
 
 fn conflict(s: &SyncStatus) {
@@ -105,12 +178,24 @@ pub fn logout() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `dino sync status|now|join|resolve|keys|undo|reset`.
+/// `dino sync status|now|approve|deny|ask|join|resolve|keys|undo|reset`.
 pub fn sync(args: &[String]) -> anyhow::Result<()> {
     let value = args.get(1).cloned();
     let s = match args.first().map(String::as_str) {
         None | Some("status") => status()?,
         Some("now") => expect_status(ask("now", None)?)?,
+        Some("approve") => return approve(value),
+        Some("deny") => {
+            let s = status()?;
+            let a = pick(&s, value.as_deref().ok_or_else(|| anyhow::anyhow!("usage: dino sync deny <number>"))?)?;
+            expect_status(ask("deny", Some(a.id))?)?;
+            println!("Said no to {}.", a.device);
+            return Ok(());
+        }
+        Some("ask") => {
+            expect_status(ask("ask", None)?)?;
+            return wait_for_approval();
+        }
         Some("join") => {
             let key = value.ok_or_else(|| anyhow::anyhow!("usage: dino sync join <recovery key>"))?;
             let s = expect_status(ask("join", Some(key))?)?;
@@ -128,7 +213,7 @@ pub fn sync(args: &[String]) -> anyhow::Result<()> {
             println!("Sync was reset: your account holds this Mac's settings again, under a new key.");
             return after(&s);
         }
-        Some(other) => anyhow::bail!("dino sync {other}? status, now, join, resolve, keys on|off, undo, reset"),
+        Some(other) => anyhow::bail!("dino sync {other}? status, now, approve, deny, ask, join, resolve, keys on|off, undo, reset"),
     };
     print(&s);
     Ok(())
@@ -143,7 +228,15 @@ fn print(s: &SyncStatus) {
     match s.phase.as_str() {
         "signed_out" => println!("Not signed in. `dino login` turns on settings sync."),
         "signing_in" => println!("Signing in…"),
-        "needs_key" => println!("Signed in as {}; waiting for the recovery key (dino sync join <key>).", s.email.as_deref().unwrap_or("?")),
+        "needs_key" => {
+            println!("Signed in as {}; this Mac needs your settings' key.", s.email.as_deref().unwrap_or("?"));
+            match s.join.as_ref().and_then(|j| j.code.as_ref()) {
+                Some(code) => println!("  Another Mac took the request; it should show  {code}"),
+                None if s.join.is_some() => println!("  Waiting for another Mac to approve it (dino sync approve there)."),
+                None => println!("  `dino sync ask` asks your other Macs again."),
+            }
+            println!("  Or: dino sync join <recovery key>");
+        }
         "conflict" => conflict(s),
         _ => {
             println!("Signed in as {} at {}", s.email.as_deref().unwrap_or("?"), s.server);
@@ -151,6 +244,9 @@ fn print(s: &SyncStatus) {
             println!("  keys {}", if s.key_sync { "sync (encrypted)" } else { "stay on this Mac" });
             if let Some(u) = &s.account_url {
                 println!("  devices and data: {u}");
+            }
+            for a in &s.approvals {
+                println!("  {} is asking for your settings' key: dino sync approve", a.device);
             }
         }
     }

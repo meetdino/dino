@@ -8,12 +8,13 @@ use serde_json::{Map, Value};
 
 use crate::hlc::Hlc;
 
-/// Protocol version this crate speaks, sent as `DINO-Sync-Version`.
-pub const PROTOCOL: u32 = 1;
+/// Protocol version this crate speaks, sent as `DINO-Sync-Version`. 2: every record carries a
+/// token (deletes too), sealed to its stamp and whether it's a delete.
+pub const PROTOCOL: u32 = 2;
 
 /// Largest encrypted value a record may carry, in bytes of its token.
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
-/// Most records one push may carry.
+/// Most records one push, or one page of a pull, may carry.
 pub const MAX_BATCH: usize = 500;
 
 /// Where a record lives: `("agents", "claude.mode")`.
@@ -30,7 +31,10 @@ impl RecordId {
 }
 
 /// One setting as the server stores it. `value` is a PASETO v4.local token (see `crypto`), so the
-/// server sees only where it lives, when and by whom it was written, and how big it is.
+/// server sees only where it lives, when and by whom it was written, whether it's a delete, and
+/// how big it is. The token is sealed to all of that but `seq` and `extra`: a server without the
+/// account key can't restamp, move or delete a value (`AccountKey::open_record`,
+/// `Store::apply_verified`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Record {
     #[serde(flatten)]
@@ -38,9 +42,11 @@ pub struct Record {
     pub hlc: Hlc,
     /// The shape of the value inside; a client keeps a newer one as it is and never overwrites it.
     pub schema: u32,
-    /// None: deleted (a tombstone, kept so the delete reaches every device).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
+    /// The sealed value, or for a delete a sealed tombstone.
+    pub value: String,
+    /// Deleted: `value` is a tombstone, kept so the delete reaches every device.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
     /// Set by the server when it accepts the record; absent on the way up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
@@ -50,7 +56,7 @@ pub struct Record {
 
 impl Record {
     pub fn is_tombstone(&self) -> bool {
-        self.value.is_none()
+        self.deleted
     }
 }
 
@@ -106,6 +112,8 @@ pub enum Nudge {
     Advanced { seq: u64 },
     /// The account's records were wiped ("Reset sync"): start over from 0.
     Reset,
+    /// A device asked for the account's key, or a request moved on.
+    Approvals,
     /// Anything a newer server sends.
     #[serde(other)]
     Unknown,
@@ -148,14 +156,43 @@ impl std::error::Error for SyncError {}
 
 /// Checks a push before sending it (the server makes the same checks).
 pub fn check_push(push: &PushRequest) -> Result<(), SyncError> {
-    if push.records.len() > MAX_BATCH {
-        return Err(SyncError::TooManyRecords { count: push.records.len(), max: MAX_BATCH });
+    check_records(&push.records)
+}
+
+/// Checks a page of a pull before taking any of it: the server never sends more than a device
+/// may push, so a page that's larger came from a server that's broken or hostile.
+pub fn check_pull(pull: &PullResponse) -> Result<(), SyncError> {
+    check_records(&pull.records)
+}
+
+fn check_records(records: &[Record]) -> Result<(), SyncError> {
+    if records.len() > MAX_BATCH {
+        return Err(SyncError::TooManyRecords { count: records.len(), max: MAX_BATCH });
     }
-    for r in &push.records {
-        let bytes = r.value.as_ref().map_or(0, String::len);
+    for r in records {
+        let bytes = r.value.len();
         if bytes > MAX_RECORD_BYTES {
             return Err(SyncError::TooLarge { bytes, max: MAX_RECORD_BYTES });
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(value: String) -> Record {
+        Record { id: RecordId::new("agents", "claude.mode"), hlc: Hlc { wall_ms: 1, counter: 0, device: "d".into() }, schema: 1, value, deleted: false, seq: Some(1), extra: Map::new() }
+    }
+
+    #[test]
+    fn pulls_are_held_to_the_push_limits() {
+        let ok = PullResponse { seq: 1, records: vec![record("v4.local.x".into()); MAX_BATCH], ..Default::default() };
+        assert_eq!(check_pull(&ok), Ok(()));
+        let many = PullResponse { records: vec![record("v4.local.x".into()); MAX_BATCH + 1], ..ok.clone() };
+        assert_eq!(check_pull(&many), Err(SyncError::TooManyRecords { count: MAX_BATCH + 1, max: MAX_BATCH }));
+        let big = PullResponse { records: vec![record("x".repeat(MAX_RECORD_BYTES + 1))], ..ok };
+        assert_eq!(check_pull(&big), Err(SyncError::TooLarge { bytes: MAX_RECORD_BYTES + 1, max: MAX_RECORD_BYTES }));
+    }
 }
