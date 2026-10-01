@@ -2366,7 +2366,15 @@ fn cached_tree(d: &Arc<Daemon>, mut folders: Vec<String>) -> Vec<ipc::RepoInfo> 
 }
 
 fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
-    let mut dirs: Vec<String> = d.sessions.lock().unwrap().iter().filter(|s| s.host.is_none()).map(|s| real(&s.cwd)).collect();
+    // A shell is where it has `cd`d to (already resolved), not where it started.
+    let mut dirs: Vec<String> = d
+        .sessions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.host.is_none())
+        .map(|s| s.pane.shared.cwd.lock().unwrap().clone().filter(|_| s.agent_id == "shell").unwrap_or_else(|| real(&s.cwd)))
+        .collect();
     dirs.extend(d.groups.lock().unwrap().iter().map(|g| real(Path::new(&g.repo))));
     // A session's worktree stays after the session ends, until the user closes it.
     let made: Vec<String> = d.worktrees.lock().unwrap().iter().map(|w| real(&w.path)).collect();

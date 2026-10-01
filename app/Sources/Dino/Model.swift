@@ -369,7 +369,10 @@ final class DinoModel: ObservableObject {
             }
         }
         // A session in a folder the tree hasn't seen: ask for it now rather than on the next tick.
-        if Set(next.compactMap(\.cwd)) != Set(sessions.compactMap(\.cwd)) { refreshTree() }
+        if Set(next.compactMap(\.here)) != Set(sessions.compactMap(\.here)) { refreshTree() }
+        // The selected shell `cd`d: the tree, and sessions started next to it, follow.
+        if let id = selected, let here = next.first(where: { $0.id == id })?.here,
+           here != sessions.first(where: { $0.id == id })?.here { folder = URL(fileURLWithPath: here) }
         placeHandedOff(next)
         if next != sessions { sessions = next }
         if quotas != self.quotas { self.quotas = quotas }
@@ -447,7 +450,7 @@ final class DinoModel: ObservableObject {
             return
         }
         // New sessions start next to the one you're looking at.
-        if let cwd = sessions.first(where: { $0.id == id })?.cwd { folder = URL(fileURLWithPath: cwd) }
+        if let cwd = sessions.first(where: { $0.id == id })?.here { folder = URL(fileURLWithPath: cwd) }
         attention.remove(id)
         unseenDone.remove(id)
         terminals[id]?.requestFocus()
@@ -803,7 +806,7 @@ final class DinoModel: ObservableObject {
 
     /// The worktree dino made that the session runs in, if any: closable once its PR lands.
     func dinoWorktree(of s: SessionInfo) -> Worktree? {
-        guard let cwd = s.cwd else { return nil }
+        guard let cwd = s.here else { return nil }
         return repos.flatMap(\.worktrees).filter { $0.dino && SessionTree.contains($0.path, cwd) }.max { $0.path.count < $1.path.count }
     }
 
