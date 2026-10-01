@@ -60,7 +60,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string(&v)?);
     } else {
         for i in shown {
-            println!("{:<8} {}  {}", i.kind, i.text, i.detail);
+            println!("{:<8} {}  {}", i.kind, crate::printable(&i.text), crate::printable(&i.detail));
         }
     }
     Ok(())
@@ -134,7 +134,8 @@ fn picker(items: &[Item], query: &str) -> anyhow::Result<Option<Item>> {
         queue!(tty, style::SetAttribute(style::Attribute::Dim), style::Print(format!("{} of {} · ↑↓ move · ⏎ put on the prompt · esc cancel", shown.len(), items.len())), style::SetAttribute(style::Attribute::Reset))?;
         for (row, (n, i)) in shown.iter().enumerate().skip(top).take(room).enumerate() {
             let mark = if i.kind == "session" { "◆ " } else { "  " };
-            let line: String = format!("{mark}{}  {}", i.text.replace('\n', " "), i.detail).chars().take(cols as usize).collect();
+            // A title, a folder or a history line could hold escapes that restyle or retitle the terminal.
+            let line: String = format!("{mark}{}  {}", crate::printable(&i.text.replace('\n', " ")), crate::printable(&i.detail)).chars().take(cols as usize).collect();
             queue!(tty, cursor::MoveTo(0, row as u16 + 2))?;
             if n == at {
                 queue!(tty, style::SetAttribute(style::Attribute::Reverse), style::Print(line), style::SetAttribute(style::Attribute::Reset))?;

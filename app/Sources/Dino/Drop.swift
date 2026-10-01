@@ -133,8 +133,29 @@ enum TerminalDrop {
     }
 
     /// Backslashes before what a shell would read as syntax: the form a path takes typed at a
-    /// prompt. The same set as Ghostty's `Shell.escape`.
+    /// prompt. The same set as Ghostty's `Shell.escape`. A name with a newline or other control
+    /// character in it is ANSI-C quoted (`$'a\nb'`) instead: pasted as is, a newline would run
+    /// what follows it in a shell without bracketed paste.
     static func escape(_ s: String) -> String {
+        if s.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
+            var out = "$'"
+            for u in s.unicodeScalars {
+                switch u {
+                case "\n": out += "\\n"
+                case "\r": out += "\\r"
+                case "\t": out += "\\t"
+                case "\\": out += "\\\\"
+                case "'": out += "\\'"
+                default:
+                    if u.properties.generalCategory == .control {
+                        for b in String(u).utf8 { out += String(format: "\\x%02X", b) }
+                    } else {
+                        out.unicodeScalars.append(u)
+                    }
+                }
+            }
+            return out + "'"
+        }
         let special: Set<Character> = ["\\", " ", "(", ")", "[", "]", "{", "}", "<", ">", "\"", "'", "`", "!", "#", "$", "&", ";", "|", "*", "?", "\t"]
         var out = ""
         for c in s {

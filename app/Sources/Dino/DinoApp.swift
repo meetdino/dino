@@ -29,6 +29,9 @@ struct DinoApp: App {
                 Button("Ask Before Quitting") { quitChoice = "" }
                     .disabled(quitChoice.isEmpty)
                     .help("Show the keep-running question again when you quit")
+                Button("Install Command Line Tool…") { CommandLineTool.install() }
+                    .disabled(DinoEnvironment.bundledDino == nil)
+                    .help("Put the dino command this app carries on your PATH")
             }
             // One window: ⌘N starts a session rather than opening a second window.
             CommandGroup(replacing: .newItem) {}
@@ -634,9 +637,13 @@ struct Sidebar: View {
     /// Changes whenever the sidebar gains, loses or restructures rows.
     private var rowsKey: String {
         let tree = SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
-        return ([filter.rawValue, model.sidebarQuery, "\(String(describing: model.sidebarScope))"] + tree.repos.map(\.shape) + model.sessions.map(\.id) + model.elsewhere.map(\.id) + model.scheduled.map(\.id)
-            + model.archived.map(\.id))
-            .joined(separator: "\n")
+        var parts: [String] = [filter.rawValue, model.sidebarQuery, "\(String(describing: model.sidebarScope))"]
+        parts += tree.repos.map(\.shape)
+        parts += model.sessions.map(\.id)
+        parts += model.elsewhere.map(\.id)
+        parts += model.scheduled.map(\.id)
+        parts += model.archived.map(\.id)
+        return parts.joined(separator: "\n")
     }
 
     var body: some View {
