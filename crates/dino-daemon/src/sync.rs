@@ -837,10 +837,9 @@ pub fn login_device(server: Option<String>) -> anyhow::Result<()> {
 }
 
 fn prepare_login(server: Option<String>) -> anyhow::Result<String> {
-    let server = server.filter(|s| !s.is_empty()).unwrap_or_else(|| {
-        let s = state().lock().unwrap();
-        if s.server.is_empty() { cloud::default_server() } else { s.server.clone() }
-    });
+    // Signed out, a server remembered from an earlier sign-in (a local test server, say) doesn't
+    // stick: a fresh sign-in goes to the default unless one is named.
+    let server = server.filter(|s| !s.is_empty()).unwrap_or_else(cloud::default_server);
     let server = server.trim_end_matches('/').to_string();
     anyhow::ensure!(server.starts_with("https://") || server.starts_with("http://127.0.0.1") || server.starts_with("http://localhost"), "the account server must be https");
     anyhow::ensure!(!cloud::signed_in() || state().lock().unwrap().phase == "signed_out", "already signed in; `dino logout` first");
