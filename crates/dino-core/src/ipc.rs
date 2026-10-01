@@ -187,12 +187,11 @@ pub enum Request {
         #[serde(default)]
         value: Option<String>,
     },
-    /// The dino account and settings sync. `action`: `status`, `login` (`value`: the server, else
-    /// the configured one), `login_device`, `join` (`value`: the recovery key), `resolve`
-    /// (`value`: `cloud`, `local` or `merge`), `now`, `reset`, `undo`, `keys` (`value`: `on`/`off`),
-    /// `ask` (ask the account's other Macs for the key again), `claim`, `grant` and `deny`
-    /// (`value`: an approval's id, to give another Mac the key after comparing codes),
-    /// `ack_recovery`, `logout`. Replies `Sync`, or `Connect` with the page to open for `login`.
+    /// The dino account and settings sync. `action`: `status`, `login` (sign in with GitHub;
+    /// `value`: the server, else the configured one), `login_email` (`value`: the address to send a
+    /// sign-in link to), `login_device`, `cancel_login`, `resolve` (`value`: `cloud`, `local` or
+    /// `merge`), `now`, `undo`, `logout`. Replies `Sync`, or `Connect` with the page to open for
+    /// `login`.
     Sync {
         action: String,
         #[serde(default)]
@@ -287,9 +286,6 @@ pub enum Response {
     State {
         sessions: Vec<SessionInfo>,
         quotas: Vec<QuotaInfo>,
-        /// Other Macs of the account asking this one for the sync key, for the app to show.
-        #[serde(default)]
-        approvals: Vec<ApprovalRequest>,
         /// Whether the Mac is being kept awake with its lid closed; absent from an older dinod.
         #[serde(default)]
         power: Option<PowerInfo>,
@@ -344,8 +340,7 @@ pub enum Response {
 /// The dino account on this Mac and where settings sync stands.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct SyncStatus {
-    /// `signed_out`, `signing_in`, `needs_key` (the recovery key, to read the settings),
-    /// `conflict` (this Mac and the account differ: choose), `ready`.
+    /// `signed_out`, `signing_in`, `conflict` (this Mac and the account differ: choose), `ready`.
     pub phase: String,
     pub server: String,
     pub email: Option<String>,
@@ -357,10 +352,9 @@ pub struct SyncStatus {
     pub pending: usize,
     /// Synced settings on this Mac.
     pub synced: usize,
-    /// API keys in dino's key store sync too.
-    pub key_sync: bool,
-    /// Shown once, right after this Mac created the account's key.
-    pub recovery_key: Option<String>,
+    /// For `login_email`: the address the sign-in link went to, while it waits to be opened.
+    #[serde(default)]
+    pub email_sent_to: Option<String>,
     /// For `login_device`: the code to enter and where.
     pub device_code: Option<String>,
     pub device_url: Option<String>,
@@ -370,33 +364,6 @@ pub struct SyncStatus {
     pub snapshots: usize,
     /// What went wrong, or what happened that the person should know (signed out elsewhere).
     pub message: Option<String>,
-    /// When `phase` is `needs_key`: this Mac asking the account's other Macs for the key.
-    #[serde(default)]
-    pub join: Option<JoinRequest>,
-    /// Other Macs of the account asking this one for the key.
-    #[serde(default)]
-    pub approvals: Vec<ApprovalRequest>,
-}
-
-/// This Mac waiting for another of the account's Macs to give it the key.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct JoinRequest {
-    /// Unix seconds when the request lapses.
-    pub expires_at: u64,
-    /// Once a Mac has taken the request: the code both screens show, to compare before it grants.
-    pub code: Option<String>,
-}
-
-/// Another Mac of the account asking for the key.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct ApprovalRequest {
-    pub id: String,
-    /// The Mac's name and system, as it signed in.
-    pub device: String,
-    pub os: String,
-    pub expires_at: u64,
-    /// Once this Mac has taken it: the code to compare with the one on the asking Mac.
-    pub code: Option<String>,
 }
 
 /// One agent in Settings → Agents. The commands are the agent's own; dino runs them in a shell.

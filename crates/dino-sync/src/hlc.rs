@@ -3,8 +3,7 @@
 //! seeing a later remote stamp, and the device id to break exact ties.
 //!
 //! The device id is chosen by the device that wrote the stamp, so a device can always win exact
-//! ties. That's harmless because the whole stamp is sealed into the value's token (`crypto`): only
-//! a device holding the account key can pick one, and such a device can write any value anyway.
+//! ties. That's harmless: a signed-in device can write any value anyway.
 //!
 //! Kulkarni et al., "Logical Physical Clocks" (2014); the shape follows
 //! <https://jaredforsyth.com/posts/hybrid-logical-clocks/>.

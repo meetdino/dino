@@ -9,32 +9,14 @@ struct SyncStatus: Codable, Equatable {
     var last_sync: UInt64?
     var pending: Int
     var synced: Int
-    var key_sync: Bool
-    var recovery_key: String?
+    /// Where a sign-in link went, while it waits to be opened.
+    var email_sent_to: String?
     var device_code: String?
     var device_url: String?
     /// Only here, only in the account, set differently.
     var conflict: [Int]?
     var snapshots: Int
     var message: String?
-    /// While this Mac needs the key: its request to the account's other Macs.
-    var join: JoinRequest?
-    var approvals: [ApprovalRequest]?
-}
-
-/// This Mac asking another for the key; `code` once one has answered.
-struct JoinRequest: Codable, Equatable {
-    var expires_at: UInt64
-    var code: String?
-}
-
-/// Another Mac asking this one for the key; `code` once this Mac answered and it revealed.
-struct ApprovalRequest: Codable, Equatable, Identifiable {
-    var id: String
-    var device: String
-    var os: String
-    var expires_at: UInt64
-    var code: String?
 }
 
 private struct SyncResponse: Decodable {
@@ -128,10 +110,9 @@ struct AccountPane: View {
         Form {
             switch sync.status?.phase ?? "signed_out" {
             case "signing_in": SigningIn(status: sync.status)
-            case "needs_key": NeedsKey()
             case "conflict": Conflict(counts: sync.status?.conflict ?? [0, 0, 0])
-            case "ready", "joining": Ready(status: sync.status)
-            default: SignedOut(status: sync.status)
+            case "ready": Ready(status: sync.status)
+            default: SignedOut()
             }
             if let m = sync.status?.message {
                 Section { Label(m, systemImage: "info.circle").foregroundStyle(.secondary) }
@@ -147,12 +128,13 @@ struct AccountPane: View {
 }
 
 private struct Hero: View {
+    var symbol = "person.crop.circle.fill"
     let title: String
     let text: String
 
     var body: some View {
         VStack(spacing: 8) {
-            Image(systemName: "person.crop.circle.fill")
+            Image(systemName: symbol)
                 .font(.system(size: 52))
                 .foregroundStyle(.secondary)
             Text(title).font(.title2.weight(.semibold))
@@ -167,127 +149,82 @@ private struct Hero: View {
 }
 
 private struct SignedOut: View {
-    let status: SyncStatus?
     @ObservedObject private var sync = SyncStore.shared
-    @State private var server = ""
+    @State private var byEmail = false
+    @State private var email = ""
 
     var body: some View {
         Section {
-            VStack(spacing: 12) {
+            VStack(spacing: 14) {
                 Hero(title: "Dino Account", text: "Sign in to keep your settings the same on every Mac you use dino on.")
-                Button("Sign In…") { sync.act("login", server.isEmpty ? nil : server) }
-                    .controlSize(.large)
+                if byEmail {
+                    HStack {
+                        TextField("Email", text: $email, prompt: Text("you@example.com"))
+                            .textContentType(.emailAddress)
+                            .onSubmit(send)
+                        Button("Send Link", action: send)
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(!email.contains("@"))
+                    }
+                    .frame(maxWidth: 360)
+                    Button("Sign in with GitHub instead") { byEmail = false }.buttonStyle(.link)
+                } else {
+                    Button { sync.act("login") } label: {
+                        Text("Sign in with GitHub").fontWeight(.semibold).frame(minWidth: 220)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Brand.green)
+                    .controlSize(.extraLarge)
                     .keyboardShortcut(.defaultAction)
-                Text("End-to-end encrypted: settings are encrypted on this Mac before they're sent, and the dino server can't read them.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+                    Button("Use email instead") { byEmail = true }.buttonStyle(.link)
+                }
             }
             .frame(maxWidth: .infinity)
+            .padding(.bottom, 6)
         }
         Section("What syncs") {
-            Text("Agent defaults, policies, worktree and terminal settings, SSH hosts, repository variables (matched by git remote), and API keys if you want.")
+            Text("Agent defaults, policies, worktree and terminal settings, SSH hosts, and repository variables (matched by git remote).")
                 .foregroundStyle(.secondary)
         }
         Section("What never leaves this Mac") {
-            Text("Sessions, conversations, terminal content, shell history, and your agents' own logins.")
+            Text("API keys and tokens, sessions, conversations, terminal content, shell history, and your agents' own logins.")
                 .foregroundStyle(.secondary)
         }
-        Section {
-            TextField("Account server", text: $server, prompt: Text(status?.server ?? ""))
-        } footer: {
-            Footnote("Leave it empty for dino's own. A self-hosted server works the same.")
-        }
+    }
+
+    private func send() {
+        let e = email.trimmingCharacters(in: .whitespaces)
+        guard e.contains("@") else { return }
+        sync.act("login_email", e)
     }
 }
 
 private struct SigningIn: View {
     let status: SyncStatus?
+    @ObservedObject private var sync = SyncStore.shared
 
     var body: some View {
         Section {
             VStack(spacing: 12) {
-                ProgressView()
-                if let code = status?.device_code, let url = status?.device_url {
+                if let sent = status?.email_sent_to {
+                    Hero(symbol: "envelope.badge", title: "Check your email", text: "We sent a sign-in link to \(sent). Open it on any device, and this Mac signs in by itself.")
+                    ProgressView().controlSize(.small)
+                    Button("Use a different email") { sync.act("cancel_login") }.buttonStyle(.link)
+                } else if let code = status?.device_code, let url = status?.device_url {
+                    ProgressView()
                     Text("Go to \(url) and enter").foregroundStyle(.secondary)
                     Text(code).font(.system(.title, design: .monospaced).weight(.semibold)).textSelection(.enabled)
+                    Button("Cancel") { sync.act("cancel_login") }
                 } else {
+                    ProgressView()
                     Text("Finish signing in in your browser.").foregroundStyle(.secondary)
+                    Button("Cancel") { sync.act("cancel_login") }
                 }
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
         }
     }
-}
-
-private struct NeedsKey: View {
-    @ObservedObject private var sync = SyncStore.shared
-    @State private var key = ""
-    @State private var confirmReset = false
-    @State private var useRecovery = false
-
-    var body: some View {
-        if !useRecovery {
-            Section {
-                VStack(spacing: 12) {
-                    Hero(title: "Approve this Mac", text: "This account already syncs from another Mac. Its settings are encrypted with a key only your Macs have: approve this one from a Mac that's signed in.")
-                    if let code = sync.status?.join?.code {
-                        Text("Check the other Mac shows").foregroundStyle(.secondary)
-                        Text(code)
-                            .font(.system(size: 34, weight: .semibold, design: .monospaced))
-                            .textSelection(.enabled)
-                            .accessibilityLabel("Approval code \(code.replacingOccurrences(of: "-", with: " "))")
-                    } else if sync.status?.join != nil {
-                        ProgressView().controlSize(.small)
-                        Text("Open dino on another of your Macs and choose Approve. A code shows here once it does.")
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Button("Ask My Other Macs") { sync.act("ask") }.keyboardShortcut(.defaultAction)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                HStack {
-                    Spacer()
-                    Button("Use Recovery Key Instead") { useRecovery = true }.buttonStyle(.link)
-                }
-            } footer: {
-                Footnote("The code is the same on both Macs only when nobody swapped keys on the way. Nothing is shared until you approve on the other Mac.")
-            }
-        } else {
-            recovery
-        }
-    }
-
-    @ViewBuilder private var recovery: some View {
-        Section {
-            Hero(title: "Enter your recovery key", text: "The recovery key you saved when you set up sync opens your settings here, without another Mac.")
-            LabeledContent("Recovery key") {
-                TextField("Recovery key", text: $key, prompt: Text("D1-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"))
-                    .labelsHidden()
-                    .font(.system(.body, design: .monospaced))
-                    .onSubmit(join)
-            }
-            HStack {
-                Button("Lost it? Reset Sync…", role: .destructive) { confirmReset = true }
-                Spacer()
-                Button("Approve from Another Mac") { useRecovery = false }
-                Button("Continue", action: join)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-        }
-        .confirmationDialog("Reset sync?", isPresented: $confirmReset) {
-            Button("Reset Sync", role: .destructive) { sync.act("reset") }
-        } message: {
-            Text("The account's synced settings are deleted and this Mac's become the account's, under a new key. Your other Macs will need the new recovery key.")
-        }
-    }
-
-    private func join() { sync.act("join", key) }
 }
 
 private struct Conflict: View {
@@ -312,33 +249,9 @@ private struct Conflict: View {
 private struct Ready: View {
     let status: SyncStatus?
     @ObservedObject private var sync = SyncStore.shared
-    @State private var confirmReset = false
     @State private var confirmSignOut = false
 
     var body: some View {
-        if let key = status?.recovery_key {
-            Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Save your recovery key", systemImage: "key.fill").font(.headline)
-                    Text("It's shown once. Another Mac joining this account needs it, and without it and your Macs, sync starts over. Keep it in your password manager.")
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(key)
-                        .font(.system(.title3, design: .monospaced).weight(.semibold))
-                        .textSelection(.enabled)
-                        .padding(.vertical, 4)
-                    HStack {
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(key, forType: .string)
-                        }
-                        Spacer()
-                        Button("I've Saved It") { sync.act("ack_recovery") }.keyboardShortcut(.defaultAction)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-        }
         Section {
             LabeledContent("Signed in as", value: status?.email ?? "")
             LabeledContent("Last synced", value: status?.last_sync.map(ago) ?? "Not yet")
@@ -354,29 +267,18 @@ private struct Ready: View {
                 Button("Sync Now") { sync.act("now") }
             }
         } footer: {
-            Footnote("Settings are encrypted on this Mac before they're sent: the dino server can't read them. Sessions, terminal content and your agents' logins never leave this Mac.")
-        }
-        Section {
-            Toggle("Sync API keys", isOn: Binding(get: { status?.key_sync ?? false }, set: { sync.act("keys", $0 ? "on" : "off") }))
-        } footer: {
-            Footnote("Keys in dino's key store, encrypted the same way. Sign-ins to ChatGPT and your dino account stay on each Mac.")
+            Footnote("Settings sync is on. API keys and tokens, sessions, terminal content and your agents' logins never leave this Mac.")
         }
         Section {
             if (status?.snapshots ?? 0) > 0 {
                 Button("Undo Last Sync Change") { sync.act("undo") }
             }
             Button("Sign Out…") { confirmSignOut = true }
-            Button("Reset Sync…", role: .destructive) { confirmReset = true }
         }
         .confirmationDialog("Sign out of your dino account?", isPresented: $confirmSignOut) {
             Button("Sign Out") { sync.act("logout") }
         } message: {
             Text("This Mac stops syncing. Its settings stay as they are.")
-        }
-        .confirmationDialog("Reset sync?", isPresented: $confirmReset) {
-            Button("Reset Sync", role: .destructive) { sync.act("reset") }
-        } message: {
-            Text("The account's synced settings are deleted and this Mac's become the account's, under a new key and recovery key. Your other Macs will need the new recovery key.")
         }
     }
 
@@ -391,130 +293,4 @@ private struct Ready: View {
 
 private extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
-}
-
-// MARK: - Another Mac asking this one for the key
-
-extension DinoModel {
-    /// One sync action in dinod, off the main thread; `done` gets the error, if any.
-    private func syncAction(_ action: String, _ value: String, done: (@MainActor (String?) -> Void)? = nil) {
-        Task.detached {
-            let failure: String?
-            do {
-                let (status, _) = try DinoConnection(path: DinoEnvironment.socketPath).sync(action, value)
-                if let status { await MainActor.run { SyncStore.shared.status = status } }
-                failure = nil
-            } catch {
-                failure = error.localizedDescription
-            }
-            let result = failure
-            await MainActor.run { done?(result) }
-        }
-    }
-
-    /// Take the request so both Macs can show the code. Gives nothing yet.
-    func claimApproval(_ r: ApprovalRequest) {
-        guard r.code == nil else { return }
-        syncAction("claim", r.id) { e in if let e { self.error = e } }
-    }
-
-    func grantApproval(_ r: ApprovalRequest, done: @escaping @MainActor (String?) -> Void) {
-        syncAction("grant", r.id, done: done)
-    }
-
-    func denyApproval(_ r: ApprovalRequest) {
-        approvals.removeAll { $0.id == r.id }
-        syncAction("deny", r.id)
-    }
-
-    /// What dinod reports with each state: published only when it changes, and a notification the
-    /// first time a request shows up.
-    func applyApprovals(_ next: [ApprovalRequest]) {
-        guard next != approvals else { return }
-        for r in next where !approvals.contains(where: { $0.id == r.id }) {
-            Notifier.post(key: "approval-\(r.id)", title: "\(r.device) wants to sync your settings", body: "Open dino to compare codes and approve it.")
-        }
-        approvals = next
-        if let open = approving, let now = next.first(where: { $0.id == open.id }) {
-            if now != open { approving = now }
-        }
-    }
-}
-
-/// A slim bar over the terminals while another Mac waits for this one's approval.
-struct ApprovalBanner: View {
-    @EnvironmentObject var model: DinoModel
-
-    var body: some View {
-        if let r = model.approvals.first {
-            HStack(spacing: 10) {
-                Image(systemName: "laptopcomputer.and.arrow.down").foregroundStyle(Brand.green)
-                Text("**\(r.device)** wants to sync your settings").lineLimit(1)
-                Spacer()
-                Button("Deny") { model.denyApproval(r) }
-                // No default-key shortcut: Return belongs to the terminal under the bar.
-                Button("Approve…") { model.approving = r }
-            }
-            .font(.callout)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(.bar)
-            .overlay(alignment: .bottom) { Divider() }
-        }
-    }
-}
-
-/// Approving another Mac: take its request, show the code, and only on "they match" give it the key.
-struct ApproveSheet: View {
-    let request: ApprovalRequest
-    @EnvironmentObject var model: DinoModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var error: String?
-
-    var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "laptopcomputer.and.arrow.down")
-                .font(.system(size: 40))
-                .foregroundStyle(Brand.green)
-            Text("Approve \(request.device)?").font(.title2.weight(.semibold))
-            Text("It gets the key to your synced settings. Approve only if it shows the same code.")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-            Group {
-                if let code = request.code {
-                    Text(code)
-                        .font(.system(size: 34, weight: .semibold, design: .monospaced))
-                        .textSelection(.enabled)
-                        .accessibilityLabel("Approval code \(code.replacingOccurrences(of: "-", with: " "))")
-                } else {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Waiting for \(request.device)…").foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .frame(height: 44)
-            if let error { Text(error).foregroundStyle(.red).font(.callout) }
-            HStack {
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Codes Don't Match") {
-                    model.denyApproval(request)
-                    dismiss()
-                }
-                .disabled(request.code == nil)
-                Button("They Match: Approve") {
-                    model.grantApproval(request) { e in
-                        if let e { error = e } else { dismiss() }
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(request.code == nil)
-            }
-        }
-        .padding(24)
-        .frame(width: 440)
-        .onAppear { model.claimApproval(request) }
-    }
 }

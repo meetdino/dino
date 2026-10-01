@@ -664,17 +664,11 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     }
                     "login" => sync::login(value).map(Some),
                     "login_device" => sync::login_device(value).map(|()| None),
-                    "join" => sync::join(value.as_deref().unwrap_or("")).map(|()| None),
+                    "login_email" => sync::login_email(value.as_deref().unwrap_or("")).map(|()| None),
+                    "cancel_login" => Ok(sync::cancel_login()).map(|()| None),
                     "resolve" => sync::resolve(value.as_deref().unwrap_or("")).map(|()| None),
                     "now" => Ok(sync::now()).map(|()| None),
-                    "reset" => sync::reset().map(|()| None),
                     "undo" => sync::undo().map(|()| None),
-                    "keys" => Ok(sync::set_key_sync(value.as_deref() != Some("off"))).map(|()| None),
-                    "ack_recovery" => Ok(sync::ack_recovery()).map(|()| None),
-                    "ask" => sync::ask().map(|()| None),
-                    "claim" => sync::claim(value.as_deref().unwrap_or("")).map(|()| None),
-                    "grant" => sync::grant(value.as_deref().unwrap_or("")).map(|()| None),
-                    "deny" => sync::deny(value.as_deref().unwrap_or("")).map(|()| None),
                     "logout" => Ok(sync::logout()).map(|()| None),
                     other => Err(anyhow::anyhow!("no sync action {other}")),
                 };
@@ -1688,7 +1682,7 @@ fn state(d: &Daemon) -> Response {
             })
         })
         .collect();
-    Response::State { sessions, quotas, approvals: sync::approvals(), power: Some(d.lid.info()) }
+    Response::State { sessions, quotas, power: Some(d.lid.info()) }
 }
 
 // ---- Persistence: sessions survive dinod restarts (and reboots) by resuming each agent. ----
