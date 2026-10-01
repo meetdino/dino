@@ -14,6 +14,7 @@
 #   DINO_DEV_PORT     the server's port (default 8787)
 #   DINO_DEV_PG_PORT  Postgres' port without Docker (default 55433)
 #   DINO_DEV_DOCKER   0 to use Homebrew's Postgres even when Docker is running
+#   DINO_DEV_PUSH     0 to run as on Vercel: no push socket, devices look every minute
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -117,6 +118,7 @@ start() {
         DINO_ENV=development \
         DINO_SECRET_KEY="$(cat "$DIR/secret")" \
         DINO_MAIL_LOG="$MAIL" \
+        DINO_PUSH="${DINO_DEV_PUSH:-1}" \
         nohup "$BIN" >"$LOGS/server.log" 2>&1 &
     echo $! >"$PID"
     for _ in $(seq 1 60); do
