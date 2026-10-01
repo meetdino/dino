@@ -735,6 +735,12 @@ fn truncate_left(s: &str, n: usize) -> String {
     if len <= n { s.into() } else { std::iter::once('…').chain(s.chars().skip(len - n + 1)).collect() }
 }
 
+/// `s` safe to print to a terminal: control characters (C0, DEL and C1), with which a title or
+/// a folder name could move the cursor, retitle the window or write to the clipboard, become `?`.
+fn printable(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
 fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     let mut redraw = true;
     let mut last_tick = Instant::now();
@@ -792,6 +798,10 @@ fn main() -> anyhow::Result<()> {
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
         // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
         Some("statusline") => std::process::exit(dino_core::statusline::run(cli.get(1).map(String::as_str))),
+        Some("--version" | "-V" | "version") => {
+            println!("dino {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Some("found") => return cmd_found(),
         Some("ai") => return ai::run(&cli[1..]),
         Some("search") => return search::run(&cli[1..]),
@@ -935,9 +945,9 @@ fn cmd_ls() -> anyhow::Result<()> {
         println!("no sessions");
     }
     for s in sessions {
-        let state = if s.exited { "exited".to_string() } else { s.activity.unwrap_or_else(|| "idle".into()) };
-        let title = s.title.unwrap_or_default();
-        println!("{:>3}  {:<16} {:<10} ↑{} ↓{}  {title}", s.id, truncate(&s.name, 16), state, tokens(s.input_tokens), tokens(s.output_tokens));
+        let state = if s.exited { "exited".to_string() } else { printable(&s.activity.unwrap_or_else(|| "idle".into())) };
+        let title = printable(&s.title.unwrap_or_default());
+        println!("{:>3}  {:<16} {:<10} ↑{} ↓{}  {title}", printable(&s.id), truncate(&printable(&s.name), 16), state, tokens(s.input_tokens), tokens(s.output_tokens));
     }
     Ok(())
 }
@@ -956,10 +966,11 @@ fn cmd_found() -> anyhow::Result<()> {
             println!("  (newest {SHOWN} of {})", group.len());
         }
         for f in group.into_iter().take(SHOWN) {
-            let place = f.terminal.as_deref().map(|t| format!("in {t}")).unwrap_or_default();
-            let status = f.status.as_deref().unwrap_or("");
-            let cwd = f.cwd.as_deref().unwrap_or("").replace(&std::env::var("HOME").unwrap_or_default(), "~");
-            println!("  {:<6} {:<38} {:<32} {:<10} {:<9} {}  {}", f.agent, truncate(&f.title, 38), truncate_left(&cwd, 32), place, status, &f.session_id.get(..8).unwrap_or(""), f.args.join(" "));
+            let place = f.terminal.as_deref().map(|t| format!("in {}", printable(t))).unwrap_or_default();
+            let status = printable(f.status.as_deref().unwrap_or(""));
+            let cwd = printable(&f.cwd.as_deref().unwrap_or("").replace(&std::env::var("HOME").unwrap_or_default(), "~"));
+            let id = printable(f.session_id.get(..8).unwrap_or(""));
+            println!("  {:<6} {:<38} {:<32} {:<10} {:<9} {}  {}", printable(&f.agent), truncate(&printable(&f.title), 38), truncate_left(&cwd, 32), place, status, id, printable(&f.args.join(" ")));
         }
     }
     Ok(())
@@ -1037,7 +1048,18 @@ fn cmd_continue(prefix: &str) -> anyhow::Result<()> {
     let Response::Found { sessions } = client::request(&Request::Found { cloud: false, running_only: false })? else { anyhow::bail!("unexpected reply") };
     let session = sessions.into_iter().find(|f| f.session_id.starts_with(prefix)).ok_or_else(|| anyhow::anyhow!("no session matching {prefix}"))?;
     if session.pid.is_some() {
-        eprintln!("moving \"{}\" into dino (waits for its current turn to finish)…", session.title);
+        eprintln!("moving \"{}\" into dino (waits for its current turn to finish)…", printable(&session.title));
     }
     print_response(client::request(&Request::Adopt { session, cwd: None })?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_characters_are_not_printed() {
+        assert_eq!(printable("fix \x1b]0;pwned\x07login\r\n\x7f\u{9b}2J done"), "fix ?]0;pwned?login????2J done");
+        assert_eq!(printable("~/src/app · café ✓\t"), "~/src/app · café ✓?");
+    }
 }

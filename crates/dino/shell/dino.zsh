@@ -89,7 +89,13 @@ _dino_suggest() {
   fi
   POSTDISPLAY='  … asking your agent'
   zle -R
-  local err=${TMPDIR:-/tmp}/dino-ai-$$.err out rc
+  local err out rc
+  # A private file of its own: a fixed name in a shared folder could be read, or planted.
+  if ! err=$(command mktemp "${TMPDIR:-/tmp}/dino-ai.XXXXXX"); then
+    POSTDISPLAY='  ✗ dino: no temp file'
+    _dino_highlight
+    return
+  fi
   out=$(command $_DINO_BIN ai suggest --shell zsh --cwd $PWD --last "$_DINO_LAST" --status $_DINO_STATUS -- $line 2>$err </dev/null)
   rc=$?
   local why=$(<$err)
@@ -169,7 +175,8 @@ _dino_escape() {
 }
 
 _dino_search() {
-  local picked hist=${TMPDIR:-/tmp}/dino-hist-$$ k
+  local picked hist k
+  hist=$(command mktemp "${TMPDIR:-/tmp}/dino-hist.XXXXXX") || return
   # fc can't list history inside a widget; $history can, newest first.
   zmodload -F zsh/parameter p:history 2>/dev/null
   for k in ${(Onk)history}; do print -r -- ${history[$k]//$'\n'/\\n}; done >$hist

@@ -4,3 +4,4 @@ target/
 error.log
 .build/
 site/
+dist/

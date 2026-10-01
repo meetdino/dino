@@ -437,6 +437,8 @@ struct PreviewConfig: Codable, Equatable, Identifiable {
     var name: String
     var argv: [String]
     var cwd: String
+    /// Variables set for it, on top of dinod's own.
+    var env: [String: String]?
     var port: UInt16?
     var url: String?
     /// The launch file it came from, relative to the session's folder.
@@ -743,9 +745,17 @@ enum DinoEnvironment {
         return path.isEmpty ? (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin") : path
     }()
 
+    /// The `dino` a release build carries in Contents/Helpers; nil in a development build.
+    static let bundledDino: String? = {
+        let path = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/dino").path
+        return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+    }()
+
+    /// The app's own `dino` first, so its dinod is the one it was built with.
     static let dinoBinary: String = {
         let env = ProcessInfo.processInfo.environment
         if let bin = env["DINO_BIN"] { return bin }
+        if let bin = bundledDino { return bin }
         for dir in loginPath.split(separator: ":") {
             let candidate = "\(dir)/dino"
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }

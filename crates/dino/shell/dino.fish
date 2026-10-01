@@ -26,7 +26,8 @@ function __dino_ai_line
         case 0
             commandline -r -- $out
         case 10
-            commandline -r -- "# $out"
+            # Every line commented out: each line of a multi-line one runs on the one Enter.
+            commandline -r -- '# '$out
             echo (set_color red)"⚠ $why: delete the # to run it"(set_color normal) >/dev/tty
         case '*'
             echo "✗ $why" >/dev/tty
