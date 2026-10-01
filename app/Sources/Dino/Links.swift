@@ -197,10 +197,72 @@ extension DinoModel {
         case let .web(url):
             openPreview(session: id, url: url)
         case let .elsewhere(url):
-            NSWorkspace.shared.open(url)
+            LinkPolicy.openElsewhere(url)
         case nil:
             // A path that doesn't exist (yet, or any more), or text that only looked like one.
             NSSound.beep()
         }
+    }
+}
+
+/// Where links from outside dino (terminal output, agent text, pages, PDFs) may go. Web and mail
+/// links open as usual; files show in dino or the Finder and are never run (the system runs a
+/// `.command` or a script and launches an app, and files from git carry no quarantine); anything
+/// else, another app's scheme, opens only once you've seen the whole URL and said so.
+@MainActor
+enum LinkPolicy {
+    static func isWeb(_ url: URL) -> Bool {
+        ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "")
+    }
+
+    /// A link dino has no viewer for here: a file (there or not) is revealed in the Finder.
+    static func openElsewhere(_ url: URL) {
+        if url.isFileURL {
+            reveal(url.path)
+        } else if isWeb(url) || confirm(url) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// A link as Ghostty or Markdown gives it, where there's no file pane or preview: files are
+    /// revealed in the Finder, local pages open in the browser.
+    static func open(_ link: String, cwd: String?) {
+        switch LinkTarget.resolve(link, cwd: cwd) {
+        case let .file(path, _):
+            reveal(path)
+        case let .web(url), let .elsewhere(url):
+            openElsewhere(url)
+        case nil:
+            NSSound.beep()
+        }
+    }
+
+    /// A Markdown link's URL as `LinkTarget.resolve` takes it: `[x](src/my%20app.rs)` is a path.
+    static func link(_ url: URL) -> String {
+        url.scheme == nil ? url.absoluteString.removingPercentEncoding ?? url.absoluteString : url.absoluteString
+    }
+
+    /// Selects it in a Finder window; nothing is opened.
+    static func reveal(_ path: String) {
+        guard FileManager.default.fileExists(atPath: path) else {
+            NSSound.beep()
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    /// Before handing `url` to whichever app claims its scheme: the whole URL, and that app.
+    static func confirm(_ url: URL) -> Bool {
+        let app = NSWorkspace.shared.urlForApplication(toOpen: url).map { FileManager.default.displayName(atPath: $0.path) }
+        let s = url.absoluteString
+        let shown = s.count > 2000 ? "\(s.prefix(2000))… (\(s.count) characters)" : s
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = app.map { "Open this link in \($0)?" } ?? "Open this link?"
+        alert.informativeText = "\(shown)\n\nA link can make another app act on it. Only open it if you trust where it came from."
+        alert.addButton(withTitle: "Open")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }

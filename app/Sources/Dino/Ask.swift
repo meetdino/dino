@@ -3,6 +3,7 @@ import SwiftUI
 /// Side chat (⇧⌘;): ask Claude about a session without disturbing it. dinod runs a one-shot
 /// `claude -p` that reads the session through `dino mcp --read-only` and can't change anything.
 struct AskSheet: View {
+    @EnvironmentObject var model: DinoModel
     @Environment(\.dismiss) private var dismiss
     let session: SessionInfo
 
@@ -41,6 +42,11 @@ struct AskSheet: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
                     }
+                    // Links in answers go where a ⌘-click in the session's terminal would.
+                    .environment(\.openURL, OpenURLAction { url in
+                        model.openLink(LinkPolicy.link(url), from: session.id)
+                        return .handled
+                    })
                     .frame(minHeight: 120, maxHeight: 380)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
                     .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))

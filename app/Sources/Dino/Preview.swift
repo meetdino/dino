@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import SwiftUI
 import WebKit
 
@@ -27,6 +28,8 @@ final class WebPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
 
     /// A server that just said its address may not accept connections yet: retry until then.
     private var retryUntil = Date.distantPast
+    /// What dino itself last loaded (a file you opened may be any kind; one a page goes to may not).
+    private var requested: URL?
     private var observers: [NSKeyValueObservation] = []
 
     init(session: String) {
@@ -68,6 +71,7 @@ final class WebPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     func load(_ u: URL, patience: TimeInterval = 3) {
         failure = nil
         retryUntil = Date().addingTimeInterval(patience)
+        requested = u
         url = u
         address = Self.display(u)
         if u.isFileURL {
@@ -145,41 +149,91 @@ final class WebPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     }
 
     func webView(_: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-        // mailto:, app links and the like belong to other apps.
-        if let u = action.request.url, let scheme = u.scheme?.lowercased(), !["http", "https", "file", "about", "data", "blob"].contains(scheme) {
-            NSWorkspace.shared.open(u)
+        guard let u = action.request.url, let scheme = u.scheme?.lowercased() else {
+            decisionHandler(.allow)
+            return
+        }
+        // mailto:, app links and the like belong to other apps: only a click on a link in the
+        // page itself, not a script or an iframe, and never without asking (see `LinkPolicy`).
+        if !Self.webSchemes.contains(scheme) {
+            decisionHandler(.cancel)
+            if action.navigationType == .linkActivated, action.targetFrame?.isMainFrame == true { LinkPolicy.openElsewhere(u) }
+            return
+        }
+        // A page may go to another page beside it, not to any file (a script there could later be
+        // handed to the browser): what was loaded here, back, forward and reload stay allowed.
+        if scheme == "file", action.targetFrame?.isMainFrame == true, action.navigationType != .backForward,
+           action.navigationType != .reload, u.standardizedFileURL.path != requested?.standardizedFileURL.path,
+           !Self.pageExtensions.contains(u.pathExtension.lowercased())
+        {
             decisionHandler(.cancel)
             return
         }
         decisionHandler(.allow)
     }
 
+    private static let webSchemes: Set<String> = ["http", "https", "file", "about", "data", "blob"]
+    /// Local files a page may navigate to.
+    private static let pageExtensions: Set<String> = ["html", "htm", "xhtml"]
+
+    /// "Open in your browser": web pages, and local HTML with the browser itself (the default app
+    /// for a file could run it). False for anything else.
+    @discardableResult
+    func openInBrowser() -> Bool {
+        guard let u = url else { return false }
+        if u.scheme == "http" || u.scheme == "https" {
+            return NSWorkspace.shared.open(u)
+        }
+        guard u.isFileURL, ["html", "htm"].contains(u.pathExtension.lowercased()),
+              let probe = URL(string: "https://example.com"), let browser = NSWorkspace.shared.urlForApplication(toOpen: probe)
+        else { return false }
+        NSWorkspace.shared.open([u], withApplicationAt: browser, configuration: NSWorkspace.OpenConfiguration())
+        return true
+    }
+
     // MARK: WKUIDelegate
 
     /// `target="_blank"` and `window.open`: one pane, so they open here.
     func webView(_ v: WKWebView, createWebViewWith _: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures _: WKWindowFeatures) -> WKWebView? {
-        if action.targetFrame == nil { v.load(action.request) }
+        guard action.targetFrame == nil else { return nil }
+        if let u = action.request.url, let scheme = u.scheme?.lowercased(), !Self.webSchemes.contains(scheme) {
+            // Another app's link: as in `decidePolicyFor`, only for a click, and after asking.
+            if action.navigationType == .linkActivated { LinkPolicy.openElsewhere(u) }
+            return nil
+        }
+        v.load(action.request)
         return nil
     }
 
-    func webView(_: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame _: WKFrameInfo, completionHandler: @escaping @MainActor () -> Void) {
+    /// Who is asking, as the alert's title: a page can't pose as dino.
+    private static func says(_ frame: WKFrameInfo) -> String {
+        let o = frame.securityOrigin
+        if o.protocol == "file" { return "A local file says" }
+        guard !o.host.isEmpty else { return "This page says" }
+        return "\(o.protocol)://\(o.host)\(o.port == 0 ? "" : ":\(o.port)") says"
+    }
+
+    func webView(_: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor () -> Void) {
         let alert = NSAlert()
-        alert.messageText = message
+        alert.messageText = Self.says(frame)
+        alert.informativeText = message
         alert.runModal()
         completionHandler()
     }
 
-    func webView(_: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame _: WKFrameInfo, completionHandler: @escaping @MainActor (Bool) -> Void) {
+    func webView(_: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor (Bool) -> Void) {
         let alert = NSAlert()
-        alert.messageText = message
+        alert.messageText = Self.says(frame)
+        alert.informativeText = message
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
         completionHandler(alert.runModal() == .alertFirstButtonReturn)
     }
 
-    func webView(_: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame _: WKFrameInfo, completionHandler: @escaping @MainActor (String?) -> Void) {
+    func webView(_: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor (String?) -> Void) {
         let alert = NSAlert()
-        alert.messageText = prompt
+        alert.messageText = Self.says(frame)
+        alert.informativeText = prompt
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         field.stringValue = defaultText ?? ""
         alert.accessoryView = field
@@ -240,14 +294,23 @@ extension DinoModel {
         }.value
     }
 
-    /// Start the server; the page loads once dinod has seen its port.
+    /// Start the server; the page loads once dinod has seen its port. The first time, and again
+    /// whenever it changes, only once you've seen the command it runs (see `ServerApproval`).
     func startServer(_ name: String, page: WebPage) {
         let session = page.session
-        page.failure = nil
-        page.server = name
-        page.waitingFor = name
-        page.started = false
+        let repo = sessions.first { $0.id == session }?.cwd
         Task {
+            // The launch file as it is now, not as the menu last polled it.
+            let (configs, _) = await previewConfigs(session)
+            guard let c = configs.first(where: { $0.name == name }) else {
+                page.failure = "\(name) isn't in the launch files any more."
+                return
+            }
+            guard ServerApproval.confirm(c, repo: repo ?? c.cwd) else { return }
+            page.failure = nil
+            page.server = name
+            page.waitingFor = name
+            page.started = false
             do {
                 try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).previewStart(session: session, name: name) }.value
                 page.started = true
@@ -296,6 +359,45 @@ extension DinoModel {
             }
         }
         openFile(path, line: 7)
+    }
+}
+
+/// Launch-file servers you've let run, per repo. A cloned repo's launch.json names any program
+/// and environment, and the menu shows only a name: its command is shown before it first runs,
+/// and again after it changes.
+@MainActor
+enum ServerApproval {
+    /// UserDefaults key: the repo's approved configurations, as hashes of all they contain.
+    static func key(_ repo: String) -> String { "preview.approved.\(repo)" }
+
+    static func hash(_ c: PreviewConfig) -> String? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(c) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// True if `c` may run: approved before as it is, or now.
+    static func confirm(_ c: PreviewConfig, repo: String) -> Bool {
+        guard let hash = hash(c) else { return false }
+        var approved = UserDefaults.standard.stringArray(forKey: key(repo)) ?? []
+        if approved.contains(hash) { return true }
+        let plain = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_./:=@%+,"))
+        let command = c.argv.map { $0.unicodeScalars.allSatisfy(plain.contains) && !$0.isEmpty ? $0 : Opening.quoted($0) }.joined(separator: " ")
+        var info = "\(c.source) runs:\n\n\(command)\n\nin \(shortPath(c.cwd))"
+        if let env = c.env, !env.isEmpty {
+            info += ", setting \(env.keys.sorted().joined(separator: ", "))"
+        }
+        info += ".\n\nIt runs with the same access to your files as dino. Only start servers you trust; dino asks again if this one changes."
+        let alert = NSAlert()
+        alert.messageText = "Start “\(c.name)”?"
+        alert.informativeText = info
+        alert.addButton(withTitle: "Start")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        approved.append(hash)
+        UserDefaults.standard.set(Array(approved.suffix(50)), forKey: key(repo))
+        return true
     }
 }
 
@@ -389,7 +491,7 @@ private struct PreviewBody: View {
                 .help("Edit the HTML")
             }
             Button {
-                if let u = page.url { NSWorkspace.shared.open(u) }
+                if !page.openInBrowser() { NSSound.beep() }
             } label: { Image(systemName: "safari") }
                 .disabled(page.url == nil)
                 .help("Open in your browser")

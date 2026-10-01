@@ -91,6 +91,12 @@ struct ConversationView: View {
                 }
                 .padding(14)
             }
+            // Links in what the agent wrote: web pages open, files show in the Finder, other
+            // apps' links only after asking.
+            .environment(\.openURL, OpenURLAction { url in
+                LinkPolicy.open(LinkPolicy.link(url), cwd: nil)
+                return .handled
+            })
             .overlay(alignment: .bottom) {
                 if newer {
                     Button { loaded = nil } label: { Label("Newer turns", systemImage: "arrow.down") }
