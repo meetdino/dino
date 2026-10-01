@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// First open: what dino found on this Mac, in a card at the foot of the sidebar. The shell is
-/// already up and has the keyboard; the card fills in as dinod looks, never takes focus, and every
-/// row can be left alone. Closing it marks this Mac onboarded (never synced); Help → Show Welcome
-/// brings it back.
+/// First open: what dino found on this Mac, in a sheet over the window. The shell is already up
+/// behind it; the sheet fills in as dinod looks, and every row can be left alone. Closing it (Done
+/// or Esc) marks this Mac onboarded (never synced) and hands the keyboard to the shell; Help →
+/// Show Welcome brings it back.
 struct WelcomeCard: View {
     @EnvironmentObject var model: DinoModel
     @StateObject private var store = SettingsStore()
@@ -16,6 +16,7 @@ struct WelcomeCard: View {
     @State private var isDefault = Opening.isDefault
     @State private var asked = false
     @State private var showMissing = false
+    @State private var rowsHeight: CGFloat = 0
 
     /// The ones dino works with best, in this order.
     private static let featured = ["claude", "codex", "kimi", "qwen", "pi", "hermes"]
@@ -26,50 +27,42 @@ struct WelcomeCard: View {
     }
 
     var body: some View {
-        // A stack, not a Group: an empty Group never appears, and this asks dinod on appear.
-        VStack(spacing: 0) {
-            if shown {
-                card
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .onAppear(perform: look)
+        Color.clear
+            .frame(width: 0, height: 0)
+            .sheet(isPresented: Binding(get: { shown }, set: { if !$0, shown { close() } })) {
+                card.onAppear(perform: look)
             }
-        }
-        .animation(.easeOut(duration: 0.2), value: shown)
-        // Once, after the first frame: whether this Mac has seen the card.
-        .onAppear { store.load() }
-        .onChange(of: model.showWelcome) { _, on in if on { store.load() } }
-        // The usage panel steps aside while it shows: the two never crowd the sidebar together.
-        .onChange(of: shown, initial: true) { _, on in model.welcomeShowing = on }
+            // Once, after the first frame: whether this Mac has seen the card.
+            .onAppear { store.load() }
+            .onChange(of: model.showWelcome) { _, on in if on { store.load() } }
     }
 
     private var card: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Welcome to dino").font(.headline)
-                Spacer()
-                Button(action: close) { Image(systemName: "xmark") }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .help("Close; Help → Show Welcome brings it back")
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                DinoMark(size: 22)
+                Text("Welcome").font(.title2.weight(.semibold))
             }
-            // Its own height, up to a point; then it scrolls, so the sidebar always fits.
-            ViewThatFits(in: .vertical) {
-                rows
-                ScrollView { rows }.scrollIndicators(.automatic)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Welcome to dino")
+            .accessibilityAddTraits(.isHeader)
+            // Its own height, up to a point; then it scrolls, so the window always fits. (A sheet
+            // asks for its content's ideal height, which a ScrollView alone puts at nothing.)
+            ScrollView {
+                rows.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { rowsHeight = $0 }
             }
-            .frame(maxHeight: 460)
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(height: min(max(rowsHeight, 120), 560))
             HStack {
+                Text("Help → Show Welcome brings this back").font(.caption).foregroundStyle(.tertiary)
                 Spacer()
                 Button("Done", action: close)
-                    .controlSize(.small)
+                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(12)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator))
-        .padding(.horizontal, 10)
-        .padding(.bottom, 8)
-        .focusable(false)
+        .padding(20)
+        .frame(width: 460)
+        .onExitCommand(perform: close)
         // While an install or sign-in runs, ask now and then; once more when its shell ends.
         .task {
             while !Task.isCancelled {
@@ -94,32 +87,44 @@ struct WelcomeCard: View {
     // MARK: Rows
 
     private var rows: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            agents
-            found
-            Divider()
-            row("keyboard", "Press ⌘I in any shell to ask in plain English")
-            startsPicker
-            if !isDefault {
-                Button("Make dino your default terminal") {
-                    guard Opening.makeDefault() else { return NSSound.beep() }
-                    isDefault = true
-                    focusTerminal()
+        VStack(alignment: .leading, spacing: 16) {
+            group("Found on this Mac") {
+                agents
+                found
+            }
+            group("Try it") {
+                row("keyboard", "Press ⌘I in any shell to ask in plain English")
+                startsPicker
+            }
+            group("Optional") {
+                if !isDefault {
+                    Button("Make dino your default terminal") {
+                        guard Opening.makeDefault() else { return NSSound.beep() }
+                        isDefault = true
+                    }
+                    .buttonStyle(.link)
+                    .font(.callout)
+                }
+                Button {
+                    settingsPane = .account
+                    openWindow(id: SettingsView.windowID)
+                } label: {
+                    Text("Sign in with GitHub to sync your settings across Macs").multilineTextAlignment(.leading)
                 }
                 .buttonStyle(.link)
                 .font(.callout)
+                .help("API keys and tokens never leave this Mac")
             }
-            Button {
-                settingsPane = .account
-                openWindow(id: SettingsView.windowID)
-            } label: {
-                Text("Sign in with GitHub to sync your settings across Macs…").multilineTextAlignment(.leading)
-            }
-            .buttonStyle(.link)
-            .font(.callout)
-            .help("API keys and tokens never leave this Mac")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func group(_ title: String, @ViewBuilder _ content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
+            content()
+        }
     }
 
     @ViewBuilder private var agents: some View {
@@ -127,14 +132,13 @@ struct WelcomeCard: View {
         let here = setup.filter(\.installed)
         let missing = setup.filter { !$0.installed }
         VStack(alignment: .leading, spacing: 5) {
-            Text("Agents").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             if store.setup == nil {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.mini)
                     Text("Looking on this Mac…").font(.callout).foregroundStyle(.secondary)
                 }
             } else if here.isEmpty {
-                Text("None yet").font(.callout).foregroundStyle(.secondary)
+                Text("No agents yet").font(.callout).foregroundStyle(.secondary)
             }
             ForEach(here) { a in agentRow(a) }
             if !missing.isEmpty {
@@ -167,8 +171,9 @@ struct WelcomeCard: View {
     private func agentRow(_ a: AgentSetupInfo) -> some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(a.signed_in == true ? Color.green : a.signed_in == false ? Color.orange : Color.secondary.opacity(0.5))
+                .fill(a.signed_in == true ? Color(nsColor: .systemGreen) : a.signed_in == false ? Color(nsColor: .systemOrange) : Color.secondary.opacity(0.5))
                 .frame(width: 7, height: 7)
+                .accessibilityLabel(a.signed_in == true ? "Signed in" : a.signed_in == false ? "Not signed in" : "")
             Text(a.name).font(.callout)
             if let v = a.version {
                 Text(v).font(.caption.monospacedDigit()).foregroundStyle(.tertiary).lineLimit(1)
@@ -216,7 +221,6 @@ struct WelcomeCard: View {
                 },
                 set: { d in
                     store.update { $0.policies.default_agent = d == "claude" ? nil : d }
-                    focusTerminal()
                 }
             )) {
                 ForEach(startable) { l in Text(l.label).tag(l.short) }
