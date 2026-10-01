@@ -39,7 +39,9 @@ say "dino $VERSION ($BUILD) for $ARCHS"
 bins=()
 for a in "${arch_list[@]}"; do
     t="$(rust_target "$a")"
-    cargo build --release -q -p dino --target "$t"
+    # No build machine paths (home folder, checkout) in what ships.
+    RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME/.cargo=cargo --remap-path-prefix=$PWD=dino" \
+        cargo build --release -q -p dino --target "$t"
     bins+=("target/$t/release/dino")
 done
 if [ "${#bins[@]}" -gt 1 ]; then
