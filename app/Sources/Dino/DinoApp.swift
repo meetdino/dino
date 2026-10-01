@@ -636,18 +636,6 @@ struct Sidebar: View {
         )
     }
 
-    /// Changes whenever the sidebar gains, loses or restructures rows.
-    private var rowsKey: String {
-        let tree = SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
-        var parts: [String] = [filter.rawValue, model.sidebarQuery, "\(String(describing: model.sidebarScope))"]
-        parts += tree.repos.map(\.shape)
-        parts += model.sessions.map(\.id)
-        parts += model.elsewhere.map(\.id)
-        parts += model.scheduled.map(\.id)
-        parts += model.archived.map(\.id)
-        return parts.joined(separator: "\n")
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             List(selection: Binding(get: { model.selected }, set: { tag in
@@ -658,6 +646,9 @@ struct Sidebar: View {
                     model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
                 } else if tag.hasPrefix("task:") {
                     model.editingTask = model.scheduled.first { "task:\($0.id)" == tag }
+                } else if tag.hasPrefix("repo:") {
+                    // A repo's row: its folder, as its main checkout's row.
+                    model.select("dir:" + tag.dropFirst(5))
                 } else {
                     model.select(tag)
                 }
@@ -727,10 +718,10 @@ struct Sidebar: View {
                     }
                 }
             }
+            // Not rebuilt when rows come or go (that replaced every row, and froze the window for
+            // up to seconds while agents made worktrees): rows keep unique tags and stable
+            // identities instead, so the list's own diff stays right.
             .listStyle(.sidebar)
-            // macOS List diffs rows into an NSOutlineView and sometimes leaves stale rows drawn
-            // (a folder row twice, a section header at its old place). Rebuild it when rows come or go.
-            .id(rowsKey)
             UsagePanel()
         }
         .safeAreaInset(edge: .top) {
