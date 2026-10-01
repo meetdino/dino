@@ -961,6 +961,10 @@ impl Launch {
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls, scheduled, started_by, host, route } = launch;
+    // The prompt goes on the agent's command line, here or over SSH: it mustn't pass for a flag.
+    if let Some(p) = &prompt {
+        dino_core::agent::check_prompt(p)?;
+    }
     let host = restore.as_ref().map_or(host, |r| r.host.clone());
     let launcher = launcher.as_str();
     // Sessions already running come back even if the policies changed since; new ones must be allowed.
@@ -2010,6 +2014,8 @@ fn save_groups(groups: &[Group]) {
 fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -> anyhow::Result<String> {
     let prompt = prompt.trim();
     anyhow::ensure!(!prompt.is_empty(), "fan-out needs a prompt");
+    // Refused before any worktree is made, rather than by the first `spawn`.
+    dino_core::agent::check_prompt(prompt)?;
     let mut picked: Vec<LauncherInfo> = vec![];
     for short in launchers {
         let l = d.allowed_launcher(short)?;

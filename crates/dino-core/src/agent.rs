@@ -256,6 +256,14 @@ pub fn agent(id: &str) -> Option<&'static dyn Agent> {
     }
 }
 
+/// A prompt an agent is started on goes on its command line (see `Agent::prompt_args`), where one
+/// starting with `-` would be read as a flag (`--dangerously-skip-permissions`, `--settings=...`):
+/// refuse it, since not every agent's command line honours `--`.
+pub fn check_prompt(prompt: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!prompt.trim_start().starts_with('-'), "a prompt to start an agent on can't begin with \"-\": it would be read as a command-line flag");
+    Ok(())
+}
+
 pub(crate) fn strings(s: &[&str]) -> Vec<String> {
     s.iter().map(|s| s.to_string()).collect()
 }
@@ -308,5 +316,15 @@ mod tests {
         let hermes = agent("hermes").unwrap();
         assert_eq!(hermes.provider_formats(), [Format::Chat]);
         assert!(hermes.provider_wiring(URL, Format::Anthropic, "m").is_none());
+    }
+
+    #[test]
+    fn a_prompt_that_would_be_read_as_a_flag_is_refused() {
+        for p in ["--dangerously-skip-permissions", "  --settings={\"hooks\":{}}", "\n\t-p", "-", "--dangerously-bypass-approvals-and-sandbox"] {
+            assert!(check_prompt(p).is_err(), "{p:?}");
+        }
+        for p in ["fix the tests", "  fix -- the tests", "why does `-x` fail?", "", "   "] {
+            assert!(check_prompt(p).is_ok(), "{p:?}");
+        }
     }
 }
