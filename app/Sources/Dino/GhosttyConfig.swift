@@ -6,14 +6,15 @@ import GhosttyTerminal
 @MainActor
 enum GhosttyConfig {
     /// Where Ghostty looks, in its order: later files win, macOS's after the XDG ones.
-    static var files: [URL] {
+    static let files: [URL] = {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
             ?? home.appendingPathComponent(".config")
         let support = home.appendingPathComponent("Library/Application Support/com.mitchellh.ghostty")
         return [xdg.appendingPathComponent("ghostty/config.ghostty"), xdg.appendingPathComponent("ghostty/config"),
                 support.appendingPathComponent("config.ghostty"), support.appendingPathComponent("config")]
-    }
+    }()
+    private static let paths = files.map(\.path)
 
     /// Settings that would take a pane from dino: every pane runs `dino attach`, and dinod starts
     /// the shell or agent behind it, in its own folder.
@@ -52,12 +53,14 @@ enum GhosttyConfig {
 
     /// A config file changed, appeared or went since `apply` read them.
     static var changed: Bool {
-        let present = files.map(\.path).filter { FileManager.default.fileExists(atPath: $0) }
-        return present.contains { stamps[$0] == nil } || stamps.contains { modified($0.key) != $0.value }
+        paths.contains { stamps[$0] == nil && access($0, F_OK) == 0 } || stamps.contains { modified($0.key) != $0.value }
     }
 
+    /// A plain stat: this runs every two seconds, and Foundation's attributes read far more.
     private static func modified(_ path: String) -> Date {
-        (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? .distantPast
+        var st = stat()
+        guard stat(path, &st) == 0 else { return .distantPast }
+        return Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec) + TimeInterval(st.st_mtimespec.tv_nsec) / 1e9)
     }
 
     /// The file's settings, then those of the files it includes: Ghostty loads a `config-file` after
