@@ -30,6 +30,33 @@ Inside **dino**:
 | `dino-daemon` | dinod, putting it together. | all of the above |
 | `dino` | The CLI, a client of dinod. | all of the above |
 
+## How they connect
+
+```mermaid
+flowchart LR
+  subgraph client [Client side: each machine]
+    T["dino terminal"] -- "calls (n windows → 1)" --> D["dinod"]
+    D -- "spawns (1 → n)" --> U["dino tui"]
+    U -- "calls" --> D
+    D -- "spawns" --> A["other agents: Claude Code, Codex, Qwen, …"]
+    H["harness-sdk"] -- "imported by" --> U
+  end
+  subgraph server [Server side]
+    C["dino cloud"]
+    X["dino cloud exec"]
+    L["dino landing"]
+  end
+  D -- "calls (n machines → 1)" --> C
+  U -- "calls, with a token from dinod" --> X
+  H -- "imported by" --> X
+  X -- "identity" --> C
+```
+
+How a session starts: the terminal asks dinod for a session; dinod spawns the agent (dino tui or
+any other) in its own pty, with its proxy route, controls and `DINO_SESSION`; the terminal shows it
+through `dino attach`. The terminal never spawns an agent itself. A TUI typed by hand into a dino
+shell is a process in that shell, which dinod notices and can take over, as with any agent.
+
 ## One machine, one dinod
 
 dinod is the only process on a machine that owns the config, the dino login and sync. The
