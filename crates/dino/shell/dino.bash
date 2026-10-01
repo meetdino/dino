@@ -13,14 +13,17 @@ _DINO_BIN=${DINO_BIN:-__DINO_BIN__}
 _DINO_BASH=1
 
 _dino_suggest_for() {
-  local line=$1 err=${TMPDIR:-/tmp}/dino-ai-$$.err out rc why
+  local line=$1 err out rc why nl=$'\n'
+  # A private file of its own: a fixed name in a shared folder could be read, or planted.
+  err=$(command mktemp "${TMPDIR:-/tmp}/dino-ai.XXXXXX") || { printf '✗ dino: no temp file\n' >/dev/tty; return 1; }
   out=$(command "$_DINO_BIN" ai suggest --shell bash --cwd "$PWD" -- "$line" 2>"$err" </dev/null)
   rc=$?
   why=$(<"$err")
   command rm -f "$err"
   case $rc in
     0) _DINO_OUT=$out ;;
-    10) _DINO_OUT="# $out"; printf '\e[31m⚠ %s: delete the # to run it\e[0m\n' "$why" >/dev/tty ;;
+    # Every line commented out: bash runs each line of a multi-line one on the one Enter.
+    10) _DINO_OUT="# ${out//$nl/$nl# }"; printf '\e[31m⚠ %s: delete the # to run it\e[0m\n' "$why" >/dev/tty ;;
     *) _DINO_OUT=; printf '✗ %s\n' "${why:-dino ai failed}" >/dev/tty; return 1 ;;
   esac
 }
@@ -71,7 +74,8 @@ if (( BASH_VERSINFO[0] >= 4 )); then
     fi
   }
   _dino_search() {
-    local picked hist=${TMPDIR:-/tmp}/dino-hist-$$
+    local picked hist
+    hist=$(command mktemp "${TMPDIR:-/tmp}/dino-hist.XXXXXX") || return 0
     HISTTIMEFORMAT= builtin history | sed 's/^ *[0-9]*  //' | awk '{a[NR]=$0} END {for (i = NR; i > 0; i--) print a[i]}' >"$hist"
     # The terminal's own device: macOS can't wait for keys on /dev/tty.
     picked=$(command "$_DINO_BIN" search --pick --query "$READLINE_LINE" --history "$hist" <"$(tty)")
