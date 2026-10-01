@@ -44,10 +44,6 @@ enum Brand {
 final class DinoModel: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     @Published var quotas: [QuotaInfo] = []
-    /// Other Macs asking this one for the sync key (dinod lists them with the state).
-    @Published var approvals: [ApprovalRequest] = []
-    /// The request whose approve sheet is open.
-    @Published var approving: ApprovalRequest?
     /// Kept awake with the lid closed, and why sleep came back last; nil from an older dinod.
     @Published var power: PowerInfo?
     @Published var launchers: [LauncherInfo] = []
@@ -204,7 +200,6 @@ final class DinoModel: ObservableObject {
             await MainActor.run {
                 if let resp {
                     self.apply(resp.sessions ?? [], resp.quotas ?? [])
-                    self.applyApprovals(resp.approvals ?? [])
                     self.applyPower(resp.power)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.poll() }
                 } else {

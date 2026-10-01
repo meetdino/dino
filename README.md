@@ -19,8 +19,8 @@ terminal UI, a CLI, a native macOS app built on Ghostty, or other agents over MC
 - **Shell integration.** An AI line for zsh, bash and fish (`dino ai`) and history search
   (`dino search`).
 - **MCP server.** `dino mcp` lets agents list, read, message and start other sessions.
-- **Settings sync (optional).** Settings are encrypted end to end and can sync across Macs.
-  dino works without an account.
+- **Settings sync (optional).** Sign in with GitHub (or a link by email) and your settings follow
+  you to every Mac; API keys and tokens never leave the Mac. dino works without an account.
 
 ## Layout
 

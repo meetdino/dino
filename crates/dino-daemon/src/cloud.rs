@@ -17,8 +17,6 @@ const SCOPE: &str = "account sync";
 pub const ACCESS_KEY: &str = "DINO_CLOUD_ACCESS_TOKEN";
 pub const REFRESH_KEY: &str = "DINO_CLOUD_REFRESH_TOKEN";
 const EXPIRES_KEY: &str = "DINO_CLOUD_EXPIRES_AT";
-/// Key-store names that belong to this Mac's sign-ins, never synced as keys.
-pub const PRIVATE_PREFIXES: [&str; 2] = ["DINO_CLOUD_", "CHATGPT_"];
 
 /// The server to use when none was chosen at sign-in.
 pub fn default_server() -> String {
@@ -92,7 +90,9 @@ fn token_post(server: &str, fields: &[(&str, String)]) -> anyhow::Result<Value> 
     if !status.is_success() {
         let code = v["error"].as_str().unwrap_or("");
         let why = v["error_description"].as_str().unwrap_or(code);
-        if status.is_client_error() && !matches!(code, "authorization_pending" | "slow_down") {
+        // Too many requests or a timeout is the server being busy, not a refusal.
+        let busy = matches!(status.as_u16(), 408 | 429);
+        if status.is_client_error() && !busy && !matches!(code, "authorization_pending" | "slow_down") {
             return Err(SignedOut(format!("the account server said {} ({why})", status.as_u16())).into());
         }
         anyhow::bail!("{code}");
@@ -117,8 +117,9 @@ fn device_fields() -> Vec<(&'static str, String)> {
 const WAIT: Duration = Duration::from_secs(10 * 60);
 
 /// Start signing in at `server` in the browser (code + PKCE, back to a loopback port): returns the
-/// page to open. `done` runs once the tokens are stored, or with why it didn't finish.
-pub fn login(server: String, done: impl FnOnce(anyhow::Result<()>) + Send + 'static) -> anyhow::Result<String> {
+/// page to open. With a `provider` (`github`), the page goes straight to that provider's sign-in.
+/// `done` runs once the tokens are stored, or with why it didn't finish.
+pub fn login(server: String, provider: Option<&str>, done: impl FnOnce(anyhow::Result<()>) + Send + 'static) -> anyhow::Result<String> {
     use base64::Engine;
     use sha2::Digest;
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
@@ -135,6 +136,9 @@ pub fn login(server: String, done: impl FnOnce(anyhow::Result<()>) + Send + 'sta
         ("code_challenge", challenge),
         ("code_challenge_method", "S256".into()),
     ];
+    if let Some(p) = provider {
+        query.push(("provider", p.into()));
+    }
     query.extend(device_fields());
     let url = format!("{server}/oauth/authorize?{}", form(&query));
     std::thread::spawn(move || {
@@ -151,9 +155,25 @@ pub fn login(server: String, done: impl FnOnce(anyhow::Result<()>) + Send + 'sta
 /// A code to enter at a page, for a Mac without a browser at hand (RFC 8628). `done` runs once
 /// the person approved (tokens stored) or it ran out.
 pub fn login_device(server: String, done: impl FnOnce(anyhow::Result<()>) + Send + 'static) -> anyhow::Result<(String, String)> {
+    device_grant(server, None, done)
+}
+
+/// A sign-in link by email: the server mails one to `email`, and opening it approves this Mac's
+/// request the way entering the code would. `done` runs once it was opened or ran out.
+pub fn login_email(server: String, email: &str, done: impl FnOnce(anyhow::Result<()>) + Send + 'static) -> anyhow::Result<()> {
+    device_grant(server, Some(email), done).map(|_| ())
+}
+
+fn device_grant(server: String, email: Option<&str>, done: impl FnOnce(anyhow::Result<()>) + Send + 'static) -> anyhow::Result<(String, String)> {
     let mut fields = vec![("client_id", CLIENT.to_string()), ("scope", SCOPE.into())];
+    if let Some(e) = email {
+        fields.push(("email", e.into()));
+    }
     fields.extend(device_fields());
     let r = http().post(format!("{server}/oauth/device_authorization")).header("content-type", "application/x-www-form-urlencoded").body(form(&fields)).send()?;
+    if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        anyhow::bail!("too many sign-in emails; try again in a while");
+    }
     anyhow::ensure!(r.status().is_success(), "the account server said {}", r.status().as_u16());
     let v: Value = r.json()?;
     let device_code = v["device_code"].as_str().ok_or_else(|| anyhow::anyhow!("no device code"))?.to_string();
@@ -161,6 +181,7 @@ pub fn login_device(server: String, done: impl FnOnce(anyhow::Result<()>) + Send
     let page = v["verification_uri_complete"].as_str().or(v["verification_uri"].as_str()).unwrap_or("").to_string();
     let mut interval = v["interval"].as_u64().unwrap_or(5).max(1);
     let until = Instant::now() + Duration::from_secs(v["expires_in"].as_u64().unwrap_or(600));
+    let by_email = email.is_some();
     std::thread::spawn(move || {
         let result = (|| -> anyhow::Result<()> {
             while Instant::now() < until {
@@ -173,7 +194,7 @@ pub fn login_device(server: String, done: impl FnOnce(anyhow::Result<()>) + Send
                     Err(_) => {}
                 }
             }
-            anyhow::bail!("the code wasn't entered in time")
+            anyhow::bail!("{}", if by_email { "the sign-in link wasn't opened in time" } else { "the code wasn't entered in time" })
         })();
         done(result);
     });
