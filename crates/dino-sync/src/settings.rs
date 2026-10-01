@@ -11,12 +11,12 @@
 //! | `ssh`      | the host               | `ssh`                                 |
 //! | `repos`    | `<git remote> <VAR>`   | `repos.<path>.env`, by remote: paths differ between Macs |
 //! | `terminal` | `shell_integration`, and a field name | `machine.shell_integration`, `terminal` |
-//! | `keys`     | the key's name         | the key store, only when the person turned key sync on |
 //!
 //! Only values that differ from the defaults are records, so a missing record means "default".
 //! The rest of `machine` stays on each Mac, and a repo without a remote isn't synced. Neither are
 //! repo variables that could make a session run code (`syncable_env`): dinod sets repo variables
-//! in every session in the repo, so one device could otherwise run code on all the others.
+//! in every session in the repo, so one device could otherwise run code on all the others. The key
+//! store (API keys, tokens) never syncs: secrets stay on the Mac they were set on.
 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -32,9 +32,8 @@ pub const SCHEMA: u32 = 1;
 /// A setting's value by where it lives.
 pub type Entries = BTreeMap<RecordId, Value>;
 
-/// Records for `settings`: `remote_of` gives a repo path's git remote (None: not synced), and
-/// `keys` the key store when key sync is on.
-pub fn flatten(settings: &Settings, remote_of: &dyn Fn(&str) -> Option<String>, keys: Option<&BTreeMap<String, String>>) -> Entries {
+/// Records for `settings`: `remote_of` gives a repo path's git remote (None: not synced).
+pub fn flatten(settings: &Settings, remote_of: &dyn Fn(&str) -> Option<String>) -> Entries {
     let mut out = Entries::new();
     fields(&mut out, "routing", &settings.routing, &Routing::default());
     fields(&mut out, "policies", &settings.policies, &Policies::default());
@@ -59,9 +58,6 @@ pub fn flatten(settings: &Settings, remote_of: &dyn Fn(&str) -> Option<String>, 
         out.insert(RecordId::new("terminal", "shell_integration"), Value::Bool(settings.machine.shell_integration));
     }
     fields(&mut out, "terminal", &settings.terminal, &Terminal::default());
-    for (name, v) in keys.into_iter().flatten() {
-        out.insert(RecordId::new("keys", name.clone()), Value::String(v.clone()));
-    }
     out
 }
 
@@ -76,8 +72,6 @@ pub fn diff(old: &Entries, new: &Entries) -> Vec<(RecordId, Option<Value>)> {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Applied {
     pub settings: Settings,
-    /// The key store's synced entries (only when key sync is on).
-    pub keys: BTreeMap<String, String>,
     /// Repo variables for remotes not checked out here: `(remote, var, value)`. They apply when
     /// the repo shows up.
     pub pending: Vec<(String, String, String)>,
@@ -131,9 +125,7 @@ pub fn unflatten(local: &Settings, entries: &Entries, path_of: &dyn Fn(&str) -> 
             None => pending.push((remote.to_string(), var.to_string(), v.clone())),
         }
     }
-
-    let keys = in_collection(entries, "keys").filter_map(|(id, v)| Some((id.key.clone(), v.as_str()?.to_string()))).collect();
-    Applied { settings: s, keys, pending }
+    Applied { settings: s, pending }
 }
 
 /// Variables that make a shell, interpreter, loader, git or an agent run code or trust something

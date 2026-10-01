@@ -113,11 +113,11 @@ struct WelcomeCard: View {
                 settingsPane = .account
                 openWindow(id: SettingsView.windowID)
             } label: {
-                Text("Sign in to sync your settings across Macs…").multilineTextAlignment(.leading)
+                Text("Sign in with GitHub to sync your settings across Macs…").multilineTextAlignment(.leading)
             }
             .buttonStyle(.link)
             .font(.callout)
-            .help("End-to-end encrypted. On another Mac, you approve it from this one")
+            .help("API keys and tokens never leave this Mac")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
