@@ -258,6 +258,12 @@ fn suggest(o: &Opts) -> Result<String, Failure> {
         }
     }
     scrub(&mut cmd);
+    // Claude Code here not signed in (or Settings say so): the Claude subscription token, Claude's alone.
+    let agent_id = if agent == "codex" { "codex" } else { "claude" };
+    let launch = dino_core::claude_token::Launch::Headless;
+    if let Some(t) = dino_core::claude_token::for_launch(agent_id, launch, false, &Settings::load(), &dino_core::load_keys(), dino_core::claude_token::signed_in()) {
+        cmd.env(dino_core::claude_token::KEY, t);
+    }
     cmd.current_dir(&o.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let text = run_for(cmd, timeout(), agent)?;
     let text = if agent == "codex" { std::fs::read_to_string(&out_file).unwrap_or(text) } else { text };
