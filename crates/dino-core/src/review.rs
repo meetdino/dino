@@ -107,7 +107,15 @@ pub(crate) fn headless(key: &str, dir: &Path, args: &[String], input: String, ti
     let claude = crate::which("claude").ok_or_else(|| {
         anyhow::anyhow!("This needs Claude Code, and `claude` isn't installed. Install it (npm install -g @anthropic-ai/claude-code), then try again.")
     })?;
-    let mut child = Command::new(claude)
+    let mut cmd = Command::new(claude);
+    // The Claude subscription token when this Mac's Claude Code isn't signed in (or Settings say
+    // to use it here); never one the environment happened to hold.
+    cmd.env_remove(crate::claude_token::KEY);
+    let headless = crate::claude_token::Launch::Headless;
+    if let Some(t) = crate::claude_token::for_launch("claude", headless, false, &crate::settings::Settings::load(), &crate::load_keys(), crate::claude_token::signed_in()) {
+        cmd.env(crate::claude_token::KEY, t);
+    }
+    let mut child = cmd
         .args(["-p", "--output-format", "json"])
         .args(crate::trust::claude_headless_args(crate::trust::claude_trusts(dir)))
         .args(args)
