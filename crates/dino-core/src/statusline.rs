@@ -70,26 +70,32 @@ pub fn user_command(project: &Path) -> Option<String> {
     Layers::for_project(project).effective()?.0["command"].as_str().map(String::from)
 }
 
+/// The environment variable that tells `dino statusline` where to report: the hook URL holds the
+/// proxy's secret, so it stays off the statusline's command line, which every user can read.
+pub const HOOK_ENV: &str = "DINO_HOOK_URL";
+
 /// The `statusLine` setting for a Claude session in `project`: the user's own, run through
-/// `dino statusline <hook_url>`, with their padding and refresh interval. `None` when they have
-/// none, or when it is managed (a managed setting can't be overridden anyway).
-pub fn wrapper(project: &Path, dino: &Path, hook_url: &str) -> Option<String> {
-    wrap(Layers::for_project(project).effective(), dino, hook_url)
+/// `dino statusline` (which reports to `HOOK_ENV`), with their padding and refresh interval.
+/// `None` when they have none, or when it is managed (a managed setting can't be overridden anyway).
+pub fn wrapper(project: &Path, dino: &Path) -> Option<String> {
+    wrap(Layers::for_project(project).effective(), dino)
 }
 
-fn wrap(effective: Option<(Value, bool)>, dino: &Path, hook_url: &str) -> Option<String> {
+fn wrap(effective: Option<(Value, bool)>, dino: &Path) -> Option<String> {
     let (mut setting, managed) = effective?;
     if managed {
         return None;
     }
-    setting["command"] = format!("{} statusline {}", shell_quote(&dino.display().to_string()), shell_quote(hook_url)).into();
+    setting["command"] = format!("{} statusline", shell_quote(&dino.display().to_string())).into();
     Some(setting.to_string())
 }
 
-/// `dino statusline <hook_url>`: pass what Claude Code gives the statusline on to dino, then run
-/// the user's own statusline with the same input; what it prints and its exit status are the
-/// statusline's. Failing to reach dino changes nothing the user sees.
+/// `dino statusline [<hook_url>]`: pass what Claude Code gives the statusline on to dino (at
+/// `hook_url`, else `HOOK_ENV`), then run the user's own statusline with the same input; what it
+/// prints and its exit status are the statusline's. Failing to reach dino changes nothing the user sees.
 pub fn run(hook_url: Option<&str>) -> i32 {
+    let from_env = std::env::var(HOOK_ENV).ok().filter(|u| !u.is_empty());
+    let hook_url = hook_url.or(from_env.as_deref());
     let mut input = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut input);
     let report = hook_url.map(|url| {
@@ -222,13 +228,14 @@ mod tests {
     fn wraps_the_users_own_keeping_its_options() {
         let d = dir("wrap");
         let dino = Path::new("/Applications/Dino app/dino");
-        assert_eq!(wrap(effective(&d), dino, "http://x"), None, "nothing to wrap");
+        assert_eq!(wrap(effective(&d), dino), None, "nothing to wrap");
         write(&d, "home/.claude/settings.json", r#"{"statusLine":{"type":"command","command":"~/bin/sl.sh","padding":0,"refreshInterval":10}}"#);
-        let wrapped: Value = serde_json::from_str(&wrap(effective(&d), dino, "http://127.0.0.1:9/s/it's/hook").unwrap()).unwrap();
-        assert_eq!(wrapped["command"], r#"'/Applications/Dino app/dino' statusline 'http://127.0.0.1:9/s/it'\''s/hook'"#);
+        let wrapped: Value = serde_json::from_str(&wrap(effective(&d), dino).unwrap()).unwrap();
+        // No URL: the one it reports to holds the proxy's secret, and comes from its environment.
+        assert_eq!(wrapped["command"], r#"'/Applications/Dino app/dino' statusline"#);
         assert_eq!((wrapped["padding"].as_u64(), wrapped["refreshInterval"].as_u64(), wrapped["type"].as_str()), (Some(0), Some(10), Some("command")));
         write(&d, "managed/managed-settings.json", r#"{"statusLine":{"type":"command","command":"org.sh"}}"#);
-        assert_eq!(wrap(effective(&d), dino, "http://x"), None, "a managed statusline can't be replaced");
+        assert_eq!(wrap(effective(&d), dino), None, "a managed statusline can't be replaced");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

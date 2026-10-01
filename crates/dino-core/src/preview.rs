@@ -41,6 +41,7 @@ pub struct PreviewConfig {
     pub name: String,
     pub argv: Vec<String>,
     pub cwd: PathBuf,
+    #[serde(default)]
     pub env: HashMap<String, String>,
     /// The port the config names; otherwise found in the server's output.
     pub port: Option<u16>,
