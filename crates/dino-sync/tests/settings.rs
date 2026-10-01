@@ -38,8 +38,7 @@ fn realistic() -> Settings {
 fn settings_cross_to_another_mac() {
     let a = realistic();
     let (a_remote, _) = mac(&[("/Users/a/code/api", "git@github.com:acme/api.git")]);
-    let keys: BTreeMap<String, String> = [("OPENROUTER_API_KEY".to_string(), "sk-or-x".to_string())].into();
-    let entries = flatten(&a, &a_remote, Some(&keys));
+    let entries = flatten(&a, &a_remote);
 
     // Defaults aren't records; per-Mac and remote-less things never leave.
     assert!(!entries.contains_key(&RecordId::new("policies", "worktree_trust")));
@@ -66,11 +65,10 @@ fn settings_cross_to_another_mac() {
     assert!(!s.machine.onboarded && !s.machine.keep_awake, "the rest of machine stays per Mac");
     assert_eq!(s.repos["/Users/b/w/api"].env, [("AWS_PROFILE".to_string(), "client-x".to_string())].into(), "synced repos come from the records");
     assert_eq!(s.repos["/Users/b/notes"].env["MINE"], "1", "repos without a remote stay as they are");
-    assert_eq!(got.keys, keys);
     assert!(got.pending.is_empty());
 
     // Round trip: B's settings flatten to the same records.
-    assert_eq!(flatten(s, &b_remote, Some(&got.keys)), entries);
+    assert_eq!(flatten(s, &b_remote), entries);
 
     // A Mac without the repo holds its variables until it's cloned.
     let (c_remote, c_path) = mac(&[]);
@@ -79,20 +77,20 @@ fn settings_cross_to_another_mac() {
 }
 
 #[test]
-fn keys_only_when_turned_on() {
+fn defaults_are_nothing_to_sync() {
     let (r, _) = mac(&[]);
-    assert!(flatten(&Settings::default(), &r, None).is_empty(), "defaults and no keys: nothing to sync");
+    assert!(flatten(&Settings::default(), &r).is_empty());
 }
 
 #[test]
 fn diff_writes_and_deletes() {
     let (r, _) = mac(&[]);
-    let before = flatten(&realistic(), &r, None);
+    let before = flatten(&realistic(), &r);
     let mut s = realistic();
     s.agents.get_mut("claude").unwrap().effort = None;
     s.policies.allow_bypass = true; // back to the default
     s.ssh.insert("gpu".into(), SshHost { folder: "~".into() });
-    let changes = diff(&before, &flatten(&s, &r, None));
+    let changes = diff(&before, &flatten(&s, &r));
     let find = |c: &str, k: &str| changes.iter().find(|(id, _)| id == &RecordId::new(c, k)).map(|(_, v)| v.clone());
     assert_eq!(find("agents", "claude.effort"), Some(None));
     assert_eq!(find("policies", "allow_bypass"), Some(None));
@@ -103,7 +101,7 @@ fn diff_writes_and_deletes() {
 #[test]
 fn values_a_newer_dino_shapes_differently_are_skipped() {
     let (r, p) = mac(&[]);
-    let mut entries = flatten(&realistic(), &r, None);
+    let mut entries = flatten(&realistic(), &r);
     entries.insert(RecordId::new("policies", "session_token_budget"), json!({"per_day": 5}));
     entries.insert(RecordId::new("policies", "brand_new_policy"), json!(true));
     let got = unflatten(&Settings::default(), &entries, &p, &r);
@@ -138,7 +136,7 @@ fn repo_variables_that_run_code_never_sync() {
     // One set on this Mac stays on this Mac: never a record, and kept when records apply.
     let mut local = Settings::default();
     local.repos.insert("/Users/b/w/api".into(), Repo { env: [("NODE_OPTIONS".to_string(), "--inspect".to_string()), ("STALE".to_string(), "1".to_string())].into() });
-    let mine = flatten(&local, &b_remote, None);
+    let mine = flatten(&local, &b_remote);
     assert_eq!(mine.keys().collect::<Vec<_>>(), vec![&RecordId::new("repos", format!("{remote} STALE"))]);
     let got = unflatten(&local, &entries, &b_path, &b_remote);
     let env = &got.settings.repos["/Users/b/w/api"].env;
