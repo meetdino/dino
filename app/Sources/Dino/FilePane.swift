@@ -232,6 +232,39 @@ extension DinoModel {
 
 // MARK: - Views
 
+/// The header every side pane shares: what it is, what it's about, its own buttons, and close.
+struct SidePaneHeader<Icon: View, Trailing: View>: View {
+    let title: String
+    var subtitle: String?
+    let closeHelp: String
+    let close: () -> Void
+    @ViewBuilder var icon: Icon
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 8) {
+            icon.frame(width: 18, height: 18).foregroundStyle(.secondary).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.headline).lineLimit(1)
+                if let subtitle {
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 8)
+            trailing
+            Button(action: close) { Image(systemName: "xmark") }
+                .buttonStyle(.borderless)
+                .help(closeHelp)
+                .accessibilityLabel("Close \(title)")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 44)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
 struct SidePaneView: View {
     @EnvironmentObject var model: DinoModel
     let pane: SidePane
@@ -267,34 +300,27 @@ struct FilePane: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: file.path)).resizable().frame(width: 18, height: 18)
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 5) {
-                    Text(file.name).font(.headline).lineLimit(1)
-                    if file.dirty {
-                        Circle().fill(.secondary).frame(width: 7, height: 7).help("Unsaved changes (⌘S saves)")
-                    }
-                    if file.reloadedNote {
-                        Text("Updated from disk").font(.caption).foregroundStyle(Brand.green).transition(.opacity)
-                    }
+        SidePaneHeader(
+            title: file.name,
+            subtitle: shortPath((file.path as NSString).deletingLastPathComponent),
+            closeHelp: "Close (⌘W or Esc)",
+            close: { model.closeSidePane() }
+        ) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: file.path)).resizable()
+        } trailing: {
+            Group {
+                if file.reloadedNote {
+                    Text("Updated from disk").font(.caption).foregroundStyle(Brand.green).transition(.opacity)
                 }
-                Text(shortPath((file.path as NSString).deletingLastPathComponent))
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                if file.dirty {
+                    Circle().fill(.secondary).frame(width: 7, height: 7).help("Unsaved changes (⌘S saves)")
+                        .accessibilityLabel("Unsaved changes")
+                    Button("Save") { file.save() }.controlSize(.small).help("Save (⌘S)")
+                }
             }
             .animation(.default, value: file.reloadedNote)
-            Spacer(minLength: 8)
-            if file.dirty {
-                Button("Save") { file.save() }.controlSize(.small).help("Save (⌘S)")
-            }
             OpenInEditorButton(path: file.path, line: file.jump?.line)
-            Button { model.closeSidePane() } label: { Image(systemName: "xmark") }
-                .buttonStyle(.borderless)
-                .help("Close (⌘W or Esc)")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(nsColor: .windowBackgroundColor))
         .help(file.path)
     }
 

@@ -75,7 +75,7 @@ struct PlaceNode: Identifiable, Equatable {
     var owner: WorktreeOwner?
     var id: String { path }
     /// Its identity as a sidebar row: a plain row and one that opens to sessions aren't the same row.
-    var rowID: String { sessions.isEmpty ? path : path + "#open" }
+    var rowID: String { sessions.isEmpty ? path : sessions.count == 1 ? path + "#one" : path + "#open" }
 
     /// Nothing in it would be lost by removing it: no uncommitted work, nobody in it.
     var cleanable: Bool {
@@ -187,7 +187,7 @@ enum SessionTree {
 
 /// The sidebar's status filter.
 enum SessionFilter: String, CaseIterable, Identifiable {
-    case all, needsYou, working, idle, archived
+    case all, working, needsYou, done, idle, archived
     var id: String { rawValue }
 
     var label: String {
@@ -195,26 +195,40 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .all: "All"
         case .needsYou: "Needs you"
         case .working: "Working"
+        case .done: "Done"
         case .idle: "Idle"
         case .archived: "Archived"
+        }
+    }
+
+    /// The row's own status mark, for the filter when there's no room for its word.
+    var symbol: String {
+        switch self {
+        case .all: "square.stack"
+        case .needsYou: "exclamationmark.circle.fill"
+        case .working: "circle.fill"
+        case .done: "checkmark.circle.fill"
+        case .idle: "circle"
+        case .archived: "archivebox"
         }
     }
 
     var help: String {
         switch self {
         case .all: "Every session"
-        case .needsYou: "Waiting on you: asking for something, or finished and not looked at yet"
+        case .needsYou: "Asking for something: a permission, an answer"
+        case .done: "Finished, and you haven't looked yet"
         case .working: "Thinking, running tools, or waiting on its subagents and background commands"
         case .idle: "Waiting for a prompt, or exited"
         case .archived: "Archived sessions: stopped and kept, to pick up again (⇧⌘A archives the current one)"
         }
     }
 
-    /// "Needs you" includes finished-unseen: both wait on you.
     func passes(_ status: SessionStatus) -> Bool {
         switch self {
         case .all: true
-        case .needsYou: status == .needsYou || status == .done
+        case .needsYou: status == .needsYou
+        case .done: status == .done
         case .working: status == .thinking || status == .working || status == .waiting
         case .idle: status == .idle || status == .ended || status == .exited
         // Live sessions are never archived; the archive is listed on its own.
@@ -227,24 +241,42 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .all: .secondary
         case .needsYou: SessionStatus.needsYou.color
         case .working: SessionStatus.working.color
+        case .done: SessionStatus.done.color
         case .idle, .archived: .secondary
         }
     }
 }
 
-/// All · Needs you · Working · Idle, with counts; one click each.
+/// All · Working · Needs you · Done · Idle, with counts; one click each. Words when they fit,
+/// else each status's mark with its count and the chosen one's word.
 struct FilterBar: View {
     @EnvironmentObject var model: DinoModel
     @Binding var filter: SessionFilter
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(SessionFilter.allCases.filter { $0 != .archived }) { f in
-                let count = model.sessions.filter { f.passes(model.status(of: $0)) && model.sidebarShows($0) }.count
+        let filters = SessionFilter.allCases.filter { $0 != .archived }
+        let counts = Dictionary(uniqueKeysWithValues: filters.map { f in
+            (f, model.sessions.filter { f.passes(model.status(of: $0)) && model.sidebarShows($0) }.count)
+        })
+        ViewThatFits(in: .horizontal) {
+            bar(filters, counts, words: true)
+            bar(filters, counts, words: false)
+        }
+    }
+
+    private func bar(_ filters: [SessionFilter], _ counts: [SessionFilter: Int], words: Bool) -> some View {
+        HStack(spacing: 2) {
+            ForEach(filters) { f in
+                let count = counts[f] ?? 0
                 let on = f == filter
                 Button { filter = f } label: {
                     HStack(spacing: 3) {
-                        Text(f.label).lineLimit(1)
+                        if words || on || f == .all {
+                            Text(f.label).lineLimit(1).fixedSize()
+                        } else {
+                            Image(systemName: f.symbol).imageScale(.small)
+                                .foregroundStyle(count > 0 ? AnyShapeStyle(f.color) : AnyShapeStyle(.tertiary))
+                        }
                         Text("\(count)").monospacedDigit()
                             .foregroundStyle(on ? AnyShapeStyle(.primary) : count > 0 && f != .all ? AnyShapeStyle(f.color) : AnyShapeStyle(.tertiary))
                     }
@@ -254,7 +286,9 @@ struct FilterBar: View {
                     .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .help(f.help)
+                .help("\(f.label): \(f.help)")
+                .accessibilityLabel("\(f.label), \(count)")
+                .accessibilityAddTraits(on ? .isSelected : [])
             }
             Spacer(minLength: 0)
         }
@@ -271,6 +305,7 @@ struct ArchiveToggle: View {
         Button { filter = on ? .all : .archived } label: {
             HStack(spacing: 3) {
                 Image(systemName: on ? "archivebox.fill" : "archivebox")
+                Text("Archived")
                 if !model.archived.isEmpty {
                     Text("\(model.archived.count)").monospacedDigit()
                 }
@@ -283,6 +318,7 @@ struct ArchiveToggle: View {
         }
         .buttonStyle(.plain)
         .help(on ? "Back to every session" : SessionFilter.archived.help)
+        .accessibilityLabel(on ? "Back to sessions" : "Archived, \(model.archived.count)")
     }
 }
 
@@ -405,6 +441,7 @@ struct ScopeMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help(model.sidebarScopeName.map { "Showing \($0)" } ?? "Show one project or host")
+        .accessibilityLabel(model.sidebarScopeName.map { "Showing \($0)" } ?? "Show one project or host")
     }
 }
 
@@ -454,24 +491,38 @@ struct RepoRows: View {
     var body: some View {
         DisclosureGroup(isExpanded: expanded(node.id)) {
             if node.flat {
-                sessionRows(node.places[0].sessions)
+                sessionRows(node.places[0].sessions, root: node.places[0].path)
             } else {
-                // A folder that gains or loses sessions changes kind (a row, or one that opens):
-                // a new identity then, so the list replaces the row instead of morphing it.
+                // A folder that gains or loses sessions changes kind (a row, one that opens, or
+                // its one session's row): a new identity then, so the list replaces the row
+                // instead of morphing it.
                 ForEach(Array(node.places.enumerated()), id: \.element.rowID) { i, place in
-                    Group {
-                        if place.sessions.isEmpty {
-                            placeRow(place, main: i == 0)
-                        } else {
-                            DisclosureGroup(isExpanded: expanded(place.id)) {
-                                sessionRows(place.sessions)
-                            } label: {
+                    if let s = sole(place) {
+                        // No header over one session: its branch goes on the row.
+                        SessionRow(session: s, index: 0, branch: branchName(place), root: place.path)
+                            .tag(s.id)
+                            .contextMenu {
+                                SessionMenu(session: s)
+                                if i > 0 {
+                                    Divider()
+                                    placeMenu(place)
+                                }
+                            }
+                    } else {
+                        Group {
+                            if place.sessions.isEmpty {
                                 placeRow(place, main: i == 0)
+                            } else {
+                                DisclosureGroup(isExpanded: expanded(place.id)) {
+                                    sessionRows(place.sessions, root: place.path)
+                                } label: {
+                                    placeRow(place, main: i == 0)
+                                }
                             }
                         }
+                        .tag("dir:\(place.path)")
+                        .contextMenu { placeMenu(place) }
                     }
-                    .tag("dir:\(place.path)")
-                    .contextMenu { placeMenu(place) }
                 }
                 ForEach(node.groups) { g in
                     DisclosureGroup(isExpanded: expanded("group:\(g.id)")) {
@@ -531,8 +582,37 @@ struct RepoRows: View {
         if main || place.git == nil {
             PlaceRow(icon: "arrow.triangle.branch", title: place.label, detail: nil)
         } else {
-            WorktreeRow(place: place)
+            WorktreeRow(place: place, title: headerTitle(place))
         }
+    }
+
+    /// Its only session, when nothing else hangs under it (subagents' worktrees keep the header).
+    private func sole(_ place: PlaceNode) -> SessionInfo? {
+        guard place.sessions.count == 1, let s = place.sessions.first, node.subagents[s.id] == nil else { return nil }
+        return s
+    }
+
+    /// The branch itself for the chip, as `git` would print it, not a commit subject.
+    private func branchName(_ place: PlaceNode) -> String {
+        node.repo.worktrees.first { $0.path == place.path }?.branch.map(Self.readable) ?? place.label
+    }
+
+    /// A worktree dino named for a session ("claude-ab12") reads as its first session's name.
+    private func headerTitle(_ place: PlaceNode) -> String? {
+        guard place.owner?.description == nil, Self.autoNamed(place.label), let first = place.sessions.first else { return nil }
+        return first.display
+    }
+
+    static func readable(_ branch: String) -> String {
+        branch.hasPrefix("dino/") ? String(branch.dropFirst(5)) : branch
+    }
+
+    /// "claude-ab12", "Subagent a367461": made up by dino or an agent, not by a person.
+    static func autoNamed(_ label: String) -> Bool {
+        if label.hasPrefix("Subagent ") { return true }
+        guard let dash = label.lastIndex(of: "-") else { return false }
+        let tail = label[label.index(after: dash)...]
+        return tail.count >= 4 && tail.allSatisfy(\.isHexDigit) && tail.contains(where: \.isNumber)
     }
 
     @ViewBuilder
@@ -550,7 +630,7 @@ struct RepoRows: View {
     }
 
     /// A session's rows, each with the worktrees its subagents made under it.
-    private func sessionRows(_ sessions: [SessionInfo]) -> some View {
+    private func sessionRows(_ sessions: [SessionInfo], root: String) -> some View {
         // With or without subagents' worktrees under it, as for folders.
         ForEach(sessions.map { (key: node.subagents[$0.id] == nil ? $0.id : "\($0.id)#sub", session: $0) }, id: \.key) { row in
             let s = row.session
@@ -558,12 +638,12 @@ struct RepoRows: View {
                 DisclosureGroup(isExpanded: expanded("subagents:\(s.id)")) {
                     worktreeRows(children)
                 } label: {
-                    SessionRow(session: s, index: 0)
+                    SessionRow(session: s, index: 0, root: root)
                 }
                 .tag(s.id)
                 .contextMenu { SessionMenu(session: s) }
             } else {
-                SessionRow(session: s, index: 0)
+                SessionRow(session: s, index: 0, root: root)
                     .tag(s.id)
                     .contextMenu { SessionMenu(session: s) }
             }
@@ -640,7 +720,7 @@ struct PlaceRow: View {
     var body: some View {
         HStack(spacing: 6) {
             // Not a Label: sidebar rows tint Label icons with the accent color.
-            Image(systemName: icon).foregroundStyle(.secondary).frame(width: 16)
+            Image(systemName: icon).foregroundStyle(.secondary).frame(width: 16).accessibilityHidden(true)
             Text(title).fontWeight(.medium).lineLimit(1)
             if let detail {
                 Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -653,29 +733,34 @@ struct PlaceRow: View {
 /// "● Review code button   +312 −20   running"
 struct WorktreeRow: View {
     let place: PlaceNode
+    /// In place of an auto-made branch name.
+    var title: String?
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary).frame(width: 16)
-            Text(place.owner?.description ?? place.label).lineLimit(1).truncationMode(.tail).layoutPriority(1)
+                .accessibilityHidden(true)
+            Text(title ?? place.owner?.description ?? place.label).lineLimit(1).truncationMode(.tail).layoutPriority(1)
             Spacer(minLength: 4)
             if let git = place.git {
                 if git.added + git.removed > 0 {
                     HStack(spacing: 3) {
-                        if git.added > 0 { Text("+\(git.added)").foregroundStyle(.green) }
-                        if git.removed > 0 { Text("−\(git.removed)").foregroundStyle(.red) }
+                        if git.added > 0 { Text("+\(git.added)").foregroundStyle(Color(nsColor: .systemGreen)) }
+                        if git.removed > 0 { Text("−\(git.removed)").foregroundStyle(Color(nsColor: .systemRed)) }
                     }
                     .font(.caption.monospacedDigit())
                     .fixedSize()
                 }
                 if git.dirty {
-                    Circle().fill(Color.orange).frame(width: 6, height: 6).help("In progress: uncommitted changes")
+                    Circle().fill(Color(nsColor: .systemOrange)).frame(width: 6, height: 6).help("In progress: uncommitted changes")
+                        .accessibilityLabel("Uncommitted changes")
                 }
             }
             if place.owner?.running == true {
-                ProgressView().controlSize(.mini).help("Running")
+                ProgressView().controlSize(.mini).help("Running").accessibilityLabel("Running")
             } else if let (icon, tip) = statusIcon {
                 Image(systemName: icon).font(.caption).foregroundStyle(.secondary).help(tip)
+                    .accessibilityLabel(tip)
             }
         }
         .help(help)
@@ -686,14 +771,14 @@ struct WorktreeRow: View {
         switch place.git?.state {
         case "ready": return ("checkmark.circle", "Ready: committed, not on the main branch yet")
         case "merged": return ("arrow.triangle.merge", "Merged into the main branch")
-        case "empty": return place.owner == nil ? ("circle.dashed", "Empty: nothing changed") : ("checkmark", "Done: nothing changed")
+        case "empty": return place.owner == nil ? ("circle.dashed", "No changes yet: nothing committed or edited in this worktree") : ("checkmark", "Done: nothing changed")
         default: return nil
         }
     }
 
     private var help: String {
         var lines = [place.path]
-        if let d = place.owner?.description, let label = place.git?.label, d != label { lines.insert(label, at: 0) }
+        if let label = place.git?.label, label != (title ?? place.owner?.description ?? place.label) { lines.insert(label, at: 0) }
         if let t = place.owner?.agentType { lines.append("Made by a \(t) subagent") }
         if let ahead = place.git?.ahead, ahead > 0 { lines.append("\(ahead) commit\(ahead == 1 ? "" : "s") not on the main branch") }
         return lines.joined(separator: "\n")

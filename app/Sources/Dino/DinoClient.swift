@@ -276,10 +276,17 @@ struct Knobs: Codable, Equatable {
     var efforts: [String]
     /// Changing a control restarts the agent, resuming its conversation.
     var restart: Bool
+    /// What the agent itself calls each mode ("Manual" for Claude's ask); nil from an older dinod.
+    var mode_labels: [String: String]?
 
     var any: Bool { !modes.isEmpty || model || !efforts.isEmpty }
 
     static let none = Knobs(modes: [], model: false, models: [], default_model: nil, efforts: [], restart: false)
+
+    /// A mode in the agent's own words, else dino's.
+    func modeLabel(_ id: String?) -> String {
+        id.flatMap { mode_labels?[$0] } ?? Mode.label(id)
+    }
 
     /// `name`'s entry: a model id or one of its aliases.
     func listed(_ name: String?) -> ModelInfo? {
@@ -321,6 +328,7 @@ extension Knobs {
         default_model = try c.decodeIfPresent(String.self, forKey: .default_model)
         efforts = try c.decodeIfPresent([String].self, forKey: .efforts) ?? []
         restart = try c.decodeIfPresent(Bool.self, forKey: .restart) ?? false
+        mode_labels = try? c.decodeIfPresent([String: String].self, forKey: .mode_labels)
     }
 }
 
