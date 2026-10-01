@@ -12,3 +12,4 @@ crossterm.workspace = true
 anyhow.workspace = true
 dino-daemon.workspace = true
 serde_json = "1"
+libc = "0.2"

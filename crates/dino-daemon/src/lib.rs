@@ -187,6 +187,9 @@ struct Daemon {
     trees: Mutex<HashMap<Vec<String>, TreeCache>>,
     /// Bumped when what the tree shows changes: a read that started before is dropped.
     tree_gen: AtomicU64,
+    /// Bumped by every request but a state read: clients waiting on `StateChange` look again now
+    /// rather than at their next look, so what a request did shows at once.
+    asked: (Mutex<u64>, std::sync::Condvar),
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -462,6 +465,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         measuring: AtomicBool::new(false),
         trees: Mutex::default(),
         tree_gen: AtomicU64::new(0),
+        asked: Default::default(),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
     });
@@ -620,8 +624,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 | Request::RemoveStored { .. }
                 | Request::FreeUpSpace
         );
+        let reads_state = matches!(req, Request::State | Request::StateChange { .. });
         let resp = match req {
             Request::State => state(d),
+            Request::StateChange { seen } => state_change(d, seen),
             Request::Launchers => Response::Launchers { launchers: d.offered() },
             Request::AllLaunchers => Response::Launchers { launchers: d.all_launchers() },
             Request::AgentSetup => Response::AgentSetup { agents: agent_setup(d) },
@@ -1032,6 +1038,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             d.tree_gen.fetch_add(1, Ordering::Relaxed);
             trees.clear();
         }
+        if !reads_state {
+            *d.asked.0.lock().unwrap() += 1;
+            d.asked.1.notify_all();
+        }
         ipc::write_json(&mut stream, &resp)?;
     }
 }
@@ -1151,13 +1161,25 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
             // A dev server the agent started, or told the user about: the app offers a preview.
             // Only up to the last space, so an address split across two chunks is read whole, from
             // the next one with the unread tail in front.
-            let text = format!("{tail}{}", preview::strip_ansi(&String::from_utf8_lossy(bytes)));
-            let done = text.char_indices().rfind(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8());
-            if let Some(found) = dino_core::preview::find_local_url(&text[..done]) {
-                *url.lock().unwrap() = Some(found);
+            // Every address it looks for starts with "http": output without one (almost all of
+            // it) only keeps its last word, in case an address starts there.
+            let edge: Vec<u8> = tail.bytes().rev().take(3).collect::<Vec<_>>().into_iter().rev().chain(bytes.iter().take(3).copied()).collect();
+            if tail.contains("http") || memchr::memmem::find(bytes, b"http").is_some() || memchr::memmem::find(&edge, b"http").is_some() {
+                let text = format!("{tail}{}", preview::strip_ansi(&String::from_utf8_lossy(bytes)));
+                let done = text.char_indices().rfind(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8());
+                if let Some(found) = dino_core::preview::find_local_url(&text[..done]) {
+                    *url.lock().unwrap() = Some(found);
+                }
+                let rest = &text[done..];
+                tail = if rest.len() > 256 { String::new() } else { rest.to_string() };
+            } else {
+                let from = bytes.len().saturating_sub(300);
+                let last = bytes[from..].iter().rposition(|b| b.is_ascii_whitespace()).map_or(from, |i| from + i + 1);
+                let word = preview::strip_ansi(&String::from_utf8_lossy(&bytes[last..]));
+                // No space at all: the word goes on from the last chunk's.
+                let whole = if last == 0 { format!("{tail}{word}") } else { word };
+                tail = if (last == from && from > 0) || whole.len() > 256 { String::new() } else { whole };
             }
-            let rest = &text[done..];
-            tail = if rest.len() > 256 { String::new() } else { rest.to_string() };
         }
         // An empty chunk means EOF; it's forwarded so clients learn the session ended.
         subs.lock().unwrap().retain(|(_, tx)| tx.send(bytes.to_vec()).is_ok());
@@ -1504,17 +1526,27 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
             let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
             return;
         }
-        while let Ok(bytes) = rx.recv() {
-            if bytes.is_empty() {
+        while let Ok(mut bytes) = rx.recv() {
+            // What else came while the last frame went out goes in one frame: a burst of output
+            // costs a few writes and client wakeups, not one per read from the PTY.
+            let mut ended = bytes.is_empty();
+            while !ended && bytes.len() < 256 << 10 {
+                match rx.try_recv() {
+                    Ok(more) if more.is_empty() => ended = true,
+                    Ok(more) => bytes.extend_from_slice(&more),
+                    Err(_) => break,
+                }
+            }
+            if !bytes.is_empty() && ipc::write_frame(&mut out, ipc::DATA, &bytes).is_err() {
+                break;
+            }
+            if ended {
                 // A fullscreen agent ends on its last screen, not the one it switched back to.
                 if s2.pane.shared.kept_alt.load(Ordering::Relaxed) {
                     let screen = [b"\x1b[H\x1b[2J\x1b[3J".as_slice(), &s2.pane.replay(REPLAY_HISTORY)].concat();
                     let _ = ipc::write_frame(&mut out, ipc::DATA, &screen);
                 }
                 let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
-                break;
-            }
-            if ipc::write_frame(&mut out, ipc::DATA, &bytes).is_err() {
                 break;
             }
         }
@@ -1682,7 +1714,43 @@ fn state(d: &Daemon) -> Response {
             })
         })
         .collect();
-    Response::State { sessions, quotas, power: Some(d.lid.info()) }
+    Response::State { sessions, quotas, power: Some(d.lid.info()), version: None }
+}
+
+/// How often a `StateChange` looks at the state, and how long it waits with nothing new.
+const STATE_LOOK: std::time::Duration = std::time::Duration::from_millis(250);
+const STATE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The state once it differs from `seen` (see `Request::StateChange`). How long ago a session last
+/// printed only counts by which side of 1.5 s and 5 s it is, as the app shows it: exact, it would
+/// differ on every look.
+fn state_change(d: &Daemon, seen: Option<u64>) -> Response {
+    let until = Instant::now() + STATE_WAIT;
+    loop {
+        let asked = *d.asked.0.lock().unwrap();
+        let mut resp = state(d);
+        let Response::State { sessions, .. } = &mut resp else { return resp };
+        let exact: Vec<Option<u64>> = sessions.iter().map(|s| s.output_ms_ago).collect();
+        for s in sessions.iter_mut() {
+            s.output_ms_ago = s.output_ms_ago.map(|ms| if ms < 1500 { 0 } else if ms < 5000 { 1500 } else { 5000 });
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hasher::write(&mut h, &serde_json::to_vec(&resp).unwrap_or_default());
+        // Within the integers a JSON number holds exactly everywhere.
+        let tag = std::hash::Hasher::finish(&h) & ((1 << 53) - 1);
+        let Response::State { sessions, version, .. } = &mut resp else { return resp };
+        for (s, ms) in sessions.iter_mut().zip(exact) {
+            s.output_ms_ago = ms;
+        }
+        *version = Some(tag);
+        if seen != Some(tag) || Instant::now() >= until {
+            return resp;
+        }
+        let guard = d.asked.0.lock().unwrap();
+        if *guard == asked {
+            let _ = d.asked.1.wait_timeout(guard, STATE_LOOK.min(until.saturating_duration_since(Instant::now())));
+        }
+    }
 }
 
 // ---- Persistence: sessions survive dinod restarts (and reboots) by resuming each agent. ----
