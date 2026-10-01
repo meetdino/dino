@@ -1,3 +1,4 @@
+mod account;
 mod ai;
 mod client;
 mod mcp;
@@ -796,11 +797,13 @@ fn main() -> anyhow::Result<()> {
         Some("search") => return search::run(&cli[1..]),
         Some("init") => return shell::init(cli.get(1).map(String::as_str)),
         Some("shell") => return shell::run(&cli[1..]),
-        Some("login") => return cmd_login(cli.get(1).map(String::as_str)),
+        Some("login") if matches!(cli.get(1).map(String::as_str), Some("openrouter" | "chatgpt")) => return cmd_login(cli.get(1).map(String::as_str)),
+        Some("login") => return account::login(&cli[1..]),
         Some("logout") => {
-            let provider = cli.get(1).cloned().ok_or_else(|| anyhow::anyhow!("usage: dino logout openrouter|chatgpt"))?;
+            let Some(provider) = cli.get(1).cloned() else { return account::logout() };
             return print_response(client::request(&Request::DisconnectProvider { provider })?);
         }
+        Some("sync") => return account::sync(&cli[1..]),
         Some("fan") => return cmd_fan(&cli[1..]),
         Some("groups") => return cmd_groups(),
         Some("diff") => {
