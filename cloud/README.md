@@ -57,24 +57,38 @@ tokens carry audience `dino-harness` and don't open the `/v1` API; the harness c
 
 ## Run it locally
 
-```sh
-docker compose up -d db            # or any Postgres; see below
-cp .env.example .env && set -a && . ./.env && set +a
-cp .cargo/config.toml.example .cargo/config.toml   # optional: build dino-sync from ../dino-app-poc
-cargo run -p dino-cloud
-open http://127.0.0.1:8787/signin  # codes land in dino-cloud-mail.log
-```
-
-Without Docker, a throwaway Postgres works as well:
+One command runs a copy on this machine, standing in for the remote one:
 
 ```sh
-initdb -D /tmp/dcpg-data -U dino --auth=trust
-pg_ctl -D /tmp/dcpg-data -o "-p 55432 -k /tmp -c listen_addresses=127.0.0.1" -l /tmp/dcpg.log start
-createdb -h 127.0.0.1 -p 55432 -U dino dino_cloud
+scripts/dev.sh start     # Postgres, migrations, the server on http://127.0.0.1:8787
+scripts/dev.sh status
+scripts/dev.sh stop      # stops everything it started
+scripts/dev.sh reset     # stops it and deletes its data
 ```
+
+Postgres comes from `docker compose` when Docker is running, else from Homebrew's `postgresql@18`
+in a data folder of its own (`~/.local/share/dino-cloud-dev`, port 55433). The server is built from
+this checkout and runs in development mode: there's no mail, and sign-in codes are written to
+`~/.local/share/dino-cloud-dev/mail.log`. Logs go next to it. `DINO_DEV_DIR`, `DINO_DEV_PORT` and
+`DINO_DEV_PG_PORT` move things; `DINO_DEV_DOCKER=0` skips Docker.
+
+To use it from dino, point a test dinod at it, so your real one isn't touched:
+
+```sh
+DINO_HOME=/tmp/dino-dev DINO_CLOUD_URL=http://127.0.0.1:8787 dino daemon
+DINO_HOME=/tmp/dino-dev dino login
+```
+
+or sign a dino in to it directly with `dino login http://127.0.0.1:8787`.
+
+Development mode serves plain http only on 127.0.0.1 or localhost; anywhere else, and always in
+production, the server needs https.
 
 `dino-sync` comes from the dino repo, which is private for now. Cargo fetches it with the git CLI
-(`.cargo/config.toml.example` turns that on), so your GitHub credentials apply.
+(`.cargo/config.toml.example` turns that on, and can point it at a local checkout instead), so
+your GitHub credentials apply.
+
+To run the server by hand instead: `cp .env.example .env`, load it, and `cargo run -p dino-cloud`.
 
 ## Tests
 
@@ -94,9 +108,14 @@ plaintext value.
 
 ## Where it runs
 
-dino's own instance is `https://cloud.meetdino.com`: the API, sign-in, device approval and the
+dino's own instance will be `https://cloud.meetdino.com`: the API, sign-in, device approval and the
 account page on one host (the product site is `meetdino.com`). dino uses it unless `DINO_CLOUD_URL`
-or `dino login <server>` names another, such as a self-hosted one.
+or `dino login <server>` names another, such as a self-hosted one or the local copy above.
+
+## Deploying
+
+The plan is AWS, set up by us: one small instance or ECS service running the container, and an RDS
+Postgres. Nothing is deployed yet; until then everything is built and tested against the local copy.
 
 ## Self-hosting
 
