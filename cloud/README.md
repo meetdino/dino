@@ -85,9 +85,9 @@ or sign a dino in to it directly with `dino login http://127.0.0.1:8787`.
 Development mode serves plain http only on 127.0.0.1 or localhost; anywhere else, and always in
 production, the server needs https.
 
-`dino-sync` comes from the dino repo, which is private for now. Cargo fetches it with the git CLI
-(`.cargo/config.toml.example` turns that on, and can point it at a local checkout instead), so
-your GitHub credentials apply.
+`crates/dino-sync` is a copy of the sync protocol crate from the dino repo, which is private until
+v1 (see `crates/dino-sync/UPSTREAM`); `scripts/update-dino-sync.sh` refreshes it from a local
+checkout. So building needs nothing private.
 
 To run the server by hand instead: `cp .env.example .env`, load it, and `cargo run -p dino-cloud`.
 
@@ -144,7 +144,6 @@ transaction-mode pooler never sees the lock.
    | `DINO_MAIL_KEY` | a [Resend](https://resend.com) API key (free tier: 3,000 emails a month) |
    | `DINO_MAIL_FROM` | `dino <no-reply@meetdino.com>` (after verifying the domain in Resend) |
    | `CRON_SECRET` | another `openssl rand -base64 32`; Vercel Cron sends it to `/internal/cron` |
-   | `DINO_GITHUB_TOKEN` | a fine-grained GitHub token with read access to `asdf9384/dino`'s contents: `dino-sync` comes from there while it's private (`crates/server/build.sh` uses it; never printed) |
    | `DINO_GITHUB_CLIENT_ID`, `DINO_GITHUB_CLIENT_SECRET` | optional: a GitHub OAuth app whose callback is `https://cloud.meetdino.com/signin/github/callback` |
    | `DINO_GOOGLE_CLIENT_ID`, `DINO_GOOGLE_CLIENT_SECRET` | optional: the same for Google |
 
@@ -179,7 +178,7 @@ open WebSockets (with push on), so run as many as you like against one database.
 assigns the port through `PORT` is followed.
 
 ```sh
-docker build --secret id=github_token,env=GITHUB_TOKEN -t dino-cloud .
+docker build -t dino-cloud .
 ```
 
 ## License
