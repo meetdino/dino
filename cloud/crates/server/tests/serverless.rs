@@ -61,6 +61,13 @@ async fn sync_works_by_request_alone() {
     assert_eq!(key.open_record(account, &pulled.records[0]).unwrap().as_deref(), Some("plan"));
     let counted: i64 = sqlx::query_scalar("SELECT count(*) FROM rate_counters WHERE key LIKE 'sync:%'").fetch_one(&s.state.db).await.unwrap();
     assert_eq!(counted, 1, "sync writes counted in Postgres");
+
+    // A reset shows as a new generation in the next pull: how a device without a socket hears of it.
+    let g0 = pulled.extra["generation"].as_i64().unwrap();
+    let r = app().post(s.url("/v1/sync/reset")).bearer_auth(ta["access_token"].as_str().unwrap()).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).send().await.unwrap();
+    assert_eq!(r.status(), 200, "reset");
+    let after: PullResponse = app().get(s.url(&format!("/v1/sync?since={}", pulled.seq))).bearer_auth(tb["access_token"].as_str().unwrap()).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).send().await.unwrap().json().await.unwrap();
+    assert_eq!(after.extra["generation"].as_i64().unwrap(), g0 + 1, "the generation moved on");
 }
 
 #[tokio::test]

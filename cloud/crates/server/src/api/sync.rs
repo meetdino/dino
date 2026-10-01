@@ -124,7 +124,12 @@ async fn pull(State(s): State<AppState>, a: Authed, headers: HeaderMap, Query(q)
     let more = rows.len() as i64 > limit;
     let records: Vec<Record> = rows.into_iter().take(limit as usize).map(record).collect();
     let seq = records.last().and_then(|r| r.seq).unwrap_or(since);
-    Ok(Json(PullResponse { seq, records, more, extra: Map::new() }).into_response())
+    // Which reset of this account's sync the records belong to (an extra field: older devices
+    // ignore it and keep relying on the Reset nudge).
+    let generation: i64 = sqlx::query_scalar("SELECT generation FROM sync_heads WHERE account_id = $1").bind(a.account_id).fetch_optional(&s.db).await?.unwrap_or(0);
+    let mut extra = Map::new();
+    extra.insert("generation".into(), json!(generation));
+    Ok(Json(PullResponse { seq, records, more, extra }).into_response())
 }
 
 fn malformed(id: &RecordId, reason: &str) -> Rejection {
@@ -254,7 +259,8 @@ async fn reset(State(s): State<AppState>, a: Authed) -> Result<Response> {
     sqlx::query("DELETE FROM sync_keys WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM sync_approvals WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
     // The sequence keeps counting up, so nothing a device saw before can be mistaken for new.
-    sqlx::query("UPDATE sync_heads SET bytes = 0, updated_at = now() WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
+    // A new generation: devices that look rather than listen see it change in their next pull.
+    sqlx::query("UPDATE sync_heads SET bytes = 0, generation = generation + 1, updated_at = now() WHERE account_id = $1").bind(a.account_id).execute(&mut *tx).await?;
     notify(&mut tx, a.account_id, &Nudge::Reset).await?;
     tx.commit().await?;
     Ok(Json(json!({"reset": true})).into_response())
