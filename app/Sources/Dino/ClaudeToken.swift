@@ -75,7 +75,7 @@ struct ClaudeTokenSection: View {
         } header: {
             Text("Claude Code Subscription Token")
         } footer: {
-            Footnote("A one-year token for your Claude plan, from claude setup-token, for Claude Code where it can't sign in in a browser. Only the Claude Code dino starts gets it: on SSH environments, and on this Mac while Claude Code here isn't signed in (always, with the second switch, over your own sign-in). Never other agents. It syncs with your keys when key sync is on.")
+            Footnote("A one-year token for your Claude plan, from claude setup-token, for Claude Code where it can't sign in in a browser. Only the Claude Code dino starts gets it: on SSH environments, and on this Mac while Claude Code here isn't signed in (always, with the second switch, over your own sign-in). Never other agents. Like every key, it stays on this Mac and never syncs.")
         }
         .task { refresh() }
         // While setup-token runs, look until the token is in.
