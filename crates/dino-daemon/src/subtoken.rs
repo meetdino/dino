@@ -1,0 +1,172 @@
+//! The Claude subscription token in dinod: made by `claude setup-token` in a shell the user
+//! watches, kept in the key store, and noting whether Claude Code on this Mac is signed in on its
+//! own (which decides whether sessions here get the token, see `dino_core::claude_token`).
+
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use dino_core::claude_token::{self as token, CREATED_KEY, KEY, LIFETIME_SECS};
+use dino_core::ipc::ClaudeTokenInfo;
+use dino_core::settings;
+
+use crate::{Daemon, Launch};
+
+/// How long a `claude setup-token` shell has to show its token.
+const CREATE_WITHIN: Duration = Duration::from_secs(10 * 60);
+/// How often to ask whether Claude Code on this Mac is signed in, while there's a token.
+const RECHECK: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Default)]
+struct State {
+    creating: Option<String>,
+    error: Option<String>,
+}
+
+static STATE: Mutex<State> = Mutex::new(State { creating: None, error: None });
+
+/// Keep the "signed in on its own" note fresh while a token is kept.
+pub(crate) fn start() {
+    std::thread::Builder::new()
+        .name("claude-token".into())
+        .spawn(|| {
+            loop {
+                check_signed_in();
+                std::thread::sleep(RECHECK);
+            }
+        })
+        .ok();
+}
+
+/// Ask Claude Code (without any token in its environment) whether it's signed in, and note it for
+/// dinod and `dino` commands. Only while a token is kept: otherwise nothing reads the answer.
+fn check_signed_in() {
+    let kept = dino_core::load_keys().get(KEY).is_some_and(|t| token::valid(t));
+    if !kept {
+        let _ = std::fs::remove_file(token::signed_in_file());
+        return;
+    }
+    let Some(claude) = dino_core::which("claude") else { return };
+    let mut child = match Command::new(claude)
+        .args(["auth", "status", "--json"])
+        .env_remove(KEY)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        if let Ok(Some(_)) = child.try_wait() {
+            let out = child.wait_with_output().map(|o| o.stdout).unwrap_or_default();
+            let signed_in = serde_json::from_slice::<serde_json::Value>(&out).ok().and_then(|v| v["loggedIn"].as_bool());
+            if let Some(s) = signed_in {
+                let _ = std::fs::write(token::signed_in_file(), if s { "yes\n" } else { "no\n" });
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+}
+
+pub(crate) fn info() -> ClaudeTokenInfo {
+    let keys = dino_core::load_keys();
+    let kept = keys.get(KEY).filter(|t| token::valid(t));
+    let created = kept.and(keys.get(CREATED_KEY)).and_then(|c| c.parse::<u64>().ok());
+    let s = STATE.lock().unwrap();
+    ClaudeTokenInfo {
+        set: kept.is_some(),
+        masked: kept.map(|t| token::masked(t)),
+        created,
+        expires: created.map(|c| c + LIFETIME_SECS),
+        signed_in: kept.and(token::signed_in()),
+        creating: s.creating.clone(),
+        error: s.error.clone(),
+    }
+}
+
+pub(crate) fn serve(d: &Arc<Daemon>, action: &str, value: Option<String>) -> anyhow::Result<ClaudeTokenInfo> {
+    match action {
+        "status" => {}
+        "set" => {
+            let t = value.map(|v| v.trim().to_string()).unwrap_or_default();
+            anyhow::ensure!(token::valid(&t), "that isn't a token from claude setup-token (they start with sk-ant-oat)");
+            keep(&t, None)?;
+        }
+        "remove" => {
+            settings::set_key(KEY, None)?;
+            settings::set_key(CREATED_KEY, None)?;
+            let _ = std::fs::remove_file(token::signed_in_file());
+        }
+        "create" => create(d)?,
+        _ => anyhow::bail!("unknown action {action}"),
+    }
+    Ok(info())
+}
+
+/// Keep `t` (made now, if `created`), then look again at whether Claude Code here is signed in.
+fn keep(t: &str, created: Option<u64>) -> anyhow::Result<()> {
+    settings::set_key(KEY, Some(t))?;
+    match created {
+        Some(c) => settings::set_key(CREATED_KEY, Some(&c.to_string()))?,
+        None => settings::set_key(CREATED_KEY, None)?,
+    }
+    STATE.lock().unwrap().error = None;
+    std::thread::spawn(check_signed_in);
+    Ok(())
+}
+
+/// A shell that runs `claude setup-token`, in front of the user: they sign in in the browser, and
+/// when the token shows up dinod keeps it and closes the shell, so it doesn't stay on screen.
+fn create(d: &Arc<Daemon>) -> anyhow::Result<()> {
+    anyhow::ensure!(dino_core::which("claude").is_some(), "Claude Code isn't installed: install it first (Settings → Agents)");
+    if let Some(open) = STATE.lock().unwrap().creating.clone() {
+        if d.sessions.lock().unwrap().iter().any(|s| s.id == open && !s.pane.is_exited()) {
+            return Ok(());
+        }
+    }
+    let id = crate::spawn(d, Launch::new("shell", vec![], Some(crate::home().display().to_string())))?;
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("the shell went away"))?;
+    *s.label.lock().unwrap() = Some("Claude subscription token".into());
+    // No token from anywhere else in the shell that makes one.
+    crate::type_at_prompt(s.clone(), format!("unset {KEY}; claude setup-token"));
+    {
+        let mut st = STATE.lock().unwrap();
+        st.creating = Some(id.clone());
+        st.error = None;
+    }
+    let d = d.clone();
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let outcome = loop {
+            std::thread::sleep(Duration::from_millis(500));
+            if s.pane.is_exited() || !d.sessions.lock().unwrap().iter().any(|x| x.id == id) {
+                break Err("the shell closed before claude setup-token printed a token".to_string());
+            }
+            if let Some(t) = token::find(&s.pane.text(200)) {
+                break keep(&t, Some(crate::now_secs())).map_err(|e| e.to_string());
+            }
+            if started.elapsed() > CREATE_WITHIN {
+                break Err("claude setup-token didn't print a token within 10 minutes".to_string());
+            }
+        };
+        let ok = outcome.is_ok();
+        {
+            let mut st = STATE.lock().unwrap();
+            st.creating = None;
+            st.error = outcome.err();
+        }
+        if ok {
+            // Long enough to see it worked, then the token goes off screen with the shell.
+            std::thread::sleep(Duration::from_secs(2));
+            crate::kill(&d, &id);
+        }
+    });
+    Ok(())
+}
