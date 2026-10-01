@@ -42,8 +42,9 @@ tokens carry audience `dino-harness` and don't open the `/v1` API; the harness c
 - **Sync** follows `dino-sync`: per-key last-writer-wins by hybrid logical clock, the same record
   twice accepted once, stamps over 10 minutes ahead refused, only PASETO `v4.local` values stored
   (5 MB per account). Writes to an account are serialized on its head row, so sequence numbers
-  have no gaps. Nudges go through Postgres `LISTEN`/`NOTIFY`, so every node's sockets hear pushes
-  made on any node.
+  have no gaps. Devices look for changes on their own (see [Push](#push-optional)); with push on,
+  nudges go through Postgres `LISTEN`/`NOTIFY`, so every node's sockets hear pushes made on any
+  node.
 - **Key approval** (sync protocol 2, `dino_sync::approval`): the new device posts a commitment to
   its key and a fresh nonce; a signed-in device answers with its own (`claim`); only then does the
   new device reveal what it committed to (`reveal`, once); both screens show a code made from all
@@ -112,10 +113,61 @@ dino's own instance will be `https://cloud.meetdino.com`: the API, sign-in, devi
 account page on one host (the product site is `meetdino.com`). dino uses it unless `DINO_CLOUD_URL`
 or `dino login <server>` names another, such as a self-hosted one or the local copy above.
 
-## Deploying
+## Deploying to Vercel
 
-The plan is AWS, set up by us: one small instance or ECS service running the container, and an RDS
-Postgres. Nothing is deployed yet; until then everything is built and tested against the local copy.
+For now dino's instance runs on Vercel with a Neon Postgres, both on free tiers (fine for testing
+with a few Macs; Vercel's Hobby plan is for non-commercial use). The plan for launch is still AWS:
+the same binary as a container, plus RDS Postgres.
+
+On Vercel the server is one Rust service (`vercel.json`): Vercel's Rust builder compiles
+`crates/server` and runs it as a standalone server on `$PORT`, scaled by Vercel (Fluid compute).
+When it sees `VERCEL=1` it runs as a serverless host should: no push socket and no `LISTEN`, the
+limits on sign-in attempts and sync writes counted in Postgres so they hold across instances, the
+cleanup only when Vercel Cron calls `/internal/cron` (daily), small database pools, and the client
+address from Vercel's headers. Migrations run when an instance starts, over the unpooled
+connection with Postgres' advisory lock, so instances starting together take turns and a
+transaction-mode pooler never sees the lock.
+
+1. **Import the repository**: Vercel → Add New → Project → `asdf9384/dino-cloud`. Set the
+   framework preset to **Services** (it picks up `vercel.json`); leave the root directory as `./`.
+2. **Add the database**: in the project, Storage → Connect Database → **Neon** (Marketplace) →
+   create a free database and connect it to the project. That sets `DATABASE_URL` (pooled) and
+   `DATABASE_URL_UNPOOLED`, which the server uses for migrations.
+3. **Environment variables** (Settings → Environment Variables, Production; mark the secrets as
+   Sensitive):
+
+   | Name | Value |
+   |---|---|
+   | `DINO_ENV` | `production` |
+   | `DINO_CLOUD_URL` | `https://cloud.meetdino.com` |
+   | `DINO_SECRET_KEY` | the output of `openssl rand -base64 32` |
+   | `DINO_MAIL_KEY` | a [Resend](https://resend.com) API key (free tier: 3,000 emails a month) |
+   | `DINO_MAIL_FROM` | `dino <no-reply@meetdino.com>` (after verifying the domain in Resend) |
+   | `CRON_SECRET` | another `openssl rand -base64 32`; Vercel Cron sends it to `/internal/cron` |
+   | `DINO_GITHUB_TOKEN` | a fine-grained GitHub token with read access to `asdf9384/dino`'s contents: `dino-sync` comes from there while it's private (`crates/server/build.sh` uses it; never printed) |
+   | `DINO_GITHUB_CLIENT_ID`, `DINO_GITHUB_CLIENT_SECRET` | optional: a GitHub OAuth app whose callback is `https://cloud.meetdino.com/signin/github/callback` |
+   | `DINO_GOOGLE_CLIENT_ID`, `DINO_GOOGLE_CLIENT_SECRET` | optional: the same for Google |
+
+4. **Deploy**, then open `https://<project>.vercel.app/readyz`: it answers `200` once the database
+   is reachable and migrated.
+5. **Domain**: Settings → Domains → add `cloud.meetdino.com`. `meetdino.com` is already on Vercel,
+   so the record is added for you; otherwise add the CNAME Vercel shows to the DNS.
+
+Check it from a Mac: `DINO_HOME=/tmp/dino-try dino login https://cloud.meetdino.com`.
+
+## Push (optional)
+
+By default a device looks for changes every minute, right away when the Mac wakes, changes network
+or comes back to the app, and every few seconds while another Mac is being approved or the
+Account pane is open. That needs nothing from the server but plain requests, so it runs anywhere,
+serverless included.
+
+With push on (`DINO_PUSH=1`, the default anywhere but Vercel), the server also keeps a WebSocket
+per device at `/v1/sync/ws` and nudges it the moment the account changes, fanned out between nodes
+with Postgres `LISTEN`/`NOTIFY`. `GET /v1/meta` tells devices which it is, and they use the socket
+when it's there and fall back to looking when it isn't. Turn it on where the server stays up (a
+VM, ECS, the local copy): for instant updates, and for things that need them, like picking a
+session up on a phone. It needs a direct (unpooled) database connection for `LISTEN`.
 
 ## Self-hosting
 
@@ -123,7 +175,8 @@ One container and a Postgres. Set `DINO_ENV=production`, `DINO_CLOUD_URL` (https
 `DINO_SECRET_KEY` (`openssl rand -base64 32`), `DATABASE_URL`, and a mail API; add GitHub or
 Google OAuth apps whose callback is `<DINO_CLOUD_URL>/signin/<github|google>/callback`. Behind a
 proxy that sets the client address, add `DINO_TRUST_PROXY=1`. Nodes are stateless apart from their
-open WebSockets, so run as many as you like against one database.
+open WebSockets (with push on), so run as many as you like against one database. A platform that
+assigns the port through `PORT` is followed.
 
 ```sh
 docker build --secret id=github_token,env=GITHUB_TOKEN -t dino-cloud .
