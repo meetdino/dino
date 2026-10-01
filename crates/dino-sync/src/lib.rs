@@ -14,6 +14,7 @@ pub mod hlc;
 pub mod merge;
 pub mod record;
 pub mod recovery;
+#[cfg(feature = "settings")]
 pub mod settings;
 
 pub use approval::{Commitment, DeviceKeys, Grant, Response, Reveal, approval_code, verify_reveal};
