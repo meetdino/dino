@@ -3,9 +3,22 @@
   "services": {
     "cloud": {
       "root": "crates/server",
+      "runtime": "rust",
       "entrypoint": "src/main.rs"
     }
   },
-  "rewrites": [{ "source": "/(.*)", "destination": { "service": "cloud" } }],
-  "crons": [{ "path": "/internal/cron", "schedule": "17 4 * * *" }]
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "cloud"
+      }
+    }
+  ],
+  "crons": [
+    {
+      "path": "/internal/cron",
+      "schedule": "17 4 * * *"
+    }
+  ]
 }
