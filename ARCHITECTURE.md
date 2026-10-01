@@ -32,6 +32,8 @@ Inside **dino**:
 
 ## How they connect
 
+![The dino codebase: dino terminal calls dinod (n → 1); dinod spawns dino tui (1 → n), which calls dinod back; dinod talks to dino cloud for account and sync (n → 1) and to dino cloud exec to run agents remotely; harness-sdk is imported by dino tui and dino cloud exec. Everything is open source except dino landing.](docs/architecture.png)
+
 ```mermaid
 flowchart LR
   subgraph client [Client side: each machine]
