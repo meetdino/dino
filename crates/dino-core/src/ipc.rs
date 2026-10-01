@@ -65,6 +65,9 @@ pub fn parse_resize(p: &[u8]) -> Option<(u16, u16)> {
 pub enum Request {
     /// Sessions, their live stats, and provider quotas.
     State,
+    /// `State`, once it differs from the one tagged `seen` in anything a client shows (or after a
+    /// few seconds regardless): a client waits on this instead of asking over and over.
+    StateChange { seen: Option<u64> },
     /// What can be started now: allowed by the policies, the default first.
     Launchers,
     /// Every launcher, allowed or not (for choosing policies).
@@ -289,6 +292,9 @@ pub enum Response {
         /// Whether the Mac is being kept awake with its lid closed; absent from an older dinod.
         #[serde(default)]
         power: Option<PowerInfo>,
+        /// Tags this state for `StateChange`; only in a reply to one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u64>,
     },
     Launchers { launchers: Vec<LauncherInfo> },
     AgentSetup { agents: Vec<AgentSetupInfo> },

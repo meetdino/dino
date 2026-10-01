@@ -160,6 +160,18 @@ fn visible(bytes: &[u8]) -> bool {
 /// last screen stays up, and Enter resumes it in place; exits once the session is removed.
 /// Meant to run inside a real terminal surface (Ghostty), which does all the rendering.
 pub fn attach_raw(id: &str) -> anyhow::Result<()> {
+    // Size changes come as SIGWINCH, taken by a thread of its own below: blocked here, before any
+    // other thread starts, so none of those gets it. A handler of its own keeps it from being
+    // dropped as ignored.
+    extern "C" fn winched(_: libc::c_int) {}
+    let winch = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGWINCH);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        libc::signal(libc::SIGWINCH, winched as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        set
+    };
     let (cols, rows) = crossterm::terminal::size()?;
     let stream = start_attach(id, cols, rows)?;
     let mut reader = stream.try_clone()?;
@@ -197,18 +209,18 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
             let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::DATA, &buf[..n]);
         }
     });
-    // Poll for size changes rather than wiring up SIGWINCH.
     let w = writer.clone();
     std::thread::spawn(move || {
         let mut last = (cols, rows);
         loop {
-            std::thread::sleep(Duration::from_millis(200));
             if let Ok(size) = crossterm::terminal::size() {
                 if size != last {
                     last = size;
                     let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::RESIZE, &ipc::resize_payload(size.0, size.1));
                 }
             }
+            let mut sig = 0;
+            unsafe { libc::sigwait(&winch, &mut sig) };
         }
     });
 
