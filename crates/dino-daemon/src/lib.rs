@@ -20,7 +20,7 @@ use dino_core::models::Catalog;
 use dino_core::providers::{Format, ProviderRoute, pick_format, route_path};
 use dino_core::settings::{self, Settings};
 use dino_core::agent::{StatusSource, agent};
-use dino_core::{detect_agents, load_keys, new_uuid, pr, proxy_wiring, ssh, trust, user_shell, worktree};
+use dino_core::{claude_token, detect_agents, load_keys, new_uuid, pr, proxy_wiring, ssh, trust, user_shell, worktree};
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
@@ -36,6 +36,7 @@ mod providers;
 mod schedule;
 mod servers;
 mod shell;
+mod subtoken;
 mod sync;
 
 /// Scrollback lines replayed to a newly attached client.
@@ -201,6 +202,10 @@ pub fn run() -> anyhow::Result<()> {
         // SAFETY: first thing, before dinod starts any thread.
         unsafe { std::env::remove_var(var) };
     }
+    // A Claude subscription token in dinod's own environment would reach everything it starts,
+    // other agents included: only the key store's goes out, and only to Claude Code.
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(claude_token::KEY) };
     let path = ipc::socket_path();
     // Held while dinod runs: no second one takes the socket over.
     let _lock = claim_socket(&path)?;
@@ -219,6 +224,7 @@ pub fn run() -> anyhow::Result<()> {
     read_catalogs(&daemon, &mut stamps);
     restore(&daemon, saved);
     lid::start(daemon.clone());
+    subtoken::start();
     {
         // Pick up late-discovered agent ids (Codex) and sessions that exited on their own.
         let d = daemon.clone();
@@ -640,6 +646,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     sync::kick();
                     Response::Ok
                 }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ClaudeToken { action, value } => match subtoken::serve(d, &action, value) {
+                Ok(token) => Response::ClaudeToken { token },
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Power { action } => match lid::serve(d, &action) {
@@ -1237,6 +1247,10 @@ fn local_spec(
     }
     // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
     env.insert("DINO_SESSION".into(), id.to_string());
+    // The Claude subscription token, for the real Claude Code only, in its env, never its argv.
+    if let Some(t) = claude_token::for_launch(&l.agent_id, claude_token::Launch::Local, route.is_some(), settings, &load_keys(), claude_token::signed_in()) {
+        env.insert(claude_token::KEY.into(), t);
+    }
     if adapter.is_some_and(|a| a.session_tools()) && settings.policies.session_tools {
         peers::wire_claude(id, &mut wired_args);
     }
@@ -1298,8 +1312,14 @@ fn remote_spec(
     let dir = ssh::control_dir();
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    let env = HashMap::from([("DINO_SESSION".to_string(), id.to_string())]);
-    Ok(SpawnSpec { program: "ssh".into(), args: ssh::ssh_args(host, tunnel, &command), cwd: Some(home()), env })
+    let mut env = HashMap::from([("DINO_SESSION".to_string(), id.to_string())]);
+    // The Claude subscription token rides in ssh's environment, for Claude Code there alone.
+    let token = claude_token::for_launch(&l.agent_id, claude_token::Launch::Remote, false, settings, &load_keys(), None);
+    let send_token = token.is_some();
+    if let Some(t) = token {
+        env.insert(ssh::TOKEN_ENV.into(), t);
+    }
+    Ok(SpawnSpec { program: "ssh".into(), args: ssh::ssh_args(host, tunnel, &command, send_token), cwd: Some(home()), env })
 }
 
 /// `r` for launcher `l`, checked, with the API shape they'll talk in: the first the agent speaks

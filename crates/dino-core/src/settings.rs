@@ -156,11 +156,31 @@ pub struct Machine {
     pub shell_integration: bool,
     /// Keep agents running with the lid closed. Off unless turned on, and for this Mac only.
     pub lid: Lid,
+    /// Where Claude Code gets the Claude subscription token (`crate::claude_token`).
+    pub claude_token: ClaudeTokenUse,
+}
+
+/// Which Claude Code sessions the Claude subscription token goes to, beyond the rule that only
+/// the real Claude Code ever gets it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct ClaudeTokenUse {
+    /// Sessions on SSH environments, where Claude Code usually isn't signed in.
+    pub ssh: bool,
+    /// Sessions and dino's own `claude -p` on this Mac too, over its own sign-in. Off: they use
+    /// it only while Claude Code here isn't signed in.
+    pub local: bool,
+}
+
+impl Default for ClaudeTokenUse {
+    fn default() -> Self {
+        Self { ssh: true, local: false }
+    }
 }
 
 impl Default for Machine {
     fn default() -> Self {
-        Self { onboarded: false, keep_awake: false, shell_integration: true, lid: Lid::default() }
+        Self { onboarded: false, keep_awake: false, shell_integration: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default() }
     }
 }
 
@@ -375,6 +395,7 @@ fn put(v: &mut serde_json::Value, path: &[String], value: Option<serde_json::Val
 pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("NVIDIA_API_KEY", "NVIDIA NIM: the free tier's models"),
     ("TYPESAFE_API_KEY", "TypeSafe Jev: picks the model for each free-tier turn"),
+    ("CLAUDE_CODE_OAUTH_TOKEN", "Claude subscription token (claude setup-token): only Claude Code gets it"),
 ];
 
 /// A key's name and where it comes from, never its value.
@@ -401,7 +422,7 @@ pub fn key_status() -> Vec<KeyInfo> {
     let stored = stored();
     let mut names: Vec<String> = KNOWN_KEYS.iter().map(|(k, _)| k.to_string()).collect();
     // Sign in with ChatGPT's tokens are Settings → Providers' to keep, not keys to edit.
-    names.extend(stored.iter().map(|(k, _)| k.clone()).filter(|k| !KNOWN_KEYS.iter().any(|(n, _)| n == k) && !k.starts_with("CHATGPT_")));
+    names.extend(stored.iter().map(|(k, _)| k.clone()).filter(|k| !KNOWN_KEYS.iter().any(|(n, _)| n == k) && !k.starts_with("CHATGPT_") && k != crate::claude_token::CREATED_KEY));
     names
         .into_iter()
         .map(|name| {

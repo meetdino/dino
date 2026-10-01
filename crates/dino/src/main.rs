@@ -798,6 +798,7 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("power") => return cmd_power(cli.get(1).map(String::as_str).unwrap_or("status")),
+        Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status")),
         Some("attach") => return client::attach_raw(cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?),
         Some("ls") => return cmd_ls(),
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
@@ -980,6 +981,51 @@ fn cmd_power(action: &str) -> anyhow::Result<()> {
         println!("last: {note}");
     }
     if let Some(e) = p.error {
+        println!("error: {e}");
+    }
+    Ok(())
+}
+
+/// The Claude subscription token (`claude setup-token`), for the Claude Code dino starts where it
+/// isn't signed in. `set` reads the token from stdin, so it never sits on a command line.
+fn cmd_claude_token(action: &str) -> anyhow::Result<()> {
+    if !matches!(action, "status" | "create" | "set" | "remove") {
+        println!(
+            "usage: dino claude-token [status|create|set|remove]\n\n\
+             create runs `claude setup-token` in a dino shell and keeps the token it prints; set reads one from stdin.\n\
+             Only Claude Code gets it: on SSH environments, and on this Mac when Claude Code here isn't signed in (Settings → Agents)."
+        );
+        return Ok(());
+    }
+    let value = if action == "set" {
+        let mut t = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)?;
+        Some(t.trim().to_string())
+    } else {
+        None
+    };
+    let t = match client::request(&Request::ClaudeToken { action: action.into(), value })? {
+        Response::ClaudeToken { token } => token,
+        Response::Error { message } => anyhow::bail!(message),
+        _ => anyhow::bail!("unexpected reply"),
+    };
+    let when = |s: u64| {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let days = s.saturating_sub(now) / 86_400;
+        format!("in {days} days")
+    };
+    match (&t.masked, t.expires) {
+        (Some(m), Some(e)) => println!("token: {m} (runs out {})", when(e)),
+        (Some(m), None) => println!("token: {m}"),
+        _ => println!("token: none (dino claude-token create)"),
+    }
+    if let Some(s) = t.signed_in {
+        println!("Claude Code on this Mac: {}", if s { "signed in on its own" } else { "not signed in: sessions here use the token" });
+    }
+    if let Some(id) = t.creating {
+        println!("waiting for claude setup-token in session {id}: finish signing in in your browser");
+    }
+    if let Some(e) = t.error {
         println!("error: {e}");
     }
     Ok(())
