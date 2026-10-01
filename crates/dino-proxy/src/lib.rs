@@ -277,6 +277,8 @@ pub struct Proxy {
     pub stats: Arc<Stats>,
     keys: Arc<RwLock<HashMap<String, String>>>,
     budget: Arc<AtomicU64>,
+    /// The same secret, for agents that send it in the `KEY_HEADER` header (see `header_base_url`).
+    secret: String,
     /// Hooks only, for sessions on other machines (see `remote_hook_url`).
     pub remote_port: u16,
     /// A remote session's token → its session id.
@@ -316,7 +318,7 @@ impl Proxy {
             budget: budget.clone(),
             substitutes: Arc::default(),
             port,
-            secret: secret.into(),
+            secret: secret.clone().into(),
         };
 
         let remote_tokens = remote.clone();
@@ -335,6 +337,7 @@ impl Proxy {
                 tokio::spawn(async move { axum::serve(remote_listener, remote_app).await });
                 let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
                 let app = axum::Router::new().route("/k/{key}/s/{session}/{provider}/{*rest}", any(forward))
+                    .route("/h/s/{session}/{provider}/{*rest}", any(forward_keyed))
                     .route("/k/{key}/s/{session}/hook", post(hook))
                     .fallback(|req: Request| async move {
                         // Not the secret, should the path carry it.
@@ -347,7 +350,7 @@ impl Proxy {
             });
         })?;
         let runtime = handle_rx.recv()?;
-        Ok(Self { port, root, stats, keys, budget, remote_port, remote, state: kept, runtime })
+        Ok(Self { port, root, secret, stats, keys, budget, remote_port, remote, state: kept, runtime })
     }
 
     /// Find the free tier's models and keep them current, remembering what was learned in `cache`.
@@ -380,11 +383,28 @@ impl Proxy {
         self.remote.write().unwrap().retain(|_, s| s != session);
     }
 
-    /// Base URL an agent should use for `provider`, attributed to `session`.
+    /// Base URL an agent should use for `provider`, attributed to `session`. It carries the
+    /// secret: give it to agents through their environment or a private file, never their command
+    /// line, which other users of the Mac can read.
     pub fn base_url(&self, session: &str, provider: &str) -> String {
         format!("{}/s/{session}/{provider}", self.root)
     }
+
+    /// The same without the secret, for agents that can only be pointed at a URL on their command
+    /// line: they send the secret in the `KEY_HEADER` header, from an environment variable.
+    pub fn header_base_url(&self, session: &str, provider: &str) -> String {
+        format!("http://127.0.0.1:{}/h/s/{session}/{provider}", self.port)
+    }
+
+    /// What goes in `KEY_HEADER`.
+    pub fn secret(&self) -> &str {
+        &self.secret
+    }
 }
+
+/// The header an agent can carry the secret in instead of its path (see `header_base_url`).
+/// dino never passes it on.
+pub const KEY_HEADER: &str = "x-dino-key";
 
 /// 128 random bits as hex, from `/dev/urandom` like the remote hook tokens (`new_uuid`).
 fn random_secret() -> std::io::Result<String> {
@@ -450,8 +470,13 @@ fn hop_by_hop(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
         "host" | "connection" | "keep-alive" | "transfer-encoding" | "upgrade" | "proxy-connection" | "te" | "trailer"
-            | "content-length" | "accept-encoding"
+            | "content-length" | "accept-encoding" | KEY_HEADER
     )
+}
+
+async fn forward_keyed(State(st): State<AppState>, Path((session, provider, rest)): Path<(String, String, String)>, req: Request) -> Response<Body> {
+    let key = req.headers().get(KEY_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    forward(State(st), Path((key, session, provider, rest)), req).await
 }
 
 async fn forward(
@@ -1169,6 +1194,14 @@ mod tests {
         assert_eq!(send(&here, &format!("{siwc}/v1/models/%2e%2e/%2e%2e/v1/files"), "", ""), "400");
         assert_eq!(send(&here, &format!("{siwc}/v1/models/../../v1/files"), "", ""), "400");
         assert_eq!(send(&here, &format!("{siwc}/v1/files"), "", ""), "404");
+        // Without the secret in the path, the header must carry it; it never goes upstream.
+        let keyed = proxy.header_base_url("7", "siwc");
+        assert!(!keyed.contains(proxy.secret()));
+        let keyed = keyed.strip_prefix(&origin).unwrap();
+        assert_eq!(send(&here, &format!("{keyed}/v1/files"), "", ""), "403");
+        assert_eq!(send(&here, &format!("{keyed}/v1/files"), &format!("{KEY_HEADER}: {}\r\n", "0".repeat(32)), ""), "403");
+        assert_eq!(send(&here, &format!("{keyed}/v1/files"), &format!("{KEY_HEADER}: {}\r\n", proxy.secret()), ""), "404");
+        assert!(hop_by_hop(&HeaderName::from_static(KEY_HEADER)));
     }
 
     #[test]
