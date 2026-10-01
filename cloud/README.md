@@ -15,7 +15,7 @@ export returns all of it.
 | OAuth 2 server | `GET /oauth/authorize` (code + PKCE S256, loopback redirects for native apps), `POST /oauth/token` (`authorization_code`, `refresh_token`, `urn:ietf:params:oauth:grant-type:device_code`), `POST /oauth/device_authorization`, `POST /oauth/revoke`, `POST /oauth/introspect`, `GET /oauth/userinfo`, `/.well-known/oauth-authorization-server` (also at `openid-configuration`) |
 | Sign-in pages | `/signin` (GitHub, Google, emailed code), `/device` (approve a device-flow code), `/account` (devices, synced data, export, sign out everywhere, delete) |
 | Account API (`/v1`, bearer) | `GET /me`, `GET /devices`, `DELETE /devices/{id}`, `POST /signout-everywhere`, `DELETE /account`, `GET /export` |
-| Sync (`/v1/sync`, bearer) | `GET ?since=&limit=`, `POST` (a `dino_sync::PushRequest`), `GET /ws` (nudges), `POST /reset`, `GET`/`PUT /recovery`, `POST`/`GET /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/claim`, `/grant`, `/deny` |
+| Sync (`/v1/sync`, bearer) | `GET ?since=&limit=`, `POST` (a `dino_sync::PushRequest`), `GET /ws` (nudges), `POST /reset`, `GET`/`PUT /recovery`, `POST`/`GET /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/claim`, `/reveal`, `/grant`, `/deny` |
 | Operations | `/healthz`, `/readyz`, Prometheus `/metrics` on `DINO_METRICS_BIND` |
 
 Clients: `dino` (the app and CLI) and `dino-harness` are native (loopback `http://127.0.0.1:<any
@@ -44,9 +44,13 @@ tokens carry audience `dino-harness` and don't open the `/v1` API; the harness c
   (5 MB per account). Writes to an account are serialized on its head row, so sequence numbers
   have no gaps. Nudges go through Postgres `LISTEN`/`NOTIFY`, so every node's sockets hear pushes
   made on any node.
-- **Key approval**: a new device posts its public key, a signed-in one claims the request with its
-  own (both screens then show the same code), then posts the account key sealed to the new device.
-  The server only relays. The recovery-wrapped key is stored as sent.
+- **Key approval** (sync protocol 2, `dino_sync::approval`): the new device posts a commitment to
+  its key and a fresh nonce; a signed-in device answers with its own (`claim`); only then does the
+  new device reveal what it committed to (`reveal`, once); both screens show a code made from all
+  four, which neither side nor this server can steer; the signed-in device then posts the account
+  key sealed to the new one (`grant`, only from the key it answered with). The asking device can
+  withdraw its request. The server stores each message as sent and only relays. The
+  recovery-wrapped key is stored as sent. A client older than protocol 2 is told to upgrade.
 - **Hardening**: per-address and per-account rate limits (GCRA), `Idempotency-Key` on `/v1`
   mutations, CSRF tokens and Origin checks on forms, a strict CSP, `__Host-` cookies on https, no
   query strings, bodies or tokens in logs.
@@ -83,9 +87,16 @@ faked. They cover the full PKCE sign-in, code replay, bad clients and redirects,
 with the grace window, concurrent refreshes and reuse detection, the device flow with consent and
 fresh sign-in, GitHub and Google linking to one account, sign-out everywhere, idempotency,
 deletion and erasure, CSRF and Origin checks, rate limits, introspection, two devices converging
-through sync, paging, nudges across two nodes, key approval and recovery, gapless sequences under
+through sync, paging, nudges across two nodes, key approval (the four-message commit-then-reveal
+exchange of sync protocol 2) and recovery, protocol 1 clients told to upgrade, gapless sequences under
 concurrent pushes, and that neither the logs nor a full database dump contain a token or any
 plaintext value.
+
+## Where it runs
+
+dino's own instance is `https://cloud.meetdino.com`: the API, sign-in, device approval and the
+account page on one host (the product site is `meetdino.com`). dino uses it unless `DINO_CLOUD_URL`
+or `dino login <server>` names another, such as a self-hosted one.
 
 ## Self-hosting
 
