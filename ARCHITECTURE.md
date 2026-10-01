@@ -16,7 +16,7 @@ below.
 | **dino-tui** | A full-screen agent TUI on harness-sdk. It runs like any other TUI, with or without dinod or the terminal. | separate repository |
 | **harness-sdk** | The agent loop, used by dino-tui and by cloud execution. | separate repository |
 | **dino-cloud** | Account, login, settings sync and the account web page. Self-hostable. | `asdf9384/dino-cloud` |
-| **dino-cloud-exec** | Cloud execution, with the agent persistence system under it. | not built |
+| **dino-cloud-exec** | Optimized remote execution of agents in microVMs/VMs, with an advanced persistence system under it. | not built |
 | **dino-landing** | The website. The only private one. | `asdf9384/dino-landing` |
 
 Inside **dino**:
@@ -46,11 +46,15 @@ flowchart LR
     X["dino cloud exec"]
     L["dino landing"]
   end
-  D -- "calls (n machines → 1)" --> C
-  U -- "calls, with a token from dinod" --> X
+  D -- "account, sync (n machines → 1)" --> C
+  D -- "runs agents remotely" --> X
   H -- "imported by" --> X
-  X -- "identity" --> C
 ```
+
+Remote execution goes through dinod too: dinod is the machine's one client of everything server
+side. It holds the dino login, asks dino-cloud-exec for a microVM, and shows the remote session
+next to local ones, so the terminal and the TUI never talk to a server themselves. dino-cloud-exec
+calls nobody: it only checks that dinod's short-lived token was signed by the account service.
 
 How a session starts: the terminal asks dinod for a session; dinod spawns the agent (dino tui or
 any other) in its own pty, with its proxy route, controls and `DINO_SESSION`; the terminal shows it
