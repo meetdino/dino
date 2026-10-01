@@ -56,6 +56,11 @@ pub enum LogEvent {
 /// Proxy and hook wiring for a session: env vars, and arguments that go before dino's others.
 pub type Wiring = (Vec<(String, String)>, Vec<String>);
 
+/// The header and environment variable that carry the proxy's secret for agents with
+/// `keyed_urls` (the header is `dino_proxy::KEY_HEADER`).
+pub const KEY_HEADER: &str = "x-dino-key";
+pub const KEY_ENV: &str = "DINO_PROXY_KEY";
+
 pub trait Agent: Sync {
     /// The launcher's agent id: "claude", "codex", "qwen".
     fn id(&self) -> &'static str;
@@ -124,6 +129,13 @@ pub trait Agent: Sync {
     }
     /// dino can route its API traffic through the proxy, to meter it.
     fn metered(&self) -> bool {
+        false
+    }
+    /// The proxy URLs it's given go on its command line, which every user of the Mac can read: it
+    /// gets them without the proxy's secret, and sends that in the `KEY_HEADER` header, from the
+    /// `KEY_ENV` environment variable. Agents given the URL in their environment or a private
+    /// file keep the secret in it.
+    fn keyed_urls(&self) -> bool {
         false
     }
     /// Arguments that give it `prompt` to start on, staying open for more.
@@ -303,11 +315,17 @@ mod tests {
         let args = codex.1.join(" ");
         assert!(args.contains("model_provider=\"dino\"") && args.contains(&format!("base_url=\"{URL}/v1\"")) && args.ends_with("-m qwen3:4b"), "{args}");
         assert_eq!(env(&codex, "DINO_PROVIDER_KEY"), Some("dino"));
+        // Its URL goes on its command line (`-c`): dinod gives it one without the proxy's secret,
+        // which Codex sends in a header from its environment.
+        assert!(agent("codex").unwrap().keyed_urls());
+        assert!(args.contains(r#"model_providers.dino.env_http_headers={"x-dino-key"="DINO_PROXY_KEY"}"#), "{args}");
 
         let qwen = agent("qwen").unwrap();
         assert_eq!(qwen.provider_formats()[0], Format::Chat);
-        let chat = qwen.provider_wiring(URL, Format::Chat, "m").unwrap().1.join(" ");
-        assert!(chat.contains("--auth-type openai ") && chat.contains(&format!("--openai-base-url {URL}/v1")), "{chat}");
+        let chat = qwen.provider_wiring(URL, Format::Chat, "m").unwrap();
+        assert!(chat.1.join(" ").contains("--auth-type openai "), "{:?}", chat.1);
+        assert_eq!(env(&chat, "OPENAI_BASE_URL"), Some(format!("{URL}/v1").as_str()));
+        assert!(!chat.1.iter().any(|a| a.contains(URL)), "the URL (and the proxy's secret in it) stays off its command line: {:?}", chat.1);
         let anthropic = qwen.provider_wiring(URL, Format::Anthropic, "m").unwrap();
         assert_eq!(env(&anthropic, "ANTHROPIC_BASE_URL"), Some(URL));
 
