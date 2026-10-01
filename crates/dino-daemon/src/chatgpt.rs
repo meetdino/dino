@@ -116,7 +116,9 @@ pub fn connect(e: Endpoints, save: impl FnOnce(Tokens) -> anyhow::Result<()> + S
     use base64::Engine;
     use sha2::Digest;
     let listener = std::net::TcpListener::bind(("127.0.0.1", e.port)).map_err(|err| anyhow::anyhow!("port {} is busy ({err}); is another app signing in to ChatGPT?", e.port))?;
-    let redirect = format!("http://127.0.0.1:{}/auth/callback", e.port);
+    // Port 0 (tests) takes any free port, so parallel sign-ins can't race for one.
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(e.port);
+    let redirect = format!("http://127.0.0.1:{port}/auth/callback");
     let verifier = random();
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
     let state = random();
@@ -304,7 +306,13 @@ mod tests {
     }
 
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        0
+    }
+
+    /// The port a sign-in page sends the browser back to, from its URL.
+    fn redirect_port(url: &str) -> u16 {
+        let r = url.split(['?', '&']).find_map(|kv| kv.strip_prefix("redirect_uri=")).map(unpercent).unwrap();
+        r.trim_start_matches("http://127.0.0.1:").split('/').next().unwrap().parse().unwrap()
     }
 
     #[test]
@@ -319,6 +327,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        let port = redirect_port(&url);
         let q = |name: &str| url.split(['?', '&']).find_map(|kv| kv.strip_prefix(&format!("{name}="))).map(unpercent).unwrap();
         assert_eq!(q("client_id"), "dynamic_agent_client");
         assert_eq!(q("agent_name_hint"), "dino");
@@ -361,11 +370,12 @@ mod tests {
     fn a_refused_sign_in_saves_nothing() {
         let port = free_port();
         let (tx, saved) = std::sync::mpsc::channel::<Tokens>();
-        connect(Endpoints { authorize: "https://auth.example/authorize".into(), token: "http://127.0.0.1:9/unused".into(), port, host: Some("urn:uuid:00000000-0000-4000-8000-000000000000".into()) }, move |t| {
+        let url = connect(Endpoints { authorize: "https://auth.example/authorize".into(), token: "http://127.0.0.1:9/unused".into(), port, host: Some("urn:uuid:00000000-0000-4000-8000-000000000000".into()) }, move |t| {
             tx.send(t).unwrap();
             Ok(())
         })
         .unwrap();
+        let port = redirect_port(&url);
         let page = http().get(format!("http://127.0.0.1:{port}/auth/callback?error=access_denied")).send().unwrap().text().unwrap();
         assert!(page.contains("isn't signed in"));
         assert!(saved.recv_timeout(Duration::from_millis(500)).is_err());
