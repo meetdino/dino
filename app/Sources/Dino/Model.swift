@@ -91,6 +91,10 @@ final class DinoModel: ObservableObject {
     @Published var archived: [ArchivedInfo] = []
     @Published var renaming: Renaming?
     @Published var showShortcuts = false
+    /// Help → Show Welcome: the first-open card, again.
+    @Published var showWelcome = false
+    /// The welcome card is up (the sidebar hides the usage panel meanwhile).
+    @Published var welcomeShowing = false
 
     /// The review panel beside the terminal, and the comments waiting to go to each session.
     @Published var showReview = false

@@ -58,6 +58,8 @@ final class QuickTerminal: NSObject, NSWindowDelegate {
     private var state: TerminalViewState?
     private var hotKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
+    /// Its shell is being started.
+    private var starting = false
     /// The app that was in front, to go back to when it hides.
     private var previous: NSRunningApplication?
     var isShown: Bool { panel?.isVisible ?? false }
@@ -85,17 +87,33 @@ final class QuickTerminal: NSObject, NSWindowDelegate {
     }
 
     func show() {
-        guard let model, let conn = model.connection else { return }
+        guard let model, let conn = model.connection, !starting else { return }
         if !sessionAlive || sessionID == nil {
-            // First use, or its shell ended: a new one in the home folder.
-            let body: [String: Any] = ["type": "new", "launcher": "shell", "args": [], "cwd": NSHomeDirectory(), "cols": 120, "rows": 30]
-            guard let id = try? conn.request(body).id else { return }
-            try? conn.rename(id, to: "Quick terminal")
-            sessionID = id
-            sessionAlive = true
-            state = nil
+            // First use, or its shell ended: a new one in the home folder. Asked off the main
+            // thread, like every other dinod call; it shows once dinod answers.
+            starting = true
+            let home = NSHomeDirectory()
+            Task.detached {
+                let body: [String: Any] = ["type": "new", "launcher": "shell", "args": [], "cwd": home, "cols": 120, "rows": 30]
+                let id = try? conn.request(body).id
+                if let id { try? conn.rename(id, to: "Quick terminal") }
+                await MainActor.run {
+                    self.starting = false
+                    guard let id else { return }
+                    self.sessionID = id
+                    self.sessionAlive = true
+                    self.state = nil
+                    self.present(id)
+                }
+            }
+            return
         }
         guard let id = sessionID else { return }
+        present(id)
+    }
+
+    /// Its shell exists: drop the panel down with it.
+    private func present(_ id: String) {
         let front = NSWorkspace.shared.frontmostApplication
         previous = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
         let panel = panel ?? makePanel()
