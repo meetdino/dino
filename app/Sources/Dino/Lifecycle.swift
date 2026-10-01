@@ -24,7 +24,7 @@ struct ArchivedInfo: Codable, Identifiable, Equatable {
     var display: String { label ?? name }
 }
 
-/// A worktree dino made, for Settings → Worktrees.
+/// A worktree dino made, for Settings → Workspaces → Worktrees.
 struct StoredWorktree: Codable, Identifiable, Equatable {
     var path: String
     var repo: String
@@ -516,6 +516,6 @@ struct ShortcutSheet: View {
                 .padding(16)
             }
         }
-        .frame(width: 640, height: 480)
+        .sheetSize(width: 640, height: 480)
     }
 }
