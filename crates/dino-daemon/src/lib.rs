@@ -190,14 +190,10 @@ pub fn run() -> anyhow::Result<()> {
         unsafe { std::env::remove_var(var) };
     }
     let path = ipc::socket_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    if UnixStream::connect(&path).is_ok() {
-        anyhow::bail!("dinod is already running ({})", path.display());
-    }
-    let _ = std::fs::remove_file(&path);
+    // Held while dinod runs: no second one takes the socket over.
+    let _lock = claim_socket(&path)?;
     let listener = UnixListener::bind(&path)?;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     let saved = load_saved();
 
     let keys = load_keys();
@@ -316,12 +312,69 @@ pub fn run() -> anyhow::Result<()> {
     }
     eprintln!("dinod listening on {}", path.display());
     for stream in listener.incoming().flatten() {
+        // Another user's process is hung up on, whatever the socket's permissions let through.
+        if !same_user(&stream) {
+            continue;
+        }
         let daemon = daemon.clone();
         std::thread::spawn(move || {
             let _ = serve(&daemon, stream);
         });
     }
     Ok(())
+}
+
+/// Get the socket at `path` ready to bind: its directory made private (0700), and refused if
+/// another user owns it; the lock that makes this the one dinod, held while the file returned is
+/// open; and a socket left by a dinod that died cleared away.
+fn claim_socket(path: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    let dir = path.parent().ok_or_else(|| anyhow::anyhow!("no directory for the socket {}", path.display()))?;
+    if let Some(up) = dir.parent() {
+        std::fs::create_dir_all(up)?;
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e.into()),
+        _ => {}
+    }
+    let meta = std::fs::metadata(dir)?;
+    // SAFETY: no arguments; it can't fail.
+    let me = unsafe { libc::geteuid() };
+    anyhow::ensure!(meta.is_dir(), "{} isn't a directory; dinod keeps its socket there", dir.display());
+    anyhow::ensure!(
+        meta.uid() == me,
+        "{} belongs to another user (uid {}, not {me}); dinod won't put its socket there",
+        dir.display(),
+        meta.uid()
+    );
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(dir.join("dinod.lock"))?;
+    // SAFETY: a live file descriptor. The lock goes when it's closed, or dinod exits.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let held = io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock;
+        anyhow::ensure!(!held, "dinod is already running ({})", path.display());
+        // Otherwise it's a file system without locks: the check below is all there is.
+    }
+    // Also one from before the lock.
+    if UnixStream::connect(path).is_ok() {
+        anyhow::bail!("dinod is already running ({})", path.display());
+    }
+    let _ = std::fs::remove_file(path);
+    Ok(lock)
+}
+
+/// Whether the process at the other end of `stream` runs as this user.
+fn same_user(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: a live socket, and two locals to fill in.
+    let known = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0;
+    // SAFETY: no arguments; it can't fail.
+    known && uid == unsafe { libc::geteuid() }
 }
 
 /// Each catalog's files (and the agent's program) as last read, with when they changed.
@@ -826,7 +879,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::PrMerge { id } => {
                 let result = pr_session(d, &id).and_then(|s| {
                     let branch = pr::branch(&s.cwd).ok_or_else(|| anyhow::anyhow!("Not on a branch"))?;
-                    pr::merge(&s.cwd, &branch)
+                    pr::merge(&s.cwd, &branch, None)
                 });
                 match result {
                     Ok(pr) => {
@@ -1569,6 +1622,20 @@ fn load_screen(id: &str) -> Vec<u8> {
     std::fs::read(screens_dir().join(id)).unwrap_or_default()
 }
 
+/// Write `bytes` to `path`, readable by this user only (prompts, paths and names are in dinod's
+/// files): to `<path>.tmp` first, then renamed over it, so a reader never sees half of it.
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    // `mode` only applies to a new file: one left over from before may be open to others.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    io::Write::write_all(&mut f, bytes)?;
+    drop(f);
+    std::fs::rename(tmp, path)
+}
+
 /// Write the sessions to disk: running ones, and ended ones with their last screen, which stay
 /// until the user resumes or removes them.
 fn save(d: &Daemon) {
@@ -1594,10 +1661,7 @@ fn save(d: &Daemon) {
             let _ = std::fs::remove_file(f.path());
         }
     }
-    let tmp = saved_path().with_extension("json.tmp");
-    if std::fs::write(&tmp, serde_json::to_vec_pretty(&saved).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(tmp, saved_path());
-    }
+    let _ = write_private(&saved_path(), &serde_json::to_vec_pretty(&saved).unwrap_or_default());
 }
 
 /// What it takes to bring `s` back.
@@ -2005,10 +2069,7 @@ fn load_groups() -> Vec<Group> {
 }
 
 fn save_groups(groups: &[Group]) {
-    let tmp = groups_path().with_extension("json.tmp");
-    if std::fs::write(&tmp, serde_json::to_vec_pretty(groups).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(tmp, groups_path());
-    }
+    let _ = write_private(&groups_path(), &serde_json::to_vec_pretty(groups).unwrap_or_default());
 }
 
 fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -> anyhow::Result<String> {
@@ -2189,10 +2250,7 @@ fn load_subagents() -> Vec<SubagentWorktree> {
 }
 
 fn save_subagents(all: &[SubagentWorktree]) {
-    let tmp = subagents_path().with_extension("json.tmp");
-    if std::fs::write(&tmp, serde_json::to_vec_pretty(all).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(tmp, subagents_path());
-    }
+    let _ = write_private(&subagents_path(), &serde_json::to_vec_pretty(all).unwrap_or_default());
 }
 
 /// Worktree path → who made it: takes in what the sessions' hooks reported since last time.
@@ -2292,12 +2350,16 @@ fn read_subagent(d: &Daemon, session: &str, id: &str) -> Option<ipc::SubagentVie
         }
     };
     // Where the Agent tool said it writes; else under its session's conversation; else anywhere.
+    // Only a plain file: the path comes from hook data, and a FIFO or a device would never
+    // finish reading, holding up this request.
+    let plain_file = |p: &PathBuf| p.metadata().is_ok_and(|m| m.is_file());
     let parent = s.as_ref().and_then(|s| s.agent_session.lock().unwrap().clone());
     let transcript = output
         .map(PathBuf::from)
-        .filter(|p| p.extension().is_some_and(|e| e == "jsonl") && p.exists())
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl") && plain_file(p))
         .or_else(|| parent.as_deref().and_then(|p| dino_core::transcript::claude_subagent_path(Some(p), id)))
-        .or_else(|| dino_core::transcript::claude_subagent_path(None, id));
+        .or_else(|| dino_core::transcript::claude_subagent_path(None, id))
+        .filter(plain_file);
     let Some(transcript) = transcript else { return Some(view) };
     // Subagents dino records are Claude's (its SubagentStart hooks).
     let conversation = agent("claude").and_then(|a| dino_core::history::page(a, &transcript, None));
@@ -2466,7 +2528,7 @@ fn refresh_prs(d: &Daemon) {
 fn auto_pr(d: &Daemon, s: &Session, root: &Path, branch: &str, pr: &ipc::PrInfo) -> bool {
     let a = s.auto.lock().unwrap().clone();
     if a.pr.merge && pr.mergeable() && a.merge_failed.as_deref() != Some(pr.head.as_str()) {
-        let result = pr::merge(root, branch);
+        let result = pr::merge(root, branch, Some(pr.head.as_str()));
         let mut a = s.auto.lock().unwrap();
         match result {
             Ok(now) => {
@@ -2656,10 +2718,7 @@ fn load_worktrees() -> Vec<SessionWorktree> {
 }
 
 fn save_worktrees(worktrees: &[SessionWorktree]) {
-    let tmp = worktrees_path().with_extension("json.tmp");
-    if std::fs::write(&tmp, serde_json::to_vec_pretty(worktrees).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(tmp, worktrees_path());
-    }
+    let _ = write_private(&worktrees_path(), &serde_json::to_vec_pretty(worktrees).unwrap_or_default());
 }
 
 fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
@@ -2794,5 +2853,56 @@ mod tests {
         assert!(ended_note(&d2, &live).is_empty());
         kill(&d, &id);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The socket's directory is made private, one dinod holds it at a time, a socket left
+    /// behind doesn't stop the next, and this user's processes are served.
+    #[test]
+    fn socket_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("dino-sock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("dinod.sock");
+        let lock = claim_socket(&path).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        let err = claim_socket(&path).unwrap_err();
+        assert!(err.to_string().contains("already running"), "{err}");
+
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = UnixStream::connect(&path).unwrap();
+        let (served, _) = listener.accept().unwrap();
+        assert!(same_user(&served));
+        drop((client, served, listener, lock));
+        let again = claim_socket(&path).unwrap();
+        assert!(!path.exists());
+        drop(again);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Another user's directory (root's) is refused, and left as it is.
+        // SAFETY: no arguments; it can't fail.
+        if unsafe { libc::geteuid() } != 0 {
+            let err = claim_socket(Path::new("/private/tmp/dinod.sock")).unwrap_err();
+            assert!(err.to_string().contains("another user"), "{err}");
+        }
+    }
+
+    #[test]
+    fn state_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("dino-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("groups.json");
+        // One a crash left, open to all.
+        let tmp = dir.join("groups.json.tmp");
+        std::fs::write(&tmp, "x").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"[]").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"[]");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(!tmp.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

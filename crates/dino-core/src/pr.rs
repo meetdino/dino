@@ -214,9 +214,19 @@ pub fn view(dir: &Path, branch: &str) -> anyhow::Result<PrInfo> {
     Ok(parse_view(&gh(dir, &["pr", "view", branch, "--json", VIEW_FIELDS])?)?.0)
 }
 
-pub fn merge(dir: &Path, branch: &str) -> anyhow::Result<PrInfo> {
-    gh(dir, &["pr", "merge", branch, "--squash"])?;
+/// Squash-merge the PR from `branch`. With `head` (the commit it was judged ready at), only if
+/// that's still its head: a push since then isn't merged unseen.
+pub fn merge(dir: &Path, branch: &str, head: Option<&str>) -> anyhow::Result<PrInfo> {
+    gh(dir, &merge_args(branch, head))?;
     view(dir, branch)
+}
+
+fn merge_args<'a>(branch: &'a str, head: Option<&'a str>) -> Vec<&'a str> {
+    let mut args = vec!["pr", "merge", branch, "--squash"];
+    if let Some(sha) = head.filter(|h| !h.is_empty()) {
+        args.extend(["--match-head-commit", sha]);
+    }
+    args
 }
 
 /// Nothing in `dir` that removing it would lose: no changes, and every commit pushed.
@@ -373,6 +383,14 @@ fn tail(s: &str, lines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_only_the_head_it_was_given() {
+        assert_eq!(merge_args("b", Some("abc123")), ["pr", "merge", "b", "--squash", "--match-head-commit", "abc123"]);
+        // A PR read from an older dinod has no head.
+        assert_eq!(merge_args("b", Some("")), ["pr", "merge", "b", "--squash"]);
+        assert_eq!(merge_args("b", None), ["pr", "merge", "b", "--squash"]);
+    }
 
     #[test]
     fn parses_checks_and_review() {
