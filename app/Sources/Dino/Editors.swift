@@ -109,47 +109,24 @@ func installedEditors() -> [ExternalEditor] {
     ExternalEditor.known.filter { $0.appURL != nil }
 }
 
-/// The toolbar's "Open in": a click opens the folder where you last did, the arrow picks another app.
-struct OpenInMenu: View {
+/// Session → Open In: the session's folder in another app.
+struct OpenInMenuItems: View {
     @EnvironmentObject var model: DinoModel
     @AppStorage("openIn") private var last = ""
-    /// Looked up once: apps rarely come and go while dino is open.
-    @State private var editors = installedEditors()
-
-    private var folder: String? { model.selectedSession.flatMap { $0.host == nil ? $0.cwd : nil } }
-    /// The app used here last, else the file pane's editor, else the first installed.
-    private var preferred: ExternalEditor? {
-        editors.first { $0.bundleID == last }
-            ?? editors.first { $0.bundleID == UserDefaults.standard.string(forKey: ExternalEditor.preferenceKey) }
-            ?? editors.first
-    }
+    /// Looked up once: apps rarely come and go while dino is open, and menus redraw often.
+    private static let editors = installedEditors()
 
     var body: some View {
-        Menu {
-            ForEach(editors) { e in
-                Button {
-                    open(e)
-                } label: {
-                    Label {
-                        Text(e.name)
-                    } icon: {
-                        if let icon = e.icon { Image(nsImage: icon) }
-                    }
+        let folder = model.selectedSession.flatMap { $0.host == nil ? $0.cwd : nil }
+        Menu("Open In") {
+            ForEach(Self.editors) { e in
+                Button(e.name) {
+                    guard let folder else { return }
+                    last = e.bundleID
+                    e.openFolder(folder)
                 }
             }
-        } label: {
-            Label("Open in \(preferred?.name ?? "…")", systemImage: "arrow.up.forward.app")
-        } primaryAction: {
-            if let preferred { open(preferred) }
         }
-        .help(folder.map { "Open \(shortPath($0)) in \(preferred?.name ?? "another app")" } ?? model.selectedSession?.remoteReason ?? "Open the session's folder in another app")
-        .disabled(folder == nil || editors.isEmpty)
-        .onAppear { editors = installedEditors() }
-    }
-
-    private func open(_ e: ExternalEditor) {
-        guard let folder else { return }
-        last = e.bundleID
-        e.openFolder(folder)
+        .disabled(folder == nil || Self.editors.isEmpty)
     }
 }
