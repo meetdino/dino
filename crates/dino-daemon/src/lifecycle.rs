@@ -226,6 +226,7 @@ fn delete(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let a = archived.remove(i);
     save_archived(&archived);
     dino_core::agent::qwen::forget(id);
+    crate::forget_session_files(id);
     if let (Some(w), true) = (&a.worktree, a.worktree_removed) {
         let _ = trust::claude_forget(&w.path);
     }

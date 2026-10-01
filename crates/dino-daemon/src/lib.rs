@@ -1220,10 +1220,13 @@ fn local_spec(
     let status_line = std::env::current_exe()
         .ok()
         .filter(|_| adapter.is_some_and(|a| a.statusline()))
-        .and_then(|dino| dino_core::statusline::wrapper(&cwd, &dino, &d.proxy.base_url(id, "hook")));
+        .and_then(|dino| dino_core::statusline::wrapper(&cwd, &dino));
     // On a provider's model the agent's own API isn't routed (it isn't used): only its status
-    // wiring, then the provider's, which wins.
-    let base = |provider: &str| d.proxy.base_url(id, provider);
+    // wiring, then the provider's, which wins. The proxy's URLs carry its secret, so they go in
+    // the agent's environment or a private file; one that must have them on its command line gets
+    // them without, and the secret in its environment (`keyed_urls`).
+    let keyed = adapter.is_some_and(|a| a.keyed_urls());
+    let base = |provider: &str| if keyed { d.proxy.header_base_url(id, provider) } else { d.proxy.base_url(id, provider) };
     let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy && route.is_none(), &base, status_line);
     // The model picked since (the model control), over the one it started on.
     let model = route.map(|r| controls.model.clone().unwrap_or_else(|| r.model.clone()));
@@ -1237,6 +1240,13 @@ fn local_spec(
     }
     // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
     env.insert("DINO_SESSION".into(), id.to_string());
+    if keyed {
+        env.insert(dino_core::agent::KEY_ENV.into(), d.proxy.secret().into());
+    }
+    // Where `dino statusline` reports, read from its environment rather than its command line.
+    if wired_args.iter().any(|a| a.contains(r#""statusLine""#)) {
+        env.insert(dino_core::statusline::HOOK_ENV.into(), d.proxy.base_url(id, "hook"));
+    }
     if adapter.is_some_and(|a| a.session_tools()) && settings.policies.session_tools {
         peers::wire_claude(id, &mut wired_args);
     }
@@ -1255,7 +1265,43 @@ fn local_spec(
     wired_args.extend(controls::args(&l.agent_id, &controls, &d.knobs(&l.agent_id, true)));
     wired_args.extend(args.iter().cloned());
     wired_args.extend(prompt.map(|p| prompt_args(&l.agent_id, p)).unwrap_or_default());
+    private_settings(id, &mut wired_args);
     (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd)
+}
+
+/// Where a session's private files go: inside dino's own folder, which only its user can open.
+fn session_files(id: &str) -> PathBuf {
+    let name: String = id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    dino_core::config_dir().join("run").join(name)
+}
+
+/// Settings given to Claude as JSON (`--settings {…}`) hold the proxy's hook URL, and its secret:
+/// written to a file only this user can read, and its path given instead. A command line is
+/// readable by every user of the Mac.
+fn private_settings(id: &str, args: &mut [String]) {
+    private_settings_in(&session_files(id), id, args);
+}
+
+fn private_settings_in(dir: &Path, id: &str, args: &mut [String]) {
+    let Some(i) = args.iter().position(|a| a == "--settings").map(|i| i + 1).filter(|&i| args.get(i).is_some_and(|v| v.trim_start().starts_with('{'))) else { return };
+    let path = dir.join("claude-settings.json");
+    let written = private_dir(dir).and_then(|_| write_private(&path, args[i].as_bytes()));
+    match written {
+        Ok(()) => args[i] = path.display().to_string(),
+        Err(e) => eprintln!("dinod: session {id}: couldn't write its settings privately ({e}); they stay on its command line"),
+    }
+}
+
+/// `dir`, made if need be, that only this user can open.
+fn private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Drop a session's private files, once the session is gone for good.
+pub(crate) fn forget_session_files(id: &str) {
+    let _ = std::fs::remove_dir_all(session_files(id));
 }
 
 /// Session `id` on `host`: `ssh` in the terminal, the agent in `folder` there. Only Claude's
@@ -2042,6 +2088,7 @@ fn kill(d: &Daemon, id: &str) -> bool {
         Some(i) => {
             sessions.remove(i).pane.kill();
             dino_core::agent::qwen::forget(id);
+            forget_session_files(id);
             d.previews.lock().unwrap().retain(|p| {
                 if p.session == id {
                     p.stop();
@@ -2906,6 +2953,30 @@ mod tests {
 
     fn session(d: &Daemon, id: &str) -> Arc<Session> {
         d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().unwrap()
+    }
+
+    /// Claude's settings carry the proxy's secret (its hook URL): they leave the command line for
+    /// a file only this user can read.
+    #[test]
+    fn claude_settings_leave_the_command_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("dino-settings-test-{}", std::process::id())).join("run/7");
+        let json = r#"{"hooks":{"Stop":[{"hooks":[{"type":"http","url":"http://127.0.0.1:1/k/SECRET/s/7/hook"}]}]}}"#;
+        let mut args: Vec<String> = ["--mcp-config", "{}", "--settings", json, "--model", "haiku"].map(String::from).into();
+        private_settings_in(&dir, "7", &mut args);
+        assert!(!args.iter().any(|a| a.contains("SECRET")), "{args:?}");
+        let path = dir.join("claude-settings.json");
+        assert_eq!(args[3], path.display().to_string());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), json);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        // A path given by the user stays as it is.
+        let mut theirs: Vec<String> = ["--settings", "/Users/me/s.json"].map(String::from).into();
+        private_settings_in(&dir, "8", &mut theirs);
+        assert_eq!(theirs[1], "/Users/me/s.json");
+        // dinod's header for agents with the secret off their command line is the proxy's.
+        assert_eq!(dino_core::agent::KEY_HEADER, dino_proxy::KEY_HEADER);
+        std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).unwrap();
     }
 
     /// A session whose program exits stays, ended, across a dinod restart, and resumes in place.
