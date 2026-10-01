@@ -1,5 +1,4 @@
-//! The pages people see: sign-in (GitHub, Google, emailed code), the account page, and the
-//! device-approval placeholder. Forms carry a CSRF token tied to the session and are checked
+//! The pages people see: sign-in (GitHub, Google, emailed code) and the account page. Forms carry a CSRF token tied to the session and are checked
 //! against the Origin header too.
 
 pub mod pages;
@@ -39,7 +38,6 @@ pub fn routes() -> Router<AppState> {
         .route("/account/signout-everywhere", post(account_signout_everywhere))
         .route("/account/delete", post(account_delete))
         .route("/account/export", get(account_export))
-        .route("/approve", get(approve))
 }
 
 async fn css() -> Response {
@@ -112,7 +110,7 @@ async fn signin(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<S
     let providers: Vec<Provider> = [Provider::GitHub, Provider::Google].into_iter().filter(|p| p.config(&s).is_some()).collect();
     let page = pages::layout(&s, "Sign in", html! {
         h1 { @if q.again.is_some() { "Sign in again" } @else { "Sign in to dino" } }
-        p { "Your settings follow you to every Mac, encrypted so only your devices can read them." }
+        p { "Your settings follow you to every Mac you sign in on." }
         div.stack {
             @for p in &providers {
                 a.btn href=(format!("/signin/{}", p.id())) { "Continue with " (p.name()) }
@@ -177,7 +175,12 @@ async fn finish_signin(s: &AppState, session: Session, v: &identity::Verified) -
     let next = session.get_str("after_signin").and_then(|n| local(&n)).unwrap_or_else(|| "/account".into());
     let mut session = session.sign_in(s, account).await?;
     session.take("after_signin");
+    // A one-click sign-in from the app goes straight back to it.
+    let back = crate::oauth::authorize::finish_one_click(s, &mut session, account).await?;
     session.save(s).await?;
+    if let Some(back) = back {
+        return Ok(session.attach(back));
+    }
     Ok(session.attach(Redirect::to(&next).into_response()))
 }
 
@@ -282,7 +285,7 @@ async fn account_page(State(s): State<AppState>, headers: HeaderMap) -> Result<R
     };
     let summary = account::summary(&s, account).await?;
     let devices = account::devices(&s, account).await?;
-    let synced = crate::api::sync::summary(&s, account).await?;
+    let synced = crate::api::sync::settings(&s, account).await?;
     let csrf = session.csrf(&s);
     let providers: Vec<String> = summary["identities"].as_array().into_iter().flatten().filter_map(|i| i["provider"].as_str().map(str::to_owned)).collect();
     let page = pages::layout(&s, "Account", html! {
@@ -312,15 +315,15 @@ async fn account_page(State(s): State<AppState>, headers: HeaderMap) -> Result<R
                 p.muted { "Nothing synced yet. Turn on sync in dino to keep your settings on every Mac." }
             } @else {
                 ul.devices {
-                    @for (collection, count, bytes, at) in &synced {
+                    @for (collection, key, value, at) in &synced {
                         li {
-                            div.row { strong { (collection) } span.muted { (count) @if *count == 1 { " setting" } @else { " settings" } } }
-                            div.muted { "🔒 Encrypted · " (bytes) " bytes · changed " (ago(*at)) }
+                            div.row { strong { (collection) "." (key) } span.muted { (ago(*at)) } }
+                            code.value { (shown(value)) }
                         }
                     }
                 }
             }
-            p.muted { "Values are encrypted on your devices. This server stores them sealed and can't read them." }
+            p.muted { "API keys and tokens never leave your Macs, and aren't here." }
         }
         h2 { "Your data" }
         div.stack {
@@ -397,8 +400,10 @@ async fn account_export(State(s): State<AppState>, headers: HeaderMap) -> Result
     Ok(r)
 }
 
-/// Where a new Mac will be approved for encrypted sync (a signed-in device confirms a code and
-/// hands over the account key). It arrives with sync.
-async fn approve(State(s): State<AppState>) -> Response {
-    pages::message(&s, "Approve a new Mac", "Approving a new Mac for encrypted sync arrives with settings sync. Nothing to do here yet.").into_response()
+/// A synced value as the account page shows it: strings as they are, the rest as JSON.
+fn shown(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(t) => t.clone(),
+        other => other.to_string(),
+    }
 }

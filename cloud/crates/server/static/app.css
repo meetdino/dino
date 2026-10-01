@@ -66,3 +66,4 @@ ul.devices li:first-child { border-top: 0; }
 form.inline { display: inline; }
 form.inline button { width: auto; min-height: 32px; padding: 4px 12px; font-size: 14px; }
 .cf-turnstile { margin: 12px 0; }
+code.value { display: block; margin-top: 4px; font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace; color: var(--muted); word-break: break-all; }

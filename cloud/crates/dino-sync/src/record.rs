@@ -8,11 +8,11 @@ use serde_json::{Map, Value};
 
 use crate::hlc::Hlc;
 
-/// Protocol version this crate speaks, sent as `DINO-Sync-Version`. 2: every record carries a
-/// token (deletes too), sealed to its stamp and whether it's a delete.
-pub const PROTOCOL: u32 = 2;
+/// Protocol version this crate speaks, sent as `DINO-Sync-Version`. 3: values are plain JSON (2
+/// sealed them on the device, with an account key handed between devices).
+pub const PROTOCOL: u32 = 3;
 
-/// Largest encrypted value a record may carry, in bytes of its token.
+/// Largest value a record may carry, in bytes of its JSON.
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// Most records one push, or one page of a pull, may carry.
 pub const MAX_BATCH: usize = 500;
@@ -30,11 +30,8 @@ impl RecordId {
     }
 }
 
-/// One setting as the server stores it. `value` is a PASETO v4.local token (see `crypto`), so the
-/// server sees only where it lives, when and by whom it was written, whether it's a delete, and
-/// how big it is. The token is sealed to all of that but `seq` and `extra`: a server without the
-/// account key can't restamp, move or delete a value (`AccountKey::open_record`,
-/// `Store::apply_verified`).
+/// One setting as the server stores it: where it lives, when and by which device it was written,
+/// and its value.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Record {
     #[serde(flatten)]
@@ -42,9 +39,10 @@ pub struct Record {
     pub hlc: Hlc,
     /// The shape of the value inside; a client keeps a newer one as it is and never overwrites it.
     pub schema: u32,
-    /// The sealed value, or for a delete a sealed tombstone.
-    pub value: String,
-    /// Deleted: `value` is a tombstone, kept so the delete reaches every device.
+    /// The setting's value; `null` for a delete.
+    #[serde(default)]
+    pub value: Value,
+    /// Deleted: kept so the delete reaches every device.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deleted: bool,
     /// Set by the server when it accepts the record; absent on the way up.
@@ -112,8 +110,6 @@ pub enum Nudge {
     Advanced { seq: u64 },
     /// The account's records were wiped ("Reset sync"): start over from 0.
     Reset,
-    /// A device asked for the account's key, or a request moved on.
-    Approvals,
     /// Anything a newer server sends.
     #[serde(other)]
     Unknown,
@@ -170,7 +166,7 @@ fn check_records(records: &[Record]) -> Result<(), SyncError> {
         return Err(SyncError::TooManyRecords { count: records.len(), max: MAX_BATCH });
     }
     for r in records {
-        let bytes = r.value.len();
+        let bytes = r.value.to_string().len();
         if bytes > MAX_RECORD_BYTES {
             return Err(SyncError::TooLarge { bytes, max: MAX_RECORD_BYTES });
         }
@@ -183,16 +179,17 @@ mod tests {
     use super::*;
 
     fn record(value: String) -> Record {
-        Record { id: RecordId::new("agents", "claude.mode"), hlc: Hlc { wall_ms: 1, counter: 0, device: "d".into() }, schema: 1, value, deleted: false, seq: Some(1), extra: Map::new() }
+        Record { id: RecordId::new("agents", "claude.mode"), hlc: Hlc { wall_ms: 1, counter: 0, device: "d".into() }, schema: 1, value: Value::String(value), deleted: false, seq: Some(1), extra: Map::new() }
     }
 
     #[test]
     fn pulls_are_held_to_the_push_limits() {
-        let ok = PullResponse { seq: 1, records: vec![record("v4.local.x".into()); MAX_BATCH], ..Default::default() };
+        let ok = PullResponse { seq: 1, records: vec![record("plan".into()); MAX_BATCH], ..Default::default() };
         assert_eq!(check_pull(&ok), Ok(()));
-        let many = PullResponse { records: vec![record("v4.local.x".into()); MAX_BATCH + 1], ..ok.clone() };
+        let many = PullResponse { records: vec![record("plan".into()); MAX_BATCH + 1], ..ok.clone() };
         assert_eq!(check_pull(&many), Err(SyncError::TooManyRecords { count: MAX_BATCH + 1, max: MAX_BATCH }));
-        let big = PullResponse { records: vec![record("x".repeat(MAX_RECORD_BYTES + 1))], ..ok };
-        assert_eq!(check_pull(&big), Err(SyncError::TooLarge { bytes: MAX_RECORD_BYTES + 1, max: MAX_RECORD_BYTES }));
+        // A JSON string's quotes count too.
+        let big = PullResponse { records: vec![record("x".repeat(MAX_RECORD_BYTES))], ..ok };
+        assert_eq!(check_pull(&big), Err(SyncError::TooLarge { bytes: MAX_RECORD_BYTES + 2, max: MAX_RECORD_BYTES }));
     }
 }

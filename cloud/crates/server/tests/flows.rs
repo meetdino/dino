@@ -371,3 +371,156 @@ async fn harness_tokens_have_their_own_audience_and_introspect() {
     assert_eq!(app().get(s.url("/v1/sync")).bearer_auth(at).send().await.unwrap().status(), 401, "harness tokens don't");
     assert_eq!(app().get(s.url("/readyz")).send().await.unwrap().status(), 200);
 }
+
+fn link_poll(s: &Server, device_code: &str) -> impl std::future::Future<Output = Value> {
+    let req = app().post(s.url("/oauth/token")).form(&[("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("client_id", "dino"), ("device_code", device_code)]).send();
+    async move { req.await.unwrap().json().await.unwrap() }
+}
+
+async fn ask_for_link(s: &Server, email: &str) -> reqwest::Response {
+    let form = [("client_id", "dino"), ("scope", "account sync"), ("device_name", "Ben's MacBook Air"), ("device_os", "macOS 26"), ("dino_version", "0.1.0"), ("email", email)];
+    app().post(s.url("/oauth/device_authorization")).form(&form).send().await.unwrap()
+}
+
+#[tokio::test]
+async fn a_mailed_link_signs_the_device_in_once() {
+    let s = start().await;
+    // The answer looks the same whether or not the address has an account.
+    s.email_signin(&browser(), "known@example.com").await;
+    let known: Value = ask_for_link(&s, "Known@Example.com").await.json().await.unwrap();
+    let r = ask_for_link(&s, "new@example.com").await;
+    assert_eq!(r.status(), 200);
+    let d: Value = r.json().await.unwrap();
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(keys(&known), keys(&d), "no account enumeration");
+    assert_eq!((d["interval"].as_i64(), d["expires_in"].as_i64()), (Some(2), Some(900)));
+    let device_code = d["device_code"].as_str().unwrap().to_owned();
+    assert_eq!(link_poll(&s, &device_code).await["error"], "authorization_pending");
+
+    // Opening the link (as a mail scanner would) uses nothing up.
+    let link = s.mailed_link("new@example.com");
+    assert!(std::fs::read_to_string(&s.mail).unwrap().contains(&s.url(&link)), "the link is on this server");
+    let page = browser().get(s.url(&link)).send().await.unwrap().text().await.unwrap();
+    assert!(page.contains("Ben&#39;s MacBook Air") || page.contains("Ben's MacBook Air"), "names the device");
+    assert!(page.contains("new@example.com"));
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    assert_eq!(link_poll(&s, &device_code).await["error"], "authorization_pending");
+
+    // The button signs the device in.
+    let done = browser().post(s.url(&link)).send().await.unwrap().text().await.unwrap();
+    assert!(done.contains("signed in on Ben"), "{done}");
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let t = link_poll(&s, &device_code).await;
+    let at = t["access_token"].as_str().expect("tokens once the link was opened");
+    let me: Value = app().get(s.url("/v1/me")).bearer_auth(at).send().await.unwrap().json().await.unwrap();
+    assert_eq!(me["email"], "new@example.com");
+    assert_eq!(me["identities"][0]["provider"], "email");
+
+    // Used once: opening it again, or posting again, does nothing.
+    let again = browser().post(s.url(&link)).send().await.unwrap().text().await.unwrap();
+    assert!(again.contains("expired"));
+    assert!(browser().get(s.url(&link)).send().await.unwrap().text().await.unwrap().contains("expired"));
+    // A link past its 15 minutes is refused too, and a made-up one.
+    ask_for_link(&s, "late@example.com").await;
+    sqlx::query("UPDATE email_links SET expires_at = now() - interval '1 second' WHERE email = 'late@example.com'").execute(&s.state.db).await.unwrap();
+    let late = browser().post(s.url(&s.mailed_link("late@example.com"))).send().await.unwrap().text().await.unwrap();
+    assert!(late.contains("expired"));
+    assert!(browser().post(s.url("/login/dino_ml_made-up")).send().await.unwrap().text().await.unwrap().contains("expired"));
+    // The known address signs in to its existing account.
+    let link = s.mailed_link("known@example.com");
+    browser().post(s.url(&link)).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let t = link_poll(&s, known["device_code"].as_str().unwrap()).await;
+    let me: Value = app().get(s.url("/v1/me")).bearer_auth(t["access_token"].as_str().unwrap()).send().await.unwrap().json().await.unwrap();
+    assert_eq!(me["email"], "known@example.com");
+    let accounts: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts WHERE email = 'known@example.com'").fetch_one(&s.state.db).await.unwrap();
+    assert_eq!(accounts, 1);
+}
+
+#[tokio::test]
+async fn sign_in_links_are_limited_per_address() {
+    let s = start().await;
+    for _ in 0..5 {
+        assert_eq!(ask_for_link(&s, "busy@example.com").await.status(), 200);
+    }
+    let r = ask_for_link(&s, "busy@example.com").await;
+    assert_eq!(r.status(), 429);
+    assert!(r.headers().get("retry-after").is_some());
+    assert_eq!(ask_for_link(&s, "not an address").await.status(), 400);
+}
+
+#[tokio::test]
+async fn sign_in_with_github_is_one_click_and_joins_the_email_account() {
+    let s = start().await;
+    // The address already has an account, from an emailed code.
+    s.email_signin(&browser(), "gh-and-google@example.com").await;
+    let existing: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM accounts WHERE email = 'gh-and-google@example.com'").fetch_one(&s.state.db).await.unwrap();
+
+    let b = browser();
+    let verifier = "v".repeat(43);
+    let challenge = {
+        use base64::Engine;
+        use sha2::Digest;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()))
+    };
+    let redirect = "http://127.0.0.1:53682/callback";
+    let mut u = url::Url::parse(&s.url("/oauth/authorize")).unwrap();
+    u.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", "dino")
+        .append_pair("redirect_uri", redirect)
+        .append_pair("state", "st-gh")
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("scope", "account sync")
+        .append_pair("device_name", "Mac GH")
+        .append_pair("provider", "github");
+    // Straight to GitHub: no dino sign-in page.
+    let r = b.get(u.as_str()).send().await.unwrap();
+    assert_eq!(location(&r), "/signin/github");
+    let r = b.get(s.url("/signin/github")).send().await.unwrap();
+    let to = url::Url::parse(&location(&r)).unwrap();
+    assert!(to.path().ends_with("/gh/authorize"), "GitHub's authorize page");
+    let q: std::collections::HashMap<_, _> = to.query_pairs().into_owned().collect();
+    // Back from GitHub: straight back to the app, no confirm page.
+    let r = b.get(s.url(&format!("/signin/github/callback?code=GHCODE&state={}", q["state"]))).send().await.unwrap();
+    let back = url::Url::parse(&location(&r)).unwrap();
+    assert!(back.as_str().starts_with(redirect), "back to the app: {back}");
+    let q: std::collections::HashMap<_, _> = back.query_pairs().into_owned().collect();
+    assert_eq!(q["state"], "st-gh");
+    let t: Value = app()
+        .post(s.url("/oauth/token"))
+        .form(&[("grant_type", "authorization_code"), ("client_id", "dino"), ("code", q["code"].as_str()), ("redirect_uri", redirect), ("code_verifier", verifier.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let me: Value = app().get(s.url("/v1/me")).bearer_auth(t["access_token"].as_str().unwrap()).send().await.unwrap().json().await.unwrap();
+    assert_eq!(me["account_id"], existing.0.to_string(), "GitHub joined the account with the same verified address");
+    let providers: Vec<&str> = me["identities"].as_array().unwrap().iter().map(|i| i["provider"].as_str().unwrap()).collect();
+    assert_eq!(providers, ["email", "github"]);
+    let subject: (String,) = sqlx::query_as("SELECT subject FROM identities WHERE provider = 'github'").fetch_one(&s.state.db).await.unwrap();
+    assert_eq!(subject.0, "4242", "keyed on GitHub's user id");
+
+    // Without `provider`, a signed-in browser still gets the confirm page.
+    let r = b.get(u.as_str().replace("&provider=github", "")).send().await.unwrap();
+    assert_eq!(location(&r), "/oauth/authorize/confirm");
+}
+
+#[tokio::test]
+async fn a_database_out_of_reach_is_a_503_not_a_crash() {
+    let s = start().await;
+    assert_eq!(app().get(s.url("/readyz")).send().await.unwrap().status(), 200);
+    // Every connection taken: requests wait their turn, then hear "try again".
+    let mut held = Vec::new();
+    while let Ok(c) = s.state.db.acquire().await {
+        held.push(c);
+    }
+    let r = app().get(s.url("/v1/me")).bearer_auth("dino_at_whatever").send().await.unwrap();
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.headers().get("retry-after").unwrap(), "5");
+    drop(held);
+    assert_eq!(app().get(s.url("/readyz")).send().await.unwrap().status(), 200, "and it's fine after");
+}
