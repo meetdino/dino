@@ -8,29 +8,38 @@ enum SessionStatus {
     /// `waiting`: its turn ended on subagents or background commands that still run.
     case thinking, working, waiting, idle, done, needsYou, ended, exited
 
+    /// Four words, the same as the sidebar's filters: Working, Needs you, Done, Idle.
     var label: String {
         switch self {
-        case .thinking: "thinking"
-        case .working: "working"
-        case .waiting: "waiting"
-        case .idle: "idle"
-        case .done: "done"
-        case .needsYou: "needs you"
-        case .ended: "ended"
-        case .exited: "exited"
+        case .thinking, .working, .waiting: "Working"
+        case .needsYou: "Needs you"
+        case .done: "Done"
+        case .idle, .ended, .exited: "Idle"
         }
     }
 
+    /// The finer state behind the word, for a tooltip or a second line.
+    var detail: String? {
+        switch self {
+        case .thinking: "Waiting on the model"
+        case .working: "Running tools or printing"
+        case .waiting: "Its turn is over; subagents or background commands still run"
+        case .needsYou: "Asking for something"
+        case .done: "Finished; you haven't looked yet"
+        case .idle: "Waiting for a prompt"
+        case .ended: "Exited; Enter resumes it"
+        case .exited: "Exited with an error"
+        }
+    }
+
+    /// System colours, so they follow light, dark and increased contrast.
     var color: Color {
         switch self {
-        case .thinking: Color(red: 0.78, green: 0.52, blue: 1.0)
-        case .working: Brand.green
-        case .waiting: Brand.green.opacity(0.7)
-        case .idle: .secondary
-        case .done: Color(red: 0.45, green: 0.82, blue: 0.95)
-        case .needsYou: Color(red: 1.0, green: 0.78, blue: 0.2)
-        case .ended: .secondary
-        case .exited: Color(red: 0.95, green: 0.35, blue: 0.3)
+        case .thinking, .working, .waiting: Color(nsColor: .systemGreen)
+        case .needsYou: Color(nsColor: .systemOrange)
+        case .done: Color(nsColor: .systemBlue)
+        case .idle, .ended: .secondary
+        case .exited: Color(nsColor: .systemRed)
         }
     }
 }
@@ -89,11 +98,12 @@ final class DinoModel: ObservableObject {
     @Published var showShortcuts = false
     /// Help → Show Welcome: the first-open card, again.
     @Published var showWelcome = false
-    /// The welcome card is up (the sidebar hides the usage panel meanwhile).
-    @Published var welcomeShowing = false
 
     /// The review panel beside the terminal, and the comments waiting to go to each session.
-    @Published var showReview = false
+    @Published var showReview = false {
+        // One side pane at a time; a file with unsaved changes asks first.
+        didSet { if showReview, sidePane != nil, !closeSidePane() { showReview = false } }
+    }
     @Published var comments: [String: [ReviewComment]] = [:]
     /// Claude's review of each session's changes; its findings join that session's comments.
     @Published var reviews: [String: ReviewRun] = [:]
@@ -101,7 +111,9 @@ final class DinoModel: ObservableObject {
     private var reviewRuns: [String: UUID] = [:]
 
     /// A file or the web preview, beside the terminals.
-    @Published var sidePane: SidePane?
+    @Published var sidePane: SidePane? {
+        didSet { if sidePane != nil { showReview = false } }
+    }
     /// The session whose tasks the Tasks pane shows while a folder is selected (after "Show in Sidebar").
     @Published var tasksFallback: String?
     /// Each session's browser, kept so switching sessions keeps its page ("" when opened without one).
@@ -112,6 +124,8 @@ final class DinoModel: ObservableObject {
     /// The Create PR sheet, and the popover about the selected session's PR.
     @Published var showCreatePR = false
     @Published var showPR = false
+    /// The command palette (⇧⌘P): every action, by name.
+    @Published var showPalette = false
     /// The session the side chat is asking about.
     @Published var askingAbout: SessionInfo?
     /// PRs dino just opened or merged, until dinod's poller reports them.
@@ -152,7 +166,11 @@ final class DinoModel: ObservableObject {
 
     /// Rang the bell or finished while in the background; cleared when selected.
     @Published private(set) var attention: Set<String> = []
-    @Published private(set) var unseenDone: Set<String> = []
+    /// Kept across relaunch, so a session that finished while dino was closed still says Done.
+    @Published private(set) var unseenDone: Set<String> = Set(UserDefaults.standard.stringArray(forKey: DinoModel.unseenKey) ?? []) {
+        didSet { if unseenDone != oldValue { UserDefaults.standard.set(Array(unseenDone), forKey: Self.unseenKey) } }
+    }
+    static let unseenKey = "unseenDone.\(DinoEnvironment.home)"
 
     /// Sessions shown side by side; selecting either one shows both.
     @Published var splits: [Split] = Split.saved() {
@@ -335,7 +353,7 @@ final class DinoModel: ObservableObject {
             // What dino did about the PR by itself.
             if let auto = s.auto, let pr = s.pr {
                 if auto.fixes > (prev.auto?.fixes ?? 0) {
-                    Notifier.post(session: s, title: "Asked \(s.name) to fix PR #\(pr.number)", body: pr.checks.failing.joined(separator: ", "))
+                    Notifier.post(session: s, title: "Asked \(s.display) to fix PR #\(pr.number)", body: pr.checks.failing.joined(separator: ", "))
                 }
                 if auto.merge, pr.state == "merged", prev.pr?.number == pr.number, prev.pr?.isOpen == true {
                     Notifier.post(session: s, title: "PR #\(pr.number) merged", body: "Auto-merged once its checks passed: \(pr.title)")
@@ -352,6 +370,7 @@ final class DinoModel: ObservableObject {
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
         terminals = terminals.filter { live.contains($0.key) }
+        if !unseenDone.isSubset(of: live) { unseenDone.formIntersection(live) }
         webPages = webPages.filter { $0.key.isEmpty || live.contains($0.key) }
         for s in next { webPages[s.id]?.follow(s.previews ?? []) }
         // A pane whose session ended closes, as it would in a terminal.

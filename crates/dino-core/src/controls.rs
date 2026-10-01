@@ -58,6 +58,8 @@ pub struct Knobs {
     pub efforts: Vec<String>,
     /// Changing a control restarts the agent (resuming its conversation) rather than applying live.
     pub restart: bool,
+    /// Mode id → what the agent itself calls it, where that differs from dino's word.
+    pub mode_labels: std::collections::BTreeMap<String, String>,
 }
 
 impl Knobs {
@@ -89,8 +91,9 @@ impl Knobs {
 pub fn knobs(agent_id: &str, allow_bypass: bool, catalog: Option<&Catalog>) -> Knobs {
     let Some(a) = agent(agent_id) else { return Knobs::default() };
     let listed = catalog.filter(|_| a.picks_model()).map(|c| Knobs { models: c.models.clone(), default_model: c.default_model.clone(), ..Knobs::default() }).unwrap_or_default();
-    let modes = a.modes().iter().filter(|m| allow_bypass || **m != "bypass").map(|m| m.to_string()).collect();
-    Knobs { modes, model: a.picks_model(), efforts: catalog.map(Catalog::efforts).unwrap_or_default(), restart: true, ..listed }
+    let modes: Vec<String> = a.modes().iter().filter(|m| allow_bypass || **m != "bypass").map(|m| m.to_string()).collect();
+    let mode_labels = modes.iter().filter_map(|m| a.mode_label(m).map(|l| (m.clone(), l.to_string()))).collect();
+    Knobs { modes, model: a.picks_model(), efforts: catalog.map(Catalog::efforts).unwrap_or_default(), restart: true, mode_labels, ..listed }
 }
 
 /// Command-line arguments that apply `c` to an agent offering `k` (see `knobs`). Values it
@@ -249,6 +252,16 @@ mod tests {
             let k = k(agent);
             let mut order = k.modes.iter().map(|m| all.iter().position(|a| a == m).expect("a known mode"));
             assert!(order.clone().zip(order.by_ref().skip(1)).all(|(a, b)| a < b), "{agent} modes in MODES order");
+        }
+    }
+
+    #[test]
+    fn modes_in_the_agents_own_words() {
+        assert_eq!(k("claude").mode_labels.get("ask").map(String::as_str), Some("Manual"));
+        assert!(!knobs("claude", false, None).mode_labels.contains_key("bypass"), "only modes it offers");
+        for agent in ["claude", "codex", "kimi", "qwen", "hermes"] {
+            let k = k(agent);
+            assert!(k.mode_labels.keys().all(|m| k.modes.contains(m)), "{agent}");
         }
     }
 

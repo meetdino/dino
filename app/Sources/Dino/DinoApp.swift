@@ -22,6 +22,8 @@ struct DinoApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
+        // The first time; after that SwiftUI opens it as you left it (it saves the frame itself).
+        .defaultSize(width: 1280, height: 800)
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { openWindow(id: SettingsView.windowID) }
@@ -42,6 +44,9 @@ struct DinoApp: App {
                     .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandMenu("Session") {
+                Button(CommandPalette.paletteTitle) { model.showPalette = true }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                Divider()
                 Button("New Shell") { model.newShell() }
                     .keyboardShortcut("t")
                     .disabled(model.launchers.isEmpty)
@@ -104,6 +109,9 @@ struct DinoApp: App {
                 Button("Ask About This Session…") { model.askingAbout = model.selectedSession }
                     .keyboardShortcut(";", modifiers: [.command, .shift])
                     .disabled(model.selectedSession == nil)
+                Button("Create Pull Request…") { model.showCreatePR = true }
+                    .disabled(model.selectedSession.map { $0.host != nil || model.pr(of: $0) != nil } ?? true)
+                OpenInMenuItems().environmentObject(model)
                 Divider()
                 ControlMenuItems().environmentObject(model)
                 Divider()
@@ -161,6 +169,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         QuickTerminal.shared.registerKey()
         desktopKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             if e.window is QuickPanel { return QuickTerminal.shared.key(e) ? nil : e }
+            // Esc closes the toolbar's pickers wherever the keyboard is: their rows are buttons,
+            // which don't take Esc themselves.
+            if e.keyCode == 53, let model = self?.model, model.controlPicker != nil || model.showPR || model.showPalette {
+                model.controlPicker = nil
+                model.showPR = false
+                model.showPalette = false
+                return nil
+            }
             guard let model = self?.model, let w = e.window, !(w is NSPanel), w.attachedSheet == nil,
                   w.identifier?.rawValue != SettingsView.windowID,
                   Self.desktopKey(e, model: model) else { return e }
@@ -212,6 +228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case ([.command], ";"):
             guard let s = model.selectedSession else { return false }
             model.askingAbout = s
+        case ([.command, .shift], "p"), ([.command, .shift], "P"):
+            model.showPalette = true
         // The terminal pastes text only; an image on its own is written to a file and pasted as
         // its path, which Claude Code and Codex attach.
         case ([.command], "v"):
@@ -322,6 +340,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
         .sheet(isPresented: $model.showNewSession) { NewSessionSheet() }
         .sheet(isPresented: $model.showShortcuts) { ShortcutSheet() }
+        .sheet(isPresented: $model.showPalette) { CommandPalette() }
         .sheet(item: $model.askingAbout) { AskSheet(session: $0) }
         .sheet(item: $model.editingTask) { ScheduleSheet(task: $0) }
         .alert(
@@ -387,6 +406,7 @@ struct ContentView: View {
                 : "dino closes it in \(f.terminal ?? "the other terminal") and continues the same conversation here, with its history.")
         }
         .overlay { if let f = model.moving { MovingOverlay(session: f) } }
+        .background(WelcomeCard())
     }
 }
 
@@ -450,59 +470,28 @@ struct Terminals: View {
             ToolbarItem(placement: .principal) {
                 if let s = model.sessions.first(where: { $0.id == model.selected }) {
                     HStack(spacing: 8) {
-                        SessionName(session: s, place: .toolbar, font: .system(.body, design: .monospaced).weight(.semibold), color: Brand.green)
-                        if let f = s.inside { AgentBadge(agent: f.agent) }
-                        if s.label == nil, let t = s.inside?.title ?? s.title { Text(t).foregroundStyle(.secondary).lineLimit(1) }
-                        if let f = s.inside, f.continuable { TakeOverButton(session: s, found: f) }
-                        if let host = s.host { HostChip(host: host) }
-                        if !s.exited {
-                            SessionControlsBar(session: s).padding(.leading, 4)
-                        } else {
-                            ResumeButton(session: s).padding(.leading, 4)
+                        // The name gives way first: the chips beside it are what you click.
+                        SessionName(session: s, place: .toolbar, font: .body.weight(.semibold))
+                            .layoutPriority(-1)
+                            .help(s.inside?.title ?? s.title ?? s.display)
+                        Group {
+                            if let f = s.inside { AgentBadge(agent: f.agent) }
+                            if let f = s.inside, f.continuable { TakeOverButton(session: s, found: f) }
+                            if let host = s.host { HostChip(host: host) }
+                            if s.exited {
+                                ResumeButton(session: s).padding(.leading, 4)
+                            } else if s.agent_id != "shell" {
+                                // A plain shell has no mode or model to pick.
+                                SessionControlsBar(session: s).padding(.leading, 4)
+                            }
                         }
+                        .fixedSize()
                     }
                 }
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.loadFound()
-                    model.showContinue = true
-                } label: {
-                    Label("Continue…", systemImage: "arrow.uturn.forward")
-                }
-                .help("Continue a session from another terminal, your history, or the cloud (⌘K)")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button { model.showFanout = true } label: {
-                    Label("Fan Out…", systemImage: "arrow.triangle.branch")
-                }
-                .help("One prompt to several agents, each in its own worktree (⇧⌘N)")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Menu { SplitMenuItems(shortcuts: false) } label: {
-                    Label("Split", systemImage: "rectangle.split.2x1")
-                }
-                .help("A shell or another session next to this one (⌘D)")
-                .disabled(model.selectedSession == nil)
-            }
             ToolbarItem(placement: .primaryAction) { NewSessionMenu() }
-            ToolbarItem(placement: .primaryAction) {
-                Button { model.showReview.toggle() } label: {
-                    Label("Changes", systemImage: model.showReview ? "plusminus.circle.fill" : "plusminus.circle")
-                }
-                .help(remoteReason ?? "Review this session's changes; click a line to comment for the agent (⇧⌘D)")
-                .disabled(!model.sessions.contains { $0.id == model.selected } || remoteReason != nil)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button { model.togglePreview() } label: {
-                    Label("Preview", systemImage: model.sidePane == .preview ? "globe.americas.fill" : "globe.americas")
-                }
-                .help(remoteReason ?? "Preview this session's dev server or any local page (⌥⌘P)")
-                .disabled(remoteReason != nil && model.sidePane != .preview)
-            }
-            ToolbarItem(placement: .primaryAction) { TasksToolbarButton() }
+            ToolbarItem(placement: .primaryAction) { SidePanePicker() }
             ToolbarItem(placement: .primaryAction) { PRToolbarButton() }
-            ToolbarItem(placement: .primaryAction) { OpenInMenu() }
         }
         .overlay(alignment: .bottomTrailing) {
             if let s = model.selectedSession, let u = s.local_url, model.offered[s.id] != u, model.sidePane != .preview {
@@ -510,6 +499,41 @@ struct Terminals: View {
             }
         }
         .animation(.spring(duration: 0.3), value: model.selectedSession?.local_url)
+    }
+}
+
+/// Changes, Preview and Tasks as one control: each shows its pane in place of the others.
+struct SidePanePicker: View {
+    @EnvironmentObject var model: DinoModel
+
+    var body: some View {
+        let session = model.selectedSession
+        let remote = session?.remoteReason
+        let running = session.map { $0.exited ? 0 : $0.tasks?.running ?? 0 } ?? 0
+        ControlGroup {
+            Button { model.showReview.toggle() } label: {
+                Label("Changes", systemImage: model.showReview ? "plusminus.circle.fill" : "plusminus.circle")
+            }
+            .help(remote ?? "Review this session's changes; click a line to comment for the agent (⇧⌘D)")
+            .disabled(session == nil || remote != nil)
+            .accessibilityValue(model.showReview ? "Shown" : "Hidden")
+            Button { model.togglePreview() } label: {
+                Label("Preview", systemImage: model.sidePane == .preview ? "globe.americas.fill" : "globe.americas")
+            }
+            .help(remote ?? "Preview this session's dev server or any local page (⌥⌘P)")
+            .disabled(remote != nil && model.sidePane != .preview)
+            .accessibilityValue(model.sidePane == .preview ? "Shown" : "Hidden")
+            Button { model.toggleTasks() } label: {
+                Label(running > 0 ? "Tasks, \(running) running" : "Tasks",
+                      systemImage: model.sidePane == .tasks ? "checklist.checked" : "checklist")
+            }
+            .help(running > 0
+                ? "\(running) running in the background: subagents and commands (⌥⌘T)"
+                : session?.reportsTasks == true ? "The agent's task list, subagents and background commands (⌥⌘T)" : "This session doesn't report tasks")
+            .disabled(!(session?.reportsTasks ?? false) && model.sidePane != .tasks)
+            .accessibilityValue(model.sidePane == .tasks ? "Shown" : "Hidden")
+        }
+        .controlGroupStyle(.navigation)
     }
 }
 
@@ -684,7 +708,8 @@ struct Sidebar: View {
                             let q = model.sidebarQuery.trimmingCharacters(in: .whitespaces)
                             Text(!q.isEmpty ? "No session matches “\(q)”"
                                 : narrowed ? "No sessions here"
-                                : filter == .needsYou ? "Nothing needs you" : "No \(filter.label.lowercased()) sessions")
+                                : filter == .needsYou ? "Nothing needs you"
+                                : filter == .done ? "Nothing new has finished" : "No \(filter.label.lowercased()) sessions")
                                 .font(.callout).foregroundStyle(.tertiary)
                         }
                     }
@@ -709,6 +734,7 @@ struct Sidebar: View {
                                     Button { model.newTask() } label: { Image(systemName: "plus") }
                                         .buttonStyle(.plain)
                                         .help("New Scheduled Task")
+                                        .accessibilityLabel("New Scheduled Task")
                                 }
                             }
                         }
@@ -727,24 +753,42 @@ struct Sidebar: View {
             // up to seconds while agents made worktrees): rows keep unique tags and stable
             // identities instead, so the list's own diff stays right.
             .listStyle(.sidebar)
-            WelcomeCard()
-            if !model.welcomeShowing {
-                UsagePanel()
-            }
+            UsagePanel()
         }
         .safeAreaInset(edge: .top) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    DinoMark(size: 15)
-                    Spacer()
-                    if filter != .archived, !model.sessions.isEmpty {
-                        Button { model.findingSessions = true } label: { Image(systemName: "magnifyingglass") }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                            .help("Find sessions (⇧⌘F)")
-                        ScopeMenu()
+                if filter == .archived {
+                    // A view of its own: a title and the way back, no status filters.
+                    HStack(spacing: 6) {
+                        Button { filter = .all } label: {
+                            Label("Sessions", systemImage: "chevron.backward").labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                        .help("Back to every session")
+                        Spacer()
                     }
-                    ArchiveToggle(filter: $filter)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Archived").font(.title3.weight(.semibold))
+                        Text("\(model.archived.count)").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isHeader)
+                } else {
+                    HStack {
+                        DinoMark(size: 15)
+                        Spacer()
+                        if !model.sessions.isEmpty {
+                            Button { model.findingSessions = true } label: { Image(systemName: "magnifyingglass") }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .help("Find sessions (⇧⌘F)")
+                                .accessibilityLabel("Find sessions")
+                            ScopeMenu()
+                        }
+                        ArchiveToggle(filter: $filter)
+                    }
                 }
                 if filter != .archived, model.findingSessions || !model.sidebarQuery.isEmpty {
                     SessionSearchField()
@@ -752,7 +796,7 @@ struct Sidebar: View {
                 if filter != .archived, model.sidebarScope != nil {
                     ScopeChip()
                 }
-                if !model.sessions.isEmpty || filter != .all {
+                if filter != .archived, !model.sessions.isEmpty || filter != .all {
                     FilterBar(filter: $filter)
                 }
             }
@@ -769,46 +813,61 @@ struct SessionRow: View {
     let session: SessionInfo
     let index: Int
     var stat: DiffStat?
+    /// The worktree's branch, on the row instead of a header above a single session.
+    var branch: String?
+    /// The repo or worktree it's filed under: a shell's folder shows only when it's somewhere else.
+    var root: String?
     @State private var hovering = false
 
     var body: some View {
         let status = model.status(of: session)
         VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 StatusDot(status: status)
-                SessionName(session: session, place: .sidebar, font: .system(.body, design: .monospaced).weight(.medium))
-                if session.pinned == true {
-                    Image(systemName: "pin.fill")
-                        .font(.caption2).foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(45))
-                        .help("Pinned: at the top of its group, and dino won't archive it on its own")
+                SessionName(session: session, place: .sidebar, font: .body.weight(.semibold))
+                    .layoutPriority(1)
+                if let branch {
+                    Text(branch)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 3))
+                        .help("Branch \(branch)\(root.map { "\n\($0)" } ?? "")")
                 }
                 if let task = session.scheduled {
                     Image(systemName: "clock")
                         .font(.caption).foregroundStyle(.tertiary)
                         .help("Started by the scheduled task “\(task)”")
+                        .accessibilityLabel("Scheduled by \(task)")
                 }
                 if let pr = model.pr(of: session) { PRChip(pr: pr, auto: session.auto) }
                 if let split = model.splits.first(where: { $0.contains(session.id) }) {
+                    let other = model.sessions.first { $0.id == split.other(session.id) }?.display ?? "another session"
                     Image(systemName: split.vertical ? "rectangle.split.1x2" : "rectangle.split.2x1")
                         .font(.caption).foregroundStyle(.tertiary)
-                        .help("In a split with \(model.sessions.first { $0.id == split.other(session.id) }?.name ?? "another session")")
+                        .help("In a split with \(other)")
+                        .accessibilityLabel("In a split with \(other)")
                 }
-                Spacer()
+                Spacer(minLength: 4)
+                if session.pinned == true {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(45))
+                        .help("Pinned: at the top of its group, and dino won't archive it on its own")
+                        .accessibilityLabel("Pinned")
+                }
                 if hovering, model.canArchive(session.id) {
                     // Where Claude desktop has it: on the row, under the pointer.
                     Button { model.archive(session.id) } label: { Image(systemName: "archivebox") }
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
                         .help("Archive: stop it and keep it under Archived, to pick up again (⇧⌘A)")
-                } else if status == .waiting, let on = session.waitingOn {
-                    Text("waiting on \(on)").font(.caption).foregroundStyle(status.color).lineLimit(1)
-                        .help("Its turn ended while these still run; it carries on when they finish")
-                } else if status == .idle || status == .done, let ports = session.serving {
-                    Text("serving :\(ports.replacingOccurrences(of: ", ", with: " :"))").font(.caption).foregroundStyle(SessionStatus.working.color).lineLimit(1)
-                        .help("Its turn is over; a server it started keeps running. Stop it from the session's menu.")
+                        .accessibilityLabel("Archive")
                 } else {
-                    Text(status.label).font(.caption).foregroundStyle(status.color)
+                    Text(status.label).font(.caption).foregroundStyle(status.color).lineLimit(1).fixedSize()
+                        .help(status.detail ?? status.label)
                 }
             }
             if let f = session.inside {
@@ -817,20 +876,19 @@ struct SessionRow: View {
                     Text(f.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 .help("\(f.agentName) started by hand in this shell")
-            } else if let here = session.shell_cwd {
-                HStack(spacing: 5) {
-                    Text(NSString(string: here).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.head)
-                    if let code = session.last_exit, code != 0 {
-                        Text("exit \(code)").foregroundStyle(SessionStatus.exited.color)
+            }
+            if detail != nil || modelText != nil {
+                HStack(spacing: 6) {
+                    if let detail { detail.lineLimit(1).truncationMode(.tail) }
+                    Spacer(minLength: 6)
+                    if let modelText {
+                        Text(modelText).font(.caption).foregroundStyle(.tertiary).lineLimit(1).fixedSize()
+                        if let ctx = session.contextUse {
+                            ContextRing(used: ctx.used, limit: ctx.limit, size: 10)
+                        }
                     }
                 }
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .help("Where this shell is now, and how its last command ended")
-            }
-            if let needs = session.needs {
-                Label(needs, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(SessionStatus.needsYou.color).lineLimit(1)
+                .help(usageHelp)
             }
             if let error = session.error {
                 ErrorLine(message: error)
@@ -839,26 +897,61 @@ struct SessionRow: View {
             if let stat, stat.files > 0 {
                 StatText(stat: stat).font(.caption.monospacedDigit())
             }
-            if session.requests > 0 {
-                HStack(spacing: 6) {
-                    if let tier = session.tier {
-                        Text("\(tier) → \(shortModel(session.last_model))").foregroundStyle(SessionStatus.done.color)
-                    } else {
-                        Text(shortModel(session.last_model))
-                    }
-                    Spacer()
-                    if let ctx = session.contextUse {
-                        ContextRing(used: ctx.used, limit: ctx.limit, size: 10)
-                    }
-                    Text("↑\(tokens(session.input_tokens)) ↓\(tokens(session.output_tokens))")
-                }
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
         }
         .padding(.vertical, 3)
         .onHover { hovering = $0 }
+    }
+
+    /// The one thing worth a second line: what it's asking, what it waits on, a server it left
+    /// running, or where a shell has gone.
+    private var detail: Text? {
+        let status = model.status(of: session)
+        if let needs = session.needs {
+            return Text(needs).font(.caption).foregroundStyle(SessionStatus.needsYou.color)
+        }
+        if status == .waiting, let on = session.waitingOn {
+            return Text("Waiting on \(on)").font(.caption).foregroundStyle(.secondary)
+        }
+        if status == .idle || status == .done, let ports = session.serving {
+            return Text("Serving :\(ports.replacingOccurrences(of: ", ", with: " :"))").font(.caption).foregroundStyle(.secondary)
+        }
+        if let here = shellPlace {
+            let path = Text(here).font(.caption.monospaced()).foregroundStyle(.secondary)
+            guard let code = session.last_exit, code != 0 else { return path }
+            return path + Text("  exit \(code)").font(.caption.monospaced()).foregroundStyle(SessionStatus.exited.color)
+        }
+        if let code = session.last_exit, code != 0, session.inside == nil {
+            return Text("exit \(code)").font(.caption.monospaced()).foregroundStyle(SessionStatus.exited.color)
+        }
+        if status == .thinking { return Text("Thinking").font(.caption).foregroundStyle(.secondary) }
+        return nil
+    }
+
+    /// A shell's folder when it isn't the place it's filed under: relative inside it, else in full.
+    private var shellPlace: String? {
+        guard session.inside == nil, let here = session.shell_cwd else { return nil }
+        let base = root ?? session.cwd
+        if let base, here == base { return nil }
+        if let base, SessionTree.contains(base, here) { return String(here.dropFirst(base.count + 1)) }
+        return NSString(string: here).abbreviatingWithTildeInPath
+    }
+
+    private var modelText: String? {
+        guard session.requests > 0, session.last_model != nil else { return nil }
+        let m = shortModel(session.last_model)
+        return session.tier.map { "\($0) → \(m)" } ?? m
+    }
+
+    private var usageHelp: String {
+        var lines: [String] = []
+        if let m = session.last_model { lines.append(m) }
+        if session.requests > 0 {
+            lines.append("↑\(tokens(session.input_tokens)) in · ↓\(tokens(session.output_tokens)) out, \(session.requests) request\(session.requests == 1 ? "" : "s")")
+        }
+        if let ctx = session.contextUse {
+            lines.append("Context \(tokens(ctx.used)) of \(tokens(ctx.limit))")
+        }
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -902,6 +995,10 @@ struct StatusDot: View {
             }
         }
         .frame(width: 14, height: 14)
+        .help(status.detail ?? status.label)
+        .accessibilityElement()
+        .accessibilityLabel(status.label)
+        .accessibilityValue(status.detail ?? "")
     }
 }
 
@@ -970,10 +1067,22 @@ final class PulseView: NSView {
     }
 }
 
+/// Usage at the foot of the sidebar: one line with the fullest window, opening to all of them.
 struct UsagePanel: View {
     @EnvironmentObject var model: DinoModel
+    @AppStorage("usage.open") private var open = false
+    private static let names = ["anthropic": "Claude", "chatgpt": "Codex"]
+
+    private var windows: [(label: String, window: WindowInfo)] {
+        model.quotas.flatMap { q in
+            q.windows.filter { $0.name.hasSuffix("h") || $0.name.hasSuffix("d") }
+                .map { ("\(Self.names[q.provider] ?? q.provider) \($0.name)", $0) }
+        }
+    }
 
     var body: some View {
+        let windows = windows
+        let fullest = windows.max { $0.window.utilization < $1.window.utilization }
         VStack(alignment: .leading, spacing: 8) {
             if model.power?.holding == true {
                 Label("Awake with the lid closed", systemImage: "laptopcomputer")
@@ -981,28 +1090,60 @@ struct UsagePanel: View {
                     .foregroundStyle(.secondary)
                     .help("dino turned system sleep off while agents work; it comes back when they're done (Settings → General)")
             }
-            Text("USAGE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            let labels = ["anthropic": "Claude", "chatgpt": "Codex"]
-            ForEach(model.quotas, id: \.provider) { q in
-                ForEach(q.windows.filter { $0.name.hasSuffix("h") || $0.name.hasSuffix("d") }, id: \.name) { w in
-                    QuotaBar(label: "\(labels[q.provider] ?? q.provider) \(w.name)", window: w)
+            Button { withAnimation(.easeOut(duration: 0.15)) { open.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .foregroundStyle(.tertiary)
+                    Text("Usage").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    if !open, let fullest {
+                        // The window closest to its limit is the one that stops work.
+                        let pct = Double(fullest.window.utilization)
+                        ProgressView(value: min(max(pct, 0), 1)).tint(QuotaBar.color(pct)).controlSize(.mini)
+                        Text("\(Int((pct * 100).rounded()))%").font(.caption.monospacedDigit()).foregroundStyle(QuotaBar.color(pct))
+                    } else {
+                        Spacer(minLength: 0)
+                    }
                 }
+                .contentShape(Rectangle())
             }
-            if model.quotas.isEmpty {
-                Text("No quota data yet").font(.caption).foregroundStyle(.tertiary)
-            }
-            let free = model.sessions.filter { $0.tier != nil }.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens }
-            if free > 0 {
-                HStack {
-                    Text("Free models").foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(tokens(free)) tok")
-                    Text("$0.00").foregroundStyle(Brand.green)
+            .buttonStyle(.plain)
+            .help(fullest.map { "\($0.label): \(Int((Double($0.window.utilization) * 100).rounded()))% used. Click for every window." } ?? "Your plans' usage windows")
+            .accessibilityLabel("Usage")
+            .accessibilityValue(fullest.map { "\($0.label) \(Int((Double($0.window.utilization) * 100).rounded())) percent" } ?? "No data yet")
+            .accessibilityHint(open ? "Collapses usage" : "Shows every usage window")
+            if open {
+                ForEach(windows, id: \.label) { w in
+                    QuotaBar(label: w.label, window: w.window)
                 }
-                .font(.caption.monospacedDigit())
+                if windows.isEmpty {
+                    Text("No quota data yet").font(.caption).foregroundStyle(.tertiary)
+                }
+                let used = model.sessions.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens }
+                if used > 0 {
+                    HStack {
+                        Text("Open sessions").foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(tokens(used)) tok")
+                    }
+                    .font(.caption.monospacedDigit())
+                    .help("Tokens in and out across the sessions in the sidebar; each row's tooltip has its own")
+                }
+                let free = model.sessions.filter { $0.tier != nil }.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens }
+                if free > 0 {
+                    HStack {
+                        Text("Free models").foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(tokens(free)) tok")
+                        Text("$0.00").foregroundStyle(Brand.green)
+                    }
+                    .font(.caption.monospacedDigit())
+                }
             }
         }
-        .padding(14)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
     }
@@ -1014,7 +1155,7 @@ struct QuotaBar: View {
 
     var body: some View {
         let pct = Double(window.utilization)
-        let color: Color = pct < 0.6 ? Brand.green : pct < 0.85 ? SessionStatus.needsYou.color : SessionStatus.exited.color
+        let color = Self.color(pct)
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text(label)
@@ -1027,6 +1168,10 @@ struct QuotaBar: View {
             .font(.caption.monospacedDigit())
             ProgressView(value: min(max(pct, 0), 1)).tint(color).controlSize(.small)
         }
+    }
+
+    static func color(_ pct: Double) -> Color {
+        pct < 0.6 ? Color(nsColor: .systemGreen) : pct < 0.85 ? SessionStatus.needsYou.color : SessionStatus.exited.color
     }
 }
 

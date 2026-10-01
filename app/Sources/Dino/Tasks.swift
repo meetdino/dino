@@ -45,33 +45,6 @@ extension DinoModel {
     }
 }
 
-/// The toolbar's Tasks toggle, with how many subagents and commands are running.
-struct TasksToolbarButton: View {
-    @EnvironmentObject var model: DinoModel
-
-    var body: some View {
-        if let s = model.selectedSession, s.reportsTasks {
-            let running = s.exited ? 0 : s.tasks?.running ?? 0
-            let shown = model.sidePane == .tasks
-            Button { model.toggleTasks() } label: {
-                if running > 0 {
-                    Label {
-                        Text("\(running)")
-                    } icon: {
-                        Image(systemName: "checklist").foregroundStyle(Brand.green)
-                    }
-                    .labelStyle(.titleAndIcon)
-                } else {
-                    Label("Tasks", systemImage: shown ? "checklist.checked" : "checklist")
-                }
-            }
-            .help(running > 0
-                ? "\(running) running in the background: subagents and commands (⌥⌘T)"
-                : "The agent's task list, subagents and background commands (⌥⌘T)")
-        }
-    }
-}
-
 struct TasksPane: View {
     @EnvironmentObject var model: DinoModel
     let session: SessionInfo?
@@ -98,22 +71,11 @@ struct TasksPane: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checklist").foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Tasks").font(.headline)
-                if let session {
-                    Text(session.display).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            Spacer(minLength: 8)
-            Button { model.closeSidePane() } label: { Image(systemName: "xmark") }
-                .buttonStyle(.borderless)
-                .help("Close (⌥⌘T, ⌘W or Esc)")
+        SidePaneHeader(title: "Tasks", subtitle: session?.display, closeHelp: "Close (⌥⌘T, ⌘W or Esc)", close: { model.closeSidePane() }) {
+            Image(systemName: "checklist")
+        } trailing: {
+            EmptyView()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var empty: some View {
