@@ -1151,13 +1151,25 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
             // A dev server the agent started, or told the user about: the app offers a preview.
             // Only up to the last space, so an address split across two chunks is read whole, from
             // the next one with the unread tail in front.
-            let text = format!("{tail}{}", preview::strip_ansi(&String::from_utf8_lossy(bytes)));
-            let done = text.char_indices().rfind(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8());
-            if let Some(found) = dino_core::preview::find_local_url(&text[..done]) {
-                *url.lock().unwrap() = Some(found);
+            // Every address it looks for starts with "http": output without one (almost all of
+            // it) only keeps its last word, in case an address starts there.
+            let edge: Vec<u8> = tail.bytes().rev().take(3).collect::<Vec<_>>().into_iter().rev().chain(bytes.iter().take(3).copied()).collect();
+            if tail.contains("http") || memchr::memmem::find(bytes, b"http").is_some() || memchr::memmem::find(&edge, b"http").is_some() {
+                let text = format!("{tail}{}", preview::strip_ansi(&String::from_utf8_lossy(bytes)));
+                let done = text.char_indices().rfind(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8());
+                if let Some(found) = dino_core::preview::find_local_url(&text[..done]) {
+                    *url.lock().unwrap() = Some(found);
+                }
+                let rest = &text[done..];
+                tail = if rest.len() > 256 { String::new() } else { rest.to_string() };
+            } else {
+                let from = bytes.len().saturating_sub(300);
+                let last = bytes[from..].iter().rposition(|b| b.is_ascii_whitespace()).map_or(from, |i| from + i + 1);
+                let word = preview::strip_ansi(&String::from_utf8_lossy(&bytes[last..]));
+                // No space at all: the word goes on from the last chunk's.
+                let whole = if last == 0 { format!("{tail}{word}") } else { word };
+                tail = if (last == from && from > 0) || whole.len() > 256 { String::new() } else { whole };
             }
-            let rest = &text[done..];
-            tail = if rest.len() > 256 { String::new() } else { rest.to_string() };
         }
         // An empty chunk means EOF; it's forwarded so clients learn the session ended.
         subs.lock().unwrap().retain(|(_, tx)| tx.send(bytes.to_vec()).is_ok());
@@ -1504,17 +1516,27 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
             let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
             return;
         }
-        while let Ok(bytes) = rx.recv() {
-            if bytes.is_empty() {
+        while let Ok(mut bytes) = rx.recv() {
+            // What else came while the last frame went out goes in one frame: a burst of output
+            // costs a few writes and client wakeups, not one per read from the PTY.
+            let mut ended = bytes.is_empty();
+            while !ended && bytes.len() < 256 << 10 {
+                match rx.try_recv() {
+                    Ok(more) if more.is_empty() => ended = true,
+                    Ok(more) => bytes.extend_from_slice(&more),
+                    Err(_) => break,
+                }
+            }
+            if !bytes.is_empty() && ipc::write_frame(&mut out, ipc::DATA, &bytes).is_err() {
+                break;
+            }
+            if ended {
                 // A fullscreen agent ends on its last screen, not the one it switched back to.
                 if s2.pane.shared.kept_alt.load(Ordering::Relaxed) {
                     let screen = [b"\x1b[H\x1b[2J\x1b[3J".as_slice(), &s2.pane.replay(REPLAY_HISTORY)].concat();
                     let _ = ipc::write_frame(&mut out, ipc::DATA, &screen);
                 }
                 let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
-                break;
-            }
-            if ipc::write_frame(&mut out, ipc::DATA, &bytes).is_err() {
                 break;
             }
         }
