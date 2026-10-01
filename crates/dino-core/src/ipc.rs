@@ -169,6 +169,15 @@ pub enum Request {
     ConnectProvider { provider: String },
     /// Forget the key dino got for it.
     DisconnectProvider { provider: String },
+    /// The dino account and settings sync. `action`: `status`, `login` (`value`: the server, else
+    /// the configured one), `login_device`, `join` (`value`: the recovery key), `resolve`
+    /// (`value`: `cloud`, `local` or `merge`), `now`, `reset`, `undo`, `keys` (`value`: `on`/`off`),
+    /// `ack_recovery`, `logout`. Replies `Sync`, or `Connect` with the page to open for `login`.
+    Sync {
+        action: String,
+        #[serde(default)]
+        value: Option<String>,
+    },
     /// What a PR from the session's branch would hold, to fill the Create PR form.
     PrDraft { id: String },
     /// Commit what's uncommitted as `title`, push the session's branch, and open a PR into `base`.
@@ -274,6 +283,7 @@ pub enum Response {
     Providers { providers: Vec<crate::providers::ProviderInfo> },
     /// Open this page to go on.
     Connect { url: String },
+    Sync { status: SyncStatus },
     /// `loading`: dinod is asking the provider now; ask again for what it says.
     Models { provider: String, models: Vec<ModelRow>, loading: bool, error: Option<String> },
     PrDraft { draft: PrDraft },
@@ -291,6 +301,37 @@ pub enum Response {
     Subagent { subagent: SubagentView },
     Ok,
     Error { message: String },
+}
+
+/// The dino account on this Mac and where settings sync stands.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct SyncStatus {
+    /// `signed_out`, `signing_in`, `needs_key` (the recovery key, to read the settings),
+    /// `conflict` (this Mac and the account differ: choose), `ready`.
+    pub phase: String,
+    pub server: String,
+    pub email: Option<String>,
+    /// Where the account's web page is (devices, what's stored, export, delete).
+    pub account_url: Option<String>,
+    /// Unix seconds of the last exchange with the server.
+    pub last_sync: Option<u64>,
+    /// Changes made here, not yet taken by the server.
+    pub pending: usize,
+    /// Synced settings on this Mac.
+    pub synced: usize,
+    /// API keys in dino's key store sync too.
+    pub key_sync: bool,
+    /// Shown once, right after this Mac created the account's key.
+    pub recovery_key: Option<String>,
+    /// For `login_device`: the code to enter and where.
+    pub device_code: Option<String>,
+    pub device_url: Option<String>,
+    /// When `phase` is `conflict`: settings only here, only in the account, and set differently.
+    pub conflict: Option<(usize, usize, usize)>,
+    /// Earlier versions of `settings.toml` kept before a sync changed it (newest first).
+    pub snapshots: usize,
+    /// What went wrong, or what happened that the person should know (signed out elsewhere).
+    pub message: Option<String>,
 }
 
 /// One agent in Settings → Agents. The commands are the agent's own; dino runs them in a shell.
