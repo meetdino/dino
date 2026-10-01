@@ -10,15 +10,18 @@ struct DinoApp: App {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        WindowGroup("dino") {
+        WindowGroup("dino", id: "main") {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 820, minHeight: 480)
                 .onAppear {
                     delegate.model = model
+                    delegate.reopenWindow = { openWindow(id: "main") }
                     Notifier.onOpenSession = { model.select($0) }
                     Notifier.setUp()
                     model.start()
+                    // Back in a reopened window: the session you had keeps the keyboard.
+                    if let id = model.selected { model.select(id) }
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -246,7 +249,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { true }
+    // Closing the window (⌘W with nothing else to close) hides it, as in Ghostty: dino keeps running
+    // and clicking its Dock icon brings the window back. Quitting is ⌘Q.
+    func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { false }
+
+    /// Opens the main window again; set once the first one has appeared.
+    var reopenWindow: (() -> Void)?
+
+    /// Clicking the Dock icon with the window closed brings it back.
+    func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows visible: Bool) -> Bool {
+        if !visible { reopenWindow?() }
+        return true
+    }
 
     weak var model: DinoModel? {
         didSet {

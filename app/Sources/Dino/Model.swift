@@ -186,7 +186,12 @@ final class DinoModel: ObservableObject {
     private(set) var connection: DinoConnection?
     private var polling = false
 
+    private var started = false
+
+    /// Connects to dinod and starts listening; a window opened again later reuses it.
     func start() {
+        guard !started else { return }
+        started = true
         Task.detached {
             do {
                 try DinoEnvironment.ensureDaemon()
