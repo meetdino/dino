@@ -1,5 +1,5 @@
 {
-  "about": "dino-sync test vectors. Records are PASETO v4.local with footer {\"kid\":…} and implicit assertion JSON [account, collection, key, schema].",
+  "about": "dino-sync test vectors, protocol 2. Records are PASETO v4.local with footer {\"kid\":…} and implicit assertion JSON [account, collection, key, schema, wall_ms, counter, device, deleted]; a delete seals the payload \"deleted\". Approval: commitment = BLAKE2b-256 and code = BLAKE2b-64 mod 10^6, each over length-prefixed (u64 LE) parts, as in src/approval.rs.",
   "account_key": {
     "id": "k_0102030405060708",
     "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
@@ -7,19 +7,49 @@
   "records": [
     {
       "account": "acct_0001",
-      "collection": "agents",
-      "key": "claude.mode",
-      "schema": 1,
       "plaintext": "\"plan\"",
-      "token": "v4.local.M-BcQ45loHQrEIQIUia9Ci5CHi3qW5ptLWrt4jbN8IwIId4wv7hnvsCRE5hyYijJa6VU3PGjA0UywyQOLOcdSwpYuT4X-Q.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ"
+      "record": {
+        "collection": "agents",
+        "key": "claude.mode",
+        "hlc": {
+          "wall_ms": 1790000000000,
+          "counter": 0,
+          "device": "d_approver"
+        },
+        "schema": 1,
+        "value": "v4.local.HGwHgEC9NvgoUu3hHmVYV2MRSaPrbK8Ll69gVKI0qkFXqxl0PgQ8-zUjRB7XSRcYS5oK0opk6fsRQnPZURxRS3T_NaT5hA.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ"
+      }
     },
     {
       "account": "acct_0001",
-      "collection": "keys",
-      "key": "OPENROUTER_API_KEY",
-      "schema": 1,
       "plaintext": "\"sk-or-v1-example\"",
-      "token": "v4.local.j-vBm_0mNQCv49sMDiBpTkx4cc8F8r18SOtO2jWIZeBxR1M-83nSHz-CMZBhvux9Z1QfuvP0gtlGfKOn8Wet_rjX8q_ffBwnRdG4OoRBdSrZGg.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ"
+      "record": {
+        "collection": "keys",
+        "key": "OPENROUTER_API_KEY",
+        "hlc": {
+          "wall_ms": 1790000000123,
+          "counter": 2,
+          "device": "d_a"
+        },
+        "schema": 1,
+        "value": "v4.local.3dDPDXLeMTlnO3-DSGvvD2HwTQRdDTUWUnfgZg2A9MJes-fXsCwNROFpHnuKFQgtXm6qWDpwKfKcf1kVa9rU7iqULoqdq2J5Uke_cnt03D36BQ.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ"
+      }
+    },
+    {
+      "account": "acct_0001",
+      "plaintext": null,
+      "record": {
+        "collection": "policies",
+        "key": "allow_bypass",
+        "hlc": {
+          "wall_ms": 1790000000456,
+          "counter": 0,
+          "device": "d_b"
+        },
+        "schema": 1,
+        "value": "v4.local.4HlwMzFk_1WZm2M7ePN_P3rErTCHHODNxp46x-V694Wm4euGUZtKEkE0Jv3leErxpXfxBI93jPvdD2UVQjzSkcaa2JoGEgY.eyJraWQiOiJrXzAxMDIwMzA0MDUwNjA3MDgifQ",
+        "deleted": true
+      }
     }
   ],
   "approval": {
@@ -28,7 +58,10 @@
     "approver_public": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo",
     "new_device_secret_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
     "new_device_public": "ST6C_HRGSlkmiBdiPSBTxeuOLMSpiLT-4XnsawENUx0",
-    "code": "25-33-07",
+    "new_device_nonce": "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8",
+    "commitment": "HKs2ZoCotNGIba4-fbM73EXwvmfCVOfol4wl2HkfO-g",
+    "approver_nonce": "wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t8",
+    "code": "95-37-38",
     "grant": {
       "from": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo",
       "nonce": "8qdpgN_HpJJLMmoSnp58fuOB_4yqLk_R",

@@ -2,10 +2,14 @@
 //! protocol elsewhere: encrypted records, device approval and the recovery key.
 //!
 //! `DINO_SYNC_WRITE_VECTORS=1 cargo test -p dino-sync --test vectors -- --ignored` writes a new
-//! file; encryption nonces are random, so tokens change but must keep opening.
+//! file; encryption and approval nonces are random, so tokens, the commitment and the code change
+//! but must keep holding.
 
-use dino_sync::approval::{DeviceKeys, Grant, approval_code};
-use dino_sync::crypto::AccountKey;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use dino_sync::approval::{Commitment, DeviceKeys, Grant, Response, Reveal, approval_code, verify_reveal};
+use dino_sync::crypto::{AccountKey, CryptoError};
+use dino_sync::hlc::Hlc;
 use dino_sync::record::{Record, RecordId};
 use dino_sync::recovery::RecoveryKey;
 use rand_chacha::ChaCha20Rng;
@@ -30,6 +34,10 @@ fn recovery() -> RecoveryKey {
     RecoveryKey::generate_with(&mut ChaCha20Rng::from_seed([7; 32]))
 }
 
+fn stamp(wall_ms: u64, counter: u32, device: &str) -> Hlc {
+    Hlc { wall_ms, counter, device: device.into() }
+}
+
 #[test]
 #[ignore]
 fn write_vectors() {
@@ -37,14 +45,20 @@ fn write_vectors() {
         return;
     }
     let key = account_key();
-    let records: Vec<Value> = [(RecordId::new("agents", "claude.mode"), 1, "\"plan\""), (RecordId::new("keys", "OPENROUTER_API_KEY"), 1, "\"sk-or-v1-example\"")]
-        .into_iter()
-        .map(|(id, schema, plain)| json!({"account": ACCOUNT, "collection": id.collection, "key": id.key, "schema": schema, "plaintext": plain, "token": key.seal(ACCOUNT, &id, schema, plain).unwrap()}))
-        .collect();
+    let records: Vec<Value> = [
+        (RecordId::new("agents", "claude.mode"), stamp(1790000000000, 0, "d_approver"), Some("\"plan\"")),
+        (RecordId::new("keys", "OPENROUTER_API_KEY"), stamp(1790000000123, 2, "d_a"), Some("\"sk-or-v1-example\"")),
+        (RecordId::new("policies", "allow_bypass"), stamp(1790000000456, 0, "d_b"), None),
+    ]
+    .into_iter()
+    .map(|(id, hlc, plain)| json!({"account": ACCOUNT, "plaintext": plain, "record": key.seal_record(ACCOUNT, id, hlc, 1, plain).unwrap()}))
+    .collect();
+    let (commitment, reveal) = newcomer().commit(ACCOUNT, &mut ChaCha20Rng::from_seed([3; 32]));
+    let response = approver().respond(&mut ChaCha20Rng::from_seed([4; 32]));
     let grant = approver().grant(&newcomer().public(), ACCOUNT, &key, &mut ChaCha20Rng::from_seed([9; 32])).unwrap();
     let r = recovery();
     let file = json!({
-        "about": "dino-sync test vectors. Records are PASETO v4.local with footer {\"kid\":…} and implicit assertion JSON [account, collection, key, schema].",
+        "about": "dino-sync test vectors, protocol 2. Records are PASETO v4.local with footer {\"kid\":…} and implicit assertion JSON [account, collection, key, schema, wall_ms, counter, device, deleted]; a delete seals the payload \"deleted\". Approval: commitment = BLAKE2b-256 and code = BLAKE2b-64 mod 10^6, each over length-prefixed (u64 LE) parts, as in src/approval.rs.",
         "account_key": {"id": key.id, "hex": hex(key.bytes())},
         "records": records,
         "approval": {
@@ -53,7 +67,10 @@ fn write_vectors() {
             "approver_public": approver().public(),
             "new_device_secret_hex": hex(newcomer().secret_bytes().as_ref()),
             "new_device_public": newcomer().public(),
-            "code": approval_code(ACCOUNT, &newcomer().public(), &approver().public()),
+            "new_device_nonce": reveal.nonce,
+            "commitment": commitment.hash,
+            "approver_nonce": response.nonce,
+            "code": approval_code(ACCOUNT, &reveal, &response).unwrap(),
             "grant": grant,
         },
         "recovery": {
@@ -73,21 +90,39 @@ fn published_vectors_hold() {
     assert_eq!(v["account_key"]["id"], key.id.as_str());
     assert_eq!(v["account_key"]["hex"], hex(key.bytes()).as_str());
 
-    for r in v["records"].as_array().unwrap() {
-        let id = RecordId::new(r["collection"].as_str().unwrap(), r["key"].as_str().unwrap());
-        let schema = r["schema"].as_u64().unwrap() as u32;
-        let token = r["token"].as_str().unwrap();
-        assert_eq!(key.open(ACCOUNT, &id, schema, token).unwrap(), r["plaintext"].as_str().unwrap());
-        // Bound to its place: another setting, schema or account doesn't open it.
-        assert!(key.open(ACCOUNT, &RecordId::new("agents", "codex.mode"), schema, token).is_err());
-        assert!(key.open(ACCOUNT, &id, schema + 1, token).is_err());
-        assert!(key.open("acct_other", &id, schema, token).is_err());
+    let records = v["records"].as_array().unwrap();
+    assert!(records.iter().any(|r| r["record"]["deleted"] == true), "a delete is among the vectors");
+    for r in records {
+        let record: Record = serde_json::from_value(r["record"].clone()).unwrap();
+        let plaintext = r["plaintext"].as_str().map(str::to_string);
+        assert_eq!(record.is_tombstone(), plaintext.is_none());
+        assert_eq!(key.open_record(ACCOUNT, &record), Ok(plaintext));
+        // Bound to everything the record says: another setting, schema, stamp, delete flag or
+        // account doesn't open it.
+        let h = &record.hlc;
+        let tampered = [
+            Record { id: RecordId::new("agents", "codex.mode"), ..record.clone() },
+            Record { schema: record.schema + 1, ..record.clone() },
+            Record { hlc: Hlc { wall_ms: h.wall_ms + 1, ..h.clone() }, ..record.clone() },
+            Record { hlc: Hlc { counter: h.counter + 1, ..h.clone() }, ..record.clone() },
+            Record { hlc: Hlc { device: "d_other".into(), ..h.clone() }, ..record.clone() },
+            Record { deleted: !record.deleted, ..record.clone() },
+        ];
+        for t in &tampered {
+            assert_eq!(key.open_record(ACCOUNT, t), Err(CryptoError::Invalid), "{t:?}");
+        }
+        assert_eq!(key.open_record("acct_other", &record), Err(CryptoError::Invalid));
     }
 
     let a = &v["approval"];
     assert_eq!(a["approver_public"], approver().public().as_str());
     assert_eq!(a["new_device_public"], newcomer().public().as_str());
-    assert_eq!(a["code"], approval_code(ACCOUNT, &newcomer().public(), &approver().public()).as_str());
+    let reveal = Reveal { public: newcomer().public(), nonce: a["new_device_nonce"].as_str().unwrap().into() };
+    let response = Response { public: approver().public(), nonce: a["approver_nonce"].as_str().unwrap().into() };
+    let commitment = Commitment { hash: a["commitment"].as_str().unwrap().into() };
+    assert_eq!(Commitment::of(ACCOUNT, &reveal).unwrap(), commitment);
+    verify_reveal(ACCOUNT, &commitment, &reveal).unwrap();
+    assert_eq!(a["code"], approval_code(ACCOUNT, &reveal, &response).unwrap().as_str());
     let grant: Grant = serde_json::from_value(a["grant"].clone()).unwrap();
     // The box is deterministic for a given nonce: the same inputs make the same grant.
     let again = approver().grant(&newcomer().public(), ACCOUNT, &key, &mut ChaCha20Rng::from_seed([9; 32])).unwrap();
@@ -105,6 +140,117 @@ fn published_vectors_hold() {
     assert_eq!(got.bytes(), key.bytes());
 }
 
+/// JSON through the server and back, as each message travels.
+fn relay<T: serde::Serialize + serde::de::DeserializeOwned>(message: &T) -> T {
+    serde_json::from_str(&serde_json::to_string(message).unwrap()).unwrap()
+}
+
+#[test]
+fn approval_in_order_gives_both_screens_the_same_code() {
+    let key = account_key();
+    let (a, n) = (approver(), newcomer());
+    // 1. The new device commits; it keeps the reveal back.
+    let (commitment, reveal) = n.commit(ACCOUNT, &mut ChaCha20Rng::from_seed([5; 32]));
+    let at_approver = relay(&commitment);
+    // 2. The approver answers with its key and a fresh nonce.
+    let response = a.respond(&mut ChaCha20Rng::from_seed([6; 32]));
+    let at_new = relay(&response);
+    // 3. Only now the new device reveals; 4. the approver checks it, and both show the code.
+    let revealed = relay(&reveal);
+    verify_reveal(ACCOUNT, &at_approver, &revealed).unwrap();
+    let on_approver = approval_code(ACCOUNT, &revealed, &response).unwrap();
+    let on_new = approval_code(ACCOUNT, &reveal, &at_new).unwrap();
+    assert_eq!(on_approver, on_new);
+    assert_eq!(on_approver.len(), 8);
+    // 5. The person matched the codes: the grant goes to the revealed key, from the responding one.
+    let grant = relay(&a.grant(&revealed.public, ACCOUNT, &key, &mut ChaCha20Rng::from_seed([7; 32])).unwrap());
+    let got = n.accept(&grant, &at_new.public, ACCOUNT).unwrap();
+    assert_eq!(got.bytes(), key.bytes());
+    // Every commitment has its own nonce.
+    let (again, _) = n.commit(ACCOUNT, &mut ChaCha20Rng::from_seed([8; 32]));
+    assert_ne!(again, commitment);
+}
+
+#[test]
+fn a_key_swapped_after_the_commitment_is_caught() {
+    let v: Value = serde_json::from_str(include_str!("vectors.json")).unwrap();
+    let a = &v["approval"];
+    let mallory = DeviceKeys::from_secret([0x11; 32]);
+    let reveal = Reveal { public: newcomer().public(), nonce: a["new_device_nonce"].as_str().unwrap().into() };
+    let response = Response { public: approver().public(), nonce: a["approver_nonce"].as_str().unwrap().into() };
+    let commitment = Commitment::of(ACCOUNT, &reveal).unwrap();
+    // The server relays the commitment, sees the approver's nonce, then swaps in a key of its own
+    // (chosen, with its nonce, so the code comes out the same): the commitment gives it away.
+    let swapped = Reveal { public: mallory.public(), ..reveal.clone() };
+    assert_eq!(verify_reveal(ACCOUNT, &commitment, &swapped), Err(CryptoError::Invalid));
+    let renonced = Reveal { nonce: response.nonce.clone(), ..reveal.clone() };
+    assert_eq!(verify_reveal(ACCOUNT, &commitment, &renonced), Err(CryptoError::Invalid));
+    assert_eq!(verify_reveal("acct_other", &commitment, &reveal), Err(CryptoError::Invalid));
+    assert!(verify_reveal(ACCOUNT, &Commitment { hash: "not base64!".into() }, &reveal).is_err());
+    // A commitment of its own made up front verifies, but then its code is a one-in-a-million
+    // guess made before the approver's nonce existed.
+    let (m_commitment, m_reveal) = mallory.commit(ACCOUNT, &mut ChaCha20Rng::from_seed([1; 32]));
+    verify_reveal(ACCOUNT, &m_commitment, &m_reveal).unwrap();
+    assert_eq!(verify_reveal(ACCOUNT, &m_commitment, &reveal), Err(CryptoError::Invalid));
+}
+
+#[test]
+fn every_key_and_nonce_changes_the_code() {
+    let v: Value = serde_json::from_str(include_str!("vectors.json")).unwrap();
+    let a = &v["approval"];
+    let mallory = DeviceKeys::from_secret([0x11; 32]).public();
+    let reveal = Reveal { public: newcomer().public(), nonce: a["new_device_nonce"].as_str().unwrap().into() };
+    let response = Response { public: approver().public(), nonce: a["approver_nonce"].as_str().unwrap().into() };
+    let code = approval_code(ACCOUNT, &reveal, &response).unwrap();
+    let flip = |nonce: &str| {
+        let mut b = B64.decode(nonce).unwrap();
+        b[0] ^= 1;
+        B64.encode(b)
+    };
+    // Each checked against the Python reference that wrote the vectors: none collides.
+    let changed = [
+        approval_code(ACCOUNT, &Reveal { nonce: flip(reveal.nonce.as_str()), ..reveal.clone() }, &response),
+        approval_code(ACCOUNT, &reveal, &Response { nonce: flip(response.nonce.as_str()), ..response.clone() }),
+        approval_code(ACCOUNT, &Reveal { public: mallory.clone(), ..reveal.clone() }, &response),
+        approval_code(ACCOUNT, &reveal, &Response { public: mallory.clone(), ..response.clone() }),
+        approval_code("acct_other", &reveal, &response),
+        approval_code(ACCOUNT, &Reveal { public: response.public.clone(), nonce: response.nonce.clone() }, &Response { public: reveal.public.clone(), nonce: reveal.nonce.clone() }),
+    ];
+    for c in changed {
+        assert_ne!(c.unwrap(), code);
+    }
+    // Malformed nonces and one key in both roles don't make a code at all.
+    assert!(approval_code(ACCOUNT, &Reveal { nonce: "AAAA".into(), ..reveal.clone() }, &response).is_err());
+    assert!(approval_code(ACCOUNT, &reveal, &Response { public: reveal.public.clone(), ..response.clone() }).is_err());
+}
+
+#[test]
+fn small_order_keys_are_refused() {
+    let key = account_key();
+    let (a, n) = (approver(), newcomer());
+    let order_8: [u8; 32] = [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00,
+    ];
+    let mut zero_high_bit = [0u8; 32];
+    zero_high_bit[31] = 0x80;
+    let mut p_minus_1 = [0xffu8; 32];
+    p_minus_1[0] = 0xec;
+    p_minus_1[31] = 0x7f;
+    let mut one = [0u8; 32];
+    one[0] = 1;
+    let grant = a.grant(&n.public(), ACCOUNT, &key, &mut ChaCha20Rng::from_seed([1; 32])).unwrap();
+    let response = a.respond(&mut ChaCha20Rng::from_seed([2; 32]));
+    for bad in [[0u8; 32], one, order_8, p_minus_1, zero_high_bit] {
+        let bad = B64.encode(bad);
+        assert!(a.grant(&bad, ACCOUNT, &key, &mut ChaCha20Rng::from_seed([3; 32])).is_err());
+        assert!(n.accept(&Grant { from: bad.clone(), ..grant.clone() }, &bad, ACCOUNT).is_err());
+        let reveal = Reveal { public: bad.clone(), nonce: response.nonce.clone() };
+        assert!(Commitment::of(ACCOUNT, &reveal).is_err());
+        assert!(approval_code(ACCOUNT, &reveal, &response).is_err());
+        assert!(approval_code(ACCOUNT, &Reveal { public: n.public(), nonce: response.nonce.clone() }, &Response { public: bad, ..response.clone() }).is_err());
+    }
+}
+
 #[test]
 fn approval_refuses_a_swapped_key_or_account() {
     let key = account_key();
@@ -116,11 +262,6 @@ fn approval_refuses_a_swapped_key_or_account() {
     assert!(mallory.accept(&grant, &a.public(), ACCOUNT).is_err());
     let forged = mallory.grant(&n.public(), ACCOUNT, &AccountKey::generate(), &mut ChaCha20Rng::from_seed([2; 32])).unwrap();
     assert!(n.accept(&Grant { from: a.public(), ..forged }, &a.public(), ACCOUNT).is_err());
-    // Swapping either key changes the code both screens show.
-    let code = approval_code(ACCOUNT, &n.public(), &a.public());
-    assert_ne!(code, approval_code(ACCOUNT, &mallory.public(), &a.public()));
-    assert_ne!(code, approval_code(ACCOUNT, &n.public(), &mallory.public()));
-    assert_eq!(code.len(), 8);
 }
 
 #[test]
@@ -149,11 +290,17 @@ fn recovery_catches_typos() {
 #[test]
 fn values_are_bound_to_their_key_id() {
     let key = account_key();
-    let token = key.seal(ACCOUNT, &RecordId::new("policies", "allow_bypass"), 1, "false").unwrap();
+    let (id, hlc) = (RecordId::new("policies", "allow_bypass"), stamp(1790000000000, 0, "d_a"));
+    let token = key.seal(ACCOUNT, &id, &hlc, 1, Some("false")).unwrap();
     assert_eq!(dino_sync::crypto::key_id(&token).unwrap(), key.id);
     let rotated = AccountKey::from_bytes("k_rotated", *key.bytes());
-    assert!(matches!(rotated.open(ACCOUNT, &RecordId::new("policies", "allow_bypass"), 1, &token), Err(dino_sync::CryptoError::UnknownKey(_))));
-    assert!(key.seal(ACCOUNT, &RecordId::new("policies", "allow_bypass"), 1, "").is_err());
+    assert!(matches!(rotated.open(ACCOUNT, &id, &hlc, 1, false, &token), Err(CryptoError::UnknownKey(_))));
+    assert_eq!(key.seal(ACCOUNT, &id, &hlc, 1, Some("")), Err(CryptoError::Empty));
+    // A delete is a token too, under the same key.
+    let deleted = key.seal(ACCOUNT, &id, &hlc, 1, None).unwrap();
+    assert_eq!(dino_sync::crypto::key_id(&deleted).unwrap(), key.id);
+    assert_eq!(key.open(ACCOUNT, &id, &hlc, 1, true, &deleted), Ok(None));
+    assert_eq!(key.open(ACCOUNT, &id, &hlc, 1, false, &deleted), Err(CryptoError::Invalid));
 }
 
 #[test]
@@ -166,14 +313,22 @@ fn unknown_fields_round_trip() {
     });
     let r: Record = serde_json::from_value(wire.clone()).unwrap();
     assert_eq!(r.extra.get("written_by_version"), Some(&json!("0.9.0")));
+    assert!(!r.is_tombstone());
     let back = serde_json::to_value(&r).unwrap();
     let mut expected = wire.clone();
     expected["hlc"].as_object_mut().unwrap().remove("future_hlc_field");
     assert_eq!(back, expected);
 
+    let mut deleted = wire.clone();
+    deleted["deleted"] = json!(true);
+    let d: Record = serde_json::from_value(deleted).unwrap();
+    assert!(d.is_tombstone());
+    assert_eq!(serde_json::to_value(&d).unwrap()["deleted"], json!(true));
+
     let pull = json!({"seq": 41, "records": [wire], "more": false, "server_hint": {"x": 1}});
     let p: dino_sync::PullResponse = serde_json::from_value(pull.clone()).unwrap();
     assert_eq!(serde_json::to_value(&p).unwrap()["server_hint"], json!({"x": 1}));
+    assert_eq!(dino_sync::record::check_pull(&p), Ok(()));
 
     let n: dino_sync::Nudge = serde_json::from_value(json!({"type": "something_new", "x": 1})).unwrap();
     assert_eq!(n, dino_sync::Nudge::Unknown);

@@ -871,7 +871,7 @@ fn main() -> anyhow::Result<()> {
     app.pane_size = (cols.saturating_sub(SIDEBAR_WIDTH), rows.saturating_sub(1));
 
     // Pick up sessions that kept running while no client was open.
-    if let Response::State { sessions, quotas } = client::request(&Request::State)? {
+    if let Response::State { sessions, quotas, .. } = client::request(&Request::State)? {
         *snapshot.lock().unwrap() = Some((sessions, quotas));
         app.poll_sessions();
     }
@@ -879,7 +879,7 @@ fn main() -> anyhow::Result<()> {
     std::thread::spawn(move || {
         loop {
             if let Ok(mut control) = client::Control::open_existing() {
-                while let Ok(Response::State { sessions, quotas }) = control.request(&Request::State) {
+                while let Ok(Response::State { sessions, quotas, .. }) = control.request(&Request::State) {
                     *snapshot.lock().unwrap() = Some((sessions, quotas));
                     std::thread::sleep(Duration::from_millis(250));
                 }

@@ -179,6 +179,8 @@ pub enum Request {
     /// The dino account and settings sync. `action`: `status`, `login` (`value`: the server, else
     /// the configured one), `login_device`, `join` (`value`: the recovery key), `resolve`
     /// (`value`: `cloud`, `local` or `merge`), `now`, `reset`, `undo`, `keys` (`value`: `on`/`off`),
+    /// `ask` (ask the account's other Macs for the key again), `claim`, `grant` and `deny`
+    /// (`value`: an approval's id, to give another Mac the key after comparing codes),
     /// `ack_recovery`, `logout`. Replies `Sync`, or `Connect` with the page to open for `login`.
     Sync {
         action: String,
@@ -264,7 +266,13 @@ pub enum Request {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    State { sessions: Vec<SessionInfo>, quotas: Vec<QuotaInfo> },
+    State {
+        sessions: Vec<SessionInfo>,
+        quotas: Vec<QuotaInfo>,
+        /// Other Macs of the account asking this one for the sync key, for the app to show.
+        #[serde(default)]
+        approvals: Vec<ApprovalRequest>,
+    },
     Launchers { launchers: Vec<LauncherInfo> },
     AgentSetup { agents: Vec<AgentSetupInfo> },
     Created { id: String },
@@ -339,6 +347,33 @@ pub struct SyncStatus {
     pub snapshots: usize,
     /// What went wrong, or what happened that the person should know (signed out elsewhere).
     pub message: Option<String>,
+    /// When `phase` is `needs_key`: this Mac asking the account's other Macs for the key.
+    #[serde(default)]
+    pub join: Option<JoinRequest>,
+    /// Other Macs of the account asking this one for the key.
+    #[serde(default)]
+    pub approvals: Vec<ApprovalRequest>,
+}
+
+/// This Mac waiting for another of the account's Macs to give it the key.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct JoinRequest {
+    /// Unix seconds when the request lapses.
+    pub expires_at: u64,
+    /// Once a Mac has taken the request: the code both screens show, to compare before it grants.
+    pub code: Option<String>,
+}
+
+/// Another Mac of the account asking for the key.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct ApprovalRequest {
+    pub id: String,
+    /// The Mac's name and system, as it signed in.
+    pub device: String,
+    pub os: String,
+    pub expires_at: u64,
+    /// Once this Mac has taken it: the code to compare with the one on the asking Mac.
+    pub code: Option<String>,
 }
 
 /// One agent in Settings → Agents. The commands are the agent's own; dino runs them in a shell.
