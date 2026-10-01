@@ -29,6 +29,9 @@ struct DinoApp: App {
                 Button("Ask Before Quitting") { quitChoice = "" }
                     .disabled(quitChoice.isEmpty)
                     .help("Show the keep-running question again when you quit")
+                Button("Install Command Line Tool…") { CommandLineTool.install() }
+                    .disabled(DinoEnvironment.bundledDino == nil)
+                    .help("Put the dino command this app carries on your PATH")
             }
             // One window: ⌘N starts a session rather than opening a second window.
             CommandGroup(replacing: .newItem) {}

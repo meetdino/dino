@@ -798,6 +798,10 @@ fn main() -> anyhow::Result<()> {
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
         // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
         Some("statusline") => std::process::exit(dino_core::statusline::run(cli.get(1).map(String::as_str))),
+        Some("--version" | "-V" | "version") => {
+            println!("dino {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Some("found") => return cmd_found(),
         Some("ai") => return ai::run(&cli[1..]),
         Some("search") => return search::run(&cli[1..]),
