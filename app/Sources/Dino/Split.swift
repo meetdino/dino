@@ -45,7 +45,7 @@ extension DinoModel {
     /// ⌘D: a shell in the selected session's folder, next to it.
     func splitWithShell(vertical: Bool) {
         guard let s = selectedSession else { return }
-        let cwd = s.cwd ?? folder.path
+        let cwd = s.here ?? folder.path
         // A shell beside a session on an SSH host runs on that host too.
         var request: [String: Any] = ["type": "new", "launcher": "shell", "args": [String](), "cwd": cwd, "cols": 120, "rows": 40]
         if let host = s.host { request["host"] = host }

@@ -224,7 +224,7 @@ extension DinoModel {
     func chooseFile() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
-        panel.directoryURL = selectedSession.flatMap { $0.host == nil ? $0.cwd : nil }.map { URL(fileURLWithPath: $0) } ?? folder
+        panel.directoryURL = selectedSession.flatMap { $0.host == nil ? $0.here : nil }.map { URL(fileURLWithPath: $0) } ?? folder
         guard panel.runModal() == .OK, let url = panel.url else { return }
         openFile(url.path)
     }

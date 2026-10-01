@@ -339,6 +339,9 @@ impl Pane {
                 }
                 "7" => {
                     if let Some(path) = file_url_path(&text) {
+                        // Resolved (`/tmp` is `/private/tmp`), as the folders it's compared with are;
+                        // a folder that isn't on this Mac stays as the shell said it.
+                        let path = std::fs::canonicalize(&path).map_or(path, |p| p.display().to_string());
                         *s.cwd.lock().unwrap() = Some(path);
                     }
                 }
@@ -1081,6 +1084,9 @@ mod tests {
         assert_eq!(*p.shared.last_exit.lock().unwrap(), Some(0));
         assert_eq!(p.shared.cwd.lock().unwrap().as_deref(), Some("/Users/me"));
         assert_eq!(p.shared.prompts.load(Ordering::Relaxed), 2);
+        // Through symlinks, as dinod names folders.
+        p.feed(b"\x1b]7;file:///tmp\x07");
+        assert_eq!(p.shared.cwd.lock().unwrap().as_deref(), Some(&*std::fs::canonicalize("/tmp").unwrap().display().to_string()));
         // An introducer split at the very end of a chunk still counts.
         p.feed(b"\x1b");
         p.feed(b"]133;A\x07");

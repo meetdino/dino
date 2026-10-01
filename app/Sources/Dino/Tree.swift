@@ -133,7 +133,7 @@ enum SessionTree {
             }
             var best: (repo: Int, place: Int, depth: Int)?
             for (ri, node) in nodes.enumerated() {
-                for (pi, place) in node.places.enumerated() where contains(place.path, s.cwd ?? "") {
+                for (pi, place) in node.places.enumerated() where contains(place.path, s.here ?? "") {
                     if place.path.count > (best?.depth ?? -1) { best = (ri, pi, place.path.count) }
                 }
             }
@@ -337,7 +337,7 @@ extension DinoModel {
 
     /// In the sidebar's scope, and its name, title, branch, folder or agent has the search in it.
     func sidebarShows(_ s: SessionInfo) -> Bool {
-        let cwd = s.cwd ?? ""
+        let cwd = s.here ?? ""
         switch sidebarScope {
         case nil: break
         case .thisMac: if s.host != nil { return false }
@@ -671,6 +671,10 @@ struct RepoRows: View {
 extension SessionInfo {
     /// Why features that need the session's folder on this Mac are off, for a session on an SSH host.
     var remoteReason: String? { host.map { "Not available for sessions on \($0): the folder is there, not on this Mac" } }
+
+    /// Where it is now: a shell follows its `cd`s (and so does an agent typed into it); everything
+    /// else stays in the folder it started in.
+    var here: String? { agent_id == "shell" && host == nil ? shell_cwd ?? cwd : cwd }
 }
 
 /// The SSH host a session runs on, beside its name in the toolbar.
