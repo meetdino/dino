@@ -312,7 +312,7 @@ extension DinoModel {
             page.waitingFor = name
             page.started = false
             do {
-                try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).previewStart(session: session, name: name) }.value
+                try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).previewStart(session: session, name: name, approved: c) }.value
                 page.started = true
             } catch {
                 page.waitingFor = nil

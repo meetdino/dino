@@ -227,8 +227,15 @@ pub enum Request {
     FreeUpSpace,
     /// The dev servers the session's folder configures (`.dino/launch.json`, `.claude/launch.json`).
     PreviewConfigs { id: String },
-    /// Start the named dev server in the session's folder; it stops with the session.
-    PreviewStart { id: String, name: String },
+    /// Start the named dev server in the session's folder; it stops with the session. `approved`
+    /// is the configuration the user saw and agreed to run: started only if the launch file still
+    /// says exactly that.
+    PreviewStart {
+        id: String,
+        name: String,
+        #[serde(default)]
+        approved: Option<crate::preview::PreviewConfig>,
+    },
     PreviewStop { id: String, name: String },
     /// What the named dev server has printed (the tail).
     PreviewLog { id: String, name: String },

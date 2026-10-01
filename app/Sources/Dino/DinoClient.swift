@@ -671,8 +671,10 @@ final class DinoConnection: @unchecked Sendable {
         return (r.configs, r.error)
     }
 
-    func previewStart(session: String, name: String) throws {
-        _ = try send(["type": "preview_start", "id": session, "name": name])
+    /// `approved` is what the user agreed to run; dinod starts it only if the launch file still says that.
+    func previewStart(session: String, name: String, approved: PreviewConfig) throws {
+        let config = try JSONSerialization.jsonObject(with: JSONEncoder().encode(approved))
+        _ = try send(["type": "preview_start", "id": session, "name": name, "approved": config])
     }
 
     func previewStop(session: String, name: String) throws {

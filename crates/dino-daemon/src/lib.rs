@@ -963,7 +963,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 },
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::PreviewStart { id, name } => match preview_start(d, &id, &name) {
+            Request::PreviewStart { id, name, approved } => match preview_start(d, &id, &name, approved.as_ref()) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
@@ -2121,13 +2121,17 @@ fn local_session(d: &Daemon, id: &str) -> anyhow::Result<Arc<Session>> {
     Ok(s)
 }
 
-/// Start (or restart) one of the session's dev servers. One run of each name per session.
-fn preview_start(d: &Daemon, id: &str, name: &str) -> anyhow::Result<()> {
+/// Start (or restart) one of the session's dev servers. One run of each name per session. A
+/// launch file names any program, so only the configuration the user saw and approved runs: the
+/// file is read again here, and a change since then is refused rather than run unseen.
+fn preview_start(d: &Daemon, id: &str, name: &str, approved: Option<&dino_core::preview::PreviewConfig>) -> anyhow::Result<()> {
     let cwd = session_cwd(d, id)?;
     let config = dino_core::preview::configs(&cwd)?
         .into_iter()
         .find(|c| c.name == name)
         .ok_or_else(|| anyhow::anyhow!("no dev server named {name} in .dino/launch.json or .claude/launch.json"))?;
+    let approved = approved.ok_or_else(|| anyhow::anyhow!("start dev servers from dino's preview, which shows what they run first"))?;
+    anyhow::ensure!(*approved == config, "{} changed since you approved {name}: start it again to see what it runs now", config.source);
     let mut previews = d.previews.lock().unwrap();
     if let Some(i) = previews.iter().position(|p| p.session == id && p.config.name == name) {
         if previews[i].running() {
