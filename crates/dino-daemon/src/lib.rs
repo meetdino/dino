@@ -1657,6 +1657,10 @@ fn state(d: &Daemon) -> Response {
             let (context_tokens, context_limit) = context_use(s, &st);
             let label = s.label.lock().unwrap().clone();
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
+            let (inside, running) = {
+                let i = s.inside.lock().unwrap();
+                (i.found.clone(), i.fg.is_some())
+            };
             let waiting = st.waiting();
             let serving = s.servers.lock().unwrap().clone();
             // A server isn't work to wait on: once it's all that runs, the turn is over.
@@ -1705,7 +1709,8 @@ fn state(d: &Daemon) -> Response {
                 pinned: s.pinned.load(Ordering::Relaxed),
                 revealed: Some(s.revealed.load(Ordering::Relaxed)).filter(|&t| t > 0),
                 tasks,
-                inside: s.inside.lock().unwrap().found.clone(),
+                inside,
+                running,
                 shell_cwd: s.pane.shared.cwd.lock().unwrap().clone(),
                 last_exit: *s.pane.shared.last_exit.lock().unwrap(),
                 servers: serving.into_iter().map(|x| ipc::ServerInfo { task: x.task, command: x.command, ports: x.ports }).collect(),

@@ -51,7 +51,7 @@ struct DinoApp: App {
                 Button(CommandPalette.paletteTitle) { model.showPalette = true }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Divider()
-                Button("New Shell") { model.newShell() }
+                Button("New Tab") { model.newShell() }
                     .keyboardShortcut("t")
                     .disabled(model.launchers.isEmpty)
                 // Its shortcut works from any app (Settings → General); a menu key would only work here.
@@ -95,12 +95,18 @@ struct DinoApp: App {
                     .keyboardShortcut("f", modifiers: [.command, .shift])
                 Button("Jump to Session Needing You") { model.jumpToAttention() }
                     .keyboardShortcut("j")
+                Button("Next Tab") { model.cycleTabs(by: 1) }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+                    .disabled(model.shownTabs.count < 2)
+                Button("Previous Tab") { model.cycleTabs(by: -1) }
+                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                    .disabled(model.shownTabs.count < 2)
                 Button("Next Session") { model.cycle(by: 1) }
                     .keyboardShortcut(.tab, modifiers: .control)
-                    .disabled(model.sessions.count < 2)
+                    .disabled(model.sidebarSessions.count < 2)
                 Button("Previous Session") { model.cycle(by: -1) }
                     .keyboardShortcut(.tab, modifiers: [.control, .shift])
-                    .disabled(model.sessions.count < 2)
+                    .disabled(model.sidebarSessions.count < 2)
                 Button(model.showReview ? "Hide Changes" : "Review Changes") { model.showReview.toggle() }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
                     .disabled(!model.showReview && model.selectedSession?.host != nil)
@@ -119,9 +125,12 @@ struct DinoApp: App {
                 Divider()
                 ControlMenuItems().environmentObject(model)
                 Divider()
-                ForEach(Array(model.sessions.prefix(9).enumerated()), id: \.element.id) { i, s in
-                    Button("\(i + 1)  \(s.display)") { model.select(s.id) }
-                        .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
+                // ⌘1…⌘9: the tabs, as in Ghostty and browsers.
+                ForEach(Array(model.shownTabs.prefix(9).enumerated()), id: \.element) { i, id in
+                    if let s = model.sessions.first(where: { $0.id == id }) {
+                        Button("\(i + 1)  \(s.display)") { model.select(id) }
+                            .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
+                    }
                 }
                 Divider()
                 Button(model.selectedSession?.pinned == true ? "Unpin" : "Pin") {
@@ -340,7 +349,10 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 230, ideal: 260, max: 340)
         } detail: {
             HSplitView {
-                Terminals()
+                VStack(spacing: 0) {
+                    TabStrip()
+                    Terminals()
+                }
                 if let pane = model.sidePane {
                     SidePaneView(pane: pane)
                         .frame(minWidth: 320, idealWidth: 520, maxWidth: .infinity)
@@ -438,7 +450,7 @@ struct Terminals: View {
             Color(nsColor: .textBackgroundColor).ignoresSafeArea()
             if let ref = model.shownSubagent, !model.daemonDown {
                 SubagentPane(ref: ref).id(ref)
-            } else if model.sessions.isEmpty || model.daemonDown || model.selected?.hasPrefix("dir:") == true {
+            } else if model.sessions.isEmpty || model.daemonDown || model.selected?.hasPrefix("dir:") == true || model.selected == nil {
                 EmptyState()
             }
             GeometryReader { geo in
@@ -702,8 +714,8 @@ struct Sidebar: View {
                 } else {
                     let narrowed = model.sidebarNarrowed
                     let tree = filter == .all && !narrowed
-                        ? SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
-                        : SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups) {
+                        ? SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups)
+                        : SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups) {
                             filter.passes(model.status(of: $0)) && model.sidebarShows($0)
                         }
                     Section("Workspaces") {
