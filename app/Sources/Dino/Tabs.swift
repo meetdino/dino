@@ -256,6 +256,7 @@ struct TmuxSuggestion: View {
                 Button("Set Up…") {
                     answered = true
                     UserDefaults.standard.set(SettingsPane.general.rawValue, forKey: "settingsTab")
+                    UserDefaults.standard.set("tmux", forKey: GeneralPane.scrollKey)
                     openWindow(id: SettingsView.windowID)
                 }
                 Button("Not Now") { answered = true }

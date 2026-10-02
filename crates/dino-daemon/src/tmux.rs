@@ -53,7 +53,22 @@ fn parse(line: &str) -> Option<(String, String, String, Option<String>, bool)> {
     let f: Vec<&str> = line.split('\t').collect();
     let [_, tty, session, window, pane, name, path, command] = f[..] else { return None };
     let path = (!path.is_empty()).then(|| std::fs::canonicalize(path).map_or(path.to_string(), |p| p.display().to_string()));
-    Some((tty.into(), format!("{session}:{window}.{pane}"), format!("{session}:{name}"), path, !is_shell(command)))
+    let label = if versioned(name) { session.to_string() } else { format!("{session}:{name}") };
+    Some((tty.into(), format!("{session}:{window}.{pane}"), label, path, !is_shell(command)))
+}
+
+/// A window tmux named after a program whose file is its version (Claude Code's is
+/// `…/versions/2.1.288`): a name that says nothing.
+fn versioned(name: &str) -> bool {
+    !name.is_empty() && name.contains('.') && name.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// `session:window` with a window named only by a version number named by its agent instead.
+fn named(label: &str, agent: &str) -> String {
+    match label.split_once(':') {
+        Some((session, window)) if versioned(window) => format!("{session}:{agent}"),
+        _ => label.to_string(),
+    }
 }
 
 /// A login shell or a plain one: the pane is at a prompt (or waiting on a job it put back).
@@ -147,10 +162,10 @@ pub fn place(found: &mut [dino_core::found::FoundSession]) {
                 socket: srv.socket.display().to_string(),
                 pane: p.id.clone(),
                 target: p.target.clone(),
-                label: p.label.clone(),
+                label: named(&p.label, &found[i].agent),
                 attached: p.attached,
             });
-            found[i].terminal = Some(format!("tmux {}", p.label));
+            found[i].terminal = Some(format!("tmux {}", named(&p.label, &found[i].agent)));
             // Claude's own status says busy, not that it's asking: its permission dialog does.
             if found[i].agent == "claude" && capture(&srv.bin, &srv.socket, &p.id).is_some_and(|t| asking(&t)) {
                 found[i].status = Some("needs".into());
@@ -332,6 +347,10 @@ mod tests {
     fn reads_what_the_client_shows() {
         let (tty, target, label, path, busy) = parse("123\t/dev/ttys004\tmain\t2\t1\tvim\t/tmp\tvim").unwrap();
         assert_eq!((tty.as_str(), target.as_str(), label.as_str(), busy), ("/dev/ttys004", "main:2.1", "main:vim", true));
+        // Claude Code's program file is its version: that says nothing as a window name.
+        assert_eq!(parse("1\t/dev/ttys001\twork\t0\t0\t2.1.288\t/tmp\t2.1.288").unwrap().2, "work");
+        assert_eq!(named("work:2.1.288", "claude"), "work:claude");
+        assert_eq!(named("main:vim", "claude"), "main:vim");
         assert_eq!(path, std::fs::canonicalize("/tmp").ok().map(|p| p.display().to_string()));
         assert!(!parse("1\tt\tm\t0\t0\tzsh\t\t-zsh").unwrap().4);
         let v = View { bin: "tmux".into(), socket: "/s".into(), tty, target, label, path, busy };
