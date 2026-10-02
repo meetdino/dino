@@ -63,6 +63,24 @@ struct DinoSettings: Codable, Equatable {
     var ssh: [String: SshHost]?
     /// The terminal's own choices, kept by dinod so they sync; nil from an older dinod.
     var terminal: Terminal?
+    /// For people who live in tmux; nil from an older dinod.
+    var tmux: Tmux?
+
+    struct Tmux: Codable, Equatable {
+        /// dino's agents as windows in your tmux, each running `dino attach`.
+        var show_agents: Bool
+        /// The session they go in; empty: the one you're attached to.
+        var session: String
+        /// New tabs attach to this tmux session; empty: they don't.
+        var new_tabs: String
+
+        static let defaults = Tmux(show_agents: false, session: "dino", new_tabs: "")
+
+        /// A name dino hands tmux as is (as dinod checks it): letters, digits, `-`, `_` and `.`.
+        static func valid(_ name: String) -> Bool {
+            !name.isEmpty && name.count <= 64 && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_.".contains($0)) }
+        }
+    }
 
     struct Terminal: Codable, Equatable {
         var start_with: String
@@ -596,6 +614,7 @@ private struct GeneralPane: View {
                 isDefault = Opening.isDefault
                 quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
             }
+            TmuxSection()
             Section {
                 Toggle("Keep your Mac awake while tasks are scheduled", isOn: Binding(
                     get: { store.settings?.machine.keep_awake ?? false },
@@ -625,6 +644,83 @@ private struct GeneralPane: View {
         // dinod keeps them too, so they sync to your other Macs.
         .onChange(of: DinoSettings.Terminal(start_with: startWith, quick_key: quickKey, quick_autohide: quickAutohide, on_quit: quitChoice)) { _, t in
             if store.settings?.terminal != t { store.update { $0.terminal = t } }
+        }
+    }
+}
+
+/// Settings → General → tmux. For people who live in tmux, and theirs stays theirs: dino never
+/// edits its config, takes none of its keys, and only touches windows it made.
+private struct TmuxSection: View {
+    @EnvironmentObject var store: SettingsStore
+    @State private var session = ""
+    @State private var tabs = ""
+    @FocusState private var editing: Field?
+
+    private enum Field { case session, tabs }
+
+    private var tmux: DinoSettings.Tmux { store.settings?.tmux ?? .defaults }
+
+    private func change(_ edit: (inout DinoSettings.Tmux) -> Void) {
+        var t = tmux
+        edit(&t)
+        if t != tmux { store.update { $0.tmux = t } }
+    }
+
+    var body: some View {
+        Section {
+            Toggle("Show my agents in tmux", isOn: Binding(get: { tmux.show_agents }, set: { on in change { $0.show_agents = on } }))
+            if tmux.show_agents {
+                Picker("Put them in", selection: Binding(
+                    get: { tmux.session.isEmpty ? "attached" : "named" },
+                    set: { v in change { $0.session = v == "attached" ? "" : (DinoSettings.Tmux.valid(session) ? session : "dino") } }
+                )) {
+                    Text("A session of their own").tag("named")
+                    Text("The session you're in").tag("attached")
+                }
+                if !tmux.session.isEmpty {
+                    name("Session", text: $session, field: .session)
+                }
+            }
+            Toggle("New tabs open in tmux", isOn: Binding(
+                get: { !tmux.new_tabs.isEmpty },
+                set: { on in change { $0.new_tabs = on ? (DinoSettings.Tmux.valid(tabs) ? tabs : "main") : "" } }
+            ))
+            if !tmux.new_tabs.isEmpty {
+                name("Session", text: $tabs, field: .tabs)
+            }
+        } header: {
+            Text("tmux")
+        } footer: {
+            Footnote("Your agents show up as tmux windows (running `dino attach`), so `tmux attach` from anywhere reaches them. They still run in dino: closing a window, or quitting tmux, leaves the agent running and its window comes back. dino never starts tmux for this, never changes your tmux config or your own windows. New tabs run `tmux new -A -s` with the name you give. For your status bar: set -g status-right '#(dino status --tmux)'.")
+        }
+        .disabled(store.settings == nil)
+        .onAppear {
+            session = tmux.session.isEmpty ? "dino" : tmux.session
+            tabs = tmux.new_tabs.isEmpty ? "main" : tmux.new_tabs
+        }
+        // A name is taken when you're done typing it, not letter by letter.
+        .onChange(of: editing) { was, _ in
+            if was == .session { commit(.session) }
+            if was == .tabs { commit(.tabs) }
+        }
+    }
+
+    private func name(_ label: String, text: Binding<String>, field: Field) -> some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            TextField(label, text: text)
+                .focused($editing, equals: field)
+                .onSubmit { commit(field) }
+            if !DinoSettings.Tmux.valid(text.wrappedValue) {
+                Text("Letters, digits, - _ and . only").font(.caption).foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func commit(_ field: Field) {
+        switch field {
+        case .session where DinoSettings.Tmux.valid(session): change { $0.session = session }
+        case .tabs where DinoSettings.Tmux.valid(tabs): change { $0.new_tabs = tabs }
+        default: break
         }
     }
 }
