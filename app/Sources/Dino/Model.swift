@@ -280,7 +280,26 @@ final class DinoModel: ObservableObject {
         daemonDown = true
         terminals.removeAll()
         sessions = []
+        restartAfterCrash()
         reconnect()
+    }
+
+    /// When dinod was started again because it crashed: a few, then it's left to the user.
+    private var crashRestarts: [Date] = []
+
+    /// dinod went away without being asked to (no stop mark, see dinod's `stopped_mark`): start it
+    /// again, so its sessions come back, as they would at the next launch. One stopped on purpose
+    /// (`dino stop`, quitting with Stop) stays stopped until someone starts it.
+    private func restartAfterCrash() {
+        let mark = URL(fileURLWithPath: DinoEnvironment.socketPath).deletingLastPathComponent().appendingPathComponent("dinod.stopped")
+        guard !FileManager.default.fileExists(atPath: mark.path) else { return }
+        crashRestarts = crashRestarts.filter { $0.timeIntervalSinceNow > -60 }
+        guard crashRestarts.count < 3 else { return }
+        crashRestarts.append(Date())
+        Task.detached {
+            try? await Task.sleep(for: .milliseconds(500))
+            try? DinoEnvironment.ensureDaemon()
+        }
     }
 
     private func reconnect() {
