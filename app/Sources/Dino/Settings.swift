@@ -515,7 +515,7 @@ private struct StoreError: View {
     }
 }
 
-private struct GeneralPane: View {
+struct GeneralPane: View {
     @EnvironmentObject var store: SettingsStore
     @AppStorage(QuitChoice.key) private var quitChoice = ""
     @AppStorage(StartWith.key) private var startWith = StartWith.last.rawValue
@@ -525,7 +525,12 @@ private struct GeneralPane: View {
     @State private var isDefault = false
     @State private var makingDefault = false
 
+    /// A section asked for when Settings opens ("tmux", from the tab strip's suggestion): shown
+    /// at once rather than below the fold.
+    static let scrollKey = "settings.general.scrollTo"
+
     var body: some View {
+        ScrollViewReader { proxy in
         Form {
             Section {
                 Picker("When you quit with agents running", selection: $quitChoice) {
@@ -614,7 +619,7 @@ private struct GeneralPane: View {
                 isDefault = Opening.isDefault
                 quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
             }
-            TmuxSection()
+            TmuxSection().id("tmux")
             Section {
                 Toggle("Keep your Mac awake while tasks are scheduled", isOn: Binding(
                     get: { store.settings?.machine.keep_awake ?? false },
@@ -644,6 +649,12 @@ private struct GeneralPane: View {
         // dinod keeps them too, so they sync to your other Macs.
         .onChange(of: DinoSettings.Terminal(start_with: startWith, quick_key: quickKey, quick_autohide: quickAutohide, on_quit: quitChoice)) { _, t in
             if store.settings?.terminal != t { store.update { $0.terminal = t } }
+        }
+        .onAppear {
+            guard let target = UserDefaults.standard.string(forKey: Self.scrollKey) else { return }
+            UserDefaults.standard.removeObject(forKey: Self.scrollKey)
+            DispatchQueue.main.async { withAnimation { proxy.scrollTo(target, anchor: .top) } }
+        }
         }
     }
 }

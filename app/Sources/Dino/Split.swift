@@ -350,6 +350,9 @@ enum CloseTarget {
 
 extension DinoModel {
     var closeTarget: CloseTarget {
+        // Another window in front (Settings, the quick terminal's, a sheet's): ⌘W closes that one,
+        // never a tab behind it.
+        if let key = NSApp.keyWindow, key.identifier?.rawValue.hasPrefix("main") != true { return .window }
         let split = shownSplit
         if split != nil, sidePane == nil || split?.contains(focusedTerminal) == true, let id = selected { return .pane(id) }
         if let p = sidePane { return .sidePane(p) }
