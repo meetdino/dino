@@ -38,6 +38,7 @@ mod servers;
 mod shell;
 mod subtoken;
 mod sync;
+mod tmux;
 
 /// Scrollback lines replayed to a newly attached client.
 const REPLAY_HISTORY: usize = 2000;
@@ -105,6 +106,32 @@ struct Inside {
     found: Option<FoundSession>,
     /// The shell's own title from before the command started, put back when an agent leaves.
     before: Option<Option<String>>,
+    /// The foreground is a tmux client: its tmux and server, and what it shows as last asked.
+    tmux: Option<((PathBuf, PathBuf), Option<tmux::View>)>,
+    /// Its bells and notifications, and the counts they were taken at.
+    alerts: TmuxAlerts,
+}
+
+/// Bells and notifications from a tmux in a dino shell, kept for clients to show together.
+#[derive(Default)]
+struct TmuxAlerts {
+    bells: u64,
+    notices: u64,
+    next: u64,
+    list: std::collections::VecDeque<ipc::TmuxAlert>,
+}
+
+impl TmuxAlerts {
+    /// The most kept: older ones drop off.
+    const KEEP: usize = 20;
+
+    fn push(&mut self, text: String) {
+        self.next += 1;
+        self.list.push_back(ipc::TmuxAlert { seq: self.next, text });
+        while self.list.len() > Self::KEEP {
+            self.list.pop_front();
+        }
+    }
 }
 
 /// How often to look again at a foreground command that hasn't changed: an agent's title and
@@ -1289,6 +1316,12 @@ fn local_spec(
     }
     // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
     env.insert("DINO_SESSION".into(), id.to_string());
+    // What draws it is Ghostty's engine: say so, so programs (tmux among them) use what it can do.
+    // Over SSH, `ssh` falls back to xterm-256color (see the shell integration).
+    if let Some(dir) = shell::terminfo() {
+        env.insert("TERM".into(), "xterm-ghostty".into());
+        env.insert("TERMINFO".into(), dir.display().to_string());
+    }
     if keyed {
         env.insert(dino_core::agent::KEY_ENV.into(), d.proxy.secret().into());
     }
@@ -1663,9 +1696,15 @@ fn state(d: &Daemon) -> Response {
             let (context_tokens, context_limit) = context_use(s, &st);
             let label = s.label.lock().unwrap().clone();
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
-            let (inside, running) = {
+            let (inside, running, tmux) = {
                 let i = s.inside.lock().unwrap();
-                (i.found.clone(), i.fg.is_some())
+                let tmux = i.tmux.as_ref().and_then(|t| t.1.as_ref()).map(|v| ipc::TmuxPane {
+                    target: v.target.clone(),
+                    label: v.label.clone(),
+                    busy: v.busy,
+                    alerts: i.alerts.list.iter().cloned().collect(),
+                });
+                (i.found.clone(), i.fg.is_some() && i.tmux.is_none(), tmux)
             };
             let waiting = st.waiting();
             let serving = s.servers.lock().unwrap().clone();
@@ -1717,6 +1756,7 @@ fn state(d: &Daemon) -> Response {
                 tasks,
                 inside,
                 running,
+                tmux,
                 shell_cwd: s.pane.shared.cwd.lock().unwrap().clone(),
                 last_exit: *s.pane.shared.last_exit.lock().unwrap(),
                 servers: serving.into_iter().map(|x| ipc::ServerInfo { task: x.task, command: x.command, ports: x.ports }).collect(),
@@ -2071,11 +2111,17 @@ fn watch_shells(d: &Daemon) {
     let shells: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| s.agent_id == "shell" && s.host.is_none() && !s.pane.is_exited()).cloned().collect();
     for s in shells {
         let fg = s.pane.foreground().filter(|fg| Some(*fg) != s.pane.pid());
+        if let Some(fg) = fg {
+            if follow_tmux(&s, fg) {
+                continue;
+            }
+        }
         let due = {
             let mut i = s.inside.lock().unwrap();
             if fg.is_none() {
                 // Agents set the title, and change it again on the way out: put the shell's back.
-                if i.found.is_some() {
+                // So does a tmux client (its server's title, or the command line).
+                if i.found.is_some() || i.tmux.is_some() {
                     *s.pane.shared.title.lock().unwrap() = i.before.clone().flatten();
                 }
                 // Taken at the prompt: an agent can retitle before a poll sees it start.
@@ -2089,8 +2135,61 @@ fn watch_shells(d: &Daemon) {
         let found = found::inside(fg);
         let mut i = s.inside.lock().unwrap();
         let before = i.before.take();
-        *i = Inside { fg: Some(fg), checked: Some(Instant::now()), found, before };
+        *i = Inside { fg: Some(fg), checked: Some(Instant::now()), found, before, ..Inside::default() };
     }
+}
+
+/// When shell `s`'s foreground `fg` is a tmux client: follow what it shows, asked of its own
+/// server each look (read-only). The tab takes the active pane's folder and the window's name;
+/// the shell's own come back at its next prompt. False when `fg` isn't a tmux client.
+fn follow_tmux(s: &Session, fg: u32) -> bool {
+    let known = {
+        let i = s.inside.lock().unwrap();
+        (i.fg == Some(fg)).then(|| i.tmux.as_ref().map(|t| t.0.clone())).flatten()
+    };
+    // A new foreground is looked at once; one that isn't tmux is left to the agent check.
+    let client = match known {
+        Some(c) => c,
+        None if s.inside.lock().unwrap().fg == Some(fg) => return false,
+        None => match tmux::client(fg) {
+            Some(c) => c,
+            None => return false,
+        },
+    };
+    let view = tmux::view(fg, &client.0, &client.1);
+    if let Some(v) = &view {
+        if let Some(path) = &v.path {
+            *s.pane.shared.cwd.lock().unwrap() = Some(path.clone());
+        }
+        *s.pane.shared.title.lock().unwrap() = Some(v.label.clone());
+    }
+    let bells = s.pane.shared.bells.load(Ordering::Relaxed);
+    let notices = s.pane.shared.notices.load(Ordering::Relaxed);
+    let mut i = s.inside.lock().unwrap();
+    if i.fg != Some(fg) {
+        let before = i.before.take().or_else(|| Some(s.pane.title()));
+        // From here on: what rang before the client started isn't tmux's.
+        let alerts = TmuxAlerts { bells, notices, ..TmuxAlerts::default() };
+        *i = Inside { fg: Some(fg), checked: Some(Instant::now()), found: None, before, tmux: None, alerts };
+    }
+    if let Some(v) = &view {
+        // A bell: tmux says which windows rang. A notification only comes through from the pane
+        // showing (passthrough is for visible panes), so it's that one's.
+        if bells > i.alerts.bells {
+            let rang = tmux::rang(v);
+            // Only other windows keep the flag: none set means the one showing rang.
+            let text = format!("Bell in tmux {}", if rang.is_empty() { v.window() } else { rang.join(", ") });
+            i.alerts.push(text);
+        }
+        if notices > i.alerts.notices {
+            let text = s.pane.shared.notice.lock().unwrap().clone().unwrap_or_default();
+            i.alerts.push(format!("{} (tmux {})", text, v.window()));
+        }
+    }
+    i.alerts.bells = bells;
+    i.alerts.notices = notices;
+    i.tmux = Some((client, view));
+    true
 }
 
 /// Continue the agent someone started by hand in shell `id` as a dino session in the shell's
@@ -2197,7 +2296,12 @@ fn kill(d: &Daemon, id: &str) -> bool {
     let mut sessions = d.sessions.lock().unwrap();
     match sessions.iter().position(|s| s.id == id) {
         Some(i) => {
-            sessions.remove(i).pane.kill();
+            let s = sessions.remove(i);
+            // A tmux client in it: detach it first, so its server only sees a client leave.
+            if let Some(v) = s.inside.lock().unwrap().tmux.as_ref().and_then(|t| t.1.clone()) {
+                tmux::detach(&v);
+            }
+            s.pane.kill();
             dino_core::agent::qwen::forget(id);
             forget_session_files(id);
             d.previews.lock().unwrap().retain(|p| {

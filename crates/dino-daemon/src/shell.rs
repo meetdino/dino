@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-const FILES: [(&str, &str); 7] = [
+const FILES: [(&str, &str); 11] = [
     ("bash/ghostty.bash", include_str!("../shell-integration/bash/ghostty.bash")),
     ("bash/bash-preexec.sh", include_str!("../shell-integration/bash/bash-preexec.sh")),
     ("bash/dino.bash", include_str!("../shell-integration/bash/dino.bash")),
@@ -15,7 +15,32 @@ const FILES: [(&str, &str); 7] = [
     ("zsh/.zshenv", include_str!("../shell-integration/zsh/.zshenv")),
     ("zsh/ghostty.zshenv", include_str!("../shell-integration/zsh/ghostty.zshenv")),
     ("zsh/ghostty-integration", include_str!("../shell-integration/zsh/ghostty-integration")),
+    ("zsh/dino-tmux-start.zsh", include_str!("../shell-integration/zsh/dino-tmux-start.zsh")),
+    ("zsh/dino-tmux.zsh", include_str!("../shell-integration/zsh/dino-tmux.zsh")),
+    ("zsh/dino-term.zsh", include_str!("../shell-integration/zsh/dino-term.zsh")),
+    ("bash/dino-term.bash", include_str!("../shell-integration/bash/dino-term.bash")),
 ];
+
+/// Ghostty's terminfo entries (from libghostty-spm, which draws dino's panes), as ncurses keeps
+/// them: by the first letter's hex code.
+const TERMINFO: [(&str, &[u8]); 2] = [
+    ("78/xterm-ghostty", include_bytes!("../terminfo/78/xterm-ghostty")),
+    ("67/ghostty", include_bytes!("../terminfo/67/ghostty")),
+];
+
+/// The folder with Ghostty's terminfo, written when missing or from another dino; `None` when it
+/// can't be, and sessions then keep `xterm-256color`.
+pub fn terminfo() -> Option<std::path::PathBuf> {
+    let dir = dino_core::config_dir().join("terminfo");
+    for (name, bytes) in TERMINFO {
+        let path = dir.join(name);
+        if std::fs::read(&path).ok().as_deref() != Some(bytes) {
+            std::fs::create_dir_all(path.parent()?).ok()?;
+            std::fs::write(&path, bytes).ok()?;
+        }
+    }
+    Some(dir)
+}
 
 /// The AI line (`dino init`), loaded after the user's own startup files. `__DINO_BIN__` becomes
 /// this dino, as `dino init` does it.
