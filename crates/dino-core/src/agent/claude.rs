@@ -248,6 +248,12 @@ impl Agent for Claude {
         out
     }
 
+    /// Its native binary is named after its version (`…/claude/versions/2.1.288`); the installer's
+    /// link is `claude`.
+    fn may_be(&self, comm: &str) -> bool {
+        !self.free && (comm.contains("/claude/versions/") || comm.rsplit('/').next() == Some("claude"))
+    }
+
     // Found by its session file: its native binary is named after its version.
     fn inside(&self, pid: u32, _comm: &str, _args: &dyn Fn() -> Vec<String>) -> Option<FoundSession> {
         let v = live(pid)?;

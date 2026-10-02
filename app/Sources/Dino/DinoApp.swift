@@ -1347,7 +1347,8 @@ struct ElsewhereRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     AgentBadge(agent: session.agent)
-                    Text(session.title).lineLimit(1)
+                    // One that's still starting has no conversation, so no title, yet.
+                    Text(session.title.isEmpty ? session.agentName : session.title).lineLimit(1)
                 }
                 Text(whereText(session)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
