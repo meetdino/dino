@@ -540,7 +540,10 @@ final class DinoModel: ObservableObject {
         let check: @Sendable () -> Void = {
             Task.detached {
                 guard let conn = try? DinoConnection(path: DinoEnvironment.socketPath),
-                      var settings = try? conn.settings(), let there = settings.terminal else { return }
+                      var settings = try? conn.settings() else { return }
+                let tmux = settings.tmux
+                await MainActor.run { self.noteTmuxSettings(tmux) }
+                guard let there = settings.terminal else { return }
                 let (here, agreed) = await MainActor.run { (DinoSettings.Terminal.mirrored, self.agreedTerminal) }
                 // First look: an app that had these before dinod kept them hands them over once.
                 let fromApp = agreed.map { here != $0 && there == $0 } ?? (there == .defaults && here != .defaults)
@@ -619,8 +622,24 @@ final class DinoModel: ObservableObject {
     @discardableResult
     func newShell() -> Bool {
         guard connection != nil, let l = launchers.first(where: { $0.short == "shell" }) else { return false }
-        newSession(l, in: selectedSession.flatMap { $0.host == nil ? $0.shell_cwd : nil })
+        // Settings → General → tmux: a new tab goes straight into that tmux session (kept here
+        // too, so the first tab at launch does, before dinod has answered).
+        let tabs = UserDefaults.standard.string(forKey: Self.tmuxTabsKey) ?? ""
+        let line = DinoSettings.Tmux.valid(tabs) ? "tmux new -A -s \(tabs)" : nil
+        newSession(l, in: selectedSession.flatMap { $0.host == nil ? $0.shell_cwd : nil }, line: line)
         return true
+    }
+
+    static let tmuxTabsKey = "tmux.newTabs"
+
+    /// What Settings → General → tmux says, as dinod last had it.
+    private func noteTmuxSettings(_ t: DinoSettings.Tmux?) {
+        let t = t ?? .defaults
+        if UserDefaults.standard.string(forKey: Self.tmuxTabsKey) != t.new_tabs {
+            UserDefaults.standard.set(t.new_tabs, forKey: Self.tmuxTabsKey)
+        }
+        let on = t.show_agents || !t.new_tabs.isEmpty
+        if on != tmuxOptionsOn { tmuxOptionsOn = on }
     }
 
     /// Folders sessions recently started in on `host`, newest first. Kept by the app, not in
@@ -729,6 +748,8 @@ final class DinoModel: ObservableObject {
     }
 
     var pendingSelect: String?
+    /// One of Settings → General → tmux's options is on (then dino stops suggesting them).
+    @Published var tmuxOptionsOn = false
     /// Per shell running tmux: the newest of its bells and notifications seen (Tabs.swift).
     @Published var tmuxSeen: [String: UInt64] = [:]
     /// The tabs along the top, by session id, in order (see Tabs.swift).

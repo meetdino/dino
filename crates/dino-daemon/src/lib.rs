@@ -39,6 +39,7 @@ mod shell;
 mod subtoken;
 mod sync;
 mod tmux;
+mod tmux_mirror;
 mod update;
 
 /// Scrollback lines replayed to a newly attached client.
@@ -261,6 +262,7 @@ pub fn run() -> anyhow::Result<()> {
     lid::start(daemon.clone());
     subtoken::start();
     update::start(daemon.clone());
+    tmux_mirror::start(daemon.clone());
     {
         // Pick up late-discovered agent ids (Codex) and sessions that exited on their own.
         let d = daemon.clone();

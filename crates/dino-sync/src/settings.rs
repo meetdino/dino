@@ -11,6 +11,7 @@
 //! | `ssh`      | the host               | `ssh`                                 |
 //! | `repos`    | `<git remote> <VAR>`   | `repos.<path>.env`, by remote: paths differ between Macs |
 //! | `terminal` | `shell_integration`, and a field name | `machine.shell_integration`, `terminal` |
+//! | `tmux`     | a field name           | `tmux`                                |
 //!
 //! Only values that differ from the defaults are records, so a missing record means "default".
 //! The rest of `machine` stays on each Mac, and a repo without a remote isn't synced. Neither are
@@ -22,7 +23,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 use dino_core::controls::Controls;
-use dino_core::settings::{Machine, Policies, Repo, Routing, Settings, SshHost, Terminal, Worktrees};
+use dino_core::settings::{Machine, Policies, Repo, Routing, Settings, SshHost, Terminal, Tmux, Worktrees};
 
 use crate::record::RecordId;
 
@@ -58,6 +59,7 @@ pub fn flatten(settings: &Settings, remote_of: &dyn Fn(&str) -> Option<String>) 
         out.insert(RecordId::new("terminal", "shell_integration"), Value::Bool(settings.machine.shell_integration));
     }
     fields(&mut out, "terminal", &settings.terminal, &Terminal::default());
+    fields(&mut out, "tmux", &settings.tmux, &Tmux::default());
     out
 }
 
@@ -89,6 +91,7 @@ pub fn unflatten(local: &Settings, entries: &Entries, path_of: &dyn Fn(&str) -> 
         _ => Machine::default().shell_integration,
     };
     s.terminal = rebuild(entries, "terminal", Terminal::default());
+    s.tmux = rebuild(entries, "tmux", Tmux::default());
 
     s.agents = BTreeMap::new();
     for (id, v) in in_collection(entries, "agents") {

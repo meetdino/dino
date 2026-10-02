@@ -27,6 +27,34 @@ pub struct Settings {
     /// `~/.ssh/config`, or `user@host`).
     pub ssh: BTreeMap<String, SshHost>,
     pub terminal: Terminal,
+    pub tmux: Tmux,
+}
+
+/// For people who live in tmux. Their tmux stays theirs: dino never edits its config, never takes
+/// a key from it, and only ever adds, renames and removes windows it made itself.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct Tmux {
+    /// Show dino's agents as windows in your tmux, each running `dino attach`. Closing one (or the
+    /// whole server) leaves the agent running in dinod; its window comes back.
+    pub show_agents: bool,
+    /// The session they go in, made when needed; empty: the session you're attached to.
+    pub session: String,
+    /// New tabs attach to this tmux session (`tmux new -A -s`), made when needed; empty: off.
+    pub new_tabs: String,
+}
+
+impl Default for Tmux {
+    fn default() -> Self {
+        Self { show_agents: false, session: "dino".into(), new_tabs: String::new() }
+    }
+}
+
+impl Tmux {
+    /// A session name dino passes to tmux as is: letters, digits, `-`, `_` and `.`.
+    pub fn valid_name(name: &str) -> bool {
+        !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    }
 }
 
 /// How the terminal itself behaves: the app's choices, kept here so they follow the person to

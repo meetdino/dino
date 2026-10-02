@@ -786,6 +786,7 @@ const USAGE: &str = "usage: dino [agent [args...]] | --welcome
        dino <folder> [agent [args...]]   (a shell, or that agent, there: opens in the terminal app)
        dino ls | new [--worktree] <agent> [--on <provider> <model>] [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
        dino found | continue <session-id prefix>
+       dino status [--tmux]   (agents that need you and that are working; --tmux: for status-right)
        dino mcp [--read-only]   (MCP server on stdio: agents list, read, message and start sessions)
        dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>
        dino ai suggest|agent -- <request>   (the shell's AI line) | search [--json|--pick]
@@ -807,6 +808,7 @@ fn main() -> anyhow::Result<()> {
             return client::attach_raw(id, fresh);
         }
         Some("ls") => return cmd_ls(),
+        Some("status") => return cmd_status(cli.iter().any(|a| a == "--tmux")),
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
         // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
         Some("statusline") => std::process::exit(dino_core::statusline::run(cli.get(1).map(String::as_str))),
@@ -1004,6 +1006,40 @@ fn print_response(resp: Response) -> anyhow::Result<()> {
         other => println!("{other:?}"),
     }
     Ok(())
+}
+
+/// What the agents are up to, in a line: `dino status --tmux` is short, for tmux's status bar
+/// (`set -g status-right '#(dino status --tmux)'`), and prints nothing when nothing needs saying.
+/// It never starts dinod: a status bar asks every few seconds.
+fn cmd_status(tmux: bool) -> anyhow::Result<()> {
+    if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
+        if !tmux {
+            println!("dinod is not running");
+        }
+        return Ok(());
+    }
+    let Response::State { sessions, .. } = client::request(&Request::State)? else { anyhow::bail!("unexpected reply") };
+    let agents: Vec<_> = sessions.iter().filter(|s| s.agent_id != "shell" && !s.exited).collect();
+    let needs = agents.iter().filter(|s| s.activity.as_deref().is_some_and(|a| a.starts_with("needs:"))).count();
+    let working = agents.iter().filter(|s| s.in_flight > 0 || s.activity.as_deref() == Some("working")).count();
+    println!("{}", status_line(tmux, agents.len(), needs, working));
+    Ok(())
+}
+
+fn status_line(tmux: bool, agents: usize, needs: usize, working: usize) -> String {
+    let mut parts = vec![];
+    if needs > 0 {
+        parts.push(format!("{needs} {}", if needs == 1 { "needs you" } else { "need you" }));
+    }
+    if working > 0 {
+        parts.push(format!("{working} working"));
+    }
+    match (tmux, parts.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => format!("dino: {}", parts.join(" · ")),
+        (false, true) => format!("{agents} {}, none working", if agents == 1 { "agent" } else { "agents" }),
+        (false, false) => format!("{agents} {}: {}", if agents == 1 { "agent" } else { "agents" }, parts.join(", ")),
+    }
 }
 
 fn cmd_ls() -> anyhow::Result<()> {
@@ -1205,5 +1241,15 @@ mod tests {
     fn control_characters_are_not_printed() {
         assert_eq!(printable("fix \x1b]0;pwned\x07login\r\n\x7f\u{9b}2J done"), "fix ?]0;pwned?login????2J done");
         assert_eq!(printable("~/src/app · café ✓\t"), "~/src/app · café ✓?");
+    }
+
+    #[test]
+    fn status_says_what_needs_saying() {
+        // tmux's status bar: nothing when nothing is going on.
+        assert_eq!(status_line(true, 3, 0, 0), "");
+        assert_eq!(status_line(true, 3, 1, 2), "dino: 1 needs you · 2 working");
+        assert_eq!(status_line(true, 3, 2, 0), "dino: 2 need you");
+        assert_eq!(status_line(false, 1, 0, 0), "1 agent, none working");
+        assert_eq!(status_line(false, 4, 0, 1), "4 agents: 1 working");
     }
 }

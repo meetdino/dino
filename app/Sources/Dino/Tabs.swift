@@ -235,3 +235,37 @@ struct TmuxLook: View {
         }
     }
 }
+
+/// Once, for someone whose tabs are mostly tmux: dino can show their agents in it and open new
+/// tabs in it (Settings → General → tmux). Gone for good once answered either way.
+struct TmuxSuggestion: View {
+    @EnvironmentObject var model: DinoModel
+    @AppStorage("tmux.suggested") private var answered = false
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        let shells = model.sessions.filter { $0.agent_id == "shell" && !$0.exited }
+        let inTmux = shells.filter { $0.tmux != nil }.count
+        if !answered, !model.tmuxOptionsOn, inTmux >= 2, inTmux * 2 > shells.count {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.split.3x1").foregroundStyle(.secondary)
+                Text("You use tmux: dino can show your agents as tmux windows and open new tabs in tmux.")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                Button("Set Up…") {
+                    answered = true
+                    UserDefaults.standard.set(SettingsPane.general.rawValue, forKey: "settingsTab")
+                    openWindow(id: SettingsView.windowID)
+                }
+                Button("Not Now") { answered = true }
+            }
+            .font(.callout)
+            .controlSize(.small)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.bar)
+            .overlay(alignment: .bottom) { Divider() }
+        }
+    }
+}
