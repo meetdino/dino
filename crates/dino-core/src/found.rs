@@ -211,10 +211,12 @@ pub(crate) fn by_hand(agent: &str, pid: u32) -> FoundSession {
 }
 
 /// An agent someone started by hand inside a dino shell: `fg` is the shell's foreground process
-/// group. Its session id is empty until the agent has written one.
+/// group. Its session id is empty until the agent has written one; until then (at its trust
+/// prompt, before the first message) it's "starting".
 pub fn inside(fg: u32) -> Option<FoundSession> {
     let table = process_table();
-    for pid in subtree(&table, fg) {
+    let pids = subtree(&table, fg);
+    for &pid in &pids {
         let comm = table.iter().find(|(p, ..)| *p == pid).map(|(.., c)| c.as_str()).unwrap_or_default();
         // Arguments cost a `ps` each, so only for the processes that may need them, and once.
         let read = std::cell::OnceCell::new();
@@ -223,7 +225,58 @@ pub fn inside(fg: u32) -> Option<FoundSession> {
             return Some(s);
         }
     }
-    None
+    pids.iter().find_map(|&pid| {
+        let comm = table.iter().find(|(p, ..)| *p == pid).map(|(.., c)| c.as_str())?;
+        let a = crate::agent::all().into_iter().find(|a| a.may_be(comm))?;
+        Some(FoundSession { status: Some("starting".into()), ..by_hand(a.id(), pid) })
+    })
+}
+
+/// Agents running in a terminal somewhere on this Mac that haven't written a conversation yet
+/// (at a trust prompt, before the first message), so `running` can't list them: "starting". Not
+/// under `roots` (dino's own sessions, which show themselves) nor `known` (listed already), and
+/// only the outermost agent process of each (a wrapper and what it runs are one agent).
+pub fn starting(roots: &[u32], known: &[u32]) -> Vec<FoundSession> {
+    let text = run("ps", &["-A", "-o", "pid=,ppid=,tty=,comm="]).unwrap_or_default();
+    let table: Vec<(u32, u32, bool, String)> = text
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
+            let tty = it.next()? != "??";
+            Some((pid, ppid, tty, it.collect::<Vec<_>>().join(" ")))
+        })
+        .collect();
+    let agents = crate::agent::all();
+    let agent_of = |comm: &str| agents.iter().find(|a| a.may_be(comm));
+    let parent = |pid: u32| table.iter().find(|(p, ..)| *p == pid).map(|(_, pp, ..)| *pp);
+    let ancestors = |pid: u32| {
+        let mut out = vec![];
+        let mut at = parent(pid);
+        while let Some(p) = at.filter(|&p| p > 1 && out.len() < 64) {
+            out.push(p);
+            at = parent(p);
+        }
+        out
+    };
+    let mut out = vec![];
+    for (pid, _, tty, comm) in &table {
+        let Some(agent) = agent_of(comm) else { continue };
+        let up = ancestors(*pid);
+        let inside_agent = up.iter().any(|a| table.iter().any(|(p, _, _, c)| p == a && agent_of(c).is_some()));
+        if !tty || known.contains(pid) || inside_agent || up.iter().any(|a| roots.contains(a) || known.contains(a)) {
+            continue;
+        }
+        // An agent process another one already lists (its native child) counts as listed.
+        if table.iter().any(|(p, _, _, _)| known.contains(p) && ancestors(*p).contains(pid)) {
+            continue;
+        }
+        // Where it runs (an app, tmux) and with which flags, as for one with a conversation.
+        let (terminal, args) = terminal_and_flags(*agent, *pid);
+        out.push(FoundSession { status: Some("starting".into()), terminal, args, ..by_hand(agent.id(), *pid) });
+    }
+    out
 }
 
 /// The agent's own question on screen, waiting for the user: a permission or trust dialog.
