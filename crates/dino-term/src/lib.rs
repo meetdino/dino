@@ -94,6 +94,8 @@ pub struct Shared {
     pub prompts: AtomicU64,
     /// What the last command printed, between its OSC 133 C and D (see [`OUTPUT_MAX_LINES`]).
     pub last_output: Mutex<Option<String>>,
+    /// Called when the shell moves to another folder, so whoever shows it needn't poll for that.
+    pub on_cwd: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// The most of a command's output kept: its last lines, up to this many characters.
@@ -223,6 +225,7 @@ impl Pane {
             last_exit: Mutex::new(None),
             prompts: AtomicU64::new(0),
             last_output: Mutex::new(None),
+            on_cwd: OnceLock::new(),
         });
         let term = new_term(&shared, cols, rows);
         let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, osc: Vec::new(), output_from: None };
@@ -342,7 +345,13 @@ impl Pane {
                         // Resolved (`/tmp` is `/private/tmp`), as the folders it's compared with are;
                         // a folder that isn't on this Mac stays as the shell said it.
                         let path = std::fs::canonicalize(&path).map_or(path, |p| p.display().to_string());
-                        *s.cwd.lock().unwrap() = Some(path);
+                        // Every prompt says where it is; only a move is news.
+                        let moved = s.cwd.lock().unwrap().replace(path.clone()).as_deref() != Some(&path);
+                        if moved {
+                            if let Some(f) = s.on_cwd.get() {
+                                f();
+                            }
+                        }
                     }
                 }
                 "133" => match text.split(';').collect::<Vec<_>>()[..] {
@@ -1073,6 +1082,11 @@ mod tests {
     #[test]
     fn a_shell_reports_its_folder_and_its_last_exit_code() {
         let p = pane();
+        let moves = Arc::new(AtomicU64::new(0));
+        let m = moves.clone();
+        let _ = p.shared.on_cwd.set(Box::new(move || {
+            m.fetch_add(1, Ordering::Relaxed);
+        }));
         assert_eq!(*p.shared.cwd.lock().unwrap(), None);
         // What shell integration prints around a prompt, split mid-sequence.
         p.feed(b"\x1b]133;D;1\x07\x1b]133;A\x07\x1b]7;file://Mac/tmp/a%20b");
@@ -1084,6 +1098,9 @@ mod tests {
         assert_eq!(*p.shared.last_exit.lock().unwrap(), Some(0));
         assert_eq!(p.shared.cwd.lock().unwrap().as_deref(), Some("/Users/me"));
         assert_eq!(p.shared.prompts.load(Ordering::Relaxed), 2);
+        // Told once per move, not once per prompt.
+        p.feed(b"\x1b]7;file:///Users/me\x07");
+        assert_eq!(moves.load(Ordering::Relaxed), 2);
         // Through symlinks, as dinod names folders.
         p.feed(b"\x1b]7;file:///tmp\x07");
         assert_eq!(p.shared.cwd.lock().unwrap().as_deref(), Some(&*std::fs::canonicalize("/tmp").unwrap().display().to_string()));
