@@ -325,6 +325,7 @@ final class DinoModel: ObservableObject {
             return s
         }
         let appActive = NSApp.isActive
+        attention.formUnion(noteTmux(next) { appActive && $0.id == self.selected })
         for s in next {
             guard let prev = sessions.first(where: { $0.id == s.id }) else { continue }
             let looking = appActive && s.id == selected
@@ -682,6 +683,8 @@ final class DinoModel: ObservableObject {
     }
 
     var pendingSelect: String?
+    /// Per shell running tmux: the newest of its bells and notifications seen (Tabs.swift).
+    @Published var tmuxSeen: [String: UInt64] = [:]
     /// The tabs along the top, by session id, in order (see Tabs.swift).
     @Published var tabs: [String] = UserDefaults.standard.stringArray(forKey: "tabs") ?? [] {
         didSet { if tabs != oldValue { UserDefaults.standard.set(tabs, forKey: "tabs") } }

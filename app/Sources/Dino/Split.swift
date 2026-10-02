@@ -331,7 +331,7 @@ struct CloseCommand: View {
         let session = model.selectedSession
         let title = pane ? "Close Pane"
             : model.sidePane.map { $0 == .preview ? "Close Preview" : $0 == .tasks ? "Close Tasks" : "Close File" }
-            ?? (session != nil ? "Close Tab" : "Close Window")
+            ?? (session?.tmux != nil ? "Detach" : session != nil ? "Close Tab" : "Close Window")
         Button(title) {
             if pane, let id = model.selected {
                 model.closePane(id)
@@ -368,6 +368,7 @@ extension DinoModel {
     /// What a tab is called: a shell by its folder, as in Ghostty, or by the agent run in it.
     func tabName(_ s: SessionInfo) -> String {
         guard s.label == nil, s.agent_id == "shell" else { return s.display }
+        if let t = s.tmux { return t.label }
         if let f = s.inside { return f.title.isEmpty ? launcherLabel(f.agent) : f.title }
         return s.here.map { URL(fileURLWithPath: $0).lastPathComponent } ?? s.display
     }

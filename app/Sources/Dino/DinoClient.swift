@@ -62,6 +62,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var revealed: UInt64?
     /// A shell running a command rather than sitting at its prompt.
     var running: Bool?
+    /// A shell whose foreground is a tmux client: what it shows. Closing the tab only detaches it.
+    var tmux: TmuxPane?
     var last_exit: Int?
     /// Background commands its agent left serving (a dev server); nil from an older dinod.
     var servers: [ServerInfo]?
@@ -824,4 +826,17 @@ enum DinoEnvironment {
         p.waitUntilExit()
         guard p.terminationStatus == 0 else { throw DinoError.daemon("`dino ping` failed; is \(dinoBinary) installed?") }
     }
+}
+
+/// The pane a tmux client in a dino shell shows, and the bells and notifications from that tmux.
+struct TmuxPane: Codable, Equatable {
+    var target: String
+    var label: String
+    var busy: Bool
+    var alerts: [TmuxAlert]?
+}
+
+struct TmuxAlert: Codable, Equatable {
+    var seq: UInt64
+    var text: String
 }
