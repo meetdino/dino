@@ -191,7 +191,7 @@ struct Daemon {
     tree_gen: AtomicU64,
     /// Bumped by every request but a state read: clients waiting on `StateChange` look again now
     /// rather than at their next look, so what a request did shows at once.
-    asked: (Mutex<u64>, std::sync::Condvar),
+    asked: Arc<(Mutex<u64>, std::sync::Condvar)>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
 }
@@ -1195,6 +1195,12 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         Some(spec) => Pane::spawn(spec, cols.max(20), rows.max(5), tap)?,
         None => Pane::ended(&load_screen(&id), cols.max(20), rows.max(5), ended.and_then(|r| r.exit_code)),
     };
+    // A shell's `cd` shows at once rather than at the next look (the sidebar files it by folder).
+    let asked = d.asked.clone();
+    let _ = pane.shared.on_cwd.set(Box::new(move || {
+        *asked.0.lock().unwrap() += 1;
+        asked.1.notify_all();
+    }));
 
     let mut sessions = d.sessions.lock().unwrap();
     let name = match (&restore, name) {
