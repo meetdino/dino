@@ -2219,6 +2219,13 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         return spawn(d, Launch::new(&launcher, a.cloud_args(&f.session_id), cwd.or(f.cwd.clone())));
     }
 
+    // Whatever would stop it starting here is checked before the running one is stopped: a
+    // conversation is never left with nothing running it.
+    anyhow::ensure!(d.launcher(&launcher).is_some(), "{} isn't installed for dino to run, so it's left running where it is", f.agent);
+    if let Some(dir) = &f.cwd {
+        anyhow::ensure!(Path::new(dir).is_dir(), "{dir} is gone, so it's left running where it is");
+    }
+
     let mut tty = None;
     if let (Source::Running, Some(pid)) = (&f.source, f.pid) {
         wait_until_idle(a, pid, std::time::Duration::from_secs(180))?;
