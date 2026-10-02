@@ -17,6 +17,7 @@ struct DinoApp: App {
                 .onAppear {
                     delegate.model = model
                     delegate.reopenWindow = { openWindow(id: "main") }
+                    model.showWindow = { openWindow(id: "main") }
                     Notifier.onOpenSession = { model.select($0) }
                     Notifier.setUp()
                     model.start()

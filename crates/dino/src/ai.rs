@@ -540,6 +540,7 @@ fn agent(o: &Opts) -> anyhow::Result<()> {
         prompt: Some(format!("{}{}", o.words, context.unwrap_or_default())),
         by: by.clone(),
         route: None,
+        reveal: false,
     };
     match crate::client::request(&req)? {
         Response::Created { id } if by.is_some() => {

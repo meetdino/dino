@@ -385,6 +385,14 @@ final class DinoModel: ObservableObject {
         awaited.subtract(live)
         let kept = splits.filter { [$0.first, $0.second].allSatisfy { live.contains($0) || awaited.contains($0) } }
         if kept != splits { splits = kept }
+        // `dino <folder>`: the session it started, brought forward even from another app.
+        let revealed = next.filter { ($0.revealed ?? 0) > revealedUpTo }.max { ($0.revealed ?? 0) < ($1.revealed ?? 0) }
+        if let r = revealed {
+            revealedUpTo = r.revealed ?? revealedUpTo
+            pendingSelect = r.id
+            NSApp.activate(ignoringOtherApps: true)
+            if !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) { showWindow?() }
+        }
         if let want = pendingSelect, live.contains(want) {
             pendingSelect = nil
             select(want)
@@ -397,7 +405,7 @@ final class DinoModel: ObservableObject {
             if !Opening.pending.isEmpty {
                 open(Opening.pending)
                 Opening.pending = []
-            } else if next.isEmpty || StartWith.current == .shell {
+            } else if revealed == nil, next.isEmpty || StartWith.current == .shell {
                 startingShell = newShell()
             }
         }
@@ -666,6 +674,10 @@ final class DinoModel: ObservableObject {
     }
 
     var pendingSelect: String?
+    /// Opens the main window again when it was closed; set once the first one has appeared.
+    var showWindow: (() -> Void)?
+    /// Reveals up to here are handled: ones from before the app started (and opened it) count too.
+    private var revealedUpTo = UInt64(Date().timeIntervalSince1970 * 1000) - 10_000
 
     /// Continue the agent started by hand in shell `s` as a dino session, in the same row.
     func takeOver(_ s: SessionInfo) {
