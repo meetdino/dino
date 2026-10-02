@@ -1068,6 +1068,9 @@ final class PulseView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// Only a picture: a click on it belongs to the row it's in.
+    override func hitTest(_: NSPoint) -> NSView? { nil }
+
     func set(color: NSColor, ring: Bool, period: Double) {
         if let s = style, s.0 == color, s.1 == ring, s.2 == period { return }
         style = (color, ring, period)
