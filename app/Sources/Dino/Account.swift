@@ -35,7 +35,8 @@ extension DinoConnection {
     }
 }
 
-/// Settings → Dino Account's view of dinod. Asks while the pane is showing, not otherwise.
+/// Settings → Dino Account's view of dinod. Asks while the pane is showing, and while a sign-in
+/// started here is under way (finished in the browser, with the pane long closed), not otherwise.
 @MainActor
 final class SyncStore: ObservableObject {
     static let shared = SyncStore()
@@ -44,11 +45,19 @@ final class SyncStore: ObservableObject {
     @Published var error: String?
     private var watching = 0
     private var timer: Timer?
+    /// A sign-in started from this app: when it ends, the app comes forward to show how.
+    private var signingIn = false
+    /// Opens Settings on the Account pane; set by the app once it can open windows.
+    var showAccount: (() -> Void)?
 
     /// Ask now and then while a view that shows it is up.
     func watch() {
         watching += 1
         refresh()
+        startTimer()
+    }
+
+    private func startTimer() {
         guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             Task { @MainActor in SyncStore.shared.refresh() }
@@ -57,7 +66,7 @@ final class SyncStore: ObservableObject {
 
     func unwatch() {
         watching = max(0, watching - 1)
-        if watching == 0 {
+        if watching == 0, !signingIn {
             timer?.invalidate()
             timer = nil
         }
@@ -65,14 +74,34 @@ final class SyncStore: ObservableObject {
 
     func refresh() { act("status") }
 
+    /// The sign-in finished (or failed) in the browser: bring dino forward on the Account pane,
+    /// which says who is signed in, or asks which settings to keep when the two sides differ.
+    private func signInEnded(_ phase: String) {
+        guard signingIn, phase != "signing_in", phase != "joining" else { return }
+        signingIn = false
+        if watching == 0 {
+            timer?.invalidate()
+            timer = nil
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        showAccount?()
+    }
+
     /// Runs `action` in dinod; `login` opens the browser.
     func act(_ action: String, _ value: String? = nil) {
+        if action == "login" || action == "login_email" {
+            signingIn = true
+            startTimer()
+        } else if action == "cancel_login" {
+            signingIn = false
+        }
         Task.detached {
             do {
                 let (status, url) = try DinoConnection(path: DinoEnvironment.socketPath).sync(action, value)
                 await MainActor.run {
                     if action != "status" { self.error = nil }
                     if let status, status != self.status { self.status = status }
+                    if let phase = status?.phase { self.signInEnded(phase) }
                     if let url { NSWorkspace.shared.open(url) }
                 }
                 if url != nil { await MainActor.run { self.refresh() } }
