@@ -247,6 +247,14 @@ impl Stats {
         });
     }
 
+    /// dino wired the agent's hooks: it reports its own turns, so only a failed turn is an error,
+    /// not any call that failed (Claude's quota probe as it resumes, which can be rate limited
+    /// when dinod restarts and resumes everything at once). Known before its first hook, which
+    /// for a session resumed idle may never come.
+    pub fn reports_turns(&self, id: &str) {
+        self.update(id, |s| s.hooked = true);
+    }
+
     /// Forget context use, e.g. when the agent restarts on another model.
     /// The agent is starting over: what it said about itself no longer holds.
     pub fn restarted(&self, id: &str) {
@@ -1153,6 +1161,19 @@ mod tests {
         assert_eq!(s.last_error.as_deref(), Some("529 overloaded"));
         s.turn_hook("UserPromptSubmit", &json!({}));
         assert_eq!(s.last_error, None);
+
+        // Resumed idle with its hooks wired: its quota probe failing isn't the session's error,
+        // but a turn that then fails says why.
+        let stats = Stats::default();
+        stats.reports_turns("1");
+        stats.update("1", |s| s.call_failed("429 Error".into()));
+        assert_eq!(stats.session("1").last_error, None);
+        stats.update("1", |s| {
+            s.turn_hook("UserPromptSubmit", &json!({}));
+            s.call_failed("429 Error".into());
+            s.turn_hook("StopFailure", &json!({}));
+        });
+        assert_eq!(stats.session("1").last_error.as_deref(), Some("429 Error"));
     }
 
     #[test]
