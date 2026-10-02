@@ -334,7 +334,8 @@ pub fn run() -> anyhow::Result<()> {
             }
         });
     }
-    eprintln!("dinod listening on {}", path.display());
+    log_exits();
+    eprintln!("{} dinod {} listening on {} (pid {})", stamp(), env!("CARGO_PKG_VERSION"), path.display(), std::process::id());
     for stream in listener.incoming().flatten() {
         // Another user's process is hung up on, whatever the socket's permissions let through.
         if !same_user(&stream) {
@@ -391,6 +392,63 @@ fn claim_socket(path: &Path) -> anyhow::Result<std::fs::File> {
 }
 
 /// Whether the process at the other end of `stream` runs as this user.
+/// Local time for dinod's log, to the second.
+fn stamp() -> String {
+    let mut buf = [0u8; 32];
+    // SAFETY: `t` and `tm` are locals; strftime writes at most `buf.len()` bytes into `buf`.
+    let n = unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        libc::strftime(buf.as_mut_ptr().cast(), buf.len(), c"%Y-%m-%d %H:%M:%S".as_ptr(), &tm)
+    };
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// Every way dinod stops leaves a line in its log, so a restart can be told apart from a crash:
+/// a panic, a signal (one it can't catch, SIGKILL, is the only kind that leaves none).
+fn log_exits() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        eprintln!("{} dinod panicked:", stamp());
+        default(info);
+    }));
+    extern "C" fn on_signal(sig: libc::c_int) {
+        // Only async-signal-safe calls here: a fixed message, then the default action.
+        let msg: &[u8] = match sig {
+            libc::SIGTERM => b"dinod stopped by SIGTERM\n",
+            libc::SIGINT => b"dinod stopped by SIGINT\n",
+            libc::SIGHUP => b"dinod stopped by SIGHUP\n",
+            _ => b"dinod stopped by a signal\n",
+        };
+        // SAFETY: write(2), signal(2) and raise(3) are async-signal-safe.
+        unsafe {
+            libc::write(2, msg.as_ptr().cast(), msg.len());
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: installs a handler that only does async-signal-safe work.
+        unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
+    }
+}
+
+/// The process on the other end of a connection, for the log: "pid 123 (Dino)".
+fn peer(stream: &UnixStream) -> String {
+    use std::os::fd::AsRawFd;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: a live socket; `pid` and `len` are locals of the right size. LOCAL_PEERPID is macOS's.
+    let ok = unsafe { libc::getsockopt(stream.as_raw_fd(), 0, 2, (&mut pid as *mut libc::pid_t).cast(), &mut len) } == 0;
+    if !ok || pid <= 0 {
+        return "an unknown process".into();
+    }
+    let name = std::process::Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().rsplit('/').next().unwrap_or("").to_string()).unwrap_or_default();
+    format!("pid {pid} ({name})")
+}
+
 fn same_user(stream: &UnixStream) -> bool {
     use std::os::fd::AsRawFd;
     let mut uid: libc::uid_t = 0;
@@ -1026,6 +1084,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             | Request::RemoveStored { .. }
             | Request::FreeUpSpace) => lifecycle::serve(d, req),
             Request::Shutdown => {
+                eprintln!("{} dinod stopping: asked to by {}", stamp(), peer(&stream));
                 // Saved first: `dino stop` pauses sessions, the next dinod resumes them.
                 save(d);
                 lid::stop(d);
