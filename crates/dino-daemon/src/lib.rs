@@ -96,6 +96,8 @@ struct Session {
     inside: Mutex<Inside>,
     /// Once it has ended: its last screen is on disk (see `save`).
     screen_saved: AtomicBool,
+    /// While it runs: when its screen was last kept on disk (see `save_live_screens`).
+    live_saved: Mutex<Option<Instant>>,
     /// Background commands its agent left serving, as last looked at (see `servers`).
     servers: Mutex<Vec<servers::Server>>,
     /// The provider and model it runs on instead of its agent's own account.
@@ -270,6 +272,7 @@ pub fn run() -> anyhow::Result<()> {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 save(&d);
+                save_live_screens(&d, false);
             }
         });
     }
@@ -1302,6 +1305,15 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         Some(spec) => Pane::spawn(spec, cols.max(20), rows.max(5), tap)?,
         None => Pane::ended(&load_screen(&id), cols.max(20), rows.max(5), ended.and_then(|r| r.exit_code)),
     };
+    // Resumed after dinod stopped or crashed: what its pane showed then, above the agent's resume.
+    if restore.is_some() && !pane.is_exited() {
+        if let Some(before) = std::fs::read(live_screens_dir().join(&id)).ok().filter(|b| !b.is_empty()) {
+            pane.feed(&before);
+            // Back on the normal screen (it may have been saved with a full-screen program up),
+            // and a line between then and now.
+            pane.feed(b"\x1b[?1049l\r\n\x1b[0m\x1b[2m-- dino restarted; above is where this session was --\x1b[0m\r\n");
+        }
+    }
     // A shell's `cd` shows at once rather than at the next look (the sidebar files it by folder).
     let asked = d.asked.clone();
     let _ = pane.shared.on_cwd.set(Box::new(move || {
@@ -1350,6 +1362,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         log: Mutex::default(),
         inside: Mutex::default(),
         screen_saved: AtomicBool::new(false),
+        live_saved: Mutex::default(),
         servers: Mutex::new(vec![]),
         route,
     }));
@@ -1911,6 +1924,7 @@ fn state(d: &Daemon) -> Response {
 /// Save and stop every session, ready to exit: the next dinod resumes them (`dino stop`).
 fn stop_all(d: &Daemon) {
     save(d);
+    save_live_screens(d, true);
     lid::stop(d);
     for s in d.sessions.lock().unwrap().drain(..) {
         s.pane.kill();
@@ -2020,6 +2034,46 @@ fn screens_dir() -> PathBuf {
 
 fn load_screen(id: &str) -> Vec<u8> {
     std::fs::read(screens_dir().join(id)).unwrap_or_default()
+}
+
+/// Running sessions' screens, kept so a dinod that crashes doesn't take them along.
+fn live_screens_dir() -> PathBuf {
+    screens_dir().join("live")
+}
+
+/// How much of a running session's screen is kept: its last lines, enough to see where it was.
+const LIVE_HISTORY: usize = 500;
+/// How often a running session's screen is written at most, and only when it printed since.
+const LIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Keep each running session's recent screen on disk (each one at most every `LIVE_EVERY`, and
+/// only if it printed since; `all` for a clean stop, now), so after a crash its pane shows where
+/// it was before the agent resumes. Screens of sessions that are gone go.
+fn save_live_screens(d: &Daemon, all: bool) {
+    let sessions = d.sessions.lock().unwrap().clone();
+    let dir = live_screens_dir();
+    for s in sessions.iter().filter(|s| s.host.is_none() && !s.pane.is_exited()) {
+        let printed = *s.last_output.lock().unwrap();
+        let mut saved = s.live_saved.lock().unwrap();
+        let due = match (printed, *saved) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(p), Some(at)) => p > at && (all || at.elapsed() >= LIVE_EVERY),
+        };
+        if !due {
+            continue;
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        if write_private(&dir.join(&s.id), &s.pane.replay(LIVE_HISTORY)).is_ok() {
+            *saved = Some(Instant::now());
+        }
+    }
+    for f in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = f.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".tmp") && !sessions.iter().any(|s| s.id == name && !s.pane.is_exited()) {
+            let _ = std::fs::remove_file(f.path());
+        }
+    }
 }
 
 /// Write `bytes` to `path`, readable by this user only (prompts, paths and names are in dinod's
@@ -3481,6 +3535,37 @@ mod tests {
         kill(&d2, &id);
         assert!(ended_note(&d2, &live).is_empty());
         kill(&d, &id);
+    }
+
+    /// A running session's screen is kept on disk, and a dinod that starts it again (after a
+    /// crash) shows it in the pane above what the session prints anew.
+    #[test]
+    fn a_running_sessions_screen_survives_a_restart() {
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(test_home().display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        s.pane.write(b"echo kept-$((6*7))\r".to_vec());
+        wait_for("the output", || s.pane.text(0).contains("kept-42") && s.last_output.lock().unwrap().is_some());
+        save_live_screens(&d, true);
+        let file = live_screens_dir().join(&id);
+        assert!(file.exists());
+        let size = file.metadata().unwrap().len();
+        // Nothing printed since: not written again.
+        save_live_screens(&d, true);
+        assert_eq!(file.metadata().unwrap().len(), size);
+
+        // dinod gone without stopping it (a crash): a new one starts the session again.
+        let saved = snapshot(&s);
+        let d2 = shell_daemon();
+        let again = spawn(&d2, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) }).unwrap();
+        assert_eq!(again, id);
+        let back = session(&d2, &id);
+        let text = back.pane.text(LIVE_HISTORY);
+        assert!(text.contains("kept-42") && text.contains("dino restarted"), "{text}");
+        kill(&d2, &id);
+        kill(&d, &id);
+        save_live_screens(&d2, false);
+        assert!(!file.exists(), "a gone session's screen goes");
     }
 
     /// A question dismissed without a hook (Esc on Claude's permission prompt) ends once the screen
