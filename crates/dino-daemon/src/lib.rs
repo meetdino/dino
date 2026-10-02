@@ -313,16 +313,21 @@ pub fn run() -> anyhow::Result<()> {
         // The ChatGPT sign-in's access token lasts an hour: a new one before it runs out.
         let d = daemon.clone();
         std::thread::spawn(move || {
+            // Failures in a row: offline or OpenAI down, it waits longer each time (up to 15
+            // minutes) rather than asking every 30 seconds all night.
+            let mut failed = 0u32;
             loop {
                 match chatgpt::refresh_if_due(&chatgpt::Endpoints::default().token, &load_keys()) {
                     Ok(Some(t)) => {
+                        failed = 0;
                         if let Err(e) = save_chatgpt(&d, &t) {
                             eprintln!("dinod: couldn't keep the new ChatGPT sign-in: {e}");
                         }
                     }
-                    Ok(None) => {}
+                    Ok(None) => failed = 0,
                     Err(e) => {
-                        eprintln!("dinod: ChatGPT sign-in refresh: {e}");
+                        failed += 1;
+                        eprintln!("dinod: ChatGPT sign-in refresh: {e} (try {failed}, next in {}s)", refresh_wait(failed).as_secs());
                         // Turned down: signed out, and it says why, rather than asking again every time.
                         if e.downcast_ref::<chatgpt::Refused>().is_some() && chatgpt::SIGNED_IN.iter().try_for_each(|k| settings::set_key(k, None)).is_ok() {
                             keys_changed(&d);
@@ -330,7 +335,7 @@ pub fn run() -> anyhow::Result<()> {
                         providers::set_error("chatgpt", Some(format!("Sign in with ChatGPT again: {e}")));
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_secs(30));
+                std::thread::sleep(refresh_wait(failed));
             }
         });
     }
@@ -483,6 +488,12 @@ fn launchers(free_tier: bool) -> Vec<LauncherInfo> {
 
 /// dino's key store changed: the proxy, what can be started and the providers follow.
 /// A ChatGPT sign-in's tokens go to dino's key store, and the proxy uses them from the next request.
+/// How long the ChatGPT sign-in refresh waits after `failed` failures in a row: 30 s normally,
+/// doubling per failure, at most 15 minutes.
+fn refresh_wait(failed: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((30u64 << failed.min(5)).min(15 * 60))
+}
+
 fn save_chatgpt(d: &Daemon, t: &chatgpt::Tokens) -> anyhow::Result<()> {
     for (k, v) in t.keys() {
         settings::set_key(k, Some(&v))?;
@@ -3069,6 +3080,12 @@ fn remove_worktree(d: &Daemon, path: &str, apply: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chatgpt_refresh_backs_off() {
+        let secs: Vec<u64> = (0..8).map(|n| refresh_wait(n).as_secs()).collect();
+        assert_eq!(secs, [30, 60, 120, 240, 480, 900, 900, 900]);
+    }
 
     fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
         let since = Instant::now();
