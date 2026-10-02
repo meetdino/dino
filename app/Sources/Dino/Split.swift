@@ -319,24 +319,56 @@ struct SplitMenuItems: View {
     }
 }
 
-/// ⌘W closes the focused pane of a split, and the window when there is none.
+/// ⌘W closes what you're in, innermost first, like a tab in a terminal: the split pane you're
+/// typing in, else the side pane, else the session itself, and the window only when no session is
+/// open. dino's sessions are its tabs.
 struct CloseCommand: View {
     @EnvironmentObject var model: DinoModel
 
-    /// ⌘W closes what has focus: the split pane you're typing in, else the side pane, else the
-    /// selected split pane, else the window.
     var body: some View {
         let split = model.shownSplit
         let pane = split != nil && (model.sidePane == nil || split?.contains(model.focusedTerminal) == true)
-        Button(pane ? "Close Pane" : model.sidePane.map { $0 == .preview ? "Close Preview" : $0 == .tasks ? "Close Tasks" : "Close File" } ?? "Close Window") {
+        let session = model.selectedSession
+        let title = pane ? "Close Pane"
+            : model.sidePane.map { $0 == .preview ? "Close Preview" : $0 == .tasks ? "Close Tasks" : "Close File" }
+            ?? (session != nil ? "Close Tab" : "Close Window")
+        Button(title) {
             if pane, let id = model.selected {
                 model.closePane(id)
             } else if model.sidePane != nil {
                 model.closeSidePane()
+            } else if let session {
+                model.closeTab(session)
             } else {
                 NSApp.keyWindow?.performClose(nil)
             }
         }
         .keyboardShortcut("w")
+    }
+}
+
+extension DinoModel {
+    /// ⌘W on a tab. A shell's tab ends the shell, asking first if something is running in it (an
+    /// agent typed into it included). An agent's tab only closes: the agent keeps running in the
+    /// sidebar, where archiving it is.
+    func closeTab(_ s: SessionInfo) {
+        let shell = s.agent_id == "shell"
+        if shell, !s.exited, s.running == true || s.inside != nil {
+            let what = s.inside.map { "\(launcherLabel($0.agent)) is running in it" } ?? "A command is still running in it"
+            let alert = NSAlert()
+            alert.messageText = "Close \(tabName(s))?"
+            alert.informativeText = "\(what), and closing the tab ends it."
+            alert.addButton(withTitle: "Close")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        dropTab(s.id, ending: shell)
+    }
+
+    /// What a tab is called: a shell by its folder, as in Ghostty, or by the agent run in it.
+    func tabName(_ s: SessionInfo) -> String {
+        guard s.label == nil, s.agent_id == "shell" else { return s.display }
+        if let f = s.inside { return f.title.isEmpty ? launcherLabel(f.agent) : f.title }
+        return s.here.map { URL(fileURLWithPath: $0).lastPathComponent } ?? s.display
     }
 }

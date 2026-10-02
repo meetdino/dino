@@ -256,7 +256,7 @@ struct FilterBar: View {
     var body: some View {
         let filters = SessionFilter.allCases.filter { $0 != .archived }
         let counts = Dictionary(uniqueKeysWithValues: filters.map { f in
-            (f, model.sessions.filter { f.passes(model.status(of: $0)) && model.sidebarShows($0) }.count)
+            (f, model.sidebarSessions.filter { f.passes(model.status(of: $0)) && model.sidebarShows($0) }.count)
         })
         ViewThatFits(in: .horizontal) {
             bar(filters, counts, words: true)

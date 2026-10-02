@@ -60,6 +60,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var shell_cwd: String?
     /// When `dino <folder>` asked for it to be shown, in ms since the epoch.
     var revealed: UInt64?
+    /// A shell running a command rather than sitting at its prompt.
+    var running: Bool?
     var last_exit: Int?
     /// Background commands its agent left serving (a dev server); nil from an older dinod.
     var servers: [ServerInfo]?

@@ -178,7 +178,7 @@ extension DinoModel {
 
     /// Sessions top to bottom as the sidebar lists them.
     var sidebarOrder: [String] {
-        let tree = SessionTree.build(repos: repos, sessions: sessions, groups: groups)
+        let tree = SessionTree.build(repos: repos, sessions: sidebarSessions, groups: groups)
         var ids: [String] = []
         for node in tree.repos {
             ids += node.places.flatMap { $0.sessions.map(\.id) }
@@ -187,7 +187,7 @@ extension DinoModel {
         ids += tree.unfiled.map(\.id)
         let live = Set(sessions.map(\.id))
         ids = ids.filter { live.contains($0) }
-        return ids + sessions.map(\.id).filter { !ids.contains($0) }
+        return ids + sidebarSessions.map(\.id).filter { !ids.contains($0) }
     }
 
     /// Ctrl+Tab: the next session down the sidebar, wrapping; `by: -1` goes up.
@@ -231,7 +231,8 @@ struct SessionName: View {
                 }
                 .help("Return to rename; empty goes back to the agent's own title")
         } else {
-            Text(session.display)
+            // In the toolbar, a shell goes by its tab's name (its folder).
+            Text(place == .toolbar ? model.tabName(session) : session.display)
                 .font(font)
                 .foregroundStyle(color)
                 .lineLimit(1)
