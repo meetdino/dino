@@ -1,7 +1,7 @@
 # dino Homebrew tap
 
 ```sh
-brew install --cask asdf9384/tap/dino      # the dino terminal, with the dino command
+brew install asdf9384/tap/dino            # the dino terminal, with the dino command
 brew install asdf9384/tap/dino-cli         # just the dino command and dinod
 ```
 

@@ -49,7 +49,7 @@ if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
     [ "$DRY" = 1 ] || exit 1
 fi
 run gh release create "$TAG" --repo "$RELEASES_REPO" --title "dino $VERSION" \
-    --notes "dino $VERSION. Install with \`brew install --cask asdf9384/tap/dino\`, or the command line alone with \`curl -fsSL https://meetdino.com/install.sh | sh\`." \
+    --notes "dino $VERSION. Install with \`brew install asdf9384/tap/dino\`, or the command line alone with \`curl -fsSL https://meetdino.com/install.sh | sh\`." \
     "$DMG" "$TAR" "$DIST/SHA256SUMS" ${UPDATES[@]+"${UPDATES[@]}"}
 # The same DMG under a name that never changes, for the website's releases/latest/download link.
 STABLE="$(mktemp -d)/Dino.dmg"
