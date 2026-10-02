@@ -923,6 +923,18 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Found { cloud, running_only } => Response::Found { sessions: discover(d, cloud, running_only) },
+            Request::TmuxShow { socket, pane } => {
+                let tty = tmux::show(&socket, &pane);
+                // The dino tab whose shell runs that client, to bring it forward too.
+                let session = tty.as_ref().and_then(|tty| {
+                    d.sessions.lock().unwrap().iter().find(|s| s.inside.lock().unwrap().tmux.as_ref().and_then(|t| t.1.as_ref()).is_some_and(|v| &v.tty == tty)).map(|s| s.id.clone())
+                });
+                Response::TmuxShown { tty, session }
+            }
+            Request::TmuxScreen { socket, pane } => match tmux::screen(&socket, &pane) {
+                Some(text) => Response::Text { text },
+                None => Response::Error { message: "that tmux pane is gone".into() },
+            },
             Request::TakeOver { id } => match take_over(d, &id) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
@@ -2186,7 +2198,9 @@ fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
     ours.extend(d.archived.lock().unwrap().iter().filter_map(|a| a.saved.agent_session.clone()));
     ours.extend(inside.iter().map(|f| f.session_id.clone()).filter(|id| !id.is_empty()));
     let in_shell = |f: &FoundSession| f.pid.is_some() && inside.iter().any(|i| i.pid == f.pid);
-    let running: Vec<FoundSession> = found::running().into_iter().filter(|f| !ours.contains(&f.session_id) && !in_shell(f)).collect();
+    let mut running: Vec<FoundSession> = found::running().into_iter().filter(|f| !ours.contains(&f.session_id) && !in_shell(f)).collect();
+    // Agents in tmux panes: which pane, and whether they're asking.
+    tmux::place(&mut running);
     let mut out = if running_only { vec![] } else { dino_core::history::finished(&running) };
     out.retain(|f| !ours.contains(&f.session_id));
     out.splice(0..0, running);
