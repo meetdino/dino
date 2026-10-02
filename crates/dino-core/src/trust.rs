@@ -171,11 +171,23 @@ mod tests {
         assert!(read(&config).unwrap()["projects"].get(real(&wt)).is_some());
         let spelled = std::fs::read_to_string(&config).unwrap();
         assert!(dir.to_string_lossy() == real(&dir) || spelled.contains(&*wt.to_string_lossy()), "both spellings written");
-        std::fs::remove_dir_all(&wt).unwrap();
+        remove_all(&wt);
         claude_forget(&wt).unwrap();
         let v = read(&config).unwrap();
         assert_eq!(v["projects"].as_object().unwrap().len(), 2, "{v}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `remove_dir_all`, again a moment later if it fails: on macOS it can fail (EINVAL) once
+    /// when something else (Spotlight, fseventsd) touches the folder at that instant.
+    fn remove_all(p: &Path) {
+        for _ in 0..5 {
+            if std::fs::remove_dir_all(p).is_ok() || !p.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::fs::remove_dir_all(p).unwrap();
     }
 
     /// The real path of a folder that no longer exists, through what's left of it.
