@@ -61,6 +61,8 @@ struct Session {
     last_output: Arc<Mutex<Option<Instant>>>,
     /// When the agent last wrote anything at all.
     last_write: Arc<Mutex<Option<Instant>>>,
+    /// The question it's waiting on the user for, and when dinod first saw it.
+    asked: Mutex<Option<(String, Instant)>>,
     /// The user's last keystroke, resize or attach.
     poked: Arc<Mutex<Option<Instant>>>,
     /// The last local web address the agent printed.
@@ -368,7 +370,8 @@ pub fn run() -> anyhow::Result<()> {
             }
         });
     }
-    eprintln!("dinod listening on {}", path.display());
+    log_exits();
+    eprintln!("{} dinod {} listening on {} (pid {})", stamp(), env!("CARGO_PKG_VERSION"), path.display(), std::process::id());
     for stream in listener.incoming().flatten() {
         // Another user's process is hung up on, whatever the socket's permissions let through.
         if !same_user(&stream) {
@@ -425,6 +428,63 @@ fn claim_socket(path: &Path) -> anyhow::Result<std::fs::File> {
 }
 
 /// Whether the process at the other end of `stream` runs as this user.
+/// Local time for dinod's log, to the second.
+fn stamp() -> String {
+    let mut buf = [0u8; 32];
+    // SAFETY: `t` and `tm` are locals; strftime writes at most `buf.len()` bytes into `buf`.
+    let n = unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        libc::strftime(buf.as_mut_ptr().cast(), buf.len(), c"%Y-%m-%d %H:%M:%S".as_ptr(), &tm)
+    };
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// Every way dinod stops leaves a line in its log, so a restart can be told apart from a crash:
+/// a panic, a signal (one it can't catch, SIGKILL, is the only kind that leaves none).
+fn log_exits() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        eprintln!("{} dinod panicked:", stamp());
+        default(info);
+    }));
+    extern "C" fn on_signal(sig: libc::c_int) {
+        // Only async-signal-safe calls here: a fixed message, then the default action.
+        let msg: &[u8] = match sig {
+            libc::SIGTERM => b"dinod stopped by SIGTERM\n",
+            libc::SIGINT => b"dinod stopped by SIGINT\n",
+            libc::SIGHUP => b"dinod stopped by SIGHUP\n",
+            _ => b"dinod stopped by a signal\n",
+        };
+        // SAFETY: write(2), signal(2) and raise(3) are async-signal-safe.
+        unsafe {
+            libc::write(2, msg.as_ptr().cast(), msg.len());
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: installs a handler that only does async-signal-safe work.
+        unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
+    }
+}
+
+/// The process on the other end of a connection, for the log: "pid 123 (Dino)".
+fn peer(stream: &UnixStream) -> String {
+    use std::os::fd::AsRawFd;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: a live socket; `pid` and `len` are locals of the right size. LOCAL_PEERPID is macOS's.
+    let ok = unsafe { libc::getsockopt(stream.as_raw_fd(), 0, 2, (&mut pid as *mut libc::pid_t).cast(), &mut len) } == 0;
+    if !ok || pid <= 0 {
+        return "an unknown process".into();
+    }
+    let name = std::process::Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().rsplit('/').next().unwrap_or("").to_string()).unwrap_or_default();
+    format!("pid {pid} ({name})")
+}
+
 fn same_user(stream: &UnixStream) -> bool {
     use std::os::fd::AsRawFd;
     let mut uid: libc::uid_t = 0;
@@ -1066,6 +1126,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             | Request::RemoveStored { .. }
             | Request::FreeUpSpace) => lifecycle::serve(d, req),
             Request::Shutdown => {
+                eprintln!("{} dinod stopping: asked to by {}", stamp(), peer(&stream));
                 ipc::write_json(&mut stream, &Response::Ok)?;
                 stop_all(d);
                 std::process::exit(0);
@@ -1257,6 +1318,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         subscribers,
         last_output,
         last_write,
+        asked: Mutex::default(),
         poked,
         local_url,
         attached: AtomicUsize::new(0),
@@ -1648,7 +1710,31 @@ fn stats(d: &Daemon, s: &Session) -> SessionStats {
         d.proxy.stats.end_turn(&s.id);
         return d.proxy.stats.session(&s.id);
     }
+    if let Some(Activity::NeedsPermission(msg)) = &st.activity {
+        if !st.tracked && s.agent_id == "claude" && question_dismissed(s, msg, quiet) {
+            d.proxy.stats.end_question(&s.id, msg);
+            return d.proxy.stats.session(&s.id);
+        }
+    } else {
+        *s.asked.lock().unwrap() = None;
+    }
     st
+}
+
+/// Esc on Claude Code's permission prompt (or its question) sends no hook, so the session would
+/// stay on "Needs you". It's over when the screen has changed since the prompt came up, has gone
+/// quiet, and no longer shows a dialog (each ends in "Esc to cancel").
+fn question_dismissed(s: &Session, msg: &str, quiet: bool) -> bool {
+    let mut asked = s.asked.lock().unwrap();
+    let since = match &*asked {
+        Some((m, at)) if m == msg => *at,
+        _ => {
+            *asked = Some((msg.to_string(), Instant::now()));
+            return false;
+        }
+    };
+    let redrawn = s.last_write.lock().unwrap().is_some_and(|t| t > since);
+    redrawn && quiet && !s.pane.text(0).contains("Esc to cancel")
 }
 
 /// Tokens in the context window, and its size as the agent reports it: Claude to its statusline,
@@ -1807,7 +1893,7 @@ fn stop_all(d: &Daemon) {
 /// Restart into `exe` (a newer dino put in its place): stop as `dino stop` does, and have a
 /// detached `dino ping` start the new dinod once this one is gone and its lock is free.
 fn restart_into(d: &Daemon, exe: &Path) -> ! {
-    eprintln!("dinod: restarting into the new dino");
+    eprintln!("{} dinod restarting into the new dino", stamp());
     stop_all(d);
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.arg("-c").arg("sleep 1; exec \"$0\" ping").arg(exe);
@@ -1948,6 +2034,17 @@ fn save(d: &Daemon) {
 }
 
 /// What it takes to bring `s` back.
+/// Where session `s` starts again after dinod restarts (or crashes): a shell on this Mac where it
+/// last was, if that folder is still there; anything else where it started.
+fn resume_folder(s: &Session) -> String {
+    if s.agent_id == "shell" && s.host.is_none() {
+        if let Some(here) = s.pane.shared.cwd.lock().unwrap().clone().filter(|p| Path::new(p).is_dir()) {
+            return here;
+        }
+    }
+    s.cwd.display().to_string()
+}
+
 fn snapshot(s: &Session) -> SavedSession {
     let mut agent_session = s.agent_session.lock().unwrap();
     if agent_session.is_none() {
@@ -1958,7 +2055,7 @@ fn snapshot(s: &Session) -> SavedSession {
         name: s.name.clone(),
         launcher: s.launcher.clone(),
         args: s.args.clone(),
-        cwd: s.cwd.display().to_string(),
+        cwd: resume_folder(s),
         started_at: s.started_at,
         agent_session: agent_session.clone(),
         auto: s.auto.lock().unwrap().clone(),
@@ -3219,7 +3316,23 @@ mod tests {
         }
     }
 
+    /// dino's folder for every test in this crate: one, set before any shell starts and never
+    /// removed during the run, so no test writes the user's own `~/.config/dino` (dino-core's
+    /// test-only folder applies to its own tests only), and no shell loses the terminfo it was
+    /// started with.
+    fn test_home() -> &'static Path {
+        static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            let home = std::env::temp_dir().join(format!("dino-daemon-test-{}", std::process::id()));
+            std::fs::create_dir_all(&home).unwrap();
+            // SAFETY: set once, before this crate's tests start any thread that reads it.
+            unsafe { std::env::set_var("DINO_HOME", &home) };
+            home
+        })
+    }
+
     fn shell_daemon() -> Arc<Daemon> {
+        test_home();
         let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default() };
         new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![shell])
     }
@@ -3255,10 +3368,7 @@ mod tests {
     /// A session whose program exits stays, ended, across a dinod restart, and resumes in place.
     #[test]
     fn ended_sessions_are_kept_and_resume() {
-        let home = std::env::temp_dir().join(format!("dino-resume-test-{}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        // SAFETY: the only test in this crate that reads dino's config.
-        unsafe { std::env::set_var("DINO_HOME", &home) };
+        let home = test_home().to_path_buf();
 
         let d = shell_daemon();
         let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
@@ -3298,9 +3408,48 @@ mod tests {
         assert!(!load_saved()[0].ended);
         assert!(!screens_dir().join(&id).exists());
 
+        // A shell comes back where it last was, not where it started (a crash loses only the screen).
+        let sub = home.join("deeper");
+        std::fs::create_dir_all(&sub).unwrap();
+        *live.pane.shared.cwd.lock().unwrap() = Some(sub.display().to_string());
+        save(&d2);
+        assert_eq!(load_saved()[0].cwd, sub.display().to_string());
+        // A folder since removed: back to where it started, rather than not starting at all.
+        std::fs::remove_dir_all(&sub).unwrap();
+        save(&d2);
+        assert_eq!(load_saved()[0].cwd, live.cwd.display().to_string());
+
         // Removed: attached clients are told it's gone, not that it ended.
         kill(&d2, &id);
         assert!(ended_note(&d2, &live).is_empty());
+        kill(&d, &id);
+    }
+
+    /// A question dismissed without a hook (Esc on Claude's permission prompt) ends once the screen
+    /// has changed since it came up and shows no dialog; a dialog still up keeps it.
+    #[test]
+    fn a_dismissed_question_ends() {
+        let home = std::env::temp_dir().join(format!("dino-asked-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        s.pane.write(b"clear; printf 'Do you want to proceed?\\n  Esc to cancel\\n'\r".to_vec());
+        wait_for("the dialog", || s.pane.text(0).contains("Esc to cancel"));
+        // First sight: noted, never over at once.
+        assert!(!question_dismissed(&s, "Run: ls?", true));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // The dialog still up, however long it waits: still a question.
+        s.pane.write(b"printf ''\r".to_vec());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!question_dismissed(&s, "Run: ls?", true));
+        // Gone from the screen, and not still drawing: over.
+        s.pane.write(b"clear\r".to_vec());
+        wait_for("the dialog to go", || !s.pane.text(0).contains("Esc to cancel"));
+        assert!(!question_dismissed(&s, "Run: ls?", false), "still drawing");
+        assert!(question_dismissed(&s, "Run: ls?", true));
+        // A different question starts over.
+        assert!(!question_dismissed(&s, "Edit main.rs?", true));
         kill(&d, &id);
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -3325,7 +3474,16 @@ mod tests {
         let (served, _) = listener.accept().unwrap();
         assert!(same_user(&served));
         drop((client, served, listener, lock));
-        let again = claim_socket(&path).unwrap();
+        // A shell another test forks at this moment holds a copy of the lock until it execs
+        // (a flock lasts while any copy is open): that clears in a moment.
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        let again = loop {
+            match claim_socket(&path) {
+                Ok(l) => break l,
+                Err(e) if Instant::now() > deadline => panic!("{e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
         assert!(!path.exists());
         drop(again);
         let _ = std::fs::remove_dir_all(&dir);
