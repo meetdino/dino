@@ -861,9 +861,20 @@ enum DinoEnvironment {
         env["PATH"] = loginPath
         p.environment = env
         p.standardOutput = FileHandle.nullDevice
-        try p.run()
+        let err = Pipe()
+        p.standardError = err
+        do {
+            try p.run()
+        } catch {
+            throw DinoError.daemon("dino's command-line tool isn't at \(dinoBinary): \(error.localizedDescription)")
+        }
+        let said = err.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        guard p.terminationStatus == 0 else { throw DinoError.daemon("`dino ping` failed; is \(dinoBinary) installed?") }
+        guard p.terminationStatus == 0 else {
+            // What it said, not a guess: on a new Mac, say, the folder it couldn't make.
+            let why = String(decoding: said, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw DinoError.daemon("dinod didn't start: \(why.isEmpty ? "`dino ping` exited with \(p.terminationStatus)" : why)")
+        }
     }
 }
 

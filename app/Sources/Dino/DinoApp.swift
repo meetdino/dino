@@ -308,8 +308,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func ask(_ model: DinoModel) -> QuitChoice {
         let count = model.sessions.count
         let working = model.sessions.filter { [.thinking, .working, .waiting, .needsYou].contains(model.status(of: $0)) }.count
+        // Shells aren't agents: "your 2 agents" for one agent and a shell said what isn't there.
+        let agents = model.sessions.filter { !$0.plainShell }.count
+        let shells = count - agents
+        let what = agents == 0 ? (shells == 1 ? "shell" : "\(shells) shells")
+            : shells == 0 ? (agents == 1 ? "agent" : "\(agents) agents")
+            : "\(count) sessions"
         let alert = NSAlert()
-        alert.messageText = count == 1 ? "Keep your agent running?" : "Keep your \(count) agents running?"
+        alert.messageText = "Keep your \(what) running?"
         alert.informativeText = (working > 0 ? "\(working) \(working == 1 ? "is" : "are") working right now. " : "")
             + "They carry on in the background while dino is closed; open dino to pick up where you left off."
             + " Stopping pauses them, and they resume the next time dino starts."

@@ -89,8 +89,19 @@ main() {
     case ":$PATH:" in
         *":$dir:"*) echo "Run: $product" ;;
         *)
-            echo "$dir isn't on your PATH. Add this to your shell's startup file, then open a new shell:"
-            echo "  export PATH=\"$dir:\$PATH\""
+            # The startup file of the shell they use, so the line can be pasted as is.
+            case "${SHELL##*/}" in
+                zsh) rc="~/.zshrc" ;;
+                bash) rc="~/.bash_profile" ;;
+                fish) rc="" ;;
+                *) rc="~/.profile" ;;
+            esac
+            echo "$dir isn't on your PATH yet. To add it, run this, then open a new terminal:"
+            if [ -n "$rc" ]; then
+                echo "  echo 'export PATH=\"$dir:\$PATH\"' >> $rc"
+            else
+                echo "  fish_add_path $dir"
+            fi
             ;;
     esac
 }

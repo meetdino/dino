@@ -32,8 +32,15 @@ struct WelcomeCard: View {
             .sheet(isPresented: Binding(get: { shown }, set: { if !$0, shown { close() } })) {
                 card.onAppear(perform: look)
             }
-            // Once, after the first frame: whether this Mac has seen the card.
-            .onAppear { store.load() }
+            // After the first frame: whether this Mac has seen the card. On a new Mac dinod is still
+            // starting then, so it asks again each second until it answers (or gives up after 30 s):
+            // asked once, the card never came up on the very first launch.
+            .task {
+                for _ in 0..<30 where store.settings == nil {
+                    store.load()
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
             .onChange(of: model.showWelcome) { _, on in if on { store.load() } }
     }
 

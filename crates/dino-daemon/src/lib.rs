@@ -1735,6 +1735,20 @@ fn stats(d: &Daemon, s: &Session) -> SessionStats {
     st
 }
 
+/// What Claude Code's own screen asks of you before its hooks can say anything: trusting the
+/// folder, signing in, or its first-run setup. Its words, as it shows them.
+fn setup_prompt(screen: &str) -> Option<&'static str> {
+    if screen.contains("Yes, I trust this folder") {
+        Some("Trust this folder?")
+    } else if screen.contains("Select login method") || screen.contains("Paste code here") {
+        Some("Sign in to Claude Code")
+    } else if screen.contains("Choose the text style") {
+        Some("Finish setting up Claude Code")
+    } else {
+        None
+    }
+}
+
 /// Esc on Claude Code's permission prompt (or its question) sends no hook, so the session would
 /// stay on "Needs you". It's over when the screen has changed since the prompt came up, has gone
 /// quiet, and no longer shows a dialog (each ends in "Esc to cancel").
@@ -1847,7 +1861,10 @@ fn state(d: &Daemon) -> Response {
                         (agents, commands) => format!("waiting:{}", waiting_words(agents, commands)),
                     },
                     Activity::NeedsPermission(what) => format!("needs:{what}"),
-                }),
+                })
+                // Before its first hook, Claude can already be waiting on you: its folder trust
+                // prompt, its login, its first-run setup. Shown, so a first session isn't "idle".
+                .or_else(|| (s.agent_id == "claude" && !s.pane.is_exited()).then(|| setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))),
                 group: group_of(&s.id),
                 error: st.last_error,
                 cwd: if s.host.is_some() { s.cwd.display().to_string() } else { real(&s.cwd) },
@@ -3324,6 +3341,14 @@ fn remove_worktree(d: &Daemon, path: &str, apply: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claudes_first_screens_need_you() {
+        assert_eq!(setup_prompt("Quick safety check\n ❯ No, exit\n   Yes, I trust this folder"), Some("Trust this folder?"));
+        assert_eq!(setup_prompt(" Select login method:\n ❯ 1. Claude account"), Some("Sign in to Claude Code"));
+        assert_eq!(setup_prompt(" Choose the text style that looks best"), Some("Finish setting up Claude Code"));
+        assert_eq!(setup_prompt("❯ hello\n● Hi!"), None);
+    }
 
     #[test]
     fn chatgpt_refresh_backs_off() {
