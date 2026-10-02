@@ -60,11 +60,12 @@ pub fn detect_agents() -> Vec<Detected> {
     detect_agents_in(&std::env::var_os("PATH").unwrap_or_default())
 }
 
-/// Known agents found on `path` (a `PATH`-style list), in catalog order.
+/// Known agents found on `path` (a `PATH`-style list), else where their installers put them (see
+/// `which`), in catalog order.
 pub fn detect_agents_in(path: &std::ffi::OsStr) -> Vec<Detected> {
     KNOWN_AGENTS
         .iter()
-        .filter_map(|kind| which_in(kind.bin, path).map(|path| Detected { kind: kind.clone(), path }))
+        .filter_map(|kind| which_in(kind.bin, path).or_else(|| which_in(kind.bin, &install_dirs())).map(|path| Detected { kind: kind.clone(), path }))
         .collect()
 }
 
@@ -73,8 +74,26 @@ pub fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
 }
 
+/// `bin` on the `PATH`, else in the folders agents' own installers put themselves: a fresh Mac's
+/// `PATH` often lacks them (Claude Code's installer says so and leaves it to you), and an agent
+/// installed from dino's Welcome must still be found.
 pub fn which(bin: &str) -> Option<PathBuf> {
-    which_in(bin, &std::env::var_os("PATH")?)
+    std::env::var_os("PATH").and_then(|p| which_in(bin, &p)).or_else(|| which_in(bin, &install_dirs()))
+}
+
+/// Where agent installers put their programs when it isn't on the `PATH` yet.
+fn install_dirs() -> std::ffi::OsString {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let dirs = [
+        home.join(".local/bin"),
+        home.join(".claude/local"),
+        home.join(".npm-global/bin"),
+        home.join(".bun/bin"),
+        home.join(".cargo/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ];
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 pub fn which_in(bin: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
