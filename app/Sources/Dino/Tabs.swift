@@ -7,6 +7,10 @@ import SwiftUI
 extension SessionInfo {
     /// A shell with no agent in it: it lives in the tabs only, not in the sidebar.
     var plainShell: Bool { agent_id == "shell" && inside == nil }
+
+    /// It says how it's doing itself: hooks or its agent's own signal (working, done, needs you),
+    /// or, typed into a shell, the agent's own status. A bell from it isn't a question then.
+    var reportsStatus: Bool { activity != nil || needs != nil || inside?.status != nil }
 }
 
 extension DinoModel {
@@ -118,6 +122,12 @@ private struct TabItem: View {
     let selected: Bool
     @State private var hovering = false
 
+    /// The agent this tab is: its own, or one typed into the shell.
+    private var tabAgent: String? {
+        if let inside = session.inside { return inside.agent }
+        return session.agent_id == "shell" ? nil : session.agent_id
+    }
+
     var body: some View {
         let split = model.splits.first { $0.contains(session.id) }
         let partner = split.flatMap { s in model.sessions.first { $0.id == s.other(session.id) } }
@@ -150,10 +160,16 @@ private struct TabItem: View {
         .padding(.horizontal, 10)
         .frame(minWidth: 90, maxWidth: 220, minHeight: 27)
         .background(selected ? Color(nsColor: .textBackgroundColor) : .clear)
+        // An agent's tab carries its colour along the top, as its chip in the sidebar; shells don't.
+        .overlay(alignment: .top) {
+            if let agent = tabAgent {
+                Rectangle().fill(AgentBadge.color(agent).opacity(selected ? 0.9 : 0.55)).frame(height: 2)
+            }
+        }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { model.select(session.id) }
-        .help(session.here.map(shortPath) ?? session.display)
+        .help([tabAgent.map { model.launcherLabel($0) }, session.here.map(shortPath) ?? session.display].compactMap { $0 }.joined(separator: " · "))
     }
 }
 
