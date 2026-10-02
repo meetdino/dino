@@ -1927,6 +1927,17 @@ fn save(d: &Daemon) {
 }
 
 /// What it takes to bring `s` back.
+/// Where session `s` starts again after dinod restarts (or crashes): a shell on this Mac where it
+/// last was, if that folder is still there; anything else where it started.
+fn resume_folder(s: &Session) -> String {
+    if s.agent_id == "shell" && s.host.is_none() {
+        if let Some(here) = s.pane.shared.cwd.lock().unwrap().clone().filter(|p| Path::new(p).is_dir()) {
+            return here;
+        }
+    }
+    s.cwd.display().to_string()
+}
+
 fn snapshot(s: &Session) -> SavedSession {
     let mut agent_session = s.agent_session.lock().unwrap();
     if agent_session.is_none() {
@@ -1937,7 +1948,7 @@ fn snapshot(s: &Session) -> SavedSession {
         name: s.name.clone(),
         launcher: s.launcher.clone(),
         args: s.args.clone(),
-        cwd: s.cwd.display().to_string(),
+        cwd: resume_folder(s),
         started_at: s.started_at,
         agent_session: agent_session.clone(),
         auto: s.auto.lock().unwrap().clone(),
@@ -3207,6 +3218,17 @@ mod tests {
         assert!(!load_saved()[0].ended);
         assert!(!screens_dir().join(&id).exists());
 
+        // A shell comes back where it last was, not where it started (a crash loses only the screen).
+        let sub = home.join("deeper");
+        std::fs::create_dir_all(&sub).unwrap();
+        *live.pane.shared.cwd.lock().unwrap() = Some(sub.display().to_string());
+        save(&d2);
+        assert_eq!(load_saved()[0].cwd, sub.display().to_string());
+        // A folder since removed: back to where it started, rather than not starting at all.
+        std::fs::remove_dir_all(&sub).unwrap();
+        save(&d2);
+        assert_eq!(load_saved()[0].cwd, live.cwd.display().to_string());
+
         // Removed: attached clients are told it's gone, not that it ended.
         kill(&d2, &id);
         assert!(ended_note(&d2, &live).is_empty());
@@ -3234,7 +3256,16 @@ mod tests {
         let (served, _) = listener.accept().unwrap();
         assert!(same_user(&served));
         drop((client, served, listener, lock));
-        let again = claim_socket(&path).unwrap();
+        // A shell another test forks at this moment holds a copy of the lock until it execs
+        // (a flock lasts while any copy is open): that clears in a moment.
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        let again = loop {
+            match claim_socket(&path) {
+                Ok(l) => break l,
+                Err(e) if Instant::now() > deadline => panic!("{e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
         assert!(!path.exists());
         drop(again);
         let _ = std::fs::remove_dir_all(&dir);
