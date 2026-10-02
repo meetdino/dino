@@ -97,6 +97,13 @@ struct RepoNode: Identifiable, Equatable {
     var merged: [PlaceNode] = []
     var id: String { repo.path }
     var isGit: Bool { !repo.worktrees.isEmpty }
+    /// Has something to show: agents, fan-outs, worktrees dino made or merged, or it's the folder
+    /// new sessions start in. Other worktrees alone don't count.
+    func worthShowing(here: String) -> Bool {
+        sessionCount > 0 || !groups.isEmpty || !merged.isEmpty || !subagents.isEmpty || places.contains(where: \.dino)
+            || SessionTree.contains(repo.path, here)
+    }
+
     /// One checkout and no fan-outs: list its sessions right under the repo.
     var flat: Bool { places.count == 1 && groups.isEmpty && others.isEmpty && merged.isEmpty }
     var sessionCount: Int { places.reduce(0) { $0 + $1.sessions.count } }
@@ -512,16 +519,18 @@ struct RepoRows: View {
                         Group {
                             if place.sessions.isEmpty {
                                 placeRow(place, main: i == 0)
+                                    .contextMenu { placeMenu(place) }
                             } else {
+                                // The menu on the label only, as for the repo's row.
                                 DisclosureGroup(isExpanded: expanded(place.id)) {
                                     sessionRows(place.sessions, root: place.path)
                                 } label: {
                                     placeRow(place, main: i == 0)
+                                        .contextMenu { placeMenu(place) }
                                 }
                             }
                         }
                         .tag("dir:\(place.path)")
-                        .contextMenu { placeMenu(place) }
                     }
                 }
                 ForEach(node.groups) { g in
@@ -542,13 +551,13 @@ struct RepoRows: View {
                         worktreeRows(node.merged)
                     } label: {
                         PlaceRow(icon: "checkmark.circle", title: "Merged", detail: "\(node.merged.count)")
+                            .contextMenu {
+                                Button("Clean Up \(node.merged.count == 1 ? "Worktree" : "All \(node.merged.count) Worktrees")") {
+                                    model.cleanWorktrees(node.merged.map(\.path))
+                                }
+                            }
                     }
                     .tag("merged:\(node.id)")
-                    .contextMenu {
-                        Button("Clean Up \(node.merged.count == 1 ? "Worktree" : "All \(node.merged.count) Worktrees")") {
-                            model.cleanWorktrees(node.merged.map(\.path))
-                        }
-                    }
                 }
                 if !node.others.isEmpty {
                     DisclosureGroup(isExpanded: opened("others:\(node.id)")) {
@@ -565,16 +574,18 @@ struct RepoRows: View {
                 title: node.repo.name,
                 detail: node.flat && node.isGit ? node.places[0].label : nil
             )
+            // On the label: on the whole group, the list gives this menu to every row inside it too,
+            // and right-clicking a session showed its folder's menu instead of its own.
+            .contextMenu {
+                Button("Copy Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(node.repo.path, forType: .string)
+                }
+                Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: node.repo.path) }
+            }
         }
         // Not "dir:": its main checkout's row has that tag, and two rows with one tag confuse the list.
         .tag("repo:\(node.repo.path)")
-        .contextMenu {
-            Button("Copy Path") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(node.repo.path, forType: .string)
-            }
-            Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: node.repo.path) }
-        }
     }
 
     @ViewBuilder
@@ -639,9 +650,9 @@ struct RepoRows: View {
                     worktreeRows(children)
                 } label: {
                     SessionRow(session: s, index: 0, root: root)
+                        .contextMenu { SessionMenu(session: s) }
                 }
                 .tag(s.id)
-                .contextMenu { SessionMenu(session: s) }
             } else {
                 SessionRow(session: s, index: 0, root: root)
                     .tag(s.id)
