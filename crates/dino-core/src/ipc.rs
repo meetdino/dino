@@ -123,6 +123,8 @@ pub enum Request {
     /// Start the agent of a session that ended again, in place, continuing its conversation.
     Resume { id: String },
     Shutdown,
+    /// Which dino this dinod is, and any newer one it installed that it starts once sessions are idle.
+    Version,
     /// Agent sessions outside dino that it can continue. `cloud` also asks providers (slower);
     /// `running_only` leaves out finished conversations on disk.
     Found {
@@ -344,6 +346,9 @@ pub enum Response {
     Subagent { subagent: SubagentView },
     Ok,
     Error { message: String },
+    /// `installed`: a newer `dino` this dinod put in place of its own binary; it restarts into it
+    /// once no agent is working and no shell is running a command.
+    Version { dino: String, installed: Option<String> },
 }
 
 /// The dino account on this Mac and where settings sync stands.

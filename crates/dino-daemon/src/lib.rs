@@ -38,6 +38,7 @@ mod servers;
 mod shell;
 mod subtoken;
 mod sync;
+mod update;
 
 /// Scrollback lines replayed to a newly attached client.
 const REPLAY_HISTORY: usize = 2000;
@@ -230,6 +231,7 @@ pub fn run() -> anyhow::Result<()> {
     restore(&daemon, saved);
     lid::start(daemon.clone());
     subtoken::start();
+    update::start(daemon.clone());
     {
         // Pick up late-discovered agent ids (Codex) and sessions that exited on their own.
         let d = daemon.clone();
@@ -1026,19 +1028,11 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             | Request::RemoveStored { .. }
             | Request::FreeUpSpace) => lifecycle::serve(d, req),
             Request::Shutdown => {
-                // Saved first: `dino stop` pauses sessions, the next dinod resumes them.
-                save(d);
-                lid::stop(d);
                 ipc::write_json(&mut stream, &Response::Ok)?;
-                for s in d.sessions.lock().unwrap().drain(..) {
-                    s.pane.kill();
-                }
-                for s in d.previews.lock().unwrap().drain(..) {
-                    s.stop();
-                }
-                let _ = std::fs::remove_file(ipc::socket_path());
+                stop_all(d);
                 std::process::exit(0);
             }
+            Request::Version => Response::Version { dino: env!("CARGO_PKG_VERSION").into(), installed: update::installed() },
         };
         if reshapes {
             let mut trees = d.trees.lock().unwrap();
@@ -1735,6 +1729,32 @@ fn state(d: &Daemon) -> Response {
         })
         .collect();
     Response::State { sessions, quotas, power: Some(d.lid.info()), version: None }
+}
+
+/// Save and stop every session, ready to exit: the next dinod resumes them (`dino stop`).
+fn stop_all(d: &Daemon) {
+    save(d);
+    lid::stop(d);
+    for s in d.sessions.lock().unwrap().drain(..) {
+        s.pane.kill();
+    }
+    for s in d.previews.lock().unwrap().drain(..) {
+        s.stop();
+    }
+    let _ = std::fs::remove_file(ipc::socket_path());
+}
+
+/// Restart into `exe` (a newer dino put in its place): stop as `dino stop` does, and have a
+/// detached `dino ping` start the new dinod once this one is gone and its lock is free.
+fn restart_into(d: &Daemon, exe: &Path) -> ! {
+    eprintln!("dinod: restarting into the new dino");
+    stop_all(d);
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg("sleep 1; exec \"$0\" ping").arg(exe);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let _ = cmd.spawn();
+    std::process::exit(0);
 }
 
 /// How often a `StateChange` looks at the state, and how long it waits with nothing new.
