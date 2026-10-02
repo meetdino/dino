@@ -728,7 +728,9 @@ struct Sidebar: View {
                             filter.passes(model.status(of: $0)) && model.sidebarShows($0)
                         }
                     Section("Workspaces") {
-                        ForEach(tree.repos) { node in
+                        // Shells live in the tabs: a folder with only those (or nothing) left in it
+                        // would be a workspace row with nothing under it.
+                        ForEach(tree.repos.filter { $0.worthShowing(here: model.folder.path) }) { node in
                             RepoRows(node: node, filter: filter, collapsed: collapsed)
                         }
                         let remote = Dictionary(grouping: tree.unfiled.filter { $0.host != nil }) { $0.host ?? "" }
@@ -917,9 +919,10 @@ struct SessionRow: View {
                 }
             }
             if let f = session.inside {
+                // The row's name is already the agent's title: the badge says what it is and where.
                 HStack(spacing: 5) {
                     AgentBadge(agent: f.agent)
-                    Text(f.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Text("in a shell").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 .help("\(f.agentName) started by hand in this shell")
             }

@@ -177,6 +177,13 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
     let mut reader = stream.try_clone()?;
     let writer = Arc::new(Mutex::new(stream));
     crossterm::terminal::enable_raw_mode()?;
+    // Whatever ran before attach printed here (a terminal's own "Last login: …" from login(1))
+    // isn't the session's: start from a clean screen and scrollback, then the session's own replay.
+    {
+        let mut out = io::stdout();
+        let _ = out.write_all(b"\x1b[H\x1b[2J\x1b[3J");
+        let _ = out.flush();
+    }
     // The session's program has ended: keys don't go to it, Enter resumes it.
     let ended = Arc::new(AtomicBool::new(false));
 
