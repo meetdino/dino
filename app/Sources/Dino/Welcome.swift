@@ -17,6 +17,10 @@ struct WelcomeCard: View {
     @State private var asked = false
     @State private var showMissing = false
     @State private var rowsHeight: CGFloat = 0
+    /// Out of the way while an install or sign-in runs in its tab (a sign-in asks you things there);
+    /// back with the outcome when it ends.
+    @State private var away = false
+    @FocusState private var doneFocused: Bool
 
     /// The ones dino works with best, in this order.
     private static let featured = ["claude", "codex", "kimi", "qwen", "pi", "hermes"]
@@ -29,9 +33,29 @@ struct WelcomeCard: View {
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
-            .sheet(isPresented: Binding(get: { shown }, set: { if !$0, shown { close() } })) {
+            .sheet(isPresented: Binding(get: { shown && !away }, set: { if !$0, shown, !away { close() } })) {
                 card.onAppear(perform: look)
             }
+            // Watched here rather than on the card, which is away while they run.
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(4))
+                    if !running.isEmpty { store.loadSetup() }
+                }
+            }
+            .onChange(of: model.sessions) { _, sessions in
+                let ended = running.filter { _, r in !sessions.contains { $0.id == r.session && !$0.exited } }
+                guard !ended.isEmpty else { return }
+                for agent in ended.keys { running[agent] = nil }
+                store.loadSetup()
+            }
+            .onChange(of: store.setup) { _, setup in
+                for (id, r) in running {
+                    guard let a = setup?.first(where: { $0.id == id }) else { continue }
+                    if r.action == "install" ? a.installed : a.signed_in == true { running[id] = nil }
+                }
+            }
+            .onChange(of: running.isEmpty) { _, idle in if idle, away { away = false } }
             // After the first frame: whether this Mac has seen the card. On a new Mac dinod is still
             // starting then, so it asks again each second until it answers (or gives up after 30 s):
             // asked once, the card never came up on the very first launch.
@@ -63,32 +87,22 @@ struct WelcomeCard: View {
             HStack {
                 Text("Help → Show Welcome brings this back").font(.caption).foregroundStyle(.tertiary)
                 Spacer()
+                if let first = firstAgent {
+                    // Without knowing ⌘N: the agent it starts, where you are.
+                    Button("Start \(first.label)") {
+                        close()
+                        model.newSession(first)
+                    }
+                }
                 Button("Done", action: close)
                     .keyboardShortcut(.defaultAction)
+                    .focused($doneFocused)
             }
         }
         .padding(20)
         .frame(width: 460)
         .onExitCommand(perform: close)
-        // While an install or sign-in runs, ask now and then; once more when its shell ends.
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(4))
-                if !running.isEmpty { store.loadSetup() }
-            }
-        }
-        .onChange(of: model.sessions) { _, sessions in
-            let ended = running.filter { _, r in !sessions.contains { $0.id == r.session && !$0.exited } }
-            guard !ended.isEmpty else { return }
-            for agent in ended.keys { running[agent] = nil }
-            store.loadSetup()
-        }
-        .onChange(of: store.setup) { _, setup in
-            for (id, r) in running {
-                guard let a = setup?.first(where: { $0.id == id }) else { continue }
-                if r.action == "install" ? a.installed : a.signed_in == true { running[id] = nil }
-            }
-        }
+        .onAppear { doneFocused = true }
     }
 
     // MARK: Rows
@@ -217,6 +231,13 @@ struct WelcomeCard: View {
         }
     }
 
+    /// The agent ⌘N starts, once one is signed in: what the card offers to start.
+    private var firstAgent: LauncherInfo? {
+        let startable = store.agents.filter { $0.agent_id != "shell" && (store.settings?.policies.allows($0.short) ?? true) }
+        let want = store.settings?.policies.default_agent ?? suggested
+        return want.flatMap { w in startable.first { $0.short == w } }
+    }
+
     /// What ⌘N starts: the agent you're signed in to, unless you chose.
     @ViewBuilder private var startsPicker: some View {
         let startable = store.agents.filter { $0.agent_id != "shell" && (store.settings?.policies.allows($0.short) ?? true) }
@@ -270,6 +291,7 @@ struct WelcomeCard: View {
         store.agentAction(agent.id, action) { session in
             running[agent.id] = (session, action)
             model.pendingSelect = session
+            away = true
         }
     }
 
