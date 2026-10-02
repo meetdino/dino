@@ -158,6 +158,9 @@ pub struct Machine {
     pub lid: Lid,
     /// Where Claude Code gets the Claude subscription token (`crate::claude_token`).
     pub claude_token: ClaudeTokenUse,
+    /// Look for a new dino once a day and install it: the app through Sparkle, a `dino` installed
+    /// with install.sh by dinod itself. Homebrew installs are left to `brew upgrade`.
+    pub check_updates: bool,
 }
 
 /// Which Claude Code sessions the Claude subscription token goes to, beyond the rule that only
@@ -180,7 +183,7 @@ impl Default for ClaudeTokenUse {
 
 impl Default for Machine {
     fn default() -> Self {
-        Self { onboarded: false, keep_awake: false, shell_integration: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default() }
+        Self { onboarded: false, keep_awake: false, shell_integration: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default(), check_updates: true }
     }
 }
 

@@ -255,6 +255,7 @@ def mkapp():
     shutil.copy(rel + "/Dino", APP + "/Contents/MacOS/Dino")
     for b in glob.glob(rel + "/*.bundle"):
         shutil.copytree(b, APP + "/Contents/Resources/" + os.path.basename(b))
+    shutil.copytree(rel + "/Sparkle.framework", APP + "/Contents/Frameworks/Sparkle.framework", symlinks=True)
     shutil.copy(REPO + "/app/Info.plist", APP + "/Contents/Info.plist")
     pb = "/usr/libexec/PlistBuddy"
     subprocess.run([pb, "-c", f"Set :CFBundleIdentifier {BUNDLE}", APP + "/Contents/Info.plist"], check=True)
