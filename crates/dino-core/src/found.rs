@@ -1,7 +1,7 @@
 //! Agent sessions that exist outside dino: running in another terminal, recent on disk, or in the
 //! cloud. dino can continue any of them (see dinod's `Adopt`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -232,18 +232,38 @@ pub fn inside(fg: u32) -> Option<FoundSession> {
     })
 }
 
+/// How long an agent with no conversation yet counts as starting, in seconds.
+const STARTING_FOR: u64 = 120;
+
+/// `ps`'s `etime` (`[[dd-]hh:]mm:ss`) in seconds.
+fn elapsed_secs(etime: &str) -> Option<u64> {
+    let (days, rest) = match etime.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, etime),
+    };
+    let mut secs = 0;
+    for part in rest.split(':') {
+        secs = secs * 60 + part.parse::<u64>().ok()?;
+    }
+    Some(days * 86_400 + secs)
+}
+
 /// Agents running in a terminal somewhere on this Mac that haven't written a conversation yet
 /// (at a trust prompt, before the first message), so `running` can't list them: "starting". Not
 /// under `roots` (dino's own sessions, which show themselves) nor `known` (listed already), and
 /// only the outermost agent process of each (a wrapper and what it runs are one agent).
 pub fn starting(roots: &[u32], known: &[u32]) -> Vec<FoundSession> {
-    let text = run("ps", &["-A", "-o", "pid=,ppid=,tty=,comm="]).unwrap_or_default();
+    let text = run("ps", &["-A", "-o", "pid=,ppid=,etime=,tty=,comm="]).unwrap_or_default();
+    let mut young = HashSet::new();
     let table: Vec<(u32, u32, bool, String)> = text
         .lines()
         .filter_map(|l| {
             let mut it = l.split_whitespace();
             let pid = it.next()?.parse().ok()?;
             let ppid = it.next()?.parse().ok()?;
+            if elapsed_secs(it.next()?).is_some_and(|s| s < STARTING_FOR) {
+                young.insert(pid);
+            }
             let tty = it.next()? != "??";
             Some((pid, ppid, tty, it.collect::<Vec<_>>().join(" ")))
         })
@@ -266,7 +286,9 @@ pub fn starting(roots: &[u32], known: &[u32]) -> Vec<FoundSession> {
         let up = ancestors(*pid);
         let inside_agent = up.iter().any(|a| table.iter().any(|(p, _, _, c)| p == a && agent_of(c).is_some()));
         // dino runs an agent as its session's own process, or under the session's shell.
-        if !tty || known.contains(pid) || roots.contains(pid) || inside_agent || up.iter().any(|a| roots.contains(a) || known.contains(a)) {
+        // Running for minutes with no conversation isn't starting (its conversation is somewhere
+        // this dino doesn't look, e.g. under another HOME): not listed as a stray "starting".
+        if !young.contains(pid) || !tty || known.contains(pid) || roots.contains(pid) || inside_agent || up.iter().any(|a| roots.contains(a) || known.contains(a)) {
             continue;
         }
         // An agent process another one already lists (its native child) counts as listed.
@@ -299,6 +321,15 @@ pub fn asking(agent: &str, screen: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_ages_from_ps() {
+        assert_eq!(elapsed_secs("00:05"), Some(5));
+        assert_eq!(elapsed_secs("01:59"), Some(119));
+        assert_eq!(elapsed_secs("02:03:04"), Some(7384));
+        assert_eq!(elapsed_secs("3-00:00:01"), Some(259_201));
+        assert_eq!(elapsed_secs("x"), None);
+    }
 
     #[test]
     fn dialogs_waiting_on_the_user() {
