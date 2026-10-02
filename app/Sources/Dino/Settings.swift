@@ -31,6 +31,8 @@ struct DinoSettings: Codable, Equatable {
         var lid: Lid?
         /// Which Claude Code sessions get the Claude subscription token; nil from an older dinod.
         var claude_token: ClaudeTokenUse?
+        /// Look for updates once a day; nil from an older dinod (on there).
+        var check_updates: Bool?
     }
     struct ClaudeTokenUse: Codable, Equatable {
         var ssh: Bool
@@ -605,6 +607,7 @@ private struct GeneralPane: View {
                 Footnote("So scheduled tasks run on time. Closing the lid still sleeps it, unless Lid closed below keeps it awake; missed tasks run once when it wakes.")
             }
             LidSection()
+            UpdatesSection()
             Section {
                 LabeledContent("Settings and keys") {
                     HStack {

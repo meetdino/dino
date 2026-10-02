@@ -24,13 +24,20 @@ VERSION="$(cat "$DIST/download/dino/latest" 2>/dev/null)" || { echo "error: no r
 TAG="v$VERSION"
 DMG="$(ls "$DIST"/Dino-"$VERSION"-*.dmg)"
 TAR="$(ls "$DIST"/dino-"$VERSION"-darwin-*.tar.gz)"
+# The update files, when the release was built with the release key.
+UPDATES=()
+if [ -f "$DIST/appcast.xml" ]; then
+    UPDATES=("$(ls "$DIST"/Dino-"$VERSION"-*.zip)" "$DIST/appcast.xml")
+else
+    echo "warning: no appcast.xml (built without DINO_RELEASE_KEY): installs of this release won't update themselves."
+fi
 (cd "$DIST" && shasum -a 256 -c SHA256SUMS >/dev/null) || { echo "error: dist/SHA256SUMS doesn't match the files" >&2; exit 1; }
 if ! codesign --verify --strict "$DIST/Dino.app" 2>/dev/null || ! spctl --assess --type execute "$DIST/Dino.app" 2>/dev/null; then
     echo "warning: Dino.app isn't signed with a Developer ID and notarized; Gatekeeper will block it for people who download it."
 fi
 
 echo "Publishing dino $VERSION"
-echo "  release $TAG in $RELEASES_REPO: $(basename "$DMG"), $(basename "$TAR"), SHA256SUMS"
+echo "  release $TAG in $RELEASES_REPO: $(basename "$DMG"), $(basename "$TAR"), SHA256SUMS${UPDATES[*]:+, $(basename "${UPDATES[0]}"), appcast.xml}"
 echo "  tap $TAP_REPO: Casks/dino.rb, Formula/dino-cli.rb"
 if [ "$DRY" = 0 ]; then
     read -r -p "Go ahead? [y/N] " ok
@@ -43,7 +50,7 @@ if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
 fi
 run gh release create "$TAG" --repo "$RELEASES_REPO" --title "dino $VERSION" \
     --notes "dino $VERSION. Install with \`brew install --cask asdf9384/tap/dino\`, or the command line alone with \`curl -fsSL https://meetdino.com/install.sh | sh\`." \
-    "$DMG" "$TAR" "$DIST/SHA256SUMS"
+    "$DMG" "$TAR" "$DIST/SHA256SUMS" ${UPDATES[@]+"${UPDATES[@]}"}
 # The same DMG under a name that never changes, for the website's releases/latest/download link.
 STABLE="$(mktemp -d)/Dino.dmg"
 [ "$DRY" = 1 ] || cp "$DMG" "$STABLE"

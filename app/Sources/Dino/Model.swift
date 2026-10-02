@@ -202,6 +202,7 @@ final class DinoModel: ObservableObject {
                 let launchers = try conn.request(["type": "launchers"]).launchers ?? []
                 await MainActor.run {
                     self.connection = conn
+                    self.checkDaemonVersion()
                     self.launchers = launchers
                     self.polling = true
                     self.poll()
@@ -218,6 +219,12 @@ final class DinoModel: ObservableObject {
     }
 
     @Published private(set) var daemonDown = false
+    /// dinod isn't the dino this app carries (it's from before an update); see Updates.swift.
+    @Published var daemonOutdated = false
+    @Published var daemonVersion: String?
+    @Published var restartingDaemon = false
+    /// The automatic restart into a new dino happens once a launch at most.
+    private var restartedForUpdate = false
 
     /// dinod's tag for the state last applied: it answers once there's something else to show.
     private var stateSeen: UInt64?
@@ -279,6 +286,7 @@ final class DinoModel: ObservableObject {
             if let conn = try? DinoConnection(path: DinoEnvironment.socketPath) {
                 await MainActor.run {
                     self.connection = conn
+                    self.checkDaemonVersion()
                     self.daemonDown = false
                     self.polling = true
                     self.poll()
@@ -425,6 +433,11 @@ final class DinoModel: ObservableObject {
             let recent = raw.filter { !$0.exited }.min { ($0.output_ms_ago ?? .max) < ($1.output_ms_ago ?? .max) }
             let open = tabs.first { live.contains($0) }
             select(shownOne ? open : last ?? recent?.id ?? next.first?.id)
+        }
+        // After an update: into the new dinod once nothing would be cut off.
+        if daemonOutdated, !restartedForUpdate, restartIsQuiet {
+            restartedForUpdate = true
+            restartDaemon()
         }
         let waiting = next.filter { status(of: $0) == .needsYou }.count
         let badge = waiting > 0 ? "\(waiting)" : nil
