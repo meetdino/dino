@@ -236,9 +236,11 @@ struct SessionName: View {
                 .font(font)
                 .foregroundStyle(color)
                 .lineLimit(1)
-                // Simultaneous, so a single click still selects the row at once.
-                .simultaneousGesture(TapGesture(count: 2).onEnded { model.renaming = Renaming(id: session.id, place: place) })
-                .help(session.label == nil ? "Double-click to rename" : "\(session.name) · double-click to rename")
+                // Only in the toolbar: on a sidebar row, a busy session redraws between mouse-down and
+                // mouse-up, the gesture is reset and swallows the click that should select the row.
+                // There, Rename… is in the row's menu.
+                .simultaneousGesture(TapGesture(count: 2).onEnded { model.renaming = Renaming(id: session.id, place: place) }, including: place == .toolbar ? .all : .none)
+                .help(place == .toolbar ? (session.label == nil ? "Double-click to rename" : "\(session.name) · double-click to rename") : session.label.map { _ in session.name } ?? "")
         }
     }
 }
@@ -430,7 +432,7 @@ struct ShortcutSheet: View {
 
     /// Keys dino handles outside the menus.
     private static let extra = MenuGroup(menu: "Sidebar", entries: [
-        Entry(title: "Rename a session", keys: "double-click"),
+        Entry(title: "Rename a session", keys: "double-click its name in the toolbar"),
         Entry(title: "Unarchive a session", keys: "double-click"),
     ])
 
