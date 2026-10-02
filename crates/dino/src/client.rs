@@ -159,7 +159,7 @@ fn visible(bytes: &[u8]) -> bool {
 /// `dino attach <id>`: relay between this terminal and the session. When its program ends the
 /// last screen stays up, and Enter resumes it in place; exits once the session is removed.
 /// Meant to run inside a real terminal surface (Ghostty), which does all the rendering.
-pub fn attach_raw(id: &str) -> anyhow::Result<()> {
+pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
     // Size changes come as SIGWINCH, taken by a thread of its own below: blocked here, before any
     // other thread starts, so none of those gets it. A handler of its own keeps it from being
     // dropped as ignored.
@@ -177,9 +177,10 @@ pub fn attach_raw(id: &str) -> anyhow::Result<()> {
     let mut reader = stream.try_clone()?;
     let writer = Arc::new(Mutex::new(stream));
     crossterm::terminal::enable_raw_mode()?;
-    // Whatever ran before attach printed here (a terminal's own "Last login: …" from login(1))
-    // isn't the session's: start from a clean screen and scrollback, then the session's own replay.
-    {
+    // In a dino pane (`--fresh`), what ran before attach (login(1)'s "Last login: …") isn't the
+    // session's: start from a clean screen and scrollback, then its own replay. In someone's own
+    // terminal, their scrollback stays.
+    if fresh {
         let mut out = io::stdout();
         let _ = out.write_all(b"\x1b[H\x1b[2J\x1b[3J");
         let _ = out.flush();

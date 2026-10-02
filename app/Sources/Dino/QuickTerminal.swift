@@ -197,7 +197,7 @@ final class QuickTerminal: NSObject, NSWindowDelegate {
         t.configuration = TerminalSurfaceOptions(
             backend: .exec,
             envVars: ["PATH": DinoEnvironment.loginPath, "DINO_HOME": DinoEnvironment.home],
-            command: "\(DinoEnvironment.dinoBinary) attach \(id)",
+            command: "\(DinoEnvironment.dinoBinary) attach --fresh \(id)",
             waitAfterCommand: false
         )
         t.makePlatformView = { [weak t] in
