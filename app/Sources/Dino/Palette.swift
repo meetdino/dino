@@ -100,15 +100,20 @@ struct CommandPalette: View {
     /// Every enabled item in the menu bar, as "Title  Menu › Submenu  ⇧⌘K".
     static func menuActions() -> [Action] {
         guard let bar = NSApp.mainMenu else { return [] }
-        // The app menu (About, Hide, Quit) last: what you come here for is in the others.
-        return (bar.items.dropFirst() + bar.items.prefix(1)).flatMap { item -> [Action] in
+        // Session first (what you come here for, and the one picked on Return), the app menu (About,
+        // Hide, Quit) last.
+        let menus = bar.items.dropFirst()
+        let ordered = menus.filter { $0.title == "Session" } + menus.filter { $0.title != "Session" } + bar.items.prefix(1)
+        return ordered.flatMap { item -> [Action] in
             guard let menu = item.submenu, menu !== NSApp.windowsMenu else { return [] }
             return actions(in: menu, path: item.title)
         }
     }
 
     private static func actions(in menu: NSMenu, path: String) -> [Action] {
-        // SwiftUI brings enabled states up to date when a menu opens; this is opening it.
+        // SwiftUI fills its menus when they're about to open, through the delegate: without this
+        // the palette saw them as they were at launch (no agents yet, so no New Tab).
+        menu.delegate?.menuNeedsUpdate?(menu)
         menu.update()
         return menu.items.flatMap { item -> [Action] in
             if let sub = item.submenu {
@@ -118,6 +123,9 @@ struct CommandPalette: View {
             guard !item.isHidden, !item.isSeparatorItem, item.isEnabled, !item.title.isEmpty, item.action != nil,
                   item.title != paletteTitle else { return [] }
             if let action = item.action, ShortcutSheet.systemActions.contains(action) { return [] }
+            // ⌘W (Close Tab, Pane or Window): one key away already, and a palette Return on it would
+            // close what you were looking at.
+            if item.keyEquivalent == "w", item.keyEquivalentModifierMask == .command { return [] }
             let keys = item.keyEquivalent.isEmpty ? "" : ShortcutSheet.keys(item)
             return [Action(title: item.title, path: path, keys: keys) { [weak item] in
                 guard let item, let menu = item.menu else { return }
