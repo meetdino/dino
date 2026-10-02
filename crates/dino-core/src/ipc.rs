@@ -100,6 +100,9 @@ pub enum Request {
         /// Run the agent on this provider's model (Settings → Providers) instead of its own account.
         #[serde(default)]
         route: Option<crate::providers::ProviderRoute>,
+        /// Clients should show it now (`dino <folder>`): see `SessionInfo::revealed`.
+        #[serde(default)]
+        reveal: bool,
     },
     Kill { id: String },
     /// Change a session's mode, model or effort. The agent restarts, resuming its conversation;
@@ -482,6 +485,9 @@ pub struct SessionInfo {
     /// Pinned: kept at the top of its group, never archived by dino on its own.
     #[serde(default)]
     pub pinned: bool,
+    /// When someone last asked for it to be shown (`dino <folder>`), in ms since the epoch.
+    #[serde(default)]
+    pub revealed: Option<u64>,
     /// What the agent tracks underneath: its task list, subagents and background commands.
     #[serde(default)]
     pub tasks: SessionTasks,

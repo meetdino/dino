@@ -157,6 +157,7 @@ impl App {
             prompt: None,
             by: None,
             route: None,
+            reveal: false,
         };
         match client::request(&req) {
             Ok(Response::Created { id }) => {
@@ -782,6 +783,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
+       dino <folder> [agent [args...]]   (a shell, or that agent, there: opens in the terminal app)
        dino ls | new [--worktree] <agent> [--on <provider> <model>] [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
        dino found | continue <session-id prefix>
        dino mcp [--read-only]   (MCP server on stdio: agents list, read, message and start sessions)
@@ -848,7 +850,7 @@ fn main() -> anyhow::Result<()> {
                 [on, provider, model, args @ ..] if on == "--on" => (Some(ProviderRoute { provider: provider.clone(), model: model.clone(), format: None, name: String::new() }), args.to_vec()),
                 args => (None, args.to_vec()),
             };
-            let req = Request::New { launcher: agent, args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route };
+            let req = Request::New { launcher: agent, args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route, reveal: false };
             return print_response(client::request(&req)?);
         }
         Some("kill") => return print_response(client::request(&Request::Kill { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),
@@ -860,6 +862,7 @@ fn main() -> anyhow::Result<()> {
             }
             return print_response(client::request(&Request::Shutdown)?);
         }
+        Some(arg) if is_folder(arg) => return cmd_open(arg, &cli[1..]),
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
             return Ok(());
@@ -869,6 +872,12 @@ fn main() -> anyhow::Result<()> {
     // The full-screen client inside a dino session would attach to the session it runs in, and its
     // close kills sessions: refuse rather than nest.
     if std::env::var_os("DINO_SESSION").is_some_and(|s| !s.is_empty()) {
+        // `dino claude` in a dino shell: that agent here, as `dino . claude`.
+        if let (Some(a), Ok(Response::Launchers { launchers })) = (cli.first(), client::request(&Request::Launchers)) {
+            if launchers.iter().any(|l| &l.short == a) {
+                return cmd_open(".", &cli);
+            }
+        }
         anyhow::bail!("already inside dino: {}\n\n{USAGE}", cli.first().map_or("run a command".into(), |a| format!("unknown command `{a}`")));
     }
 
@@ -934,6 +943,53 @@ fn main() -> anyhow::Result<()> {
     let _ = execute!(stdout, DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     Ok(result?)
+}
+
+/// `.`, `~/x`, `a/b`: a folder, not an agent's name. A bare word is one only when it's a folder
+/// here and no agent is called that.
+fn is_folder(arg: &str) -> bool {
+    if arg == "." || arg == ".." || arg.starts_with('~') || arg.contains('/') {
+        return true;
+    }
+    !arg.starts_with('-')
+        && std::path::Path::new(arg).is_dir()
+        && !matches!(client::request(&Request::Launchers), Ok(Response::Launchers { launchers }) if launchers.iter().any(|l| l.short == arg))
+}
+
+/// `dino <folder> [agent [args...]]`: a session in that folder, shown in the terminal app. Inside
+/// it, the app switches to it; elsewhere this opens the app, or attaches here if there isn't one.
+fn cmd_open(folder: &str, rest: &[String]) -> anyhow::Result<()> {
+    let expanded = match folder.strip_prefix('~') {
+        Some(tail) => format!("{}{tail}", std::env::var("HOME").unwrap_or_default()),
+        None => folder.to_string(),
+    };
+    let path = std::fs::canonicalize(&expanded).map_err(|e| anyhow::anyhow!("{folder}: {e}"))?;
+    anyhow::ensure!(path.is_dir(), "{folder} isn't a folder");
+    let (cols, rows) = terminal::size().unwrap_or((120, 40));
+    let req = Request::New {
+        launcher: rest.first().cloned().unwrap_or_else(|| "shell".into()),
+        args: rest.get(1..).unwrap_or_default().to_vec(),
+        cwd: Some(path.display().to_string()),
+        cols,
+        rows,
+        worktree: false,
+        controls: Default::default(),
+        host: None,
+        prompt: None,
+        by: None,
+        route: None,
+        reveal: true,
+    };
+    let id = match client::request(&req)? {
+        Response::Created { id } => id,
+        Response::Error { message } => anyhow::bail!(message),
+        other => anyhow::bail!("unexpected reply from dinod: {other:?}"),
+    };
+    if std::env::var_os("DINO_SESSION").is_some_and(|s| !s.is_empty()) {
+        return Ok(());
+    }
+    let opened = cfg!(target_os = "macos") && std::process::Command::new("open").args(["-b", "dev.dino.app"]).status().is_ok_and(|s| s.success());
+    if opened { Ok(()) } else { client::attach_raw(&id) }
 }
 
 fn print_response(resp: Response) -> anyhow::Result<()> {
