@@ -498,6 +498,9 @@ pub struct SessionInfo {
     /// exit code of the last command it ran.
     #[serde(default)]
     pub shell_cwd: Option<String>,
+    /// A shell running a command (not at its prompt), as last looked at: closing it would stop it.
+    #[serde(default)]
+    pub running: bool,
     #[serde(default)]
     pub last_exit: Option<i32>,
     /// Background commands its agent left running that listen on a port: a dev server, not work

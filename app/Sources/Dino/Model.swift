@@ -151,6 +151,8 @@ final class DinoModel: ObservableObject {
 
     /// Launch has been handled: the session left selected is back, or a shell was started.
     private(set) var launched = false
+    /// A session has been shown: from then on, one is only picked among the tabs.
+    private var shownOne = false
     /// The shell started at launch, until dinod says which it is.
     private var startingShell = false
 
@@ -375,6 +377,7 @@ final class DinoModel: ObservableObject {
            here != sessions.first(where: { $0.id == id })?.here { folder = URL(fileURLWithPath: here) }
         placeHandedOff(next)
         if next != sessions { sessions = next }
+        syncTabs(next)
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
         terminals = terminals.filter { live.contains($0.key) }
@@ -413,12 +416,14 @@ final class DinoModel: ObservableObject {
         // this Mac) carry a "kind:" prefix: one of those stays selected. Only a session that's gone
         // falls back to another, or a click on "Other worktrees" would jump straight back.
         let sessionGone = selected.map { !$0.contains(":") && !live.contains($0) } ?? true
-        if !startingShell, sessionGone {
-            // The one selected when the app last quit, else the one that last did something.
+        if !startingShell, sessionGone, !(shownOne && tabs.isEmpty) {
+            // The one selected when the app last quit, else the one that last did something; once
+            // running, only among the tabs: with the last one closed, nothing is.
             // Through select(), so the terminal also takes keyboard focus on launch.
             let last = UserDefaults.standard.string(forKey: Self.lastSelectedKey).flatMap { live.contains($0) ? $0 : nil }
             let recent = raw.filter { !$0.exited }.min { ($0.output_ms_ago ?? .max) < ($1.output_ms_ago ?? .max) }
-            select(last ?? recent?.id ?? next.first?.id)
+            let open = tabs.first { live.contains($0) }
+            select(shownOne ? open : last ?? recent?.id ?? next.first?.id)
         }
         let waiting = next.filter { status(of: $0) == .needsYou }.count
         let badge = waiting > 0 ? "\(waiting)" : nil
@@ -457,6 +462,8 @@ final class DinoModel: ObservableObject {
             folder = URL(fileURLWithPath: String(id.dropFirst(4)))
             return
         }
+        openTab(id)
+        shownOne = true
         // New sessions start next to the one you're looking at.
         if let cwd = sessions.first(where: { $0.id == id })?.here { folder = URL(fileURLWithPath: cwd) }
         attention.remove(id)
@@ -674,6 +681,12 @@ final class DinoModel: ObservableObject {
     }
 
     var pendingSelect: String?
+    /// The tabs along the top, by session id, in order (see Tabs.swift).
+    @Published var tabs: [String] = UserDefaults.standard.stringArray(forKey: "tabs") ?? [] {
+        didSet { if tabs != oldValue { UserDefaults.standard.set(tabs, forKey: "tabs") } }
+    }
+    /// Shells whose tab was put away without ending them (dropped from a split): not reopened.
+    var knownTabless = Set<String>()
     /// Opens the main window again when it was closed; set once the first one has appeared.
     var showWindow: (() -> Void)?
     /// Reveals up to here are handled: ones from before the app started (and opened it) count too.
