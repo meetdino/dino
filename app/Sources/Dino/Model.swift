@@ -505,13 +505,17 @@ final class DinoModel: ObservableObject {
     }
 
     /// Ghostty handles its own shortcuts before the menu sees them (⌘D splits, ⌘W closes, ⌘K
-    /// clears), so a focused pane would swallow dino's. Hand those keys back to the menu, over
-    /// whatever the user's Ghostty config binds them to.
-    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "t", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t"]
+    /// clears, ⇧⌘P its command palette, ⇧⌘[ ] its tabs), so a focused pane would swallow dino's.
+    /// Hand every dino shortcut back to the menu, over whatever the user's Ghostty config binds it
+    /// to. A shortcut added to a menu belongs here too.
+    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "t", "shift+n", "alt+n", "ctrl+n", "alt+shift+n",
+                             "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t", "shift+p", "shift+bracket_left",
+                             "shift+bracket_right", "shift+semicolon", "backslash", "shift+m", "shift+i", "shift+e"]
         + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
         .map { "super+\($0)" }
-        // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F finds sessions.
-        + ["ctrl+tab", "ctrl+shift+tab", "super+slash", "super+shift+a", "super+shift+f"])
+        // Ctrl+Tab cycles sessions, ⌃` swaps split panes, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F
+        // finds sessions.
+        + ["ctrl+tab", "ctrl+shift+tab", "ctrl+backquote", "super+slash", "super+shift+a", "super+shift+f"])
         .map { "keybind = \($0)=unbind" }.joined(separator: "\n")
 
     static let terminals: TerminalController = {
