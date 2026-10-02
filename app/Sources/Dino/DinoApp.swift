@@ -1308,8 +1308,12 @@ struct AgentBadge: View {
     /// Free-tier ones ("kimi-free") as their agent.
     private var base: String { agent.hasSuffix("-free") ? String(agent.dropLast(5)) : agent }
 
-    private var color: Color {
-        switch base {
+    private var color: Color { Self.color(agent) }
+
+    /// Each agent's colour, wherever it's marked (this chip, an agent's tab).
+    static func color(_ agent: String) -> Color {
+        let base = agent.hasSuffix("-free") ? String(agent.dropLast(5)) : agent
+        return switch base {
         case "codex": .blue
         case "qwen": .purple
         case "kimi": .teal
