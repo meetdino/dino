@@ -265,7 +265,8 @@ pub fn starting(roots: &[u32], known: &[u32]) -> Vec<FoundSession> {
         let Some(agent) = agent_of(comm) else { continue };
         let up = ancestors(*pid);
         let inside_agent = up.iter().any(|a| table.iter().any(|(p, _, _, c)| p == a && agent_of(c).is_some()));
-        if !tty || known.contains(pid) || inside_agent || up.iter().any(|a| roots.contains(a) || known.contains(a)) {
+        // dino runs an agent as its session's own process, or under the session's shell.
+        if !tty || known.contains(pid) || roots.contains(pid) || inside_agent || up.iter().any(|a| roots.contains(a) || known.contains(a)) {
             continue;
         }
         // An agent process another one already lists (its native child) counts as listed.
