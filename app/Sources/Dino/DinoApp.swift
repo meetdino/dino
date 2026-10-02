@@ -688,7 +688,12 @@ struct Sidebar: View {
     private var collapsed: Binding<Set<String>> {
         Binding(
             get: { Set(collapsedIDs.split(separator: "\n").map(String.init)) },
-            set: { collapsedIDs = $0.sorted().joined(separator: "\n") }
+            set: {
+                // The outline calls this from its own delegate as rows come in, often with nothing
+                // changed: writing anyway redraws the list mid-update (a reentrant operation).
+                let ids = $0.sorted().joined(separator: "\n")
+                if ids != collapsedIDs { collapsedIDs = ids }
+            }
         )
     }
 
@@ -697,16 +702,21 @@ struct Sidebar: View {
             List(selection: Binding(get: { model.selected }, set: { tag in
                 // Rows outside "Agents" carry a `move:` tag: ask before handing that session over.
                 // Anything else that isn't a session (or deselecting) leaves the selection alone.
-                guard let tag else { return }
-                if tag.hasPrefix("move:") {
-                    model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
-                } else if tag.hasPrefix("task:") {
-                    model.editingTask = model.scheduled.first { "task:\($0.id)" == tag }
-                } else if tag.hasPrefix("repo:") {
-                    // A repo's row: its folder, as its main checkout's row.
-                    model.select("dir:" + tag.dropFirst(5))
-                } else {
-                    model.select(tag)
+                guard let tag, tag != model.selected else { return }
+                // This runs inside NSTableView's own selection callback (rows being inserted at launch
+                // fire it too): changing what the list shows from there is a reentrant update that
+                // can crash it, so it waits for the table to finish.
+                DispatchQueue.main.async {
+                    if tag.hasPrefix("move:") {
+                        model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
+                    } else if tag.hasPrefix("task:") {
+                        model.editingTask = model.scheduled.first { "task:\($0.id)" == tag }
+                    } else if tag.hasPrefix("repo:") {
+                        // A repo's row: its folder, as its main checkout's row.
+                        model.select("dir:" + tag.dropFirst(5))
+                    } else {
+                        model.select(tag)
+                    }
                 }
             })) {
                 if filter == .archived {
@@ -740,6 +750,16 @@ struct Sidebar: View {
                                 .font(.callout).foregroundStyle(.tertiary)
                         }
                     }
+                    // Other terminals' sessions aren't dino's to sort by status. Above Scheduled: a
+                    // section inserted after the last one when they load trips NSTableView into a
+                    // reentrant update that can crash the sidebar.
+                    if !model.elsewhere.isEmpty, filter == .all, !narrowed {
+                        Section("On this Mac") {
+                            ForEach(model.elsewhere) { f in
+                                ElsewhereRow(session: f).tag("move:\(f.id)")
+                            }
+                        }
+                    }
                     if filter == .all, !narrowed {
                         Section {
                             ForEach(model.scheduled) { t in
@@ -763,14 +783,6 @@ struct Sidebar: View {
                                         .help("New Scheduled Task")
                                         .accessibilityLabel("New Scheduled Task")
                                 }
-                            }
-                        }
-                    }
-                    // Other terminals' sessions aren't dino's to sort by status.
-                    if !model.elsewhere.isEmpty, filter == .all, !narrowed {
-                        Section("On this Mac") {
-                            ForEach(model.elsewhere) { f in
-                                ElsewhereRow(session: f).tag("move:\(f.id)")
                             }
                         }
                     }
