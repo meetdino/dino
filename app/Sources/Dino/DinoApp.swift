@@ -688,12 +688,7 @@ struct Sidebar: View {
     private var collapsed: Binding<Set<String>> {
         Binding(
             get: { Set(collapsedIDs.split(separator: "\n").map(String.init)) },
-            set: {
-                // The outline calls this from its own delegate as rows come in, often with nothing
-                // changed: writing anyway redraws the list mid-update (a reentrant operation).
-                let ids = $0.sorted().joined(separator: "\n")
-                if ids != collapsedIDs { collapsedIDs = ids }
-            }
+            set: { collapsedIDs = $0.sorted().joined(separator: "\n") }
         )
     }
 
@@ -702,21 +697,16 @@ struct Sidebar: View {
             List(selection: Binding(get: { model.selected }, set: { tag in
                 // Rows outside "Agents" carry a `move:` tag: ask before handing that session over.
                 // Anything else that isn't a session (or deselecting) leaves the selection alone.
-                guard let tag, tag != model.selected else { return }
-                // This runs inside NSTableView's own selection callback (rows being inserted at launch
-                // fire it too): changing what the list shows from there is a reentrant update that
-                // can crash it, so it waits for the table to finish.
-                DispatchQueue.main.async {
-                    if tag.hasPrefix("move:") {
-                        model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
-                    } else if tag.hasPrefix("task:") {
-                        model.editingTask = model.scheduled.first { "task:\($0.id)" == tag }
-                    } else if tag.hasPrefix("repo:") {
-                        // A repo's row: its folder, as its main checkout's row.
-                        model.select("dir:" + tag.dropFirst(5))
-                    } else {
-                        model.select(tag)
-                    }
+                guard let tag else { return }
+                if tag.hasPrefix("move:") {
+                    model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
+                } else if tag.hasPrefix("task:") {
+                    model.editingTask = model.scheduled.first { "task:\($0.id)" == tag }
+                } else if tag.hasPrefix("repo:") {
+                    // A repo's row: its folder, as its main checkout's row.
+                    model.select("dir:" + tag.dropFirst(5))
+                } else {
+                    model.select(tag)
                 }
             })) {
                 if filter == .archived {
@@ -788,6 +778,14 @@ struct Sidebar: View {
                     }
                 }
             }
+            // Double-clicking a session renames it. The list's own double-click, not a gesture on
+            // the name: that swallowed the single click meant to select the row. The rows keep their
+            // own menus; this adds none.
+            .contextMenu(forSelectionType: String.self, menu: { _ in EmptyView() }, primaryAction: { tags in
+                if tags.count == 1, let id = tags.first, model.sessions.contains(where: { $0.id == id }) {
+                    model.renaming = Renaming(id: id, place: .sidebar)
+                }
+            })
             // Not rebuilt when rows come or go (that replaced every row, and froze the window for
             // up to seconds while agents made worktrees): rows keep unique tags and stable
             // identities instead, so the list's own diff stays right.
