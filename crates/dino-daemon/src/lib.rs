@@ -2309,7 +2309,13 @@ fn watch_shells(d: &Daemon) {
             fg.is_some() && (i.fg != fg || i.checked.is_none_or(|t| t.elapsed() >= INSIDE_RECHECK))
         };
         let Some(fg) = fg.filter(|_| due) else { continue };
-        let found = found::inside(fg);
+        let mut found = found::inside(fg);
+        // Asking the user (a permission or trust dialog): its own status only says busy.
+        if let Some(f) = found.as_mut().filter(|f| ["claude", "codex"].contains(&f.agent.as_str())) {
+            if found::asking(&f.agent, &s.pane.text(0)) {
+                f.status = Some("needs".into());
+            }
+        }
         let mut i = s.inside.lock().unwrap();
         let before = i.before.take();
         *i = Inside { fg: Some(fg), checked: Some(Instant::now()), found, before, ..Inside::default() };
