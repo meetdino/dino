@@ -280,7 +280,26 @@ final class DinoModel: ObservableObject {
         daemonDown = true
         terminals.removeAll()
         sessions = []
+        restartAfterCrash()
         reconnect()
+    }
+
+    /// When dinod was started again because it crashed: a few, then it's left to the user.
+    private var crashRestarts: [Date] = []
+
+    /// dinod went away without being asked to (no stop mark, see dinod's `stopped_mark`): start it
+    /// again, so its sessions come back, as they would at the next launch. One stopped on purpose
+    /// (`dino stop`, quitting with Stop) stays stopped until someone starts it.
+    private func restartAfterCrash() {
+        let mark = URL(fileURLWithPath: DinoEnvironment.socketPath).deletingLastPathComponent().appendingPathComponent("dinod.stopped")
+        guard !FileManager.default.fileExists(atPath: mark.path) else { return }
+        crashRestarts = crashRestarts.filter { $0.timeIntervalSinceNow > -60 }
+        guard crashRestarts.count < 3 else { return }
+        crashRestarts.append(Date())
+        Task.detached {
+            try? await Task.sleep(for: .milliseconds(500))
+            try? DinoEnvironment.ensureDaemon()
+        }
     }
 
     private func reconnect() {
@@ -342,8 +361,14 @@ final class DinoModel: ObservableObject {
         for s in next {
             guard let prev = sessions.first(where: { $0.id == s.id }) else { continue }
             let looking = appActive && s.id == selected
+            // Working again: a bell it rang before isn't asking for you any more.
+            let resumed = (s.activity == "working" && prev.activity != "working") || (s.inside?.status == "busy" && prev.inside?.status != "busy")
+            if resumed, attention.contains(s.id) { attention.remove(s.id) }
             if !looking {
-                if s.bells > prev.bells { attention.insert(s.id) }
+                // A bell asks for you only where nothing else says how the session is (a plain
+                // shell, an agent with no hooks). One that reports its own state rings as a turn
+                // ends (Claude Code does): its Needs you and Done already say what it means.
+                if s.bells > prev.bells, !s.reportsStatus, !attention.contains(s.id) { attention.insert(s.id) }
                 let wasBusy = prev.activity == "working" || prev.needs != nil || prev.waitingOn != nil
                 if s.activity == "done", wasBusy {
                     unseenDone.insert(s.id)
@@ -459,6 +484,7 @@ final class DinoModel: ObservableObject {
         if attention.contains(s.id) || s.needs != nil { return .needsYou }
         // An agent run by hand in a shell says whether it's busy; its shell has no hooks.
         if let f = s.inside, let st = f.status {
+            if st == "needs" { return .needsYou }
             if st == "busy" { return s.in_flight > 0 ? .thinking : .working }
             return unseenDone.contains(s.id) ? .done : .idle
         }
@@ -505,13 +531,17 @@ final class DinoModel: ObservableObject {
     }
 
     /// Ghostty handles its own shortcuts before the menu sees them (⌘D splits, ⌘W closes, ⌘K
-    /// clears), so a focused pane would swallow dino's. Hand those keys back to the menu, over
-    /// whatever the user's Ghostty config binds them to.
-    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "t", "shift+n", "alt+n", "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t"]
+    /// clears, ⇧⌘P its command palette, ⇧⌘[ ] its tabs), so a focused pane would swallow dino's.
+    /// Hand every dino shortcut back to the menu, over whatever the user's Ghostty config binds it
+    /// to. A shortcut added to a menu belongs here too.
+    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "t", "shift+n", "alt+n", "ctrl+n", "alt+shift+n",
+                             "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t", "shift+p", "shift+bracket_left",
+                             "shift+bracket_right", "shift+semicolon", "backslash", "shift+m", "shift+i", "shift+e"]
         + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
         .map { "super+\($0)" }
-        // Ctrl+Tab cycles sessions, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F finds sessions.
-        + ["ctrl+tab", "ctrl+shift+tab", "super+slash", "super+shift+a", "super+shift+f"])
+        // Ctrl+Tab cycles sessions, ⌃` swaps split panes, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F
+        // finds sessions.
+        + ["ctrl+tab", "ctrl+shift+tab", "ctrl+backquote", "super+slash", "super+shift+a", "super+shift+f"])
         .map { "keybind = \($0)=unbind" }.joined(separator: "\n")
 
     static let terminals: TerminalController = {

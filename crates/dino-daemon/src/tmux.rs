@@ -166,18 +166,15 @@ pub fn place(found: &mut [dino_core::found::FoundSession]) {
                 attached: p.attached,
             });
             found[i].terminal = Some(format!("tmux {}", named(&p.label, &found[i].agent)));
-            // Claude's own status says busy, not that it's asking: its permission dialog does.
-            if found[i].agent == "claude" && capture(&srv.bin, &srv.socket, &p.id).is_some_and(|t| asking(&t)) {
+            // An agent's own status says busy, not that it's asking: its dialog on screen does.
+            if ["claude", "codex"].contains(&found[i].agent.as_str())
+                && capture(&srv.bin, &srv.socket, &p.id).is_some_and(|t| dino_core::found::asking(&found[i].agent, &t))
+            {
                 found[i].status = Some("needs".into());
             }
         }
     }
     servers.retain(|pid, _| seen.contains(pid));
-}
-
-/// Claude's permission dialog on screen (each ends in "Esc to cancel").
-fn asking(screen: &str) -> bool {
-    screen.contains("Esc to cancel")
 }
 
 /// The tmux and socket of server `pid`: from the arguments it was started with, else (a socket
@@ -338,8 +335,6 @@ mod tests {
         assert_eq!(p, Pane { pid: 4242, id: "%3".into(), target: "main:1.0".into(), label: "main:claude".into(), attached: true });
         assert!(!parse_pane("1\t%0\tw:0.0\tw:zsh\t0").unwrap().attached);
         assert!(parse_pane("garbage").is_none());
-        assert!(asking("Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel"));
-        assert!(!asking("> write a poem"));
         assert!(is_tmux("/opt/homebrew/bin/tmux") && is_tmux("tmux") && !is_tmux("/bin/zsh") && !is_tmux("tmuxinator"));
     }
 
