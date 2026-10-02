@@ -172,7 +172,7 @@ extension DinoModel {
         for s in next {
             guard let t = s.tmux, let newest = t.alerts?.last?.seq else { continue }
             if looking(s) {
-                tmuxSeen[s.id] = newest
+                if tmuxSeen[s.id] != newest { tmuxSeen[s.id] = newest }
                 continue
             }
             let before = sessions.first { $0.id == s.id }?.tmux?.alerts?.last?.seq ?? 0

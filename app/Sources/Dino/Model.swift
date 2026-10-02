@@ -333,7 +333,10 @@ final class DinoModel: ObservableObject {
             return s
         }
         let appActive = NSApp.isActive
-        attention.formUnion(noteTmux(next) { appActive && $0.id == self.selected })
+        // Only when there's something new: mutating a published set announces a change even when
+        // it adds nothing, and this runs on every state, which redrew the window four times a second.
+        let tmuxNeeds = noteTmux(next) { appActive && $0.id == self.selected }
+        if !Set(tmuxNeeds).isSubset(of: attention) { attention.formUnion(tmuxNeeds) }
         for s in next {
             guard let prev = sessions.first(where: { $0.id == s.id }) else { continue }
             let looking = appActive && s.id == selected
