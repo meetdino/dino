@@ -326,28 +326,46 @@ struct CloseCommand: View {
     @EnvironmentObject var model: DinoModel
 
     var body: some View {
-        let split = model.shownSplit
-        let pane = split != nil && (model.sidePane == nil || split?.contains(model.focusedTerminal) == true)
-        let session = model.selectedSession
-        let title = pane ? "Close Pane"
-            : model.sidePane.map { $0 == .preview ? "Close Preview" : $0 == .tasks ? "Close Tasks" : "Close File" }
-            ?? (session != nil ? "Close Tab" : "Close Window")
-        Button(title) {
-            if pane, let id = model.selected {
-                model.closePane(id)
-            } else if model.sidePane != nil {
-                model.closeSidePane()
-            } else if let session {
-                model.closeTab(session)
-            } else {
-                NSApp.keyWindow?.performClose(nil)
-            }
+        // Menu commands don't always redraw when the model changes (at launch this one still saw no
+        // session), so the title may lag; what it closes is worked out when it's pressed.
+        Button(model.closeTarget.title) { model.closeCurrent() }
+            .keyboardShortcut("w")
+    }
+}
+
+/// What ⌘W closes right now: the pane, then a side pane, then the tab; the window only when there's
+/// no tab.
+enum CloseTarget {
+    case pane(String), sidePane(SidePane), tab(SessionInfo), window
+
+    var title: String {
+        switch self {
+        case .pane: "Close Pane"
+        case .sidePane(let p): p == .preview ? "Close Preview" : p == .tasks ? "Close Tasks" : "Close File"
+        case .tab: "Close Tab"
+        case .window: "Close Window"
         }
-        .keyboardShortcut("w")
     }
 }
 
 extension DinoModel {
+    var closeTarget: CloseTarget {
+        let split = shownSplit
+        if split != nil, sidePane == nil || split?.contains(focusedTerminal) == true, let id = selected { return .pane(id) }
+        if let p = sidePane { return .sidePane(p) }
+        if let s = selectedSession { return .tab(s) }
+        return .window
+    }
+
+    func closeCurrent() {
+        switch closeTarget {
+        case .pane(let id): closePane(id)
+        case .sidePane: closeSidePane()
+        case .tab(let s): closeTab(s)
+        case .window: NSApp.keyWindow?.performClose(nil)
+        }
+    }
+
     /// ⌘W on a tab. A shell's tab ends the shell, asking first if something is running in it (an
     /// agent typed into it included). An agent's tab only closes: the agent keeps running in the
     /// sidebar, where archiving it is.

@@ -547,7 +547,7 @@ fn agent(o: &Opts) -> anyhow::Result<()> {
             println!("{id}");
             Ok(())
         }
-        Response::Created { id } => crate::client::attach_raw(&id),
+        Response::Created { id } => crate::client::attach_raw(&id, false),
         Response::Error { message } => anyhow::bail!(message),
         other => anyhow::bail!("unexpected reply from dinod: {other:?}"),
     }
