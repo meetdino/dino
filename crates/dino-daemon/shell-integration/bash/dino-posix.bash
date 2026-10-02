@@ -3,3 +3,4 @@
 
 builtin source "${BASH_SOURCE[0]%/*}/ghostty.bash"
 [[ $- == *i* ]] && builtin source "${BASH_SOURCE[0]%/*}/dino-ai.bash"
+[[ $- == *i* ]] && builtin source "${BASH_SOURCE[0]%/*}/dino-term.bash"

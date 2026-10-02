@@ -129,12 +129,21 @@ private struct TabItem: View {
             Text(partner.map { "\(model.tabName(session)) | \(model.tabName($0))" } ?? model.tabName(session))
                 .lineLimit(1)
                 .truncationMode(.middle)
+            let unseen = model.tmuxUnseen(session)
+            if !unseen.isEmpty {
+                Text("\(unseen.count)")
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+                    .padding(.horizontal, 5)
+                    .background(Capsule().fill(SessionStatus.needsYou.color.opacity(0.25)))
+                    .help(unseen.map(\.text).joined(separator: "\n"))
+            }
             Button { model.closeTab(session) } label: {
                 Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
             }
             .buttonStyle(.plain)
             .opacity(hovering || selected ? 1 : 0)
-            .help(session.plainShell ? "Close this tab (⌘W)" : "Close this tab; \(session.display) keeps running in the sidebar (⌘W)")
+            .help(session.tmux != nil ? "Detach tmux and close this tab; tmux keeps everything (⌘W)"
+                : session.plainShell ? "Close this tab (⌘W)" : "Close this tab; \(session.display) keeps running in the sidebar (⌘W)")
         }
         .font(.callout)
         .foregroundStyle(selected ? .primary : .secondary)
@@ -145,5 +154,36 @@ private struct TabItem: View {
         .onHover { hovering = $0 }
         .onTapGesture { model.select(session.id) }
         .help(session.here.map(shortPath) ?? session.display)
+    }
+}
+
+extension DinoModel {
+    /// Bells and notifications from the tmux in shell `s` not seen yet: seen once its tab is looked at.
+    func tmuxUnseen(_ s: SessionInfo) -> [TmuxAlert] {
+        let seen = tmuxSeen[s.id] ?? 0
+        return (s.tmux?.alerts ?? []).filter { $0.seq > seen }
+    }
+
+    /// New bells and notifications from a tmux: one notification for the tab, saying how many and
+    /// where each came from, replacing the last one instead of piling up. Called with the sessions
+    /// dinod reports, before they replace `sessions`. Returns the tabs that now need you.
+    func noteTmux(_ next: [SessionInfo], looking: (SessionInfo) -> Bool) -> [String] {
+        var needs: [String] = []
+        for s in next {
+            guard let t = s.tmux, let newest = t.alerts?.last?.seq else { continue }
+            if looking(s) {
+                tmuxSeen[s.id] = newest
+                continue
+            }
+            let before = sessions.first { $0.id == s.id }?.tmux?.alerts?.last?.seq ?? 0
+            guard newest > before else { continue }
+            let unseen = tmuxUnseen(s)
+            guard !unseen.isEmpty else { continue }
+            let tmuxSession = t.target.split(separator: ":").first.map(String.init) ?? t.label
+            let title = unseen.count == 1 ? "tmux \(tmuxSession)" : "\(unseen.count) notifications in tmux \(tmuxSession)"
+            needs.append(s.id)
+            Notifier.post(session: s, title: title, body: unseen.map(\.text).joined(separator: "\n"))
+        }
+        return needs
     }
 }

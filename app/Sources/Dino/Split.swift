@@ -342,7 +342,7 @@ enum CloseTarget {
         switch self {
         case .pane: "Close Pane"
         case .sidePane(let p): p == .preview ? "Close Preview" : p == .tasks ? "Close Tasks" : "Close File"
-        case .tab: "Close Tab"
+        case .tab(let s): s.tmux != nil ? "Detach" : "Close Tab"
         case .window: "Close Window"
         }
     }
@@ -386,6 +386,7 @@ extension DinoModel {
     /// What a tab is called: a shell by its folder, as in Ghostty, or by the agent run in it.
     func tabName(_ s: SessionInfo) -> String {
         guard s.label == nil, s.agent_id == "shell" else { return s.display }
+        if let t = s.tmux { return t.label }
         if let f = s.inside { return f.title.isEmpty ? launcherLabel(f.agent) : f.title }
         return s.here.map { URL(fileURLWithPath: $0).lastPathComponent } ?? s.display
     }
