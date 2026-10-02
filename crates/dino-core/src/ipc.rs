@@ -406,6 +406,28 @@ pub struct LauncherInfo {
     pub knobs: Knobs,
 }
 
+/// The pane a tmux client in a dino shell shows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TmuxPane {
+    /// `session:window.pane`.
+    pub target: String,
+    /// `session:window name`.
+    pub label: String,
+    /// Something other than a shell runs in it.
+    pub busy: bool,
+    /// Bells and notifications from the client's tmux, newest last, each with where it came from;
+    /// numbered so a client can tell which it has shown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerts: Vec<TmuxAlert>,
+}
+
+/// One bell or notification from a tmux in a dino shell.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TmuxAlert {
+    pub seq: u64,
+    pub text: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct SessionInfo {
     pub id: String,
@@ -499,8 +521,13 @@ pub struct SessionInfo {
     #[serde(default)]
     pub shell_cwd: Option<String>,
     /// A shell running a command (not at its prompt), as last looked at: closing it would stop it.
+    /// Never for a tmux client: closing that only detaches it.
     #[serde(default)]
     pub running: bool,
+    /// A shell whose foreground is a tmux client: what the client shows. Closing the tab detaches
+    /// it, and the tmux server keeps everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<TmuxPane>,
     #[serde(default)]
     pub last_exit: Option<i32>,
     /// Background commands its agent left running that listen on a port: a dev server, not work

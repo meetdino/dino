@@ -7,13 +7,26 @@
 typeset -g _dino_zsh_dir=${${(%):-%x}:A:h}
 builtin source -- "$_dino_zsh_dir/ghostty.zshenv"
 
-# The AI line loads at the first prompt, after the user's .zshrc, so its keys win.
-_dino_ai_init() {
-    precmd_functions=(${precmd_functions:#_dino_ai_init})
-    builtin unfunction _dino_ai_init
-    builtin source -- "$_dino_zsh_dir/dino-ai.zsh"
-}
-[[ -o interactive ]] && precmd_functions+=(_dino_ai_init)
+if [[ -n ${TMUX-} ]]; then
+    # A pane of a tmux started from a dino shell (see dino-tmux-start.zsh): the marks again, wrapped
+    # so they reach dino through tmux. No AI line: this pane may be shown in any terminal.
+    _dino_late_init() {
+        precmd_functions=(${precmd_functions:#_dino_late_init})
+        builtin unfunction _dino_late_init
+        builtin source -- "$_dino_zsh_dir/dino-tmux.zsh"
+    }
+else
+    # The AI line loads at the first prompt, after the user's .zshrc, so its keys win; so does
+    # what passes this integration on to a tmux started here.
+    _dino_late_init() {
+        precmd_functions=(${precmd_functions:#_dino_late_init})
+        builtin unfunction _dino_late_init
+        builtin source -- "$_dino_zsh_dir/dino-ai.zsh"
+        builtin source -- "$_dino_zsh_dir/dino-tmux-start.zsh"
+        builtin source -- "$_dino_zsh_dir/dino-term.zsh"
+    }
+fi
+[[ -o interactive ]] && precmd_functions+=(_dino_late_init)
 
 if [[ -o interactive ]] && (( ! ${+functions[precmd]} )); then
     precmd() {
@@ -23,6 +36,6 @@ if [[ -o interactive ]] && (( ! ${+functions[precmd]} )); then
         (( ${+functions[_ghostty_deferred_init]} )) && builtin unfunction _ghostty_deferred_init
         # Its hook joins precmd_functions, which zsh runs right after this.
         (( ${+_ghostty_integration_loaded} )) || builtin source -- "$GHOSTTY_ZSH_INTEGRATION_DIR/ghostty-integration"
-        (( ${+functions[_dino_ai_init]} )) && _dino_ai_init
+        (( ${+functions[_dino_late_init]} )) && _dino_late_init
     }
 fi
