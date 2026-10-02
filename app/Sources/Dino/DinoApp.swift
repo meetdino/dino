@@ -54,6 +54,9 @@ struct DinoApp: App {
                 Button("New Tab") { model.newShell() }
                     .keyboardShortcut("t")
                     .disabled(model.launchers.isEmpty)
+                Button("New Project…") { model.showNewProject = true }
+                    .keyboardShortcut("n", modifiers: [.command, .option, .shift])
+                    .disabled(model.launchers.isEmpty)
                 // Its shortcut works from any app (Settings → General); a menu key would only work here.
                 Button("Quick Terminal") { QuickTerminal.shared.toggle() }
                     .disabled(model.launchers.isEmpty)
@@ -366,6 +369,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
         .sheet(isPresented: $model.showNewSession) { NewSessionSheet() }
+        .sheet(isPresented: $model.showNewProject) { NewProjectSheet() }
         .sheet(isPresented: $model.showShortcuts) { ShortcutSheet() }
         .sheet(isPresented: $model.showPalette) { CommandPalette() }
         .sheet(item: $model.askingAbout) { AskSheet(session: $0) }
@@ -658,6 +662,11 @@ struct EmptyState: View {
                     }
                     .controlSize(.large)
                     .help("One prompt, several agents, each in its own worktree; keep the best (⇧⌘N)")
+                    Button { model.showNewProject = true } label: {
+                        Label("New Project…", systemImage: "folder.badge.plus").frame(width: 240)
+                    }
+                    .controlSize(.large)
+                    .help("A new folder, a git repository in it, and a tab there (⌥⇧⌘N)")
                 }
             }
             Button("In \((model.folder.path as NSString).abbreviatingWithTildeInPath) · Choose Folder…") { model.chooseFolder() }

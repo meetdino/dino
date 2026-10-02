@@ -78,6 +78,7 @@ final class DinoModel: ObservableObject {
     @Published var showFanout = false
     /// The New Session sheet: agent, place, mode, model and effort.
     @Published var showNewSession = false
+    @Published var showNewProject = false
     /// The toolbar's mode, model or effort picker that's open (⇧⌘M, ⇧⌘I, ⇧⌘E).
     @Published var controlPicker: ControlKind?
     /// A member whose changes the user is about to keep.
