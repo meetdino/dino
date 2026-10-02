@@ -247,6 +247,8 @@ pub fn run() -> anyhow::Result<()> {
     let path = ipc::socket_path();
     // Held while dinod runs: no second one takes the socket over.
     let _lock = claim_socket(&path)?;
+    // Running: a stop from now on is either asked for (marked again then) or a crash.
+    let _ = std::fs::remove_file(stopped_mark());
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     let saved = load_saved();
@@ -449,6 +451,7 @@ fn stamp() -> String {
 /// Every way dinod stops leaves a line in its log, so a restart can be told apart from a crash:
 /// a panic, a signal (one it can't catch, SIGKILL, is the only kind that leaves none).
 fn log_exits() {
+    let _ = STOPPED_MARK.set(std::ffi::CString::new(stopped_mark().as_os_str().as_encoded_bytes()).unwrap_or_default());
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         eprintln!("{} dinod panicked:", stamp());
@@ -462,9 +465,16 @@ fn log_exits() {
             libc::SIGHUP => b"dinod stopped by SIGHUP\n",
             _ => b"dinod stopped by a signal\n",
         };
-        // SAFETY: write(2), signal(2) and raise(3) are async-signal-safe.
+        // SAFETY: write(2), open(2), close(2), signal(2) and raise(3) are async-signal-safe, and the
+        // mark's path was made before any signal could come.
         unsafe {
             libc::write(2, msg.as_ptr().cast(), msg.len());
+            if let Some(mark) = STOPPED_MARK.get() {
+                let fd = libc::open(mark.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o600);
+                if fd >= 0 {
+                    libc::close(fd);
+                }
+            }
             libc::signal(sig, libc::SIG_DFL);
             libc::raise(sig);
         }
@@ -474,6 +484,15 @@ fn log_exits() {
         unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
     }
 }
+
+/// Left when dinod stops because it was asked to (`dino stop`, quitting with Stop, an update, a
+/// signal) and removed when one starts: a client that loses dinod with no mark lost it to a crash,
+/// and may start it again.
+fn stopped_mark() -> PathBuf {
+    dino_core::config_dir().join("dinod.stopped")
+}
+
+static STOPPED_MARK: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
 
 /// The process on the other end of a connection, for the log: "pid 123 (Dino)".
 fn peer(stream: &UnixStream) -> String {
@@ -1925,6 +1944,7 @@ fn state(d: &Daemon) -> Response {
 fn stop_all(d: &Daemon) {
     save(d);
     save_live_screens(d, true);
+    let _ = std::fs::write(stopped_mark(), b"");
     lid::stop(d);
     for s in d.sessions.lock().unwrap().drain(..) {
         s.pane.kill();
