@@ -1275,8 +1275,16 @@ fn local_spec(
     // the agent's environment or a private file; one that must have them on its command line gets
     // them without, and the secret in its environment (`keyed_urls`).
     let keyed = adapter.is_some_and(|a| a.keyed_urls());
-    let base = |provider: &str| if keyed { d.proxy.header_base_url(id, provider) } else { d.proxy.base_url(id, provider) };
+    // Asked for the hooks' URL: the agent reports its own turns (see `Stats::reports_turns`).
+    let hooked = std::cell::Cell::new(false);
+    let base = |provider: &str| {
+        hooked.set(hooked.get() || provider == "hook");
+        if keyed { d.proxy.header_base_url(id, provider) } else { d.proxy.base_url(id, provider) }
+    };
     let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy && route.is_none(), &base, status_line);
+    if hooked.get() {
+        d.proxy.stats.reports_turns(id);
+    }
     // The model picked since (the model control), over the one it started on.
     let model = route.map(|r| controls.model.clone().unwrap_or_else(|| r.model.clone()));
     let provider = route.zip(adapter).zip(model.as_deref()).and_then(|((r, a), m)| a.provider_wiring(&base(&route_path(&r.provider)), r.format?, m));
@@ -1384,6 +1392,7 @@ fn remote_spec(
             let port = ssh::pick_port();
             tunnel = Some((port, d.proxy.remote_port));
             wired.extend(["--settings".into(), dino_core::claude_hook_settings(&d.proxy.remote_hook_url(id, &new_uuid(), port), None)]);
+            d.proxy.stats.reports_turns(id);
             ssh::Program::Claude { session: agent_session.get_or_insert_with(new_uuid), resume: restoring }
         }
         _ if agent(&l.agent_id).is_some_and(|a| a.free()) => anyhow::bail!("{} runs through dino on this Mac; start it here instead", l.label),
