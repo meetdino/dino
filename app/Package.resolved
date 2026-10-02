@@ -1,5 +1,5 @@
 {
-  "originHash" : "1da36a16f99185d50df20a8071a731f911ed70960c02e7525e8c6d368a204b8c",
+  "originHash" : "a759fa9b6c0f1a05c5c4f95c022fe390c2f538fbc1a000fac766e9492eb23ce3",
   "pins" : [
     {
       "identity" : "libghostty-spm",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "87eb0af130744c8cbe2e31b6e1a5bcd659f1c220",
         "version" : "2.2.0"
+      }
+    },
+    {
+      "identity" : "sparkle",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sparkle-project/Sparkle",
+      "state" : {
+        "revision" : "eef1a539a373c1f1a320624b1130fc5de7b2e100",
+        "version" : "2.10.0"
       }
     }
   ],

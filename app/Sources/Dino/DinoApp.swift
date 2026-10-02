@@ -36,6 +36,8 @@ struct DinoApp: App {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { openWindow(id: SettingsView.windowID) }
                     .keyboardShortcut(",")
+                Button("Check for Updates…") { Updates.shared.checkNow() }
+                    .disabled(!Updates.shared.available)
                 Button("Ask Before Quitting") { quitChoice = "" }
                     .disabled(quitChoice.isEmpty)
                     .help("Show the keep-running question again when you quit")
@@ -185,6 +187,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         NSApp.servicesProvider = services
+        // Sparkle schedules its daily check from here (a release build only).
+        _ = Updates.shared
         NSUpdateDynamicServices()
         QuickTerminal.shared.registerKey()
         desktopKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in

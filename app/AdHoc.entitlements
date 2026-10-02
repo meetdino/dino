@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Ad hoc builds only (app/build.sh, scripts/release.sh without DEVELOPER_ID_APP). An ad hoc
+     signature has no Team ID, so with the hardened runtime macOS won't load the Sparkle.framework
+     inside the app for one launched from the Finder or Dock. This lets it, and keeps the rest of
+     the hardened runtime (no DYLD_INSERT_LIBRARIES). A Developer ID build signs the app and the
+     framework with one Team ID and doesn't use this. -->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
