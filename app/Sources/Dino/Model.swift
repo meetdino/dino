@@ -549,7 +549,7 @@ final class DinoModel: ObservableObject {
         t.configuration = TerminalSurfaceOptions(
             backend: .exec,
             envVars: ["PATH": DinoEnvironment.loginPath, "DINO_HOME": DinoEnvironment.home],
-            command: "\(DinoEnvironment.dinoBinary) attach \(id)",
+            command: "\(DinoEnvironment.dinoBinary) attach --fresh \(id)",
             waitAfterCommand: false
         )
         // ⌘-clicked paths and local URLs open in dino's side pane; dropped files paste as paths.
