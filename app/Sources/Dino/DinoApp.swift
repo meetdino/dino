@@ -362,6 +362,7 @@ struct ContentView: View {
             HSplitView {
                 VStack(spacing: 0) {
                     TabStrip()
+                    TmuxSuggestion()
                     Terminals()
                 }
                 if let pane = model.sidePane {
