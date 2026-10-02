@@ -782,6 +782,16 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     Ok(())
 }
 
+/// What `dino --help` says before the full list: what dino is, and where to start.
+const INTRO: &str = "dino runs your coding agents (Claude Code, Codex, …) and keeps them running: in the dino app, or here.
+
+  dino                 the full-screen view of every session (starts dinod if needed)
+  dino claude          start Claude Code here (any agent dino knows: dino ls shows what's running)
+  dino .               a shell in this folder, in the dino app
+  dino status          what's working and what needs you
+  dino found           agents already running on this Mac, in any terminal
+";
+
 const USAGE: &str = "usage: dino [agent [args...]] | --welcome
        dino <folder> [agent [args...]]   (a shell, or that agent, there: opens in the terminal app)
        dino ls | new [--worktree] <agent> [--on <provider> <model>] [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
@@ -870,7 +880,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(arg) if is_folder(arg) => return cmd_open(arg, &cli[1..]),
         Some("-h" | "--help" | "help") => {
-            println!("{USAGE}");
+            println!("{INTRO}\n{USAGE}");
             return Ok(());
         }
         _ => {}
