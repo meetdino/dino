@@ -231,8 +231,8 @@ struct SessionName: View {
                 }
                 .help("Return to rename; empty goes back to the agent's own title")
         } else {
-            // In the toolbar, a shell goes by its tab's name (its folder).
-            Text(place == .toolbar ? model.tabName(session) : session.display)
+            // A shell goes by its tab's name everywhere: its folder, or the agent run in it.
+            Text(model.tabName(session))
                 .font(font)
                 .foregroundStyle(color)
                 .lineLimit(1)
