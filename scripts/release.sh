@@ -14,6 +14,13 @@
 # Without them the app is signed ad hoc, which Gatekeeper refuses for downloads.
 #   RELEASES_REPO      the binaries-only GitHub repository the files are published to
 #                      (default asdf9384/dino-releases); the tap's URLs point at its releases
+#
+# Updates (the app through Sparkle, an install.sh `dino` through dinod) need the release key:
+#   DINO_RELEASE_KEY   its private half, a file outside any repository (scripts/release-key.swift).
+#                      With it the release carries Dino-<version>-<arch>.zip and appcast.xml, both
+#                      signed; without it the build doesn't update itself, and there's no appcast.
+#   DINO_FEED_URL      where builds look for the appcast (default: the newest release's, in RELEASES_REPO)
+#   DINO_UPDATE_BASE   where the appcast says the files are (default: this release's downloads)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -25,6 +32,12 @@ ARCHS="${ARCHS:-$(uname -m)}"
 DIST="$ROOT/dist"
 APP="$DIST/Dino.app"
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
+
+KEY="${DINO_RELEASE_KEY:-}"
+PUBKEY=""
+if [ -n "$KEY" ]; then PUBKEY="$(swift scripts/release-key.swift public "$KEY")"; fi
+FEED_URL="${DINO_FEED_URL:-https://github.com/$RELEASES_REPO/releases/latest/download/appcast.xml}"
+UPDATE_BASE="${DINO_UPDATE_BASE:-https://github.com/$RELEASES_REPO/releases/download/v$VERSION}"
 
 rust_target() { case "$1" in arm64) echo aarch64-apple-darwin ;; x86_64) echo x86_64-apple-darwin ;; *) echo "unknown arch $1" >&2; exit 1 ;; esac; }
 read -r -a arch_list <<<"$ARCHS"
@@ -40,6 +53,8 @@ bins=()
 for a in "${arch_list[@]}"; do
     t="$(rust_target "$a")"
     # No build machine paths (home folder, checkout) in what ships.
+    # dinod checks the updates it installs with the release key's public half, and only with it.
+    DINO_UPDATE_PUBLIC_KEY="$PUBKEY" DINO_UPDATE_FEED_URL="$FEED_URL" \
     RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME/.cargo=cargo --remap-path-prefix=$PWD=dino" \
         cargo build --release -q -p dino --target "$t"
     bins+=("target/$t/release/dino")
@@ -57,13 +72,24 @@ swift_arch=()
 for a in "${arch_list[@]}"; do swift_arch+=(--arch "$a"); done
 (cd app && swift build -c release "${swift_arch[@]}" -q)
 SWIFT_BIN="$(cd app && swift build -c release "${swift_arch[@]}" --show-bin-path)"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers" "$APP/Contents/Frameworks"
 cp "$SWIFT_BIN/Dino" "$APP/Contents/MacOS/Dino"
+cp -R "$SWIFT_BIN/Sparkle.framework" "$APP/Contents/Frameworks/"
+# Only the bundle's own Frameworks: no build machine paths to look in.
+for r in $(otool -l "$APP/Contents/MacOS/Dino" | awk '/LC_RPATH/{getline; getline; print $2}' | grep '^/' || true); do
+    install_name_tool -delete_rpath "$r" "$APP/Contents/MacOS/Dino"
+done
 cp -R "$SWIFT_BIN"/*.bundle "$APP/Contents/Resources/" 2>/dev/null || true
 cp app/AppIcon.icns "$APP/Contents/Resources/"
 cp "$DIST/dino" "$APP/Contents/Helpers/dino"
 cp app/Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :SUFeedURL $FEED_URL" "$APP/Contents/Info.plist"
+if [ -n "$PUBKEY" ]; then
+    /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $PUBKEY" "$APP/Contents/Info.plist"
+else
+    say "no DINO_RELEASE_KEY: this build won't update itself"
+fi
 
 # Signing: inside out, never --deep (Apple's guidance), always with the hardened runtime as
 # app/build.sh does (no library injection into dino); a Developer ID and a timestamp when given,
@@ -79,8 +105,20 @@ say "signing (${DEVELOPER_ID_APP:-ad hoc})"
 while IFS= read -r -d '' f; do
     if file -b "$f" | grep -q 'Mach-O'; then sign "$f"; fi
 done < <(find "$APP/Contents/Resources" -type f -print0)
+# Sparkle, inside out, as its documentation lists.
+SPK="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+sign "$SPK/XPCServices/Installer.xpc"
+sign --preserve-metadata=entitlements "$SPK/XPCServices/Downloader.xpc"
+sign "$SPK/Autoupdate"
+sign "$SPK/Updater.app"
+sign "$APP/Contents/Frameworks/Sparkle.framework"
 sign "$APP/Contents/Helpers/dino"
-sign "$APP"
+if [ -n "${DEVELOPER_ID_APP:-}" ]; then
+    sign "$APP"
+else
+    # Ad hoc: no Team ID for the framework to share with the app (app/AdHoc.entitlements).
+    sign --entitlements app/AdHoc.entitlements "$APP"
+fi
 codesign --verify --strict --verbose=1 "$APP"
 
 # The DMG: the app beside a link to /Applications.
@@ -123,6 +161,35 @@ rm -rf "$CLI"
 DMG_SHA="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
 TAR_SHA="$(shasum -a 256 "$DIST/$TAR" | cut -d' ' -f1)"
 
+# Updates: the app as a zip for Sparkle, and the appcast naming it and the CLI tarball, each
+# signed with the release key. The tarball's line is dino's own (`dino:cli`), which Sparkle skips.
+if [ -n "$KEY" ]; then
+    say "appcast"
+    ZIP="Dino-$VERSION-$LABEL.zip"
+    ditto -c -k --sequesterRsrc --keepParent "$APP" "$DIST/$ZIP"
+    ZIP_SIG="$(swift scripts/release-key.swift sign "$KEY" "$DIST/$ZIP")"
+    TAR_SIG="$(swift scripts/release-key.swift sign "$KEY" "$DIST/$TAR")"
+    cat > "$DIST/appcast.xml" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dino="https://meetdino.com/xml-namespaces/dino">
+  <channel>
+    <title>dino</title>
+    <item>
+      <title>dino $VERSION</title>
+      <pubDate>$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')</pubDate>
+      <sparkle:version>$BUILD</sparkle:version>
+      <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/$RELEASES_REPO/releases/tag/v$VERSION</link>
+      <enclosure url="$UPDATE_BASE/$ZIP" length="$(stat -f %z "$DIST/$ZIP")" type="application/octet-stream" sparkle:edSignature="$ZIP_SIG"/>
+      <dino:cli arch="$LABEL" url="$UPDATE_BASE/$TAR" sha256="$TAR_SHA" signature="$TAR_SIG"/>
+    </item>
+  </channel>
+</rss>
+XML
+    (cd "$DIST" && shasum -a 256 "$ZIP" >> SHA256SUMS)
+fi
+
 # The tap: the cask for the app (CLI included) and the formula for the CLI alone, filled in.
 mkdir -p "$DIST/tap/Casks" "$DIST/tap/Formula"
 fill() {
@@ -137,6 +204,7 @@ cp packaging/homebrew/README.md "$DIST/tap/README.md"
 D="$DIST/download/dino/$VERSION"
 mkdir -p "$D"
 cp "$DMG" "$DIST/$TAR" "$DIST/SHA256SUMS" "$D/"
+if [ -n "$KEY" ]; then cp "$DIST/$ZIP" "$DIST/appcast.xml" "$D/"; fi
 echo "$VERSION" > "$DIST/download/dino/latest"
 cp scripts/install.sh "$DIST/download/install.sh"
 
