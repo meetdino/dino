@@ -238,6 +238,16 @@ impl Stats {
         });
     }
 
+    /// The question `asked` was answered or dismissed although no hook said so (Esc on a permission
+    /// prompt fires none): the turn is over. A newer question since is left alone.
+    pub fn end_question(&self, id: &str, asked: &str) {
+        self.update(id, |s| {
+            if matches!(&s.activity, Some(Activity::NeedsPermission(m)) if m == asked) {
+                s.activity = Some(Activity::Done);
+            }
+        });
+    }
+
     /// Where the agent's turn is, as its own record says (Codex's rollout and notices): what the
     /// hooks say for Claude.
     pub fn report(&self, id: &str, activity: Activity) {
