@@ -187,3 +187,51 @@ extension DinoModel {
         return needs
     }
 }
+
+/// An agent in a tmux pane nobody is attached to: what the pane shows, read-only and kept current.
+/// tmux keeps the agent; "Continue in dino" moves it over.
+struct TmuxLook: View {
+    @EnvironmentObject var model: DinoModel
+    @Environment(\.dismiss) private var dismiss
+    let session: FoundSession
+    @State private var screen = ""
+    @State private var gone = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                AgentBadge(agent: session.agent)
+                Text(session.title).font(.headline).lineLimit(1)
+                Spacer()
+                Text(session.tmux.map { "tmux \($0.label) · no client attached" } ?? "").font(.caption).foregroundStyle(.secondary)
+            }
+            ScrollView([.vertical, .horizontal]) {
+                Text(gone ? "That tmux pane is gone." : screen)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            }
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            HStack {
+                Text("Attach to its tmux session to type in it.").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Continue in dino…") {
+                    dismiss()
+                    model.confirmMove = session
+                }
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 760, height: 520)
+        .task {
+            guard let place = session.tmux else { return }
+            while !Task.isCancelled {
+                let text = try? await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).tmuxScreen(place) }.value
+                if let text { if text != screen { screen = text } } else if !gone { gone = true }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+}

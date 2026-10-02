@@ -88,6 +88,180 @@ pub fn detach(v: &View) {
     let _ = Command::new(&v.bin).arg("-S").arg(&v.socket).args(["detach-client", "-t", &v.tty]).output();
 }
 
+// ---- Agents started by hand in tmux panes (any server on this Mac, dino's or not) ----
+
+/// One pane of a server, from `list-panes -a`.
+#[derive(Clone, Debug, PartialEq)]
+struct Pane {
+    pid: u32,
+    id: String,
+    target: String,
+    label: String,
+    attached: bool,
+}
+
+/// A tmux server as last asked: its tmux, socket and panes. Asked again after [`FRESH`].
+struct Server {
+    bin: PathBuf,
+    socket: PathBuf,
+    panes: Vec<Pane>,
+    at: std::time::Instant,
+}
+
+/// How long a server's pane list is reused: the sidebar asks every few seconds.
+const FRESH: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// Servers by their pid. Only ever read from: nothing here changes a server.
+static SERVERS: std::sync::Mutex<Option<std::collections::HashMap<u32, Server>>> = std::sync::Mutex::new(None);
+
+/// Fill in where each running agent that lives under a tmux server is: its pane. One `ps` for the
+/// process table and one `list-panes -a` per server (reused for [`FRESH`]); nothing at all when no
+/// agent runs in tmux.
+pub fn place(found: &mut [dino_core::found::FoundSession]) {
+    let tmuxed: Vec<usize> = (0..found.len()).filter(|&i| found[i].terminal.as_deref() == Some("tmux") && found[i].pid.is_some()).collect();
+    if tmuxed.is_empty() {
+        return;
+    }
+    let table = processes();
+    let parent = |p: u32| table.get(&p).map(|(pp, _)| *pp);
+    let mut servers = SERVERS.lock().unwrap();
+    let servers = servers.get_or_insert_default();
+    let mut seen = std::collections::HashSet::new();
+    for i in tmuxed {
+        let mut chain = vec![found[i].pid.unwrap()];
+        while let Some(pp) = parent(*chain.last().unwrap()).filter(|&pp| pp > 1 && chain.len() < 32) {
+            chain.push(pp);
+        }
+        // The nearest ancestor that is a tmux: the server the pane belongs to.
+        let Some(&server) = chain.iter().find(|p| table.get(p).is_some_and(|(_, c)| is_tmux(c))) else { continue };
+        seen.insert(server);
+        if servers.get(&server).is_none_or(|s| s.at.elapsed() >= FRESH) {
+            let known = servers.remove(&server).map(|s| (s.bin, s.socket));
+            let Some((bin, socket)) = known.or_else(|| locate(server)) else { continue };
+            let panes = panes(&bin, &socket).unwrap_or_default();
+            servers.insert(server, Server { bin, socket, panes, at: std::time::Instant::now() });
+        }
+        let srv = &servers[&server];
+        if let Some(p) = chain.iter().find_map(|c| srv.panes.iter().find(|p| p.pid == *c)) {
+            found[i].tmux = Some(dino_core::found::TmuxPlace {
+                socket: srv.socket.display().to_string(),
+                pane: p.id.clone(),
+                target: p.target.clone(),
+                label: p.label.clone(),
+                attached: p.attached,
+            });
+            found[i].terminal = Some(format!("tmux {}", p.label));
+            // Claude's own status says busy, not that it's asking: its permission dialog does.
+            if found[i].agent == "claude" && capture(&srv.bin, &srv.socket, &p.id).is_some_and(|t| asking(&t)) {
+                found[i].status = Some("needs".into());
+            }
+        }
+    }
+    servers.retain(|pid, _| seen.contains(pid));
+}
+
+/// Claude's permission dialog on screen (each ends in "Esc to cancel").
+fn asking(screen: &str) -> bool {
+    screen.contains("Esc to cancel")
+}
+
+/// The tmux and socket of server `pid`: from the arguments it was started with, else (a socket
+/// under another `TMUX_TMPDIR`) the socket in tmux's usual folders whose server is this one.
+fn locate(pid: u32) -> Option<(PathBuf, PathBuf)> {
+    let (bin, args) = command_of(pid)?;
+    if let Some(s) = socket(&args).filter(|s| server_pid(&bin, s) == Some(pid)) {
+        return Some((bin, s));
+    }
+    let uid = unsafe { libc::getuid() };
+    let dirs = [std::env::var_os("TMUX_TMPDIR").map(PathBuf::from), std::env::var_os("TMPDIR").map(PathBuf::from), Some("/tmp".into()), Some("/private/tmp".into())];
+    for dir in dirs.into_iter().flatten() {
+        for e in std::fs::read_dir(dir.join(format!("tmux-{uid}"))).into_iter().flatten().flatten() {
+            let s = e.path();
+            if server_pid(&bin, &s) == Some(pid) {
+                return Some((bin, s));
+            }
+        }
+    }
+    None
+}
+
+fn server_pid(bin: &Path, socket: &Path) -> Option<u32> {
+    let out = Command::new(bin).arg("-S").arg(socket).args(["display-message", "-p", "#{pid}"]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().parse().ok()).flatten()
+}
+
+fn panes(bin: &Path, socket: &Path) -> Option<Vec<Pane>> {
+    const FMT: &str = "#{pane_pid}\t#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_name}:#{window_name}\t#{session_attached}";
+    let out = Command::new(bin).arg("-S").arg(socket).args(["list-panes", "-a", "-F", FMT]).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).lines().filter_map(parse_pane).collect())
+}
+
+fn parse_pane(line: &str) -> Option<Pane> {
+    let f: Vec<&str> = line.split('\t').collect();
+    let [pid, id, target, label, attached] = f[..] else { return None };
+    Some(Pane { pid: pid.parse().ok()?, id: id.into(), target: target.into(), label: label.into(), attached: attached.parse::<u32>().is_ok_and(|n| n > 0) })
+}
+
+/// What pane `pane` shows now, as text.
+fn capture(bin: &Path, socket: &Path, pane: &str) -> Option<String> {
+    let out = Command::new(bin).arg("-S").arg(socket).args(["capture-pane", "-p", "-J", "-t", pane]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The tmux of the server on `socket`, as last seen by [`place`].
+fn bin_for(socket: &str) -> Option<PathBuf> {
+    SERVERS.lock().unwrap().as_ref()?.values().find(|s| s.socket == Path::new(socket)).map(|s| s.bin.clone())
+}
+
+/// What pane `pane` of the server on `socket` shows, for a look without taking it over.
+pub fn screen(socket: &str, pane: &str) -> Option<String> {
+    capture(&bin_for(socket)?, Path::new(socket), pane)
+}
+
+/// Bring pane `pane` to the front in a client attached to its server: the one on its session if
+/// any, else the one used last (switched to that session). Returns that client's terminal, `None`
+/// when nobody is attached (nothing changes then).
+pub fn show(socket: &str, pane: &str) -> Option<String> {
+    let bin = bin_for(socket)?;
+    let tmux = |args: &[&str]| Command::new(&bin).arg("-S").arg(socket).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let session = tmux(&["display-message", "-p", "-t", pane, "#{session_name}"])?.trim().to_string();
+    let clients = tmux(&["list-clients", "-F", "#{client_activity}\t#{client_tty}\t#{client_session}"])?;
+    let mut clients: Vec<(u64, String, String)> = clients
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let [at, tty, s] = f[..] else { return None };
+            Some((at.parse().unwrap_or(0), tty.to_string(), s.to_string()))
+        })
+        .collect();
+    // On the pane's session first, then the most recently used.
+    clients.sort_by_key(|(at, _, s)| (*s == session, *at));
+    let (_, tty, on) = clients.pop()?;
+    if on != session {
+        tmux(&["switch-client", "-c", &tty, "-t", &session])?;
+    }
+    tmux(&["select-window", "-t", pane])?;
+    tmux(&["select-pane", "-t", pane])?;
+    Some(tty)
+}
+
+fn is_tmux(comm: &str) -> bool {
+    comm.rsplit('/').next().is_some_and(|c| c == "tmux" || c.starts_with("tmux:"))
+}
+
+/// Every process: pid → (parent, command).
+fn processes() -> std::collections::HashMap<u32, (u32, String)> {
+    let out = Command::new("ps").args(["-A", "-o", "pid=,ppid=,comm="]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    out.lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
+            Some((pid, (ppid, it.collect::<Vec<_>>().join(" "))))
+        })
+        .collect()
+}
+
 /// The executable and arguments of `pid`.
 fn command_of(pid: u32) -> Option<(PathBuf, Vec<String>)> {
     let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()?;
@@ -141,6 +315,17 @@ mod tests {
         assert_eq!(s(&["-f", "/dev/null", "-S", "/y", "new"]), Some(PathBuf::from("/y")));
         // A `-S` after the command is the command's, not tmux's.
         assert_eq!(s(&["new", "-S", "/z"]).filter(|p| p == Path::new("/z")), None);
+    }
+
+    #[test]
+    fn reads_panes_and_dialogs() {
+        let p = parse_pane("4242\t%3\tmain:1.0\tmain:claude\t1").unwrap();
+        assert_eq!(p, Pane { pid: 4242, id: "%3".into(), target: "main:1.0".into(), label: "main:claude".into(), attached: true });
+        assert!(!parse_pane("1\t%0\tw:0.0\tw:zsh\t0").unwrap().attached);
+        assert!(parse_pane("garbage").is_none());
+        assert!(asking("Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel"));
+        assert!(!asking("> write a poem"));
+        assert!(is_tmux("/opt/homebrew/bin/tmux") && is_tmux("tmux") && !is_tmux("/bin/zsh") && !is_tmux("tmuxinator"));
     }
 
     #[test]

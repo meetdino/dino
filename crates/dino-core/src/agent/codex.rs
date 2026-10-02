@@ -256,6 +256,7 @@ impl Agent for Codex {
                 terminal,
                 args,
                 url: None,
+                tmux: None,
             });
         }
         out
@@ -322,6 +323,7 @@ impl Agent for Codex {
                 terminal: t["environment_label"].as_str().map(String::from),
                 args: vec![],
                 url: t["url"].as_str().map(String::from),
+                tmux: None,
             })
             .collect()
     }

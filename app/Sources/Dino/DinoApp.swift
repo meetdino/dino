@@ -377,6 +377,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
         .sheet(isPresented: $model.showNewSession) { NewSessionSheet() }
+        .sheet(item: $model.tmuxLook) { TmuxLook(session: $0) }
         .sheet(isPresented: $model.showNewProject) { NewProjectSheet() }
         .sheet(isPresented: $model.showShortcuts) { ShortcutSheet() }
         .sheet(isPresented: $model.showPalette) { CommandPalette() }
@@ -715,7 +716,9 @@ struct Sidebar: View {
                 // Rows outside "Agents" carry a `move:` tag: ask before handing that session over.
                 // Anything else that isn't a session (or deselecting) leaves the selection alone.
                 guard let tag else { return }
-                if tag.hasPrefix("move:") {
+                if tag.hasPrefix("tmux:") {
+                    if let f = model.elsewhere.first(where: { "tmux:\($0.id)" == tag }) { model.showInTmux(f) }
+                } else if tag.hasPrefix("move:") {
                     model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
                 } else if tag.hasPrefix("task:") {
                     model.editingTask = model.scheduled.first { "task:\($0.id)" == tag }
@@ -767,7 +770,8 @@ struct Sidebar: View {
                     if !model.elsewhere.isEmpty, filter == .all, !narrowed {
                         SidebarHeading(title: "On this Mac")
                         ForEach(model.elsewhere) { f in
-                            ElsewhereRow(session: f).tag("move:\(f.id)")
+                            // In a tmux pane: a click shows it there (tmux keeps it); elsewhere it moves to dino.
+                            ElsewhereRow(session: f).tag(f.tmux != nil ? "tmux:\(f.id)" : "move:\(f.id)")
                         }
                     }
                     if filter == .all, !narrowed {
@@ -1337,19 +1341,32 @@ struct ElsewhereRow: View {
                 Text(whereText(session)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            Image(systemName: "arrow.right.circle").foregroundStyle(Brand.green)
-                .help("Click to continue this session in dino")
+            if session.asking {
+                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(SessionStatus.needsYou.color)
+                    .help("Asking for something in tmux: click to go there")
+            } else if session.tmux != nil {
+                Image(systemName: "rectangle.split.2x1").foregroundStyle(.secondary)
+                    .help("Running in tmux, which keeps it: click to show it there")
+            } else {
+                Image(systemName: "arrow.right.circle").foregroundStyle(Brand.green)
+                    .help("Click to continue this session in dino")
+            }
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
-        .contextMenu { Button("Continue in dino…") { model.confirmMove = session } }
+        .contextMenu {
+            if session.tmux != nil {
+                Button("Show in tmux") { model.showInTmux(session) }
+            }
+            Button("Continue in dino…") { model.confirmMove = session }
+        }
     }
 }
 
 func whereText(_ f: FoundSession) -> String {
     var parts: [String] = []
     if let t = f.terminal { parts.append("in \(t)") }
-    if let s = f.status { parts.append(s) }
+    if let s = f.status { parts.append(s == "needs" ? "needs you" : s) }
     if let cwd = f.cwd { parts.append(shortPath(cwd)) }
     return parts.joined(separator: " · ")
 }

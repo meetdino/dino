@@ -269,6 +269,7 @@ pub(crate) fn recent(agent: &str, session_id: String, title: String, cwd: Option
         terminal: None,
         args: vec![],
         url: None,
+        tmux: None,
     }
 }
 
