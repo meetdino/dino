@@ -24,7 +24,7 @@ Inside **dino**:
 | Crate | Role | May use |
 |---|---|---|
 | `dino-core` | Settings, the agent adapters, models and compatibility, discovery. Public: dino-tui and dino-cloud build on it. | nothing of ours |
-| `dino-sync` | The sync protocol and its end-to-end encryption. Public, and shared with dino-cloud: our encryption claim is checkable because this is open. | `dino-core` |
+| `dino-sync` | The sync protocol. Public, and shared with dino-cloud: what leaves the Mac is checkable because this is open. | `dino-core` |
 | `dino-term` | Terminal emulation behind each session. | nothing of ours |
 | `dino-router`, `dino-proxy` | The local proxy: per-session routes, metering, the free models pool. It runs inside dinod as a library (no extra hop) and could move to its own repository if cloud execution needs to run it on its own. | `dino-router` |
 | `dino-daemon` | dinod, putting it together. | all of the above |
@@ -71,7 +71,8 @@ starts it in the background (the ssh-agent pattern), so dino-tui works on its ow
 the terminal shares the same config, login and sync connection: nothing to reconcile.
 
 Agent traffic goes through the proxy inside dinod and never leaves the machine except to the
-provider the agent talks to. dino-cloud only ever sees end-to-end encrypted settings.
+provider the agent talks to. dino-cloud sees only synced settings (over TLS, readable by the
+service so the account page can show them); API keys and tokens never leave the Mac.
 
 ## One config, in layers
 
