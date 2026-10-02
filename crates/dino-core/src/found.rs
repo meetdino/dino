@@ -226,9 +226,37 @@ pub fn inside(fg: u32) -> Option<FoundSession> {
     None
 }
 
+/// The agent's own question on screen, waiting for the user: a permission or trust dialog.
+/// Each says so in words it doesn't use otherwise; an agent dino can't read this way says nothing.
+pub fn asking(agent: &str, screen: &str) -> bool {
+    match agent.trim_end_matches("-free") {
+        // Claude Code's permission and trust dialogs each end in "Esc to cancel".
+        "claude" => screen.contains("Esc to cancel"),
+        // Codex's approvals ("Would you like to run the following command?", "…make the following
+        // edits?", …) all offer this way out; its folder trust has its own.
+        "codex" => {
+            (screen.contains("Would you like to ") && screen.contains("No, and tell Codex what to do differently"))
+                || (screen.contains("Trust this folder?") && screen.contains("Trust and continue"))
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dialogs_waiting_on_the_user() {
+        assert!(asking("claude", "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel"));
+        assert!(!asking("claude", "> write a poem\n  esc to interrupt"));
+        // Codex 0.159's approval and trust dialogs, as it draws them.
+        let approval = "  Would you like to run the following command?\n\n  $ touch hello.txt\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for this command in this session\n  3. No, and tell Codex what to do differently (esc)";
+        assert!(asking("codex", approval));
+        assert!(asking("codex", "  Trust this folder? Codex can read, edit, and run files here.\n› 1. Trust and continue\n  2. Back"));
+        assert!(!asking("codex", "› Ask Codex to do anything\n  Would you like to know more?"));
+        assert!(!asking("qwen", approval), "an agent dino can't read this way says nothing");
+    }
 
     #[test]
     fn subtree_walks_children_in_order() {

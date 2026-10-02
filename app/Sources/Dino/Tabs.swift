@@ -7,6 +7,10 @@ import SwiftUI
 extension SessionInfo {
     /// A shell with no agent in it: it lives in the tabs only, not in the sidebar.
     var plainShell: Bool { agent_id == "shell" && inside == nil }
+
+    /// It says how it's doing itself: hooks or its agent's own signal (working, done, needs you),
+    /// or, typed into a shell, the agent's own status. A bell from it isn't a question then.
+    var reportsStatus: Bool { activity != nil || needs != nil || inside?.status != nil }
 }
 
 extension DinoModel {

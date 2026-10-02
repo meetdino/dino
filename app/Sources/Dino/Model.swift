@@ -342,8 +342,14 @@ final class DinoModel: ObservableObject {
         for s in next {
             guard let prev = sessions.first(where: { $0.id == s.id }) else { continue }
             let looking = appActive && s.id == selected
+            // Working again: a bell it rang before isn't asking for you any more.
+            let resumed = (s.activity == "working" && prev.activity != "working") || (s.inside?.status == "busy" && prev.inside?.status != "busy")
+            if resumed, attention.contains(s.id) { attention.remove(s.id) }
             if !looking {
-                if s.bells > prev.bells { attention.insert(s.id) }
+                // A bell asks for you only where nothing else says how the session is (a plain
+                // shell, an agent with no hooks). One that reports its own state rings as a turn
+                // ends (Claude Code does): its Needs you and Done already say what it means.
+                if s.bells > prev.bells, !s.reportsStatus, !attention.contains(s.id) { attention.insert(s.id) }
                 let wasBusy = prev.activity == "working" || prev.needs != nil || prev.waitingOn != nil
                 if s.activity == "done", wasBusy {
                     unseenDone.insert(s.id)
@@ -459,6 +465,7 @@ final class DinoModel: ObservableObject {
         if attention.contains(s.id) || s.needs != nil { return .needsYou }
         // An agent run by hand in a shell says whether it's busy; its shell has no hooks.
         if let f = s.inside, let st = f.status {
+            if st == "needs" { return .needsYou }
             if st == "busy" { return s.in_flight > 0 ? .thinking : .working }
             return unseenDone.contains(s.id) ? .done : .idle
         }
