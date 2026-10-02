@@ -58,6 +58,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     /// A shell's, from its shell integration: where it is now (`cwd` is where it started), and
     /// how its last command ended.
     var shell_cwd: String?
+    /// When `dino <folder>` asked for it to be shown, in ms since the epoch.
+    var revealed: UInt64?
     var last_exit: Int?
     /// Background commands its agent left serving (a dev server); nil from an older dinod.
     var servers: [ServerInfo]?

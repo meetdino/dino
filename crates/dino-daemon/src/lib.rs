@@ -79,6 +79,8 @@ struct Session {
     label: Mutex<Option<String>>,
     /// Kept at the top of its group, and never archived by dino on its own.
     pinned: AtomicBool,
+    /// When a client asked for it to be shown, in ms since the epoch; 0 for never.
+    revealed: AtomicU64,
     /// The SSH host it runs on; `cwd` is then a path there, and nothing local applies to it.
     host: Option<String>,
     /// Codex's rollout: which conversation it's on, where its turn is, its context window.
@@ -756,15 +758,20 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 let (models, loading, error) = providers::rows(&provider);
                 Response::Models { provider, models, loading, error }
             }
-            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by, route } => {
+            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by, route, reveal } => {
                 // A shell's "prompt" is a line typed at its prompt (a script opened with dino, a
                 // man page), not an argument.
                 let (prompt, line) = if launcher == "shell" { (None, prompt) } else { (prompt, None) };
                 let launch = Launch { cols, rows, controls, host, prompt, started_by: by, route, ..Launch::new(&launcher, args, cwd) };
                 match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {
                     Ok(id) => {
-                        if let Some(line) = line {
-                            if let Some(s) = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                        let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
+                        if let Some(s) = s {
+                            if reveal {
+                                let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis() as u64);
+                                s.revealed.store(ms, Ordering::Relaxed);
+                            }
+                            if let Some(line) = line {
                                 type_at_prompt(s, line);
                             }
                         }
@@ -1223,6 +1230,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         messaged_by: Mutex::new(restore.as_ref().and_then(|r| r.messaged_by.clone())),
         label: Mutex::new(restore.as_ref().and_then(|r| r.label.clone())),
         pinned: AtomicBool::new(restore.as_ref().is_some_and(|r| r.pinned)),
+        revealed: AtomicU64::new(0),
         host,
         rollout: Mutex::default(),
         log: Mutex::default(),
@@ -1695,6 +1703,7 @@ fn state(d: &Daemon) -> Response {
                 messaged_by: s.messaged_by.lock().unwrap().clone(),
                 label,
                 pinned: s.pinned.load(Ordering::Relaxed),
+                revealed: Some(s.revealed.load(Ordering::Relaxed)).filter(|&t| t > 0),
                 tasks,
                 inside: s.inside.lock().unwrap().found.clone(),
                 shell_cwd: s.pane.shared.cwd.lock().unwrap().clone(),
