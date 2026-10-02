@@ -111,7 +111,9 @@ private final class LinkForwarder:
     func terminalDidRingBell() { state?.terminalDidRingBell() }
     func terminalDidRequestDesktopNotification(title: String, body: String) { state?.terminalDidRequestDesktopNotification(title: title, body: body) }
     func terminalDidChangeWorkingDirectory(_ path: String) { state?.terminalDidChangeWorkingDirectory(path) }
-    func terminalDidUpdateScrollbar(_ scrollbar: TerminalScrollbar) { state?.terminalDidUpdateScrollbar(scrollbar) }
+    // Not passed on: nothing here shows it, and as published state it changed with every line of
+    // output, making SwiftUI look at the pane again each time.
+    func terminalDidUpdateScrollbar(_: TerminalScrollbar) {}
     func terminalDidFinishCommand(exitCode: Int?, durationNanos: UInt64) { state?.terminalDidFinishCommand(exitCode: exitCode, durationNanos: durationNanos) }
     func terminalDidRequestTextSelection(_ request: TerminalTextSelectionRequest) { state?.terminalDidRequestTextSelection(request) }
     func terminalDidRequestClipboardConfirmation(_ request: TerminalClipboardConfirmationRequest) { state?.terminalDidRequestClipboardConfirmation(request) }
