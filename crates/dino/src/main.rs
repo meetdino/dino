@@ -801,7 +801,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some("power") => return cmd_power(cli.get(1).map(String::as_str).unwrap_or("status")),
         Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status")),
-        Some("attach") => return client::attach_raw(cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?),
+        Some("attach") => {
+            let fresh = cli.iter().any(|a| a == "--fresh");
+            let id = cli.iter().skip(1).find(|a| *a != "--fresh").ok_or_else(|| anyhow::anyhow!(USAGE))?;
+            return client::attach_raw(id, fresh);
+        }
         Some("ls") => return cmd_ls(),
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
         // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
@@ -989,7 +993,7 @@ fn cmd_open(folder: &str, rest: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     let opened = cfg!(target_os = "macos") && std::process::Command::new("open").args(["-b", "dev.dino.app"]).status().is_ok_and(|s| s.success());
-    if opened { Ok(()) } else { client::attach_raw(&id) }
+    if opened { Ok(()) } else { client::attach_raw(&id, false) }
 }
 
 fn print_response(resp: Response) -> anyhow::Result<()> {
