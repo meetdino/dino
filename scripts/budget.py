@@ -112,6 +112,14 @@ def ws_pid():
     return int(subprocess.run(["pgrep", "-x", "WindowServer"], capture_output=True, text=True).stdout.split()[0])
 
 
+def windows(pid):
+    """How many on-screen windows the app has (the main window, plus Settings when it's open)."""
+    code = ("import CoreGraphics\nlet l = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String: Any]]\n"
+            f"print(l.filter {{ ($0[kCGWindowOwnerPID as String] as? Int32) == {pid} && ($0[kCGWindowLayer as String] as? Int) == 0 }}.count)")
+    r = subprocess.run(["swift", "-"], input=code, capture_output=True, text=True)
+    return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else 0
+
+
 def visible(pid):
     """Whether the app has an on-screen window, from the window list (no permission needed)."""
     code = ("import CoreGraphics\nlet l = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String: Any]]\n"
@@ -272,7 +280,8 @@ def defaults(*a):
 def launch(env, select, settings=False):
     """The app, showing session `select` (the one it restores), Settings open or not."""
     defaults("write", BUNDLE, f"selected.{HOME}", select)
-    defaults("write", BUNDLE, "settingsTab", "providers")
+    # Models & Providers: the pane with the most to draw (the model lists).
+    defaults("write", BUNDLE, "settingsTab", "models")
     # No second window restored from a previous run.
     shutil.rmtree(os.path.expanduser(f"~/Library/Saved Application State/{BUNDLE}.savedState"), ignore_errors=True)
     a = ["-ApplePersistenceIgnoreState", "YES"]
@@ -377,12 +386,15 @@ def main():
 
         # Settings open, nothing happening: the model list must cost nothing while idle.
         app = launch(env, shells[1])
-        r = subprocess.run(["osascript", "-e", f'tell application "System Events" to keystroke "," using command down'], capture_output=True)
-        if r.returncode != 0:
-            # No Accessibility: open it the way the menu does, through the URL the app handles.
-            warnings.append("Settings opened by launch default only (no Accessibility for ⌘,)")
+        before = windows(app.pid)
+        subprocess.run(["osascript", "-e", f'tell application "System Events" to keystroke "," using command down'], capture_output=True)
         time.sleep(8)
-        check("Settings open, idle", usage(app.pid, 15), BUDGET["settings"])
+        # Measured only with Settings really open: without Accessibility for ⌘, it never opens, and
+        # the number would be the main window's, passed off as Settings'.
+        if windows(app.pid) > before:
+            check("Settings open, idle", usage(app.pid, 15), BUDGET["settings"])
+        else:
+            warnings.append("Settings open, idle: not measured (Settings didn't open; ⌘, needs Accessibility for this terminal)")
         stop(app)
         app = None
     finally:
