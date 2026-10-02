@@ -158,6 +158,9 @@ pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("DINO_HOME") {
         return PathBuf::from(dir);
     }
+    // Tests never write the user's own dino: a session's files there belong to a running dinod.
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("dino-core-test-{}", std::process::id()));
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     home.join(".config/dino")
 }

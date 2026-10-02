@@ -735,7 +735,11 @@ struct Sidebar: View {
                         : SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups) {
                             filter.passes(model.status(of: $0)) && model.sidebarShows($0)
                         }
-                    Section("Workspaces") {
+                    // Headings are plain rows, not List section headers: when the sidebar's height
+                    // changed (the usage panel, the filter bar) while sections came and went, the table
+                    // tied a header to a row of another section and threw, quitting the app.
+                    SidebarHeading(title: "Workspaces")
+                    Group {
                         // Shells live in the tabs: a folder with only those (or nothing) left in it
                         // would be a workspace row with nothing under it.
                         ForEach(tree.repos.filter { $0.worthShowing(here: model.folder.path) }) { node in
@@ -759,40 +763,32 @@ struct Sidebar: View {
                                 .font(.callout).foregroundStyle(.tertiary)
                         }
                     }
-                    // Other terminals' sessions aren't dino's to sort by status. Above Scheduled: a
-                    // section inserted after the last one when they load trips NSTableView into a
-                    // reentrant update that can crash the sidebar.
+                    // Other terminals' sessions aren't dino's to sort by status.
                     if !model.elsewhere.isEmpty, filter == .all, !narrowed {
-                        Section("On this Mac") {
-                            ForEach(model.elsewhere) { f in
-                                ElsewhereRow(session: f).tag("move:\(f.id)")
-                            }
+                        SidebarHeading(title: "On this Mac")
+                        ForEach(model.elsewhere) { f in
+                            ElsewhereRow(session: f).tag("move:\(f.id)")
                         }
                     }
                     if filter == .all, !narrowed {
-                        Section {
-                            ForEach(model.scheduled) { t in
-                                ScheduledRow(task: t).tag("task:\(t.id)")
+                        SidebarHeading(title: "Scheduled") {
+                            if !model.scheduled.isEmpty {
+                                Button { model.newTask() } label: { Image(systemName: "plus") }
+                                    .buttonStyle(.plain)
+                                    .help("New Scheduled Task")
+                                    .accessibilityLabel("New Scheduled Task")
                             }
-                            if model.scheduled.isEmpty {
-                                Button { model.newTask() } label: {
-                                    Label("Run a prompt on a schedule…", systemImage: "clock")
-                                }
-                                .buttonStyle(.plain)
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(model.scheduled) { t in
+                            ScheduledRow(task: t).tag("task:\(t.id)")
+                        }
+                        if model.scheduled.isEmpty {
+                            Button { model.newTask() } label: {
+                                Label("Run a prompt on a schedule…", systemImage: "clock")
                             }
-                        } header: {
-                            HStack {
-                                Text("Scheduled")
-                                Spacer()
-                                if !model.scheduled.isEmpty {
-                                    Button { model.newTask() } label: { Image(systemName: "plus") }
-                                        .buttonStyle(.plain)
-                                        .help("New Scheduled Task")
-                                        .accessibilityLabel("New Scheduled Task")
-                                }
-                            }
+                            .buttonStyle(.plain)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -861,6 +857,31 @@ struct Sidebar: View {
         }
         // The archive has its own search.
         .onChange(of: model.findingSessions) { _, on in if on, filter == .archived { filter = .all } }
+    }
+}
+
+/// A title over a part of the sidebar, as a section header looks, but an ordinary row that can't
+/// be selected (see Sidebar for why it isn't a header).
+struct SidebarHeading<Trailing: View>: View {
+    let title: String
+    @ViewBuilder var trailing: Trailing
+
+    init(title: String, @ViewBuilder trailing: () -> Trailing = { EmptyView() }) {
+        self.title = title
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            trailing.foregroundStyle(.secondary)
+        }
+        .padding(.top, 8)
+        .selectionDisabled()
+        .accessibilityAddTraits(.isHeader)
     }
 }
 
