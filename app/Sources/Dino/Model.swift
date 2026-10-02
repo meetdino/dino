@@ -72,6 +72,8 @@ final class DinoModel: ObservableObject {
     @Published var showContinue = false
     /// A handoff waiting for the user's confirmation.
     @Published var confirmMove: FoundSession?
+    /// An agent in a tmux pane nobody is attached to: its screen, read-only (TmuxLook).
+    @Published var tmuxLook: FoundSession?
 
     /// Fan-outs, with each member's diff size.
     @Published var groups: [GroupInfo] = []
@@ -443,9 +445,7 @@ final class DinoModel: ObservableObject {
             restartedForUpdate = true
             restartDaemon()
         }
-        let waiting = next.filter { status(of: $0) == .needsYou }.count
-        let badge = waiting > 0 ? "\(waiting)" : nil
-        if NSApp.dockTile.badgeLabel != badge { NSApp.dockTile.badgeLabel = badge }
+        updateBadge(next)
     }
 
     /// A terminal title without the spinner or status glyphs an agent puts before its words.
@@ -643,14 +643,44 @@ final class DinoModel: ObservableObject {
                     let ended = await MainActor.run { () -> Bool in
                         let before = Set(self.elsewhere.map(\.session_id))
                         let now = Set(running.map(\.session_id))
+                        // An agent in a tmux pane that just started asking: tell, once.
+                        let asked = Set(self.elsewhere.filter(\.asking).map(\.id))
+                        for f in running where f.asking && f.tmux != nil && !asked.contains(f.id) {
+                            Notifier.post(key: "tmux-\(f.id)", title: "\(f.agentName) needs you", body: "\(f.title) · in \(f.terminal ?? "tmux")")
+                        }
                         let rest = self.found.filter { $0.source != "running" && !now.contains($0.session_id) }
                         if running + rest != self.found { self.found = running + rest }
                         // One that stopped is a finished conversation now.
                         return self.showContinue && !before.subtracting(now).isEmpty
                     }
                     if ended { await self.loadFound(cloud: false) }
+                    await MainActor.run { self.updateBadge(self.sessions) }
                 }
                 try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    /// The Dock badge: sessions asking for something, and agents asking in tmux panes.
+    private func updateBadge(_ sessions: [SessionInfo]) {
+        let waiting = sessions.filter { status(of: $0) == .needsYou }.count + elsewhere.filter { $0.asking && $0.tmux != nil }.count
+        let badge = waiting > 0 ? "\(waiting)" : nil
+        if NSApp.dockTile.badgeLabel != badge { NSApp.dockTile.badgeLabel = badge }
+    }
+
+    /// An agent in a tmux pane: brought to the front in the tmux client attached to its server
+    /// (and that dino tab, when the client runs in one), else shown read-only. tmux keeps it.
+    func showInTmux(_ f: FoundSession) {
+        guard let place = f.tmux else { return }
+        Task.detached {
+            let shown = try? DinoConnection(path: DinoEnvironment.socketPath).tmuxShow(place)
+            await MainActor.run {
+                if let id = shown?.session {
+                    self.select(id)
+                    NSApp.activate(ignoringOtherApps: true)
+                } else if shown?.tty == nil {
+                    self.tmuxLook = f
+                }
             }
         }
     }

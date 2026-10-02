@@ -312,6 +312,7 @@ impl Agent for Qwen {
                 terminal,
                 args,
                 url: None,
+                tmux: None,
             });
         }
         out

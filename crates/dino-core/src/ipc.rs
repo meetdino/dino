@@ -127,6 +127,11 @@ pub enum Request {
     Version,
     /// Agent sessions outside dino that it can continue. `cloud` also asks providers (slower);
     /// `running_only` leaves out finished conversations on disk.
+    /// Bring an agent running in a tmux pane (a found session's `tmux`) to the front in the client
+    /// attached to its server. Nothing changes when no client is attached.
+    TmuxShow { socket: String, pane: String },
+    /// What that pane shows, for a look without taking it over.
+    TmuxScreen { socket: String, pane: String },
     Found {
         cloud: bool,
         #[serde(default)]
@@ -306,6 +311,9 @@ pub enum Response {
     Created { id: String },
     ShellOutput { output: Option<String>, exit: Option<i32> },
     Found { sessions: Vec<crate::found::FoundSession> },
+    /// Shown in the tmux client on `tty`; `session` is the dino tab that client runs in, if any.
+    /// Neither when no client is attached.
+    TmuxShown { tty: Option<String>, session: Option<String> },
     Conversation { page: crate::history::Page },
     Groups { groups: Vec<GroupInfo> },
     Tree { repos: Vec<RepoInfo> },

@@ -367,14 +367,31 @@ struct FoundSession: Codable, Identifiable, Equatable {
     var terminal: String?
     var args: [String]
     var url: String?
+    /// Running in a tmux pane: where. tmux owns it; dino watches, and can show it there.
+    var tmux: TmuxPlace?
 
     var id: String { "\(source)-\(agent)-\(session_id)-\(pid ?? 0)" }
-    var isBusy: Bool { status == "busy" }
+    var isBusy: Bool { status == "busy" || status == "needs" }
+    /// Asking for something (a permission) in its tmux pane.
+    var asking: Bool { status == "needs" }
     /// Started by hand in a dino shell, and dino can continue it (it has a conversation to resume).
     var continuable: Bool { ["claude", "codex", "qwen", "kimi", "pi", "hermes"].contains(baseAgent) && !session_id.isEmpty }
     var agentName: String { ["claude": "Claude", "codex": "Codex", "qwen": "Qwen", "kimi": "Kimi", "pi": "Pi", "hermes": "Hermes"][baseAgent] ?? agent }
     /// The agent, whether or not it ran on the free tier ("kimi-free" is Kimi).
     var baseAgent: String { agent.hasSuffix("-free") ? String(agent.dropLast(5)) : agent }
+}
+
+/// The tmux pane an agent runs in.
+struct TmuxPlace: Codable, Equatable {
+    var socket: String
+    /// The pane's id (`%3`): stays the same as windows and panes move.
+    var pane: String
+    /// `session:window.pane`, as it is now.
+    var target: String
+    /// `session:window name`.
+    var label: String
+    /// A client is attached to its session.
+    var attached: Bool
 }
 
 /// Part of a conversation, oldest first. `start` is where it begins in its file; 0 means the beginning.
@@ -482,6 +499,11 @@ private struct PreviewLogResponse: Decodable {
 
 private struct ReviewResponse: Decodable {
     var findings: [Finding]
+}
+
+private struct TmuxShownResponse: Decodable {
+    var tty: String?
+    var session: String?
 }
 
 private struct TextResponse: Decodable {
@@ -604,6 +626,18 @@ final class DinoConnection: @unchecked Sendable {
     }
 
     /// `runningOnly` skips finished conversations on disk (cheap enough to poll).
+    /// Bring a tmux pane to the front in the client attached to its server: that client's terminal,
+    /// and the dino tab running it if one does; neither when nobody is attached.
+    func tmuxShow(_ place: TmuxPlace) throws -> (tty: String?, session: String?) {
+        let r = try JSONDecoder().decode(TmuxShownResponse.self, from: send(["type": "tmux_show", "socket": place.socket, "pane": place.pane]))
+        return (r.tty, r.session)
+    }
+
+    /// What a tmux pane shows, as text.
+    func tmuxScreen(_ place: TmuxPlace) throws -> String {
+        try JSONDecoder().decode(TextResponse.self, from: send(["type": "tmux_screen", "socket": place.socket, "pane": place.pane])).text
+    }
+
     func found(cloud: Bool, runningOnly: Bool = false) throws -> [FoundSession] {
         try JSONDecoder().decode(FoundResponse.self, from: send(["type": "found", "cloud": cloud, "running_only": runningOnly])).sessions
     }

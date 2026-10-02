@@ -38,6 +38,24 @@ pub struct FoundSession {
     pub terminal: Option<String>,
     pub args: Vec<String>,
     pub url: Option<String>,
+    /// Running in a tmux pane: where, so dino can show it there (tmux owns it; dino only watches).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<TmuxPlace>,
+}
+
+/// The tmux pane an agent runs in.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TmuxPlace {
+    /// The server's socket.
+    pub socket: String,
+    /// The pane's id (`%3`): stays the same as windows and panes move.
+    pub pane: String,
+    /// `session:window.pane`, as it is now.
+    pub target: String,
+    /// `session:window name`, for people.
+    pub label: String,
+    /// A client is attached to the pane's session, so showing it moves a real tmux on screen.
+    pub attached: bool,
 }
 
 pub(crate) fn run(cmd: &str, args: &[&str]) -> Option<String> {
@@ -188,6 +206,7 @@ pub(crate) fn by_hand(agent: &str, pid: u32) -> FoundSession {
         terminal: Some("dino".into()),
         args: vec![],
         url: None,
+        tmux: None,
     }
 }
 
