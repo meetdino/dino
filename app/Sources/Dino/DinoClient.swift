@@ -507,7 +507,7 @@ struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
 
-    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, launchers, id, message, version }
+    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, launchers, id, message, version, dino, installed }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -520,6 +520,8 @@ struct Response: Decodable {
         id = try c.decodeIfPresent(String.self, forKey: .id)
         message = try c.decodeIfPresent(String.self, forKey: .message)
         version = try c.decodeIfPresent(UInt64.self, forKey: .version)
+        dino = try c.decodeIfPresent(String.self, forKey: .dino)
+        installed = try c.decodeIfPresent(String.self, forKey: .installed)
     }
     var quotas: [QuotaInfo]?
     var power: PowerInfo?
@@ -528,6 +530,9 @@ struct Response: Decodable {
     var message: String?
     /// Tags a state reply to a `state_change` request: the `seen` of the next one.
     var version: UInt64?
+    /// A version reply: which dino the running dinod is, and a newer one it installed.
+    var dino: String?
+    var installed: String?
 }
 
 /// Keeping agents running with the lid closed, as dinod sees it.
