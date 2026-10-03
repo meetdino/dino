@@ -224,16 +224,35 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
     });
     let w = writer.clone();
     std::thread::spawn(move || {
+        // A run of size changes (a window dragged, the sidebar sliding in, a split moving) reaches
+        // the program as its first and its settled size, not every frame between: an inline TUI
+        // like Pi clears and repaints its whole screen on each one, which flickers. One change on
+        // its own still goes at once.
+        const SETTLE: Duration = Duration::from_millis(50);
         let mut last = (cols, rows);
+        let mut sent = Instant::now().checked_sub(SETTLE).unwrap_or_else(Instant::now);
         loop {
             if let Ok(size) = crossterm::terminal::size() {
                 if size != last {
                     last = size;
+                    sent = Instant::now();
                     let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::RESIZE, &ipc::resize_payload(size.0, size.1));
                 }
             }
             let mut sig = 0;
             unsafe { libc::sigwait(&winch, &mut sig) };
+            if sent.elapsed() < SETTLE {
+                let mut seen = crossterm::terminal::size().ok();
+                let mut still = Instant::now();
+                while still.elapsed() < SETTLE {
+                    std::thread::sleep(Duration::from_millis(10));
+                    let now = crossterm::terminal::size().ok();
+                    if now != seen {
+                        seen = now;
+                        still = Instant::now();
+                    }
+                }
+            }
         }
     });
 
