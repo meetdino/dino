@@ -105,13 +105,13 @@ struct TabStrip: View {
                 }
             }
             Button { model.newShell() } label: {
-                Image(systemName: "plus").frame(width: 28, height: 26)
+                Image(systemName: "plus").font(.system(size: 11)).frame(width: 24, height: 22)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .help("New tab: a shell in \(shortPath(model.folder.path)) (⌘T)")
         }
-        .frame(height: 28)
+        .frame(height: 22)
         .background {
             // In light mode the bar is near white, as the selected tab is: a shade darker, so the
             // tab you're on stands out, as in Safari and Xcode. Dark mode's contrast is already there.
@@ -140,9 +140,9 @@ private struct TabItem: View {
         let split = model.splits.first { $0.contains(session.id) }
         let partner = split.flatMap { s in model.sessions.first { $0.id == s.other(session.id) } }
         let status = model.status(of: session)
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             if !session.plainShell {
-                Circle().fill(status.color).frame(width: 6, height: 6)
+                Circle().fill(status.color).frame(width: 5, height: 5)
             }
             Text(partner.map { "\(model.tabName(session)) | \(model.tabName($0))" } ?? model.tabName(session))
                 .lineLimit(1)
@@ -151,27 +151,28 @@ private struct TabItem: View {
             if !unseen.isEmpty {
                 Text("\(unseen.count)")
                     .font(.caption2.monospacedDigit().weight(.semibold))
-                    .padding(.horizontal, 5)
+                    .padding(.horizontal, 4)
                     .background(Capsule().fill(SessionStatus.needsYou.color.opacity(0.25)))
                     .help(unseen.map(\.text).joined(separator: "\n"))
             }
             Button { model.closeTab(session) } label: {
-                Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
+                Image(systemName: "xmark").font(.system(size: 8, weight: .semibold))
+                    .frame(width: 16, height: 16).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .opacity(hovering || selected ? 1 : 0)
             .help(session.tmux != nil ? "Detach tmux and close this tab; tmux keeps everything (⌘W)"
                 : session.plainShell ? "Close this tab (⌘W)" : "Close this tab; \(session.display) keeps running in the sidebar (⌘W)")
         }
-        .font(.callout)
+        .font(.subheadline)
         .foregroundStyle(selected ? .primary : .secondary)
-        .padding(.horizontal, 10)
-        .frame(minWidth: 90, maxWidth: 220, minHeight: 27)
+        .padding(.leading, 9).padding(.trailing, 4)
+        .frame(minWidth: 80, maxWidth: 200, minHeight: 22)
         .background(selected ? Color(nsColor: .textBackgroundColor) : .clear)
         // An agent's tab carries its colour along the top, as its chip in the sidebar; shells don't.
         .overlay(alignment: .top) {
             if let agent = tabAgent {
-                Rectangle().fill(AgentBadge.color(agent).opacity(selected ? 0.9 : 0.55)).frame(height: 2)
+                Rectangle().fill(AgentBadge.color(agent).opacity(selected ? 0.8 : 0.4)).frame(height: 1.5)
             }
         }
         .contentShape(Rectangle())
