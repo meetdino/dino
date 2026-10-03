@@ -150,6 +150,8 @@ struct AgentSetupInfo: Codable, Identifiable, Equatable {
     /// What to type in the agent to sign in, for ones that do it from inside ("/login").
     let sign_in_hint: String?
     let homepage: String
+    /// What signing in means for it, when that isn't obvious ("Pi has no models of its own…").
+    let sign_in_note: String?
 
     var installed: Bool { path != nil }
 }
@@ -1153,6 +1155,9 @@ private struct AgentSetupRow: View {
     private var detail: String {
         guard agent.installed else { return "Not installed" }
         let version = agent.version.map { "Version \($0)" } ?? "Installed"
+        if agent.signed_in == false, let note = agent.sign_in_note {
+            return "\(version) · \(note)"
+        }
         if agent.signed_in == nil, let hint = agent.sign_in_hint {
             return "\(version) · signs in with \(hint) inside \(agent.name)"
         }

@@ -91,6 +91,8 @@ pub struct Setup {
     pub homepage: &'static str,
     pub sign_in: Option<&'static str>,
     pub sign_in_hint: Option<&'static str>,
+    /// What signing in means for it, when that isn't obvious: Pi has no models of its own.
+    pub sign_in_note: Option<&'static str>,
 }
 
 pub fn setup(id: &str) -> Setup {
@@ -108,7 +110,11 @@ pub fn setup(id: &str) -> Setup {
         "cursor" => ("https://cursor.com/cli", None, None),
         _ => ("", None, None),
     };
-    Setup { homepage, sign_in, sign_in_hint }
+    let sign_in_note = match id {
+        "pi" => Some("Pi has no models of its own. Sign in with an account you already have with an AI provider, or an API key; dino opens Pi, then type /login. Or run it on a provider from Settings → Models & Providers."),
+        _ => None,
+    };
+    Setup { homepage, sign_in, sign_in_hint, sign_in_note }
 }
 
 /// Whether agent `id` at `bin` is signed in, from its own status command, and how ("Claude Max",
@@ -131,8 +137,49 @@ pub fn sign_in_status(id: &str, bin: &Path) -> Option<(bool, Option<String>)> {
             Some((signed_in, how.filter(|_| signed_in).map(String::from)))
         }
         "codex" => codex_status(&run_quietly(bin, &["login", "status"])?),
+        "pi" => pi_status(bin),
         _ => None,
     }
+}
+
+/// Pi has no models of its own: it's signed in once it has a provider (an account it signed in
+/// to with `/login`, or an API key), which is when `--list-models` lists any. The providers it
+/// lists say how. Someone who has never run it isn't asked: asking makes its folder.
+fn pi_status(bin: &Path) -> Option<(bool, Option<String>)> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let dir = std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from).unwrap_or_else(|| home.join(".pi/agent"));
+    if !dir.exists() {
+        return Some((false, None));
+    }
+    let bin = bin.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Its list can be long (hundreds of models): read all of it, not a pipe's worth.
+    std::thread::spawn(move || {
+        let _ = tx.send(Command::new(&bin).args(["--list-models", "--offline"]).stdin(Stdio::null()).stderr(Stdio::null()).output());
+    });
+    let out = rx.recv_timeout(Duration::from_secs(5)).ok()?.ok()?;
+    pi_providers(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `pi --list-models`: a header row, then one model a row, its provider first. No rows: none.
+fn pi_providers(list: &str) -> Option<(bool, Option<String>)> {
+    let mut rows = list.lines().map(|l| l.split_whitespace().collect::<Vec<_>>()).filter(|r| !r.is_empty());
+    let header = rows.next()?;
+    if header.first() != Some(&"provider") {
+        return Some((false, None));
+    }
+    let mut providers: Vec<&str> = vec![];
+    for r in rows {
+        if !providers.contains(&r[0]) {
+            providers.push(r[0]);
+        }
+    }
+    let how = match providers.len() {
+        0 => None,
+        1..=2 => Some(providers.join(", ")),
+        n => Some(format!("{n} providers")),
+    };
+    Some((!providers.is_empty(), how))
 }
 
 /// `codex login status`: "Logged in using ChatGPT", "Logged in using an API key", "Not logged in".
@@ -276,6 +323,15 @@ fn scan_keys() -> Vec<KeyInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_is_signed_in_once_it_has_a_provider() {
+        let list = "provider    model                context  max-out  thinking  images\nanthropic   claude-fable-5       1M       128K     yes       yes\nanthropic   claude-opus-5-5      1M       128K     yes       yes\nopenai      gpt-6                400K     128K     yes       yes\n";
+        assert_eq!(pi_providers(list), Some((true, Some("anthropic, openai".into()))));
+        let many = format!("{list}openrouter  x/y  1M 1K no no\ngoogle  g  1M 1K no no\n");
+        assert_eq!(pi_providers(&many), Some((true, Some("4 providers".into()))));
+        assert_eq!(pi_providers("No models available. Use /login to log into a provider via OAuth or API key. See:\n  docs/providers.md\n"), Some((false, None)));
+    }
 
     #[test]
     fn codex_login_status_is_read_without_the_account() {

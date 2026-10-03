@@ -194,6 +194,17 @@ struct WelcomeCard: View {
     }
 
     private func agentRow(_ a: AgentSetupInfo) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            agentLine(a)
+            // Signing in that needs explaining (Pi has no models of its own).
+            if a.signed_in == false, let note = a.sign_in_note {
+                Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 13)
+            }
+        }
+    }
+
+    private func agentLine(_ a: AgentSetupInfo) -> some View {
         HStack(spacing: 6) {
             Circle()
                 .fill(a.signed_in == true ? Color(nsColor: .systemGreen) : a.signed_in == false ? Color(nsColor: .systemOrange) : Color.secondary.opacity(0.5))

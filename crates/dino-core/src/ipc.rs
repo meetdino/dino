@@ -405,6 +405,9 @@ pub struct AgentSetupInfo {
     /// What to type in the agent once it's open, for ones that sign in from inside ("/login").
     pub sign_in_hint: Option<String>,
     pub homepage: String,
+    /// What signing in means for it, when that isn't obvious ("Pi has no models of its own…").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in_note: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
