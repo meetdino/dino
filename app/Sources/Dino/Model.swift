@@ -474,7 +474,7 @@ final class DinoModel: ObservableObject {
     }
 
     /// A terminal title without the spinner or status glyphs an agent puts before its words.
-    static func undecorated(_ title: String) -> String? {
+    nonisolated static func undecorated(_ title: String) -> String? {
         let t = title.drop { !$0.isLetter && !$0.isNumber && $0 != "~" && $0 != "/" && $0 != "." }.trimmingCharacters(in: .whitespaces)
         return t.isEmpty ? nil : t
     }
