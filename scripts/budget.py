@@ -32,7 +32,7 @@ HOME = "/tmp/dino-budget"
 WORK = HOME + "/work"
 BIN = REPO + "/target/release/dino"
 APP = "/tmp/dino-budget-app/BudgetDino.app"
-BUNDLE = "ai.vecna.dino.budget"
+BUNDLE = "dev.dino.budget"
 SAFE = ["--model", "haiku", "--disallowedTools", "Artifact,Write,Edit,WebFetch,WebSearch"]
 
 BUDGET = {"idle": 1.0, "cat_s": 2.0, "cat_cpu": 2.5, "ws_delta": 5.0, "shell": 10.0, "claude": 10.0, "settings": 2.0, "lat_median": 1.0, "lat_p95": 2.0}

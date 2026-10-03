@@ -1,95 +1,93 @@
 # dino
 
-A home for the coding agents on your Mac: start them, see which ones need you, and act on them,
-all in one place.
+A terminal for the agent era, on Ghostty's core. dino finds every coding agent already on your
+Mac, and runs, watches and resumes them all in one place: Claude Code, Codex, Qwen Code, Kimi Code,
+Pi and Hermes, plus your shells.
 
-dino runs agents such as Claude Code, Codex, Qwen, Kimi, Pi and Hermes inside a background
-daemon (`dinod`), so they keep running when you close the window. You can reach them from a
-terminal UI, a CLI, a native macOS app built on Ghostty, or other agents over MCP.
+- **Finds what's already running.** Agents you started in other terminals, in tmux or in a dino
+  shell show up in the sidebar with what they're doing, and you can pick any of them up in dino.
+- **Agents keep running.** A background daemon, `dinod`, owns every session. Close the window, quit
+  the app, even restart dinod: sessions come back where they were.
+- **Knows which one needs you.** Working, Needs you, Done and Idle, from each agent's own signals,
+  with notifications and a Dock badge.
+- **A real terminal.** Tabs, splits, your Ghostty config, themes and keybinds, and real tmux inside
+  it, untouched.
+- **Worktrees, reviews and PRs.** A session per git worktree, a diff view to comment on, fan-out of
+  one prompt to several agents, and pull requests from the app.
+- **Any model in any agent.** A local proxy routes an agent to another provider's model, and
+  counts what each session uses. Traffic goes from your Mac to the provider, nowhere else.
+- **No account needed.** Sign in only to sync settings between Macs. API keys never leave the Mac.
 
-## Features
+## Install
 
-- **Persistent sessions.** `dinod` owns each agent's PTY and terminal state. Clients attach and
-  detach over a Unix socket.
-- **Repo → worktree → session tree.** Sessions are grouped under the git worktree they run in.
-- **Fan-out.** Give one prompt to several agents, each in its own worktree, then compare the
-  diffs and keep the best one.
-- **Model routing.** A local proxy can point any agent at another provider's model, such as
-  OpenRouter, the ChatGPT plan, a model server on this Mac, or the free `auto` router.
-- **Shell integration.** An AI line for zsh, bash and fish (`dino ai`) and history search
-  (`dino search`).
-- **MCP server.** `dino mcp` lets agents list, read, message and start other sessions.
-- **Settings sync (optional).** Sign in with GitHub (or a link by email) and your settings follow
-  you to every Mac; API keys and tokens never leave the Mac. dino works without an account.
+macOS 14 or later, on Apple silicon.
 
-## Layout
-
-| Path | What it is |
-| --- | --- |
-| `crates/dino` | The `dino` binary: TUI and CLI |
-| `crates/dino-daemon` | `dinod`: sessions, PTYs, proxy and router; shell integration scripts |
-| `crates/dino-core` | Agent catalog and discovery, IPC, settings, worktrees, PRs, schedules |
-| `crates/dino-term` | Terminal panes: `alacritty_terminal` emulation rendered with ratatui |
-| `crates/dino-proxy` | Local pass-through proxy and provider adapters |
-| `crates/dino-router` | The `auto` model: picks a free model per request |
-| `crates/dino-sync` | Settings sync: records, hybrid logical clocks, merge, encryption |
-| `app/` | `Dino.app`, the SwiftUI macOS app with Ghostty terminal surfaces |
-| `docs/` | Design notes, such as [`management-plane.md`](docs/management-plane.md) |
-
-This workspace will split into several repositories; [ARCHITECTURE.md](ARCHITECTURE.md) has the plan, and `crates/boundaries` keeps the crates to it.
-
-## Building
-
-Requirements: a Rust toolchain that supports edition 2024 (Rust 1.85 or later). The app also
-needs macOS 14 or later and Swift 6.
-
-Build the CLI and daemon:
-
-```bash
-cargo build --release
+```sh
+brew install asdf9384/tap/dino            # the app, with the dino command
 ```
 
-The binary is at `target/release/dino`.
+Or download the DMG from the [latest release](https://github.com/asdf9384/dino-releases/releases/latest).
+For just the command line:
 
-Build the macOS app. This also builds the Rust workspace:
-
-```bash
-./app/build.sh
+```sh
+curl -fsSL https://meetdino.com/install.sh | sh
 ```
 
-The script prints the path to `app/build/Dino.app`, which is ad-hoc signed.
+dino updates itself.
 
-Run the tests:
+## Build from source
 
-```bash
-cargo test
+You need the Xcode Command Line Tools (`xcode-select --install`) and Rust
+([rustup](https://rustup.rs)). No Apple developer account or signing keys.
+
+```sh
+git clone https://github.com/asdf9384/dino.git
+cd dino
+cargo build --release      # the dino command and dinod: target/release/dino
+./app/build.sh             # Dino.app, ad hoc signed: app/build/Dino.app
 ```
 
-## Usage
+`./app/build.sh` builds the Rust workspace too, and prints where the app is. Open it from there;
+it uses the `dino` it was built with.
 
-```text
-dino [agent [args...]] | --welcome
-dino ls | new [--worktree] <agent> [--on <provider> <model>] [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
-dino found | continue <session-id prefix>
-dino mcp [--read-only]
-dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>
-dino ai suggest|agent -- <request> | search [--json|--pick]
-dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]
-dino login | logout openrouter|chatgpt
+Try a build without touching the dino you use every day: give it its own home, and it runs its own
+`dinod` there.
+
+```sh
+DINO_HOME=/tmp/dino-dev ./target/release/dino new shell
 ```
 
-Some examples:
+## Using the command line
 
-```bash
-dino                                   # open the TUI
-dino new --worktree claude             # start Claude Code in a new worktree
-dino fan --agents claude,codex "fix the flaky test"
-dino shell install zsh                 # add the shell integration to ~/.zshrc
+```sh
+dino .                    # a shell in this folder, shown in the app
+dino . claude             # Claude Code in this folder
+dino ls                   # every session
+dino attach <id>          # a session in this terminal
+dino found                # agents running elsewhere on this Mac
+dino --help               # the rest
 ```
 
-Settings live in `~/.config/dino/settings.toml`. `dinod` reads and writes this file.
+Settings live in `~/.config/dino/settings.toml`, which `dinod` reads and writes. The app's
+Settings window edits the same file.
+
+## How it's built
+
+- `dinod` (Rust) owns sessions, the local proxy, settings and sign-in. Everything else is a client
+  of it over a Unix socket.
+- The app (Swift, SwiftUI) draws terminals with [libghostty](https://github.com/Lakr233/libghostty-spm).
+- `dino` (Rust) is the command line, and `dinod` itself.
+
+[ARCHITECTURE.md](ARCHITECTURE.md) has the whole picture: crates, how they may depend on each
+other, and the contracts other projects build on.
+
+## Contributing
+
+Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, tests, the
+performance budget, and signing off your commits (DCO). Please report security issues privately:
+see [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE). The bundled shell integration includes third-party code under its
-own licenses. See `crates/dino-daemon/shell-integration/`.
+MIT, see [LICENSE](LICENSE). Third-party code dino includes, and its licenses, are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

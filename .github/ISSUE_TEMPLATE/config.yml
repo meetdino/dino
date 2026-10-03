@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security issue
+    url: https://github.com/asdf9384/dino/security/advisories/new
+    about: Privately, please. See SECURITY.md.
