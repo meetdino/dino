@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import GhosttyTerminal
 
@@ -7,12 +8,27 @@ import GhosttyTerminal
 enum GhosttyConfig {
     /// Where Ghostty looks, in its order: later files win, macOS's after the XDG ones.
     static let files: [URL] = {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
-            ?? home.appendingPathComponent(".config")
-        let support = home.appendingPathComponent("Library/Application Support/com.mitchellh.ghostty")
+        let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/com.mitchellh.ghostty")
         return [xdg.appendingPathComponent("ghostty/config.ghostty"), xdg.appendingPathComponent("ghostty/config"),
                 support.appendingPathComponent("config.ghostty"), support.appendingPathComponent("config")]
+    }()
+
+    private static let xdg: URL = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
+
+    /// Where Ghostty finds a theme by name, in its order: the user's own themes, then the ones that
+    /// come with Ghostty (in Ghostty.app). dino's engine ships without Ghostty's themes, so a name
+    /// it can't find here would fall back to the engine's dark colors, whatever the Mac's mode.
+    private static let themeFolders: [URL] = {
+        var folders = [xdg.appendingPathComponent("ghostty/themes")]
+        let apps = [NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty"),
+                    URL(fileURLWithPath: "/Applications/Ghostty.app"),
+                    FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Ghostty.app")]
+        for case let app? in apps {
+            let themes = app.appendingPathComponent("Contents/Resources/ghostty/themes")
+            if !folders.contains(themes) { folders.append(themes) }
+        }
+        return folders
     }()
     private static let paths = files.map(\.path)
 
@@ -30,7 +46,7 @@ enum GhosttyConfig {
     /// `overrides` go last, so they win over anything the user set.
     static func apply(to controller: TerminalController, overrides: String) {
         var read: [String] = []
-        let all = files.flatMap { expand($0, depth: 0, read: &read) }
+        let all = files.flatMap { expand($0, depth: 0, read: &read) }.compactMap(resolvingTheme)
         var lines = all
         loaded = read
         stamps = Dictionary(uniqueKeysWithValues: read.map { ($0, modified($0)) })
@@ -49,6 +65,34 @@ enum GhosttyConfig {
         // Still refused: dino's own settings alone, as if there were no config.
         skipped = all
         controller.updateConfigSource(.generated(overrides))
+    }
+
+    /// A `theme` line with its names made absolute paths, as Ghostty would find them (also inside
+    /// `light:…,dark:…`); nil, leaving it out, when one isn't anywhere, so the pane keeps dino's own
+    /// light and dark colors rather than the engine's dark ones.
+    private static func resolvingTheme(_ line: String) -> String? {
+        let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 2, parts[0] == "theme" else { return line }
+        let value = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        func path(_ name: String) -> String? {
+            let name = name.trimmingCharacters(in: .whitespaces)
+            if name.hasPrefix("/") || name.hasPrefix("~") {
+                let full = NSString(string: name).expandingTildeInPath
+                return FileManager.default.fileExists(atPath: full) ? full : nil
+            }
+            return themeFolders.map { $0.appendingPathComponent(name).path }.first { FileManager.default.fileExists(atPath: $0) }
+        }
+        let pairs = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        if pairs.count == 2, pairs.allSatisfy({ $0.hasPrefix("light:") || $0.hasPrefix("dark:") }) {
+            var resolved: [String] = []
+            for pair in pairs {
+                let (mode, name) = pair.hasPrefix("light:") ? ("light", pair.dropFirst(6)) : ("dark", pair.dropFirst(5))
+                guard let p = path(String(name)) else { return nil }
+                resolved.append("\(mode):\(p)")
+            }
+            return "theme = " + resolved.joined(separator: ",")
+        }
+        return path(value).map { "theme = \($0)" }
     }
 
     /// A config file changed, appeared or went since `apply` read them.
