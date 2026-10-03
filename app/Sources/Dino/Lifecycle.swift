@@ -96,8 +96,18 @@ extension DinoConnection {
 }
 
 extension SessionInfo {
-    /// What the user named it, else dino's name for it.
-    var display: String { label ?? name }
+    /// What the user named it, else what its agent calls the conversation, else dino's name for it.
+    var display: String { label ?? agentTitle ?? name }
+
+    /// What the agent calls the conversation: its terminal title (Claude sets it to the topic once
+    /// it has one, and dinod passes every change on), without spinner or status glyphs. Nil for a
+    /// shell, and while the agent only names itself ("Claude Code", "Codex").
+    var agentTitle: String? {
+        guard agent_id != "shell", let title, let t = DinoModel.undecorated(title) else { return nil }
+        let words = t.lowercased().split(separator: " ")
+        if let first = words.first, agent_id.lowercased().hasPrefix(first), words.count <= 2 { return nil }
+        return t
+    }
 }
 
 // MARK: - Model
@@ -220,14 +230,14 @@ struct SessionName: View {
                 .font(font)
                 .focused($focused)
                 .onAppear {
-                    draft = session.label ?? session.title ?? ""
+                    draft = session.display
                     DispatchQueue.main.async { focused = true }
                 }
-                .onSubmit { model.rename(session.id, to: draft) }
+                .onSubmit { commit() }
                 .onExitCommand { model.renaming = nil; model.terminals[session.id]?.requestFocus() }
                 .onChange(of: focused) { _, f in
                     // Clicking away keeps what was typed, like Finder.
-                    if !f, model.renaming?.id == session.id { model.rename(session.id, to: draft) }
+                    if !f, model.renaming?.id == session.id { commit() }
                 }
                 .help("Return to rename; empty goes back to the agent's own title")
         } else {
@@ -241,6 +251,16 @@ struct SessionName: View {
                 .simultaneousGesture(TapGesture(count: 2).onEnded { model.renaming = Renaming(id: session.id, place: place) }, including: place == .toolbar ? .all : .none)
                 .help(session.label == nil ? "Double-click to rename" : "\(session.name) · double-click to rename")
         }
+    }
+}
+
+extension SessionName {
+    /// The name as typed. Left as the agent's own title, it stays the agent's (and follows it), not
+    /// a name of yours: opening and leaving the field changes nothing.
+    fileprivate func commit() {
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let auto = session.agentTitle ?? session.name
+        model.rename(session.id, to: session.label == nil && typed == auto ? "" : draft)
     }
 }
 
