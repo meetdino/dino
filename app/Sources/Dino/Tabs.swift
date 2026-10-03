@@ -90,6 +90,7 @@ extension DinoModel {
 /// The tabs along the top of the terminal area.
 struct TabStrip: View {
     @EnvironmentObject var model: DinoModel
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let current = model.tab(of: model.selected)
@@ -111,7 +112,14 @@ struct TabStrip: View {
             .help("New tab: a shell in \(shortPath(model.folder.path)) (⌘T)")
         }
         .frame(height: 28)
-        .background(.bar)
+        .background {
+            // In light mode the bar is near white, as the selected tab is: a shade darker, so the
+            // tab you're on stands out, as in Safari and Xcode. Dark mode's contrast is already there.
+            ZStack {
+                Rectangle().fill(.bar)
+                if colorScheme == .light { Color.black.opacity(0.06) }
+            }
+        }
         .overlay(alignment: .bottom) { Divider() }
     }
 }

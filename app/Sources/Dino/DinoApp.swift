@@ -1162,6 +1162,7 @@ final class PulseView: NSView {
 /// Usage at the foot of the sidebar: one line with the fullest window, opening to all of them.
 struct UsagePanel: View {
     @EnvironmentObject var model: DinoModel
+    @Environment(\.colorScheme) private var colorScheme
     @AppStorage("usage.open") private var open = false
     private static let names = ["anthropic": "Claude", "chatgpt": "Codex"]
 
@@ -1237,7 +1238,10 @@ struct UsagePanel: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.bar)
+        // Light mode: the sidebar shows through, under a hairline; the bar material there is a white
+        // band across the grey sidebar. Dark mode keeps its bar.
+        .background(colorScheme == .dark ? AnyShapeStyle(.bar) : AnyShapeStyle(.clear))
+        .overlay(alignment: .top) { if colorScheme == .light { Divider() } }
     }
 }
 
