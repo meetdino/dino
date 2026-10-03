@@ -102,7 +102,11 @@ struct WelcomeCard: View {
         .padding(20)
         .frame(width: 460)
         .onExitCommand(perform: close)
-        .onAppear { doneFocused = true }
+        // Done has the keyboard first (with keyboard navigation on, the first link took it, so Space
+        // would have made dino the default terminal). Set as the sheet's default, and again once it's
+        // the key window: set at onAppear alone it came too early to take.
+        .defaultFocus($doneFocused, true)
+        .onAppear { DispatchQueue.main.async { doneFocused = true } }
     }
 
     // MARK: Rows
