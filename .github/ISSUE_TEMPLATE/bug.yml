@@ -1,0 +1,43 @@
+name: Bug
+description: Something in dino doesn't work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen again
+      placeholder: |
+        1. Open a new tab
+        2. Run claude
+        3. …
+  - type: input
+    id: version
+    attributes:
+      label: dino version
+      description: "`dino --version`, or dino → About dino"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent, if one is involved
+      placeholder: Claude Code 2.1.288
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The end of `~/.config/dino/dinod.log` often says why. Check it for anything private first.
+      render: text
