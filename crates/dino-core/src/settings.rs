@@ -70,11 +70,13 @@ pub struct Terminal {
     pub quick_autohide: bool,
     /// What quitting does with running agents: empty asks, else the choice the app remembered.
     pub on_quit: String,
+    /// The app's look: "system" (follow the Mac), "light" or "dark"; its panes follow it too.
+    pub appearance: String,
 }
 
 impl Default for Terminal {
     fn default() -> Self {
-        Self { start_with: "last".into(), quick_key: "cmd-grave".into(), quick_autohide: true, on_quit: String::new() }
+        Self { start_with: "last".into(), quick_key: "cmd-grave".into(), quick_autohide: true, on_quit: String::new(), appearance: "system".into() }
     }
 }
 
