@@ -64,7 +64,9 @@ if [ "$DRY" = 1 ]; then
 else
     cp -R "$DIST/tap/." "$TAP/"
     git -C "$TAP" add -A
-    git -C "$TAP" commit -q -m "dino $VERSION"
+    # As this repository's own identity, never the machine's global one (the tap is a fresh clone).
+    git -C "$TAP" -c user.name="$(git -C "$ROOT" config user.name)" -c user.email="$(git -C "$ROOT" config user.email)" \
+        commit -q -m "dino $VERSION"
     git -C "$TAP" push -q
 fi
 echo "done"
