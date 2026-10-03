@@ -51,7 +51,7 @@ tokens carry audience `dino-harness` and don't open the `/v1` API; the harness c
   have no gaps. Devices look for changes on their own (see [Push](#push-optional)); with push on,
   nudges go through Postgres `LISTEN`/`NOTIFY`, so every node's sockets hear pushes made on any
   node.
-- **The database out of reach** (Neon waking up, Postgres restarting): requests answer 503 with
+- **The database out of reach** (a serverless Postgres waking up, Postgres restarting): requests answer 503 with
   `Retry-After` instead of failing, and the server waits for it at start rather than exiting.
 - **Hardening**: per-address and per-account rate limits (GCRA), `Idempotency-Key` on `/v1`
   mutations, CSRF tokens and Origin checks on forms, a strict CSP, `__Host-` cookies on https, no
@@ -86,9 +86,9 @@ or sign a dino in to it directly with `dino login http://127.0.0.1:8787`.
 Development mode serves plain http only on 127.0.0.1 or localhost; anywhere else, and always in
 production, the server needs https.
 
-`crates/dino-sync` is a copy of the sync protocol crate from the dino repo, which is private until
-v1 (see `crates/dino-sync/UPSTREAM`); `scripts/update-dino-sync.sh` refreshes it from a local
-checkout. So building needs nothing private.
+`crates/dino-sync` is a copy of the sync protocol crate from the [dino](https://github.com/asdf9384/dino)
+repository (see `crates/dino-sync/UPSTREAM`), so the server builds on its own;
+`scripts/update-dino-sync.sh` refreshes it from a dino checkout.
 
 To run the server by hand instead: `cp .env.example .env`, load it, and `cargo run -p dino-cloud`.
 
@@ -110,50 +110,42 @@ logs contain no token.
 
 ## Where it runs
 
-dino's own instance will be `https://cloud.meetdino.com`: the API, sign-in, device approval and the
+dino's own instance is `https://cloud.meetdino.com`: the API, sign-in, device approval and the
 account page on one host (the product site is `meetdino.com`). dino uses it unless `DINO_CLOUD_URL`
 or `dino login <server>` names another, such as a self-hosted one or the local copy above.
 
-## Deploying to Vercel
+## Deploying on a serverless host (Vercel)
 
-For now dino's instance runs on Vercel with a Neon Postgres, both on free tiers (fine for testing
-with a few Macs; Vercel's Hobby plan is for non-commercial use). The plan for launch is still AWS:
-the same binary as a container, plus RDS Postgres.
-
-On Vercel the server is one Rust service (`vercel.json`): Vercel's Rust builder compiles
-`crates/server` and runs it as a standalone server on `$PORT`, scaled by Vercel (Fluid compute).
-When it sees `VERCEL=1` it runs as a serverless host should: no push socket and no `LISTEN`, the
-limits on sign-in attempts and sync writes counted in Postgres so they hold across instances, the
-cleanup only when Vercel Cron calls `/internal/cron` (daily), small database pools, and the client
-address from Vercel's headers. Migrations run when an instance starts, over the unpooled
+The server also runs as a serverless service. `vercel.json` describes it for Vercel: Vercel's Rust
+builder compiles `crates/server` and runs it as a standalone server on `$PORT`. When it sees
+`VERCEL=1` it runs as a serverless host should: no push socket and no `LISTEN`, the limits on
+sign-in attempts and sync writes counted in Postgres so they hold across instances, cleanup only
+when Vercel Cron calls `/internal/cron` (daily, with `CRON_SECRET`), small database pools, and the
+client address from Vercel's headers. Migrations run when an instance starts, over the unpooled
 connection with Postgres' advisory lock, so instances starting together take turns and a
 transaction-mode pooler never sees the lock.
 
-1. **Import the repository**: Vercel → Add New → Project → `asdf9384/dino-cloud`. Set the
-   framework preset to **Services** (it picks up `vercel.json`); leave the root directory as `./`.
-2. **Add the database**: in the project, Storage → Connect Database → **Neon** (Marketplace) →
-   create a free database and connect it to the project. That sets `DATABASE_URL` (pooled) and
-   `DATABASE_URL_UNPOOLED`, which the server uses for migrations.
-3. **Environment variables** (Settings → Environment Variables, Production; mark the secrets as
-   Sensitive):
+1. Import the repository as a Vercel project with the **Services** framework preset (it picks up
+   `vercel.json`).
+2. Connect a Postgres database. With a pooler in front (Neon's integration, say), set both
+   `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct), which migrations use.
+3. Set the environment variables (mark the secrets as sensitive):
 
    | Name | Value |
    |---|---|
    | `DINO_ENV` | `production` |
-   | `DINO_CLOUD_URL` | `https://cloud.meetdino.com` |
+   | `DINO_CLOUD_URL` | your server's https URL, e.g. `https://dino.example.com` |
    | `DINO_SECRET_KEY` | the output of `openssl rand -base64 32` |
-   | `DINO_MAIL_KEY` | a [Resend](https://resend.com) API key (free tier: 3,000 emails a month) |
-   | `DINO_MAIL_FROM` | `dino <no-reply@meetdino.com>` (after verifying the domain in Resend) |
-   | `CRON_SECRET` | another `openssl rand -base64 32`; Vercel Cron sends it to `/internal/cron` |
-   | `DINO_GITHUB_CLIENT_ID`, `DINO_GITHUB_CLIENT_SECRET` | optional: a GitHub OAuth app whose callback is `https://cloud.meetdino.com/signin/github/callback` |
+   | `DINO_MAIL_KEY` | a [Resend](https://resend.com) API key, or set `DINO_MAIL_URL` too for another mail API of the same shape |
+   | `DINO_MAIL_FROM` | `dino <no-reply@example.com>`, from a domain your mail API has verified |
+   | `CRON_SECRET` | another `openssl rand -base64 32` |
+   | `DINO_GITHUB_CLIENT_ID`, `DINO_GITHUB_CLIENT_SECRET` | optional: a GitHub OAuth app whose callback is `<DINO_CLOUD_URL>/signin/github/callback` |
    | `DINO_GOOGLE_CLIENT_ID`, `DINO_GOOGLE_CLIENT_SECRET` | optional: the same for Google |
 
-4. **Deploy**, then open `https://<project>.vercel.app/readyz`: it answers `200` once the database
-   is reachable and migrated.
-5. **Domain**: Settings → Domains → add `cloud.meetdino.com`. `meetdino.com` is already on Vercel,
-   so the record is added for you; otherwise add the CNAME Vercel shows to the DNS.
+4. Deploy, then open `<your URL>/readyz`: it answers `200` once the database is reachable and
+   migrated.
 
-Check it from a Mac: `DINO_HOME=/tmp/dino-try dino login https://cloud.meetdino.com`.
+Check it from a Mac: `DINO_HOME=/tmp/dino-try dino login <your URL>`.
 
 ## Push (optional)
 
@@ -182,6 +174,13 @@ assigns the port through `PORT` is followed.
 docker build -t dino-cloud .
 ```
 
+## Contributing
+
+Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md), which covers setup,
+tests and signing off your commits (DCO). Report security issues privately, as
+[SECURITY.md](SECURITY.md) says.
+
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE). Third-party licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

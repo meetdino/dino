@@ -1,7 +1,7 @@
 # Local development: Postgres, and the server built from this checkout.
 #
 #   docker compose up db                       # just Postgres, for `cargo run` and `cargo test`
-#   GITHUB_TOKEN=... docker compose up         # everything
+#   docker compose up                          # everything
 #
 # The server here runs in development mode: sign-in codes go to ./dino-cloud-mail.log.
 
@@ -24,8 +24,6 @@ services:
   server:
     build:
       context: .
-      secrets:
-        - github_token
     depends_on:
       db:
         condition: service_healthy
@@ -38,10 +36,6 @@ services:
       - "127.0.0.1:8787:8787"
     volumes:
       - ./:/tmp/mail
-
-secrets:
-  github_token:
-    environment: GITHUB_TOKEN
 
 volumes:
   db:

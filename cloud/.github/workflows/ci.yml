@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: dino
+          POSTGRES_PASSWORD: dino
+          POSTGRES_DB: dino_cloud
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U dino"
+          --health-interval 2s
+          --health-retries 30
+    env:
+      DINO_TEST_DATABASE_URL: postgres://dino:dino@127.0.0.1:55432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml picks the version.
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
