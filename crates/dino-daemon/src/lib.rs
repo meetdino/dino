@@ -42,6 +42,22 @@ mod tmux;
 mod tmux_mirror;
 mod update;
 
+/// The line between a resumed session's screen from before dinod restarted and what follows.
+const RESTART_MARK: &[u8] = b"\x1b[?1049l\r\n\x1b[0m\x1b[2m-- dino restarted; above is where this session was --\x1b[0m\r\n";
+
+/// A saved screen without the restart lines earlier restarts left in it: one line per restart,
+/// not one more each time.
+fn without_restart_marks(screen: &[u8]) -> Vec<u8> {
+    const TEXT: &[u8] = b"-- dino restarted; above is where this session was --";
+    let mut out = Vec::with_capacity(screen.len());
+    for line in screen.split_inclusive(|&b| b == b'\n') {
+        if !line.windows(TEXT.len()).any(|w| w == TEXT) {
+            out.extend_from_slice(line);
+        }
+    }
+    out
+}
+
 /// Scrollback lines replayed to a newly attached client.
 const REPLAY_HISTORY: usize = 2000;
 
@@ -1327,10 +1343,10 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     // Resumed after dinod stopped or crashed: what its pane showed then, above the agent's resume.
     if restore.is_some() && !pane.is_exited() {
         if let Some(before) = std::fs::read(live_screens_dir().join(&id)).ok().filter(|b| !b.is_empty()) {
-            pane.feed(&before);
+            pane.feed(&without_restart_marks(&before));
             // Back on the normal screen (it may have been saved with a full-screen program up),
             // and a line between then and now.
-            pane.feed(b"\x1b[?1049l\r\n\x1b[0m\x1b[2m-- dino restarted; above is where this session was --\x1b[0m\r\n");
+            pane.feed(RESTART_MARK);
         }
     }
     // A shell's `cd` shows at once rather than at the next look (the sidebar files it by folder).
@@ -3582,6 +3598,9 @@ mod tests {
         let back = session(&d2, &id);
         let text = back.pane.text(LIVE_HISTORY);
         assert!(text.contains("kept-42") && text.contains("dino restarted"), "{text}");
+        // Restarted again: still one restart line, not one per restart.
+        let again = without_restart_marks(&[b"kept-42\r\n".as_slice(), RESTART_MARK, b"$ ".as_slice()].concat());
+        assert_eq!(String::from_utf8_lossy(&again).matches("dino restarted").count(), 0);
         kill(&d2, &id);
         kill(&d, &id);
         save_live_screens(&d2, false);
