@@ -330,6 +330,10 @@ def main():
     subprocess.run(["git", "-C", WORK, "-c", "user.name=b", "-c", "user.email=b@b", "commit", "-qm", "init"], check=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
     env["DINO_HOME"] = HOME
+    # A Mac that has been through Welcome: the budget is for the app as it idles every day, not the
+    # first-launch card over it (which, once it showed reliably, put several WindowServer points
+    # on every run).
+    open(HOME + "/settings.toml", "w").write("[machine]\nonboarded = true\n")
     d = subprocess.Popen([BIN, "daemon"], env=env, stdout=open(HOME + "/dinod.log", "a"), stderr=subprocess.STDOUT, start_new_session=True)
     time.sleep(1.5)
     app = None
