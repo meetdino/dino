@@ -287,14 +287,14 @@ mod tests {
 
     #[test]
     fn setup_files_hold_nothing_but_pmset() {
-        assert!(valid_user("talian") && valid_user("a.b-c_d") && !valid_user("x y") && !valid_user("-x") && !valid_user("a,b"));
-        let rule = sudoers("talian");
+        assert!(valid_user("alice") && valid_user("a.b-c_d") && !valid_user("x y") && !valid_user("-x") && !valid_user("a,b"));
+        let rule = sudoers("alice");
         let grants: Vec<&str> = rule.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(grants, ["talian ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1"]);
+        assert_eq!(grants, ["alice ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1"]);
         let plist = boot_plist();
         assert!(plist.contains("<string>/usr/bin/pmset</string>") && plist.contains("<true/>"));
         for install in [true, false] {
-            let s = setup_script(install, "talian");
+            let s = setup_script(install, "alice");
             assert!(s.trim_end().ends_with("/usr/bin/pmset -a disablesleep 0"), "sleep comes back either way");
         }
         let a = osascript("echo \"hi\" \\ there");
