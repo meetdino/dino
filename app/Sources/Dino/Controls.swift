@@ -117,6 +117,7 @@ struct ControlFields: View {
     var lockPath: String?
     @State private var typing = false
     @State private var typed = ""
+    @State private var choosingModel = false
 
     private static let other = "\u{1}other"
 
@@ -131,12 +132,43 @@ struct ControlFields: View {
         }
     }
 
-    private func picker(_ kind: ControlKind) -> some View {
+    @ViewBuilder private func picker(_ kind: ControlKind) -> some View {
         let options = kind.options(knobs, seen: seen, current: kind.value(controls), model: model)
         let fallback = kind == .model
             ? (defaults.model ?? knobs.default_model).map(knobs.label)
             : kind.value(defaults).map { v in options.first { $0.value == v }?.label ?? v }
-        return Picker(kind == .mode ? "Mode" : kind.title, selection: Binding(
+        if kind == .model, options.count > ControlKind.longList {
+            longPicker(options, fallback: fallback)
+        } else {
+            menuPicker(kind, options, fallback: fallback)
+        }
+    }
+
+    /// A model list too long for a menu: a button that opens it searched and grouped.
+    private func longPicker(_ options: [ControlOption], fallback: String?) -> some View {
+        let defaultLabel = fallback.map { "Default (\($0))" } ?? "Default"
+        let current = controls.model.map(knobs.canonical)
+        return LabeledContent(ControlKind.model.title) {
+            Button { choosingModel = true } label: {
+                HStack(spacing: 4) {
+                    Text(current.map(knobs.label) ?? defaultLabel).lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                }
+            }
+            .popover(isPresented: $choosingModel, arrowEdge: .trailing) {
+                ModelSearchList(options: options, current: current, defaultLabel: defaultLabel) { v in
+                    choosingModel = false
+                    typing = false
+                    set(.model, v)
+                }
+                .padding(12)
+                .frame(width: 340)
+            }
+        }
+    }
+
+    private func menuPicker(_ kind: ControlKind, _ options: [ControlOption], fallback: String?) -> some View {
+        Picker(kind == .mode ? "Mode" : kind.title, selection: Binding(
             get: {
                 if typing && kind == .model { return Self.other }
                 let v = kind.value(controls) ?? ""
@@ -394,8 +426,13 @@ struct ControlPopover: View {
         let more = listed.filter { $0.group != nil }
         let open = showMore || more.contains { $0.value == current }
         let options: [(String?, String, String?)] = [(nil, defaultLabel, defaultHelp)] + (main + (open ? more : [])).map { ($0.value, $0.label, $0.help) }
+        let long = kind == .model && listed.count > ControlKind.longList
         VStack(alignment: .leading, spacing: 2) {
             Text(kind.title).font(.headline).padding(.bottom, 6)
+            if long {
+                // Hundreds of models (Pi across providers): searched, grouped, kept on screen.
+                ModelSearchList(options: listed, current: current, defaultLabel: defaultLabel, defaultHelp: defaultHelp, choose: choose)
+            } else {
             ForEach(Array(options.enumerated()), id: \.offset) { i, o in
                 if i == main.count + 1, open, let g = more.first?.group {
                     Text(g).font(.caption).foregroundStyle(.secondary).padding(.top, 6)
@@ -414,7 +451,8 @@ struct ControlPopover: View {
                 .buttonStyle(.plain)
                 .padding(.top, 2)
             }
-            if kind == .model {
+            }
+            if kind == .model, !long {
                 TextField("Other model", text: $typed, prompt: Text("Other model name"))
                     .textFieldStyle(.roundedBorder)
                     .font(.callout.monospaced())
@@ -439,7 +477,7 @@ struct ControlPopover: View {
             }
         }
         .padding(12)
-        .frame(width: 290)
+        .frame(width: long ? 340 : 290)
     }
 
     @ViewBuilder private func row(_ i: Int, _ o: (String?, String, String?)) -> some View {
@@ -607,6 +645,7 @@ struct NewSessionSheet: View {
     @State private var provider = ""
     @State private var providerModels: [ProviderModel] = []
     @State private var providerModel = ""
+    @State private var choosingProviderModel = false
 
     private static let addHost = "\u{0}add"
 
@@ -686,7 +725,29 @@ struct NewSessionSheet: View {
                             Text("\(launcher?.label ?? "The agent")'s own account").tag("")
                             ForEach(providers) { p in Text(p.name).tag(p.id) }
                         }
-                        if !provider.isEmpty {
+                        if !provider.isEmpty, providerModels.count > ControlKind.longList {
+                            // A provider's whole catalog (OpenRouter: hundreds): searched, not a menu.
+                            LabeledContent("Model") {
+                                Button { choosingProviderModel = true } label: {
+                                    HStack(spacing: 4) {
+                                        Text(chosen?.name ?? "Choose…").lineLimit(1)
+                                        Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                                    }
+                                }
+                                .popover(isPresented: $choosingProviderModel, arrowEdge: .trailing) {
+                                    ModelSearchList(
+                                        options: providerModels.map { ControlOption(value: $0.id, label: $0.name, help: $0.id) },
+                                        current: providerModel.isEmpty ? nil : providerModel,
+                                        defaultLabel: "", allowsOther: false, showsDefault: false
+                                    ) { v in
+                                        choosingProviderModel = false
+                                        if let v { providerModel = v }
+                                    }
+                                    .padding(12)
+                                    .frame(width: 340)
+                                }
+                            }
+                        } else if !provider.isEmpty {
                             Picker("Model", selection: $providerModel) {
                                 if providerModels.isEmpty { Text("Asking \(providers.first { $0.id == provider }?.name ?? provider)…").tag("") }
                                 ForEach(providerModels) { m in Text(m.name).tag(m.id) }
