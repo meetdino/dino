@@ -87,9 +87,29 @@ struct DinoSettings: Codable, Equatable {
         var quick_key: String
         var quick_autohide: Bool
         var on_quit: String
+        var appearance: String
 
-        /// dinod's defaults: StartWith.last, QuickTerminal.Key.commandGrave, hide on click, ask on quit.
-        static let defaults = Terminal(start_with: "last", quick_key: "cmd-grave", quick_autohide: true, on_quit: "")
+        /// dinod's defaults: StartWith.last, QuickTerminal.Key.commandGrave, hide on click, ask on
+        /// quit, the Mac's look.
+        static let defaults = Terminal(start_with: "last", quick_key: "cmd-grave", quick_autohide: true, on_quit: "", appearance: "system")
+
+        init(start_with: String, quick_key: String, quick_autohide: Bool, on_quit: String, appearance: String) {
+            self.start_with = start_with
+            self.quick_key = quick_key
+            self.quick_autohide = quick_autohide
+            self.on_quit = on_quit
+            self.appearance = appearance
+        }
+
+        /// A dinod from before `appearance` leaves it out: the Mac's look.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            start_with = try c.decode(String.self, forKey: .start_with)
+            quick_key = try c.decode(String.self, forKey: .quick_key)
+            quick_autohide = try c.decode(Bool.self, forKey: .quick_autohide)
+            on_quit = try c.decode(String.self, forKey: .on_quit)
+            appearance = try c.decodeIfPresent(String.self, forKey: .appearance) ?? "system"
+        }
 
         /// As the app keeps them for itself (it reads them there at launch, before dinod answers).
         @MainActor static var mirrored: Terminal {
@@ -98,7 +118,8 @@ struct DinoSettings: Codable, Equatable {
                 start_with: d.string(forKey: StartWith.key) ?? defaults.start_with,
                 quick_key: d.string(forKey: QuickTerminal.Key.storageKey) ?? defaults.quick_key,
                 quick_autohide: d.object(forKey: QuickTerminal.autohideKey) as? Bool ?? defaults.quick_autohide,
-                on_quit: d.string(forKey: QuitChoice.key) ?? defaults.on_quit
+                on_quit: d.string(forKey: QuitChoice.key) ?? defaults.on_quit,
+                appearance: d.string(forKey: Appearance.key) ?? defaults.appearance
             )
         }
 
@@ -111,6 +132,9 @@ struct DinoSettings: Codable, Equatable {
             d.set(quick_key, forKey: QuickTerminal.Key.storageKey)
             d.set(quick_autohide, forKey: QuickTerminal.autohideKey)
             d.set(on_quit, forKey: QuitChoice.key)
+            d.set(appearance, forKey: Appearance.key)
+            // Chosen on another Mac (or in settings.toml): the look changes here too.
+            if before.appearance != appearance { (Appearance(rawValue: appearance) ?? .system).apply() }
             if before.quick_key != quick_key { QuickTerminal.shared.registerKey() }
         }
     }
@@ -523,6 +547,7 @@ struct GeneralPane: View {
     @AppStorage(StartWith.key) private var startWith = StartWith.last.rawValue
     @AppStorage(QuickTerminal.Key.storageKey) private var quickKey = QuickTerminal.Key.commandGrave.rawValue
     @AppStorage(QuickTerminal.autohideKey) private var quickAutohide = true
+    @AppStorage(Appearance.key) private var appearance = Appearance.system.rawValue
     @State private var quickTaken = false
     @State private var isDefault = false
     @State private var makingDefault = false
@@ -544,6 +569,9 @@ struct GeneralPane: View {
                 Footnote("Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
             }
             Section {
+                Picker("Appearance", selection: Binding(get: { appearance }, set: { (Appearance(rawValue: $0) ?? .system).choose() })) {
+                    ForEach(Appearance.allCases) { Text($0.label).tag($0.rawValue) }
+                }
                 Picker("When dino opens", selection: $startWith) {
                     Text("Your last session").tag(StartWith.last.rawValue)
                     Text("A new shell").tag(StartWith.shell.rawValue)
@@ -649,7 +677,7 @@ struct GeneralPane: View {
         }
         .formStyle(.grouped)
         // dinod keeps them too, so they sync to your other Macs.
-        .onChange(of: DinoSettings.Terminal(start_with: startWith, quick_key: quickKey, quick_autohide: quickAutohide, on_quit: quitChoice)) { _, t in
+        .onChange(of: DinoSettings.Terminal(start_with: startWith, quick_key: quickKey, quick_autohide: quickAutohide, on_quit: quitChoice, appearance: appearance)) { _, t in
             if store.settings?.terminal != t { store.update { $0.terminal = t } }
         }
         .onAppear {

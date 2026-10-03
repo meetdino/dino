@@ -7,6 +7,7 @@ struct DinoApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @StateObject private var model = DinoModel()
     @AppStorage(QuitChoice.key) private var quitChoice = ""
+    @AppStorage(Appearance.key) private var appearance = Appearance.system.rawValue
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -158,6 +159,12 @@ struct DinoApp: App {
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
                     .disabled(model.selected == nil)
             }
+            CommandGroup(after: .toolbar) {
+                Picker("Appearance", selection: Binding(get: { appearance }, set: { (Appearance(rawValue: $0) ?? .system).choose() })) {
+                    ForEach(Appearance.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+                .pickerStyle(.inline)
+            }
             CommandGroup(replacing: .help) {
                 Button("Keyboard Shortcuts") { model.showShortcuts = true }
                     .keyboardShortcut("/")
@@ -176,6 +183,8 @@ struct DinoApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_: Notification) {
+        // Before the first window draws: no flash of the Mac's look when dino is set otherwise.
+        Appearance.current.apply()
         // Opening the app shows the sessions, even if it quit while looking at the archive.
         if UserDefaults.standard.string(forKey: "sidebar.filter") == SessionFilter.archived.rawValue {
             UserDefaults.standard.set(SessionFilter.all.rawValue, forKey: "sidebar.filter")
@@ -342,6 +351,40 @@ enum StartWith: String {
     case last, shell
     static let key = "startWith"
     static var current: StartWith { UserDefaults.standard.string(forKey: key).flatMap(StartWith.init) ?? .last }
+}
+
+/// The app's look, in the app and its terminal panes alike (they follow the window's appearance):
+/// the Mac's, or light or dark whatever the Mac is set to.
+enum Appearance: String, CaseIterable, Identifiable {
+    case system, light, dark
+    static let key = "appearance"
+    static var current: Appearance { UserDefaults.standard.string(forKey: key).flatMap(Appearance.init) ?? .system }
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: "System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+
+    /// Chosen in the View menu or Settings: kept, and applied at once.
+    @MainActor func choose() {
+        UserDefaults.standard.set(rawValue, forKey: Self.key)
+        apply()
+    }
+
+    /// Every window, sheet and pane at once; System hands it back to the Mac (and follows it live).
+    @MainActor func apply() {
+        let name: NSAppearance.Name? = switch self {
+        case .system: nil
+        case .light: .aqua
+        case .dark: .darkAqua
+        }
+        guard NSApp.appearance?.name != name else { return }
+        NSApp.appearance = name.flatMap(NSAppearance.init(named:))
+    }
 }
 
 enum QuitChoice: String {

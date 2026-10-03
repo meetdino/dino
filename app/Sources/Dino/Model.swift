@@ -555,10 +555,21 @@ final class DinoModel: ObservableObject {
         return c
     }()
 
+    /// Every pane, shown or not, takes the app's light or dark: the Mac's mode or View > Appearance.
+    private var appearanceObservation: NSKeyValueObservation?
+
     /// Picks up edits to the Ghostty config, as Ghostty does when told to reload.
     private func watchGhosttyConfig() {
         // Read now, not at the first pane: Settings says what's in effect.
         _ = Self.terminals
+        appearanceObservation = NSApp.observe(\.effectiveAppearance) { _, _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard GhosttyConfig.scheme != GhosttyConfig.applied else { return }
+                    GhosttyConfig.apply(to: Self.terminals, overrides: Self.menuKeys)
+                }
+            }
+        }
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
             MainActor.assumeIsolated {
                 if GhosttyConfig.changed { GhosttyConfig.apply(to: Self.terminals, overrides: Self.menuKeys) }

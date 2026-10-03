@@ -42,11 +42,22 @@ enum GhosttyConfig {
     private(set) static var loaded: [String] = []
     private(set) static var skipped: [String] = []
     private static var stamps: [String: Date] = [:]
+    /// The light or dark the config was last read for.
+    private(set) static var applied: TerminalColorScheme?
 
-    /// `overrides` go last, so they win over anything the user set.
+    /// Light or dark, as the app looks now: the Mac's mode, or the one picked in View > Appearance.
+    static var scheme: TerminalColorScheme {
+        NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
+    }
+
+    /// `overrides` go last, so they win over anything the user set. Run again when the app's look
+    /// changes: dino picks the half of a `light:…,dark:…` theme itself, as the engine won't reload.
     static func apply(to controller: TerminalController, overrides: String) {
+        let scheme = scheme
+        applied = scheme
+        defer { controller.setColorScheme(scheme) }
         var read: [String] = []
-        let all = files.flatMap { expand($0, depth: 0, read: &read) }.compactMap(resolvingTheme)
+        let all = files.flatMap { expand($0, depth: 0, read: &read) }.compactMap { resolvingTheme($0, for: scheme) }
         var lines = all
         loaded = read
         stamps = Dictionary(uniqueKeysWithValues: read.map { ($0, modified($0)) })
@@ -67,10 +78,10 @@ enum GhosttyConfig {
         controller.updateConfigSource(.generated(overrides))
     }
 
-    /// A `theme` line with its names made absolute paths, as Ghostty would find them (also inside
-    /// `light:…,dark:…`); nil, leaving it out, when one isn't anywhere, so the pane keeps dino's own
+    /// A `theme` line with its name made an absolute path, as Ghostty would find it (of `light:…,dark:…`,
+    /// the one for `scheme`); nil, leaving it out, when it isn't anywhere, so the pane keeps dino's own
     /// light and dark colors rather than the engine's dark ones.
-    private static func resolvingTheme(_ line: String) -> String? {
+    private static func resolvingTheme(_ line: String, for scheme: TerminalColorScheme) -> String? {
         let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
         guard parts.count == 2, parts[0] == "theme" else { return line }
         let value = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
@@ -84,13 +95,9 @@ enum GhosttyConfig {
         }
         let pairs = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         if pairs.count == 2, pairs.allSatisfy({ $0.hasPrefix("light:") || $0.hasPrefix("dark:") }) {
-            var resolved: [String] = []
-            for pair in pairs {
-                let (mode, name) = pair.hasPrefix("light:") ? ("light", pair.dropFirst(6)) : ("dark", pair.dropFirst(5))
-                guard let p = path(String(name)) else { return nil }
-                resolved.append("\(mode):\(p)")
-            }
-            return "theme = " + resolved.joined(separator: ",")
+            let mode = scheme == .dark ? "dark:" : "light:"
+            guard let pair = pairs.first(where: { $0.hasPrefix(mode) }) else { return nil }
+            return path(String(pair.dropFirst(mode.count))).map { "theme = \($0)" }
         }
         return path(value).map { "theme = \($0)" }
     }
