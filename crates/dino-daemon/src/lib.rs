@@ -683,6 +683,7 @@ fn agent_setup(d: &Daemon) -> Vec<ipc::AgentSetupInfo> {
                         sign_in: setup.sign_in.map(String::from),
                         sign_in_hint: setup.sign_in_hint.map(String::from),
                         homepage: setup.homepage.into(),
+                        sign_in_note: setup.sign_in_note.map(String::from),
                     }
                 })
             })
@@ -1781,6 +1782,24 @@ fn setup_prompt(screen: &str) -> Option<&'static str> {
     }
 }
 
+/// Pi brings no models: until it has a provider it says so and waits. Its sign-in dialog, or that
+/// warning with nothing after it (a sign-in prints its result below), is a question for the user.
+fn pi_setup_prompt(screen: &str) -> Option<&'static str> {
+    if screen.contains("Select provider to configure") || screen.contains("Select authentication method") {
+        return Some("Sign in to a provider in Pi");
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    let warned = lines.iter().rposition(|l| l.contains("No models available") || l.contains("No API key found"))?;
+    // What follows the warning in the conversation, up to Pi's input box: only the warning's own lines.
+    let after = lines[warned + 1..].iter().map(|l| l.trim()).take_while(|l| !l.starts_with('─'));
+    // Wrapped in a narrow pane, its sentence and paths go over several lines.
+    let part_of_warning = |l: &str| {
+        !l.contains(' ') || ["/login", "provider", "API key", ".md", "Error:", "See:"].iter().any(|w| l.contains(w))
+    };
+    let only_warning = after.filter(|l| !l.is_empty()).all(part_of_warning);
+    only_warning.then_some("Connect a provider: type /login in Pi")
+}
+
 /// Esc on Claude Code's permission prompt (or its question) sends no hook, so the session would
 /// stay on "Needs you". It's over when the screen has changed since the prompt came up, has gone
 /// quiet, and no longer shows a dialog (each ends in "Esc to cancel").
@@ -1896,7 +1915,8 @@ fn state(d: &Daemon) -> Response {
                 })
                 // Before its first hook, Claude can already be waiting on you: its folder trust
                 // prompt, its login, its first-run setup. Shown, so a first session isn't "idle".
-                .or_else(|| (s.agent_id == "claude" && !s.pane.is_exited()).then(|| setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))),
+                .or_else(|| (s.agent_id == "claude" && !s.pane.is_exited()).then(|| setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}")))
+                .or_else(|| (s.agent_id == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))),
                 group: group_of(&s.id),
                 error: st.last_error,
                 cwd: if s.host.is_some() { s.cwd.display().to_string() } else { real(&s.cwd) },
@@ -3432,6 +3452,16 @@ mod tests {
         assert_eq!(setup_prompt(" Select login method:\n ❯ 1. Claude account"), Some("Sign in to Claude Code"));
         assert_eq!(setup_prompt(" Choose the text style that looks best"), Some("Finish setting up Claude Code"));
         assert_eq!(setup_prompt("❯ hello\n● Hi!"), None);
+        // Pi without a provider, its sign-in, and after it.
+        let warned = " Warning: No models available. Use /login to log into a provider via OAuth or API key. See:\n   /x/docs/providers.md\n   /x/docs/models.md\n\n────\n\n────\n/tmp";
+        assert_eq!(pi_setup_prompt(warned), Some("Connect a provider: type /login in Pi"));
+        assert_eq!(pi_setup_prompt(" Select provider to configure:\n → Anthropic • not configured"), Some("Sign in to a provider in Pi"));
+        let signed = " Warning: No models available. Use /login to log into a provider via OAuth or API key. See:\n   /x/docs/providers.md\n\n Logged in to Anthropic\n────\n/tmp";
+        assert_eq!(pi_setup_prompt(signed), None);
+        assert_eq!(pi_setup_prompt(" ▀▀█  v1.0.1\n hello\n────"), None);
+        // Wrapped in a split pane.
+        let narrow = "Warning: No models available. Use /login to log into a\nprovider via OAuth or API key. See:\n\n/x/node_modules/@earendil-works/pi-\ncoding-agent/docs/providers.md\n\n────\nwh\n────";
+        assert_eq!(pi_setup_prompt(narrow), Some("Connect a provider: type /login in Pi"));
     }
 
     #[test]
