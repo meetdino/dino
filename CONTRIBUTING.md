@@ -12,8 +12,11 @@ you use, and get it merged.
 
 ```sh
 cargo build --release      # target/release/dino: the CLI, and dinod (`dino daemon`)
-./app/build.sh             # app/build/Dino.app, ad hoc signed, with that dino inside
+./app/build.sh             # app/build/Dino.app, ad hoc signed
 ```
+
+The app runs the `dino` it finds on your `PATH` or in `~/.local/bin` (or `DINO_BIN`, when set), so
+link the one you built: `ln -sf "$PWD/target/release/dino" ~/.local/bin/dino`.
 
 ## Where things are
 
