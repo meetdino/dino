@@ -47,8 +47,13 @@ cargo build --release      # the dino command and dinod: target/release/dino
 ./app/build.sh             # Dino.app, ad hoc signed: app/build/Dino.app
 ```
 
-`./app/build.sh` builds the Rust workspace too, and prints where the app is. Open it from there;
-it uses the `dino` it was built with.
+`./app/build.sh` builds the Rust workspace too, and prints where the app is. The app runs the
+`dino` command it finds on your `PATH` or in `~/.local/bin`, so put the one you built there:
+
+```sh
+mkdir -p ~/.local/bin && ln -sf "$PWD/target/release/dino" ~/.local/bin/dino
+open app/build/Dino.app
+```
 
 Try a build without touching the dino you use every day: give it its own home, and it runs its own
 `dinod` there.
