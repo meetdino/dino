@@ -45,7 +45,12 @@ enum SessionStatus {
 }
 
 enum Brand {
-    static let green = Color(red: 0x75 / 255, green: 0xB3 / 255, blue: 0x40 / 255)
+    /// dino's green; darker in light mode, where the dark mode's is too faint for text on white.
+    static let green = Color(nsColor: NSColor(name: "dino.green") { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 0x75 / 255, green: 0xB3 / 255, blue: 0x40 / 255, alpha: 1)
+            : NSColor(srgbRed: 0x4A / 255, green: 0x85 / 255, blue: 0x1C / 255, alpha: 1)
+    })
     static let spike = Color(red: 0xFC / 255, green: 0x4F / 255, blue: 0x26 / 255)
 }
 
