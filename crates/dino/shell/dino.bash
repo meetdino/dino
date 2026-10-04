@@ -2,7 +2,8 @@
 #
 # The AI line: start a line with # and press Enter, and your own agent (Claude Code or Codex, run
 # with no tools) answers with one command. On bash 4 or later ⌘I in Dino (Alt+I elsewhere,
-# $DINO_AI_KEY) puts it straight on the prompt; the old bash macOS ships can only offer it with ↑.
+# $DINO_AI_KEY) puts it straight on the prompt; on the old bash macOS ships, ⌘I asks the same way
+# as the # line, and ↑ puts the answer on the prompt.
 # Nothing runs by itself. A command that could destroy something arrives commented out: delete
 # the # to run it. ⌘⏎ in Dino (Alt+Enter elsewhere) hands the line to the agent as a session.
 # Alt+R (Ctrl+R with DINO_SEARCH_CTRL_R=1) searches history and dino's sessions together.
@@ -28,6 +29,22 @@ _dino_suggest_for() {
   esac
 }
 
+# The line to an agent: a session of its own in Dino, the command to start one elsewhere.
+_dino_hand_off() {
+  local out
+  if [[ -n $DINO_SESSION ]]; then
+    if out=$(command "$_DINO_BIN" ai agent --cwd "$PWD" -- "$1" 2>&1 </dev/null); then
+      printf 'handed to your agent, in session %s\n' "$out" >/dev/tty
+    else
+      printf '✗ %s\n' "$out" >/dev/tty
+    fi
+  else
+    out="$(printf '%q' "$_DINO_BIN") ai agent -- $(printf '%q' "$1")"
+    builtin history -s -- "$out"
+    printf '→ %s   (↑ puts it on the prompt)\n' "$out"
+  fi
+}
+
 # Keyless, any bash: a line starting with # is a request, answered after it "runs".
 _dino_prompt_command() {
   local last
@@ -35,8 +52,16 @@ _dino_prompt_command() {
   last=${last#*[0-9]  }
   [[ $last == \#* && $last != \#!* && $last != "$_DINO_ASKED" ]] || return 0
   _DINO_ASKED=$last
-  local line=${last#\#}
-  line=${line# }
+  local line=$last
+  # `#@ …` is ⌘⏎ on old bash: the line goes to an agent.
+  if [[ $line == \#@* ]]; then
+    line=${line#\#@}
+    line=${line# }
+    [[ -n ${line// } ]] || return 0
+    _dino_hand_off "$line"
+    return 0
+  fi
+  while [[ $line == \#* ]]; do line=${line#\#}; line=${line# }; done
   [[ -n ${line// } ]] || return 0
   _dino_suggest_for "$line" || return 0
   builtin history -s -- "$_DINO_OUT"
@@ -91,4 +116,14 @@ if (( BASH_VERSINFO[0] >= 4 )); then
   bind -x '"\e\C-m": _dino_ai_agent'
   bind -x '"\er": _dino_search'
   [[ -n $DINO_SEARCH_CTRL_R ]] && bind -x '"\C-r": _dino_search'
+else
+  # Old bash can't change the line from a key, so ⌘I (Alt+I) makes it a # request and ⌘⏎
+  # (Alt+Enter) a #@ one, and enters it, through keys of its own for the start of the line and
+  # Enter, whatever the user bound.
+  bind '"\e[57397~": beginning-of-line'
+  bind '"\e[57398~": accept-line'
+  bind '"\e[57300~": "\e[57397~# \e[57398~"'
+  bind "\"${DINO_AI_KEY:-\\ei}\": \"\\e[57397~# \\e[57398~\""
+  bind '"\e[57301~": "\e[57397~#@ \e[57398~"'
+  bind '"\e\C-m": "\e[57397~#@ \e[57398~"'
 fi
