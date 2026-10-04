@@ -1149,7 +1149,7 @@ private struct AgentsPane: View {
     @State private var showMore = false
 
     /// The ones dino works with best, in this order; the rest are under More Agents.
-    private static let featured = ["claude", "codex", "kimi", "qwen", "pi", "hermes", "codewhale", "opencode"]
+    private static let featured = ["claude", "codex", "copilot", "cursor", "amp", "kimi", "qwen", "pi", "hermes", "codewhale", "opencode"]
 
     private var main: [AgentSetupInfo] {
         Self.featured.compactMap { id in store.setup?.first { $0.id == id } }

@@ -76,10 +76,11 @@ pub fn install_hint(id: &str) -> &'static str {
         "pi" => "npm i -g --ignore-scripts @earendil-works/pi-coding-agent",
         "hermes" => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
         "codewhale" => "npm i -g codewhale",
+        "copilot" => "npm i -g @github/copilot",
         "opencode" => "curl -fsSL https://opencode.ai/install | bash",
         "crush" => "brew install charmbracelet/tap/crush",
         "aider" => "pip install aider-install && aider-install",
-        "amp" => "npm i -g @sourcegraph/amp",
+        "amp" => "curl -fsSL https://ampcode.com/install.sh | bash",
         "cursor" => "curl https://cursor.com/install -fsS | bash",
         _ => "",
     }
@@ -105,15 +106,17 @@ pub fn setup(id: &str) -> Setup {
         "pi" => ("https://pi.dev", Some("pi"), Some("/login")),
         "hermes" => ("https://hermes-agent.nousresearch.com/docs/", Some("hermes setup"), None),
         "codewhale" => ("https://github.com/Hmbown/CodeWhale", Some("codewhale"), Some("/provider")),
+        "copilot" => ("https://docs.github.com/copilot/how-tos/copilot-cli", Some("copilot login"), None),
         "opencode" => ("https://opencode.ai/docs", Some("opencode auth login"), None),
         "crush" => ("https://github.com/charmbracelet/crush", None, None),
         "aider" => ("https://aider.chat", None, None),
-        "amp" => ("https://ampcode.com", None, None),
-        "cursor" => ("https://cursor.com/cli", None, None),
+        "amp" => ("https://ampcode.com/manual", Some("amp login"), None),
+        "cursor" => ("https://cursor.com/docs/cli/overview", Some("cursor-agent login"), None),
         _ => ("", None, None),
     };
     let sign_in_note = match id {
         "pi" => Some("Pi has no models of its own. Sign in with an account you already have with an AI provider, or an API key; dino opens Pi, then type /login. Or run it on a provider from Settings → Models & Providers."),
+        "copilot" => Some("Copilot CLI runs on your GitHub account's Copilot plan (Copilot Free included). It also uses the GitHub CLI's sign-in when there is one."),
         _ => None,
     };
     Setup { homepage, sign_in, sign_in_hint, sign_in_note }
@@ -141,6 +144,8 @@ pub fn sign_in_status(id: &str, bin: &Path) -> Option<(bool, Option<String>)> {
         "codex" => codex_status(&run_quietly(bin, &["login", "status"])?),
         "pi" => pi_status(bin),
         "opencode" => opencode_status(),
+        "cursor" => cursor_status(&run_quietly(bin, &["status", "--format", "json"])?),
+        "amp" => crate::agent::amp::signed_in(bin).map(|on| (on, None)),
         _ => None,
     }
 }
@@ -203,6 +208,13 @@ fn pi_providers(list: &str) -> Option<(bool, Option<String>)> {
         n => Some(format!("{n} providers")),
     };
     Some((!providers.is_empty(), how))
+}
+
+/// `cursor-agent status --format json`: `isAuthenticated`, and nothing else of it kept (it names the
+/// account).
+fn cursor_status(out: &str) -> Option<(bool, Option<String>)> {
+    let v: serde_json::Value = serde_json::from_str(&out[out.find('{')?..]).ok()?;
+    Some((v["isAuthenticated"].as_bool()?, None))
 }
 
 /// `codex login status`: "Logged in using ChatGPT", "Logged in using an API key", "Not logged in".
@@ -278,7 +290,8 @@ pub fn version_of(bin: &Path) -> Option<String> {
         if child.try_wait().ok()?.is_some() {
             let out = child.wait_with_output().ok()?;
             let text = String::from_utf8_lossy(&out.stdout);
-            return text.split_whitespace().find(|w| w.trim_start_matches('v').starts_with(|c: char| c.is_ascii_digit())).map(|v| v.trim_start_matches('v').to_string());
+            // "GitHub Copilot CLI 1.0.91." ends its sentence.
+            return text.split_whitespace().find(|w| w.trim_start_matches('v').starts_with(|c: char| c.is_ascii_digit())).map(|v| v.trim_start_matches('v').trim_end_matches(['.', ',']).to_string());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -371,6 +384,16 @@ mod tests {
         assert_eq!(codex_status("Logged in using an API key - sk-proj-***ABCD\n"), Some((true, Some("API key".into()))));
         assert_eq!(codex_status("Not logged in\n"), Some((false, None)));
         assert_eq!(codex_status("error: something else\n"), None);
+    }
+
+    #[test]
+    fn cursor_status_is_read_without_the_account() {
+        // Cursor Agent 2026.10.01, signed out.
+        let out = "{\n  \"status\": \"unauthenticated\",\n  \"isAuthenticated\": false,\n  \"hasAccessToken\": false,\n  \"hasRefreshToken\": false,\n  \"message\": \"Not logged in\"\n}\n";
+        assert_eq!(cursor_status(out), Some((false, None)));
+        let signed = r#"{"status":"authenticated","isAuthenticated":true,"userInfo":{"email":"me@example.com"}}"#;
+        assert_eq!(cursor_status(signed), Some((true, None)), "the account isn't kept");
+        assert_eq!(cursor_status("Error: oops"), None);
     }
 
     #[test]

@@ -328,7 +328,7 @@ private struct CloudNote: View {
             if session.session_id.isEmpty {
                 Text("Claude Code on the web keeps its sessions in the cloud. Continuing opens the picker, and the one you choose is brought into a checkout here.")
             } else {
-                Text("This task runs in \(session.agent == "codex" ? "Codex" : "Claude")'s cloud; its conversation is read there.")
+                Text("This task runs in \(AgentNames.of(session.agent))'s cloud; its conversation is read there.")
                 if let url = session.url, let u = URL(string: url) {
                     Link(url, destination: u).font(.caption)
                 }

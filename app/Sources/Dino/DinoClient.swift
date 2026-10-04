@@ -383,15 +383,20 @@ struct FoundSession: Codable, Identifiable, Equatable {
     /// Asking for something (a permission) in its tmux pane.
     var asking: Bool { status == "needs" }
     /// Started by hand in a dino shell, and dino can continue it (it has a conversation to resume).
-    var continuable: Bool { ["claude", "codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode"].contains(baseAgent) && !session_id.isEmpty }
-    var agentName: String { Self.name(agent) }
-    /// What people call agent `id` ("kimi-free" is Kimi).
-    static func name(_ id: String) -> String {
-        let base = id.hasSuffix("-free") ? String(id.dropLast(5)) : id
-        return ["claude": "Claude", "codex": "Codex", "qwen": "Qwen", "kimi": "Kimi", "pi": "Pi", "hermes": "Hermes", "codewhale": "CodeWhale", "opencode": "OpenCode"][base] ?? id
-    }
+    var continuable: Bool { AgentNames.short[baseAgent] != nil && !session_id.isEmpty }
+    var agentName: String { AgentNames.of(agent) }
     /// The agent, whether or not it ran on the free tier ("kimi-free" is Kimi).
     var baseAgent: String { agent.hasSuffix("-free") ? String(agent.dropLast(5)) : agent }
+}
+
+/// What each agent dino can continue is called, short ("Copilot"), by its id; free-tier ones
+/// ("kimi-free") as their agent.
+enum AgentNames {
+    static let short = ["claude": "Claude", "codex": "Codex", "qwen": "Qwen", "kimi": "Kimi", "pi": "Pi", "hermes": "Hermes", "codewhale": "CodeWhale", "opencode": "OpenCode", "copilot": "Copilot", "cursor": "Cursor", "amp": "Amp"]
+
+    static func of(_ agent: String) -> String {
+        short[agent.hasSuffix("-free") ? String(agent.dropLast(5)) : agent] ?? agent
+    }
 }
 
 /// The tmux pane an agent runs in.

@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn only_the_real_claude_code_gets_it() {
         let mut s = Settings::default();
-        for agent in ["claude-free", "codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode", "shell"] {
+        for agent in ["claude-free", "codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode", "copilot", "cursor", "amp", "shell"] {
             for launch in [Launch::Local, Launch::Remote, Launch::Headless] {
                 assert_eq!(for_launch(agent, launch, false, &s, &keys(), Some(false)), None, "{agent} {launch:?}");
             }
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn no_agent_or_provider_route_wiring_carries_it() {
         use crate::providers::Format;
-        let ids = ["claude", "claude-free", "codex", "qwen", "qwen-free", "kimi", "kimi-free", "pi", "pi-free", "hermes", "hermes-free", "codewhale", "opencode"];
+        let ids = ["claude", "claude-free", "codex", "qwen", "qwen-free", "kimi", "kimi-free", "pi", "pi-free", "hermes", "hermes-free", "codewhale", "opencode", "copilot", "cursor", "amp"];
         let base = |p: &str| format!("http://127.0.0.1:1/s/1/{p}");
         for id in ids {
             let a = crate::agent::agent(id).unwrap_or_else(|| panic!("no adapter {id}"));

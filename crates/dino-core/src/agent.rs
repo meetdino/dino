@@ -11,9 +11,12 @@ use crate::history::Turn;
 use crate::models::Catalog;
 use crate::providers::Format;
 
+pub(crate) mod amp;
 mod claude;
 pub mod codex;
 mod codewhale;
+mod copilot;
+mod cursor;
 mod hermes;
 mod kimi;
 mod opencode;
@@ -44,6 +47,9 @@ pub enum StatusSource {
     /// The agent serves its own API on a port dino picks (`serve`), and dino follows the events
     /// it streams there (`server_event`); see dinod's `agentserver`.
     Server,
+    /// It keeps no record dino can read as it goes: its output going quiet, and the questions its
+    /// screen asks (`asking`), are all dino goes on.
+    Screen,
 }
 
 /// What one event from an agent's own server (`StatusSource::Server`) says.
@@ -225,6 +231,17 @@ pub trait Agent: Sync {
     fn log_event(&self, _line: &serde_json::Value) -> LogEvent {
         LogEvent::Other
     }
+    /// A question its own screen puts to the user that its record doesn't (its folder trust, a
+    /// permission dialog), in a few words; `None` when the screen asks nothing. Read in a dino
+    /// shell, in a session's state, and, for `StatusSource::Polled`, while its store says it's on
+    /// a turn (reported as waiting on the user).
+    fn asking(&self, _screen: &str) -> Option<String> {
+        None
+    }
+    /// Its screen can ask what `asking` reads, so it's worth reading.
+    fn asks_on_screen(&self) -> bool {
+        false
+    }
     /// For agents that can't be given a conversation id up front: the conversation a process of it
     /// started in `cwd` at `since` (seconds) began, not one of `claimed`.
     fn new_conversation(&self, _cwd: &Path, _since: u64, _claimed: &[String]) -> Option<String> {
@@ -233,11 +250,6 @@ pub trait Agent: Sync {
     /// With `StatusSource::Polled`: whether conversation `session` is on a turn, as its store says
     /// now, in a process of it started at `since` (seconds).
     fn turn_now(&self, _session: &str, _since: u64) -> Option<bool> {
-        None
-    }
-    /// With `StatusSource::Polled`, for agents whose store can't say they wait on the user: what
-    /// its own dialog on `screen` asks of them, while it's on a turn.
-    fn asking(&self, _screen: &str) -> Option<String> {
         None
     }
     /// With `StatusSource::Server`: env vars and arguments that have it serve its API on `port`
@@ -337,10 +349,13 @@ static HERMES: hermes::Hermes = hermes::Hermes { free: false };
 static HERMES_FREE: hermes::Hermes = hermes::Hermes { free: true };
 static CODEWHALE: codewhale::CodeWhale = codewhale::CodeWhale;
 static OPENCODE: opencode::OpenCode = opencode::OpenCode;
+static COPILOT: copilot::Copilot = copilot::Copilot;
+static CURSOR: cursor::Cursor = cursor::Cursor;
+static AMP: amp::Amp = amp::Amp;
 
 /// The agents dino works with, in the order they're listed and looked for.
-pub fn all() -> [&'static dyn Agent; 8] {
-    [&CLAUDE, &CODEX, &QWEN, &KIMI, &PI, &HERMES, &CODEWHALE, &OPENCODE]
+pub fn all() -> [&'static dyn Agent; 11] {
+    [&CLAUDE, &CODEX, &QWEN, &KIMI, &PI, &HERMES, &CODEWHALE, &OPENCODE, &COPILOT, &CURSOR, &AMP]
 }
 
 /// The adapter for launcher agent id `id` (the free-tier ones, "<agent>-free", too); `None` for

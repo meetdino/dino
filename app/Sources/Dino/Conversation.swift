@@ -195,7 +195,7 @@ private struct TurnBubble: View {
             }
         default:
             VStack(alignment: .leading, spacing: 3) {
-                Text(FoundSession.name(agent)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(AgentNames.of(agent)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 Text(markdown(turn.text)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
