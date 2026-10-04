@@ -1,0 +1,41 @@
+# Local development: Postgres, and the server built from this checkout.
+#
+#   docker compose up db                       # just Postgres, for `cargo run` and `cargo test`
+#   docker compose up                          # everything
+#
+# The server here runs in development mode: sign-in codes go to ./dino-cloud-mail.log.
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: dino
+      POSTGRES_PASSWORD: dino
+      POSTGRES_DB: dino_cloud
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "dino"]
+      interval: 2s
+      retries: 30
+
+  server:
+    build:
+      context: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://dino:dino@db:5432/dino_cloud
+      DINO_CLOUD_URL: http://127.0.0.1:8787
+      DINO_ENV: development
+      DINO_MAIL_LOG: /tmp/mail/dino-cloud-mail.log
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./:/tmp/mail
+
+volumes:
+  db:

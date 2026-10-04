@@ -1,0 +1,13 @@
+[package]
+name = "dino-sync"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "dino's settings sync: records, clocks and merge, shared by dinod and dino-cloud. A copy of crates/dino-sync from the dino repo (see UPSTREAM)."
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+
+[dev-dependencies]
+proptest = "1"

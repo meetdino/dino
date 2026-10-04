@@ -1,0 +1,24 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "cloud": {
+      "root": "crates/server",
+      "runtime": "rust",
+      "entrypoint": "src/main.rs"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "cloud"
+      }
+    }
+  ],
+  "crons": [
+    {
+      "path": "/internal/cron",
+      "schedule": "17 4 * * *"
+    }
+  ]
+}
