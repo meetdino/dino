@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -59,8 +59,6 @@ pub(crate) const SETTLE: Duration = Duration::from_secs(3);
 #[derive(Default)]
 pub(crate) struct Scheduler {
     tasks: Mutex<Vec<ScheduledTask>>,
-    /// `caffeinate`, while it keeps the Mac awake for the tasks.
-    awake: Mutex<Option<Child>>,
     /// One decision at a time (a schedule, an event, a run's end), so nothing runs twice.
     ticking: Mutex<()>,
     /// Wakes the deciding thread: set by a change to an automation, a file change, an event.
@@ -1249,31 +1247,13 @@ fn post_comment(d: &Daemon, t: &ScheduledTask, run: &ScheduledRun, text: String)
     });
 }
 
-/// While the setting is on and any task runs on a schedule, or while the lid is kept awake for
-/// agents, `caffeinate -i` holds an IOPM assertion against idle sleep. It exits with dinod (`-w`).
+/// While the setting is on and any task runs on a schedule, dinod's own power assertion keeps the
+/// Mac from idle sleep (see [`crate::awake`], which also holds it for working agents and the lid).
 pub(crate) fn keep_awake(d: &Daemon) {
-    // Also while the lid is kept awake for agents: idle sleep is the other way to stop them.
-    let want = d.lid.holding() || Settings::load().machine.keep_awake && d.schedule.tasks.lock().unwrap().iter().any(|t| t.enabled && t.scheduled() && t.frequency != Frequency::Manual);
-    let mut awake = d.schedule.awake.lock().unwrap();
-    if let Some(c) = awake.as_mut()
-        && !matches!(c.try_wait(), Ok(None))
-    {
-        *awake = None;
-    }
-    if want && awake.is_none() {
-        let pid = std::process::id().to_string();
-        *awake = Command::new("/usr/bin/caffeinate")
-            .args(["-i", "-w", &pid])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .inspect_err(|e| eprintln!("dinod: couldn't keep the Mac awake: {e}"))
-            .ok();
-    } else if !want && let Some(mut c) = awake.take() {
-        let _ = c.kill();
-        let _ = c.wait();
-    }
+    let settings = Settings::load();
+    let scheduled = settings.machine.keep_awake && d.schedule.tasks.lock().unwrap().iter().any(|t| t.enabled && t.scheduled() && t.frequency != Frequency::Manual);
+    d.awake.set_scheduled(scheduled);
+    crate::awake::apply(d, &settings);
 }
 
 // ---- When: local time, through libc, so daylight saving time is the system's. ----

@@ -1023,6 +1023,82 @@ pub struct PowerInfo {
     pub ready: Option<bool>,
     /// The last time turning sleep off or on failed.
     pub error: Option<String>,
+    /// What keeps the Mac from idle sleep now, from the system's power assertions: dinod's own
+    /// first, then the rest by when they started. Empty from an older dinod.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub awake: Vec<AwakeHolder>,
+}
+
+/// One process holding a power assertion that keeps the Mac from idle sleep.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct AwakeHolder {
+    /// The process the assertion is for: who asked, when another process holds it for them
+    /// (`caffeinate -w`, a browser's audio).
+    pub pid: u32,
+    /// Its name (`caffeinate`, `Safari`, `dino`).
+    pub process: String,
+    /// What the assertion says it's for ("caffeinate command-line tool", "dino: 2 agents working").
+    pub name: String,
+    /// The assertion's type: `PreventUserIdleSystemSleep`, `PreventSystemSleep`,
+    /// `PreventUserIdleDisplaySleep`.
+    pub kind: String,
+    /// When it was taken (unix seconds).
+    pub since: Option<u64>,
+    /// The dino session whose processes it's under, if it is.
+    pub session: Option<String>,
+    /// dinod's own, for working agents (`awake_while_working`), scheduled automations or the lid.
+    pub ours: bool,
+    /// Part of macOS (powerd while the display is on, Handoff…), not something you started.
+    pub system: bool,
+}
+
+impl AwakeHolder {
+    /// What sleep it keeps away, in a word or two.
+    pub fn kind_label(&self) -> &str {
+        match self.kind.as_str() {
+            "PreventUserIdleSystemSleep" | "NoIdleSleepAssertion" => "idle sleep",
+            "PreventSystemSleep" => "all sleep",
+            "PreventUserIdleDisplaySleep" | "NoDisplaySleepAssertion" => "display sleep",
+            k => k,
+        }
+    }
+}
+
+impl PowerInfo {
+    /// What keeps the Mac awake now, in a line, or `None` when nothing you'd care about does:
+    /// "Staying awake · 2 agents working", "Staying awake · caffeinate (Claude: Fix the build)",
+    /// "Awake with the lid closed · 2 agents working". `session` names a session by its id.
+    pub fn awake_line(&self, session: impl Fn(&str) -> Option<String>) -> Option<String> {
+        let mut parts: Vec<String> = vec![];
+        if let Some(o) = self.awake.iter().find(|h| h.ours) {
+            parts.push(o.name.strip_prefix("dino: ").unwrap_or(&o.name).to_string());
+        }
+        // Those in a dino session first: they're about your agents.
+        let mut others: Vec<&AwakeHolder> = self.awake.iter().filter(|h| !h.ours && !h.system).collect();
+        others.sort_by_key(|h| h.session.as_deref().and_then(&session).is_none());
+        let mut seen: Vec<String> = vec![];
+        for h in &others {
+            let said = match h.session.as_deref().and_then(&session) {
+                Some(s) => format!("{} ({s})", h.process),
+                None => h.process.clone(),
+            };
+            if !seen.contains(&said) {
+                seen.push(said);
+            }
+        }
+        // dinod's own reason, then one other or how many others.
+        match (parts.is_empty(), seen.as_slice()) {
+            (_, []) => {}
+            (_, [one]) => parts.push(one.clone()),
+            (false, many) => parts.push(format!("{} others", many.len())),
+            (true, [first, rest @ ..]) => parts.extend([first.clone(), format!("{} more", rest.len())]),
+        }
+        let head = if self.holding { "Awake with the lid closed" } else { "Staying awake" };
+        if parts.is_empty() {
+            return self.holding.then(|| head.to_string());
+        }
+        Some(format!("{head} · {}", parts.join(" · ")))
+    }
 }
 
 /// The Claude subscription token, as dinod holds it: never the token itself.
@@ -1067,6 +1143,47 @@ pub struct ModelRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn awake_line_says_what_keeps_the_mac_awake() {
+        let h = |process: &str, name: &str, session: Option<&str>, ours: bool, system: bool| AwakeHolder {
+            pid: 1,
+            process: process.into(),
+            name: name.into(),
+            kind: "PreventUserIdleSystemSleep".into(),
+            since: None,
+            session: session.map(String::from),
+            ours,
+            system,
+        };
+        let names = |id: &str| (id == "3").then(|| "Claude: Retry with backoff".to_string());
+        let mut p = PowerInfo::default();
+        assert_eq!(p.awake_line(names), None);
+        // macOS's own (the display is on) isn't worth a line.
+        p.awake = vec![h("powerd", "Powerd - Prevent sleep while display is on", None, false, true)];
+        assert_eq!(p.awake_line(names), None);
+        p.awake.push(h("caffeinate", "caffeinate command-line tool", Some("3"), false, false));
+        assert_eq!(p.awake_line(names).as_deref(), Some("Staying awake · caffeinate (Claude: Retry with backoff)"));
+        p.awake.insert(0, h("dino", "dino: 2 agents working", None, true, false));
+        assert_eq!(p.awake_line(names).as_deref(), Some("Staying awake · 2 agents working · caffeinate (Claude: Retry with backoff)"));
+        // Claude Code's caffeinates come one after another: the same holder says it once.
+        p.awake.push(h("caffeinate", "caffeinate command-line tool", Some("3"), false, false));
+        p.awake.push(h("Safari", "Playing audio", None, false, false));
+        assert_eq!(p.awake_line(names).as_deref(), Some("Staying awake · 2 agents working · 2 others"));
+        p.awake.remove(0);
+        assert_eq!(p.awake_line(names).as_deref(), Some("Staying awake · caffeinate (Claude: Retry with backoff) · 1 more"));
+        // One in a session comes first, whenever it started.
+        p.awake.insert(0, h("caffeinate", "caffeinate command-line tool", None, false, false));
+        assert_eq!(p.awake_line(names).as_deref(), Some("Staying awake · caffeinate (Claude: Retry with backoff) · 2 more"));
+        p.awake.clear();
+        p.holding = true;
+        assert_eq!(p.awake_line(names).as_deref(), Some("Awake with the lid closed"));
+        p.awake = vec![h("dino", "dino: an agent working", None, true, false)];
+        assert_eq!(p.awake_line(names).as_deref(), Some("Awake with the lid closed · an agent working"));
+        // An older dinod sends no list, and a newer client reads it as empty.
+        let old: PowerInfo = serde_json::from_str(r#"{"holding":false,"since":null,"external":false,"note":null,"note_at":null,"ready":null,"error":null}"#).unwrap();
+        assert!(old.awake.is_empty());
+    }
 
     #[test]
     fn session_cost_takes_older_and_newer_dinods() {

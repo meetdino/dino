@@ -702,6 +702,65 @@ struct PowerInfo: Codable, Equatable {
     /// The one-time permission is in place; only in a `power` reply.
     var ready: Bool?
     var error: String?
+    /// What keeps the Mac from idle sleep now, dinod's own first; nil from an older dinod.
+    var awake: [AwakeHolder]?
+}
+
+/// A process holding a power assertion that keeps the Mac awake.
+struct AwakeHolder: Codable, Equatable, Identifiable {
+    var pid: UInt32
+    /// `caffeinate`, `Google Chrome`, `dino`.
+    var process: String
+    /// What the assertion says it's for.
+    var name: String
+    var kind: String
+    var since: UInt64?
+    /// The session whose processes it's under.
+    var session: String?
+    /// dinod's own.
+    var ours: Bool
+    /// Part of macOS, not something you started.
+    var system: Bool
+
+    var id: String { "\(pid) \(kind) \(name) \(since ?? 0)" }
+
+    /// What sleep it keeps away, in a word or two.
+    var kindLabel: String {
+        switch kind {
+        case "PreventUserIdleSystemSleep", "NoIdleSleepAssertion": "Idle sleep"
+        case "PreventSystemSleep": "All sleep"
+        case "PreventUserIdleDisplaySleep", "NoDisplaySleepAssertion": "Display sleep"
+        default: kind
+        }
+    }
+}
+
+extension PowerInfo {
+    /// What keeps the Mac awake now, in a line, or nil when nothing worth saying does; as
+    /// `PowerInfo::awake_line` in dino-core, which `dino status` prints.
+    func awakeLine(session: (String) -> String?) -> String? {
+        let holders = awake ?? []
+        var parts: [String] = []
+        if let o = holders.first(where: \.ours) {
+            parts.append(o.name.hasPrefix("dino: ") ? String(o.name.dropFirst(6)) : o.name)
+        }
+        var seen: [String] = []
+        // Those in a dino session first: they're about your agents.
+        let others = holders.filter { !$0.ours && !$0.system }
+        for h in others.filter({ $0.session.flatMap(session) != nil }) + others.filter({ $0.session.flatMap(session) == nil }) {
+            let said = h.session.flatMap(session).map { "\(h.process) (\($0))" } ?? h.process
+            if !seen.contains(said) { seen.append(said) }
+        }
+        switch (parts.isEmpty, seen.count) {
+        case (_, 0): break
+        case (_, 1): parts.append(seen[0])
+        case (false, let n): parts.append("\(n) others")
+        case (true, let n): parts += [seen[0], "\(n - 1) more"]
+        }
+        let head = holding ? "Awake with the lid closed" : "Staying awake"
+        if parts.isEmpty { return holding ? head : nil }
+        return ([head] + parts).joined(separator: " · ")
+    }
 }
 
 private struct PowerResponse: Decodable {
