@@ -73,6 +73,7 @@ dino . claude             # Claude Code in this folder
 dino ls                   # every session
 dino attach <id>          # a session in this terminal
 dino found                # agents running elsewhere on this Mac
+dino stats                # usage across every agent: tokens, models, streaks
 dino --help               # the rest
 ```
 

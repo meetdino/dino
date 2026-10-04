@@ -337,6 +337,20 @@ impl Agent for Claude {
         crate::transcript::claude_tail(session_id, budget)
     }
 
+    // The free tier's conversations are Claude's own files, read once, for Claude.
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        if self.free {
+            return vec![];
+        }
+        let mut out = vec![];
+        for p in history::claude_usage_files() {
+            if let Some((text, _)) = seen.new_lines(&p, b"\"usage\"") {
+                out.extend(history::claude_usage_in(&text));
+            }
+        }
+        out
+    }
+
     fn login(&self) -> Option<String> {
         let account = crate::discover::read_json(home().join(".claude.json")).map(|v| v["oauthAccount"].clone()).filter(|a| a.is_object());
         Some(match account {

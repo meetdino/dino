@@ -2,7 +2,8 @@
 //! servers: the CLI runs the tools and talks to Amp, never to a model provider, so dino can't
 //! route or meter it. Its threads live in Amp's cloud (`T-<uuid>`), listed by `amp threads list`
 //! and continued with `amp threads continue`; nothing on disk records them as it goes, so dino goes
-//! on its output and what its screen asks. Its mode (`-m low|medium|high|ultra`) picks the model,
+//! on its output and what its screen asks. The copy of each thread it caches here says what its
+//! answers used (see `usage`). Its mode (`-m low|medium|high|ultra`) picks the model,
 //! as its help lists them.
 
 use std::path::{Path, PathBuf};
@@ -249,9 +250,62 @@ impl Agent for Amp {
         None
     }
 
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(threads_dir()).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "json") || !seen.changed(&p) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            seen.remember(&p);
+            out.extend(usage_in(&text));
+        }
+        out
+    }
+
     fn turns(&self, _text: &str, _path: &Path, _start: u64) -> Vec<Turn> {
         vec![]
     }
+}
+
+/// Where it caches the threads it has run here: `$XDG_DATA_HOME/amp/threads`, else
+/// `~/.local/share/amp/threads`; one JSON document per thread, rewritten as it goes.
+fn threads_dir() -> PathBuf {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".local/share"));
+    data.join("amp/threads")
+}
+
+/// The answers in a thread's document: its assistant messages with the usage Amp put on them.
+fn usage_in(text: &str) -> Vec<crate::usage::Used> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else { return vec![] };
+    let Some(thread) = v["id"].as_str() else { return vec![] };
+    let cwd = v["env"]["initial"]["trees"][0]["uri"].as_str().map(|u| u.strip_prefix("file://").unwrap_or(u).to_string());
+    let mut out = vec![];
+    for (i, m) in v["messages"].as_array().into_iter().flatten().enumerate() {
+        let u = &m["usage"];
+        if m["role"] != "assistant" || !u.is_object() {
+            continue;
+        }
+        let at = [&u["timestamp"], &m["meta"]["sentAt"]].into_iter().find_map(crate::history::ms_of);
+        let Some(at_ms) = at else { continue };
+        let which = m["messageId"].as_u64().map_or_else(|| i.to_string(), |n| n.to_string());
+        out.push(crate::usage::Used { undated: false,
+            id: format!("{thread}:{which}"),
+            at_ms,
+            conversation: thread.into(),
+            cwd: cwd.clone(),
+            model: u["model"].as_str().map(String::from),
+            input: crate::history::count(&u["inputTokens"]),
+            cache_read: crate::history::count(&u["cacheReadInputTokens"]),
+            cache_write: crate::history::count(&u["cacheCreationInputTokens"]),
+            output: crate::history::count(&u["outputTokens"]),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -300,5 +354,17 @@ mod tests {
         assert!(Amp.asking(" Approval Required\n Allow Once  Reject").is_some());
         assert_eq!(Amp.asking("Would you like to log in to Amp? [(y)es, (n)o]:").as_deref(), Some("Sign in to Amp"));
         assert_eq!(Amp.asking("> hello").as_deref(), None);
+    }
+
+    #[test]
+    fn its_thread_cache_says_what_each_answer_used() {
+        let doc = r#"{"id":"T-1","env":{"initial":{"trees":[{"uri":"file:///r/proj"}]}},"messages":[
+            {"role":"user","messageId":0,"content":[]},
+            {"role":"assistant","messageId":1,"usage":{"model":"claude-x","inputTokens":10,"outputTokens":3,"cacheCreationInputTokens":500,"cacheReadInputTokens":0,"timestamp":"2026-10-04T01:00:00Z"}},
+            {"role":"assistant","messageId":2}]}"#;
+        let used = usage_in(doc);
+        assert_eq!(used.len(), 1);
+        assert_eq!((used[0].id.as_str(), used[0].conversation.as_str(), used[0].cwd.as_deref()), ("T-1:1", "T-1", Some("/r/proj")));
+        assert_eq!((used[0].input, used[0].cache_write, used[0].output), (10, 500, 3));
     }
 }

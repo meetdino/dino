@@ -39,6 +39,7 @@ mod providers;
 mod schedule;
 mod servers;
 mod shell;
+mod stats;
 mod subtoken;
 mod sync;
 mod tmux;
@@ -316,6 +317,7 @@ pub fn run() -> anyhow::Result<()> {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 save(&d);
                 save_live_screens(&d, false);
+                stats::tick(&d);
             }
         });
     }
@@ -1212,6 +1214,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 None => Response::Error { message: "that tmux pane is gone".into() },
             },
             Request::TakeOver { id } => match take_over(d, &id) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Stats { range } => match stats::report(d, range) {
+                Ok(report) => Response::Stats { report: Box::new(report) },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::StatsClear => match stats::clear(d) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
@@ -2790,6 +2800,8 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
 
 /// Notice agents started by hand in dino's shells, and when they exit back to the prompt.
 fn watch_shells(d: &Daemon) {
+    // Calls from an agent typed in a shell are written down while dinod still knows it's there.
+    stats::flush(d);
     let shells: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| s.agent_id == "shell" && s.host.is_none() && !s.pane.is_exited()).cloned().collect();
     for s in shells {
         let fg = s.pane.foreground().filter(|fg| Some(*fg) != s.pane.pid());
@@ -2809,6 +2821,7 @@ fn watch_shells(d: &Daemon) {
                 // Back at the prompt: what an agent's hooks said of it went with it.
                 if i.fg.is_some() {
                     d.proxy.stats.agent_left(&s.id);
+                    stats::session_ended();
                 }
                 // Taken at the prompt: an agent can retitle before a poll sees it start.
                 *i = Inside { before: Some(s.pane.title()), ..Inside::default() };

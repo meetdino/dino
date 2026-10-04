@@ -28,6 +28,7 @@ pub mod status;
 pub mod statusline;
 pub mod transcript;
 pub mod trust;
+pub mod usage;
 pub mod worktree;
 
 /// A coding agent (or plain program) dino knows how to launch.

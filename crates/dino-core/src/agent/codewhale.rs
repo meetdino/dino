@@ -530,6 +530,26 @@ impl Agent for CodeWhale {
     }
 
     // A whole document; a part of one isn't JSON.
+    // Its document keeps no answer's usage nor time, only the conversation's: each new answer
+    // counts as a call to its model, at the time the document was last saved, with no tokens.
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        let mut out = vec![];
+        for p in documents() {
+            if !seen.changed(&p) {
+                continue;
+            }
+            let Some(id) = p.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            seen.remember(&p);
+            let key = format!("codewhale:{id}");
+            let before: usize = seen.mark(&key).and_then(|m| m.parse().ok()).unwrap_or(0);
+            let (found, answers) = usage_in(&text, before);
+            out.extend(found);
+            seen.set_mark(&key, answers.to_string());
+        }
+        out
+    }
+
     fn turns(&self, text: &str, _path: &Path, _start: u64) -> Vec<Turn> {
         turns_in(text)
     }
@@ -545,6 +565,38 @@ impl Agent for CodeWhale {
         let turns = turns_in(&std::fs::read_to_string(&newest).ok()?);
         Some(Page { turns, start: 0, path: doc.map(|d| d.display().to_string()) })
     }
+}
+
+/// The answers in a document past the first `before`, and how many it has. One shortened since
+/// (compacted) counts from where it is now.
+fn usage_in(text: &str, before: usize) -> (Vec<crate::usage::Used>, usize) {
+    #[derive(Deserialize)]
+    struct Message {
+        role: String,
+    }
+    #[derive(Deserialize)]
+    struct Whole {
+        metadata: Head,
+        #[serde(default)]
+        messages: Vec<Message>,
+    }
+    let Ok(doc) = serde_json::from_str::<Whole>(text) else { return (vec![], before) };
+    let h = doc.metadata;
+    let answers = doc.messages.iter().filter(|m| m.role == "assistant").count();
+    let at = crate::usage::parse_time(&h.created_at).map(|c| c.max(0)).unwrap_or(0);
+    let updated = serde_json::from_str::<Value>(text).ok().and_then(|v| history::ms_of(&v["metadata"]["updated_at"])).unwrap_or(at);
+    let out = (before.min(answers)..answers)
+        .map(|i| crate::usage::Used {
+            id: format!("{}:{i}", h.id),
+            at_ms: updated,
+            conversation: h.id.clone(),
+            cwd: (!h.workspace.is_empty()).then(|| h.workspace.clone()),
+            model: (!h.model.is_empty()).then(|| h.model.clone()),
+            undated: true,
+            ..Default::default()
+        })
+        .collect();
+    (out, answers)
 }
 
 #[cfg(test)]
@@ -674,5 +726,15 @@ mod tests {
         std::fs::write(&p, DOC.replace(r#""spawn_depth":0"#, r#""spawn_depth":10"#)).unwrap();
         assert!(meta(&p).hidden, "a sub-agent's (read again: it changed size)");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn each_new_answer_counts_as_a_call() {
+        let (used, n) = usage_in(DOC, 0);
+        assert_eq!(n, 3);
+        assert_eq!(used.len(), 3);
+        assert_eq!((used[0].conversation.as_str(), used[0].model.as_deref(), used[0].cwd.as_deref()), ("c148a117-1281-4a4b-9549-466f0477296b", Some("fake-coder"), Some("/r/proj")));
+        assert_eq!(used[0].at_ms, crate::usage::parse_time("2026-10-04T03:55:35.366314Z").unwrap());
+        assert!(usage_in(DOC, 3).0.is_empty(), "nothing new");
     }
 }

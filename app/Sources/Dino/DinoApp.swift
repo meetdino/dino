@@ -37,6 +37,8 @@ struct DinoApp: App {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { openWindow(id: SettingsView.windowID) }
                     .keyboardShortcut(",")
+                Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
+                    .keyboardShortcut("u", modifiers: [.command, .shift])
                 Button("Check for Updates…") { Updates.shared.checkNow() }
                     .disabled(!Updates.shared.available)
                 Button("Ask Before Quitting") { quitChoice = "" }
@@ -167,6 +169,11 @@ struct DinoApp: App {
                 .environmentObject(model)
         }
         .windowResizability(.contentSize)
+        .windowToolbarStyle(.unified)
+        Window("Usage Stats", id: StatsView.windowID) {
+            StatsView()
+        }
+        .defaultSize(width: 1040, height: 760)
         .windowToolbarStyle(.unified)
     }
 }
@@ -1265,6 +1272,7 @@ final class PulseView: NSView {
 struct UsagePanel: View {
     @EnvironmentObject var model: DinoModel
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("usage.open") private var open = false
     private static let names = ["anthropic": "Claude", "chatgpt": "Codex"]
 
@@ -1308,6 +1316,9 @@ struct UsagePanel: View {
             .accessibilityLabel("Usage")
             .accessibilityValue(fullest.map { "\($0.label) \(Int((Double($0.window.utilization) * 100).rounded())) percent" } ?? "No data yet")
             .accessibilityHint(open ? "Collapses usage" : "Shows every usage window")
+            .contextMenu {
+                Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
+            }
             if open {
                 ForEach(windows, id: \.label) { w in
                     QuotaBar(label: w.label, window: w.window)
@@ -1335,6 +1346,15 @@ struct UsagePanel: View {
                     }
                     .font(.caption.monospacedDigit())
                 }
+                Button { openWindow(id: StatsView.windowID) } label: {
+                    Label("Usage Stats", systemImage: "chart.bar.xaxis")
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Tokens, models, agents, projects, routes and speed over time (⇧⌘U)")
             }
         }
         .padding(.horizontal, 14)

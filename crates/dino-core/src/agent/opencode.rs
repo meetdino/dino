@@ -694,6 +694,23 @@ impl Agent for OpenCode {
         None
     }
 
+    // Read again when its store changes, from a little before the newest answer last read: an
+    // answer is written as it starts and filled in as it ends.
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        let db = db_path();
+        let wal = PathBuf::from(format!("{}-wal", db.display()));
+        if !seen.changed(&db) && !seen.changed(&wal) {
+            return vec![];
+        }
+        let Some(c) = store() else { return vec![] };
+        let since: i64 = seen.mark("opencode:since").and_then(|m| m.parse().ok()).unwrap_or(0);
+        let (out, latest) = usage_from(&c, since - REREAD_MS);
+        seen.remember(&db);
+        seen.remember(&wal);
+        seen.set_mark("opencode:since", latest.max(since).to_string());
+        out
+    }
+
     fn turns(&self, _text: &str, _path: &Path, _start: u64) -> Vec<Turn> {
         vec![]
     }
@@ -722,6 +739,46 @@ impl Agent for OpenCode {
 /// The session a message belongs to.
 fn session_of(info: &Value) -> String {
     info["sessionID"].as_str().unwrap_or_default().to_string()
+}
+
+/// How far before the newest answer read each look starts.
+const REREAD_MS: i64 = 6 * 3600 * 1000;
+
+/// Its finished answers started after `since` (ms), and when the newest message read started. A
+/// subagent's count for the conversation that started it.
+fn usage_from(c: &Connection, since: i64) -> (Vec<crate::usage::Used>, i64) {
+    let q = "select m.id, coalesce(s.parent_id, s.id), s.directory, m.time_created, m.data
+             from message m join session s on s.id = m.session_id where m.time_created > ?1 order by m.time_created";
+    let Ok(mut stmt) = c.prepare(q) else { return (vec![], since) };
+    let rows: Vec<(String, String, String, i64, String)> =
+        stmt.query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map(|r| r.flatten().collect()).unwrap_or_default();
+    let mut latest = since;
+    let mut out = vec![];
+    for (id, conversation, dir, created, data) in rows {
+        latest = latest.max(created);
+        let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
+        let t = &v["tokens"];
+        // Still answering: counted once it's done.
+        if v["role"] != "assistant" || !v["time"]["completed"].is_number() || !t.is_object() {
+            continue;
+        }
+        let used = crate::usage::Used { undated: false,
+            id,
+            at_ms: v["time"]["created"].as_i64().unwrap_or(created),
+            conversation,
+            cwd: Some(dir),
+            model: v["modelID"].as_str().map(String::from),
+            input: history::count(&t["input"]),
+            cache_read: history::count(&t["cache"]["read"]),
+            cache_write: history::count(&t["cache"]["write"]),
+            // It counts reasoning apart; the API counts it as output.
+            output: history::count(&t["output"]) + history::count(&t["reasoning"]),
+        };
+        if used.input + used.cache_read + used.cache_write + used.output > 0 {
+            out.push(used);
+        }
+    }
+    (out, latest)
 }
 
 #[cfg(test)]
@@ -906,5 +963,29 @@ mod tests {
         assert_eq!(OpenCode.shown_title("OpenCode").as_deref(), Some("OpenCode"));
         assert!(OpenCode.may_be("/opt/homebrew/bin/opencode") && OpenCode.may_be("opencode.exe"), "npm's runs as opencode.exe");
         assert!(!OpenCode.may_be("opencode-helper"));
+    }
+
+    #[test]
+    fn its_finished_answers_are_its_usage() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            r#"create table session (id text primary key, parent_id text, directory text not null, title text not null,
+                 time_created integer not null, time_updated integer not null, time_archived integer);
+             create table message (id text primary key, session_id text not null, time_created integer not null, data text not null);
+             insert into session values ('ses_a', null, '/r', 't', 1, 1, null);
+             insert into session values ('ses_sub', 'ses_a', '/r', 'sub', 1, 1, null);
+             insert into message values ('m1', 'ses_a', 1000, '{"role":"user"}');
+             insert into message values ('m2', 'ses_a', 2000, '{"role":"assistant","modelID":"qwen3:4b","time":{"created":2000,"completed":2500},"tokens":{"input":10,"output":5,"reasoning":2,"cache":{"read":100,"write":3}}}');
+             insert into message values ('m3', 'ses_sub', 3000, '{"role":"assistant","modelID":"qwen3:4b","time":{"created":3000,"completed":3100},"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}');
+             insert into message values ('m4', 'ses_a', 4000, '{"role":"assistant","modelID":"qwen3:4b","time":{"created":4000},"tokens":{"input":9,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}');"#,
+        )
+        .unwrap();
+        let (used, latest) = usage_from(&c, 0);
+        assert_eq!(latest, 4000);
+        assert_eq!(used.len(), 2, "not the user's message, nor an answer still going");
+        assert_eq!((used[0].id.as_str(), used[0].conversation.as_str(), used[0].at_ms), ("m2", "ses_a", 2000));
+        assert_eq!((used[0].input, used[0].cache_read, used[0].cache_write, used[0].output), (10, 100, 3, 7), "reasoning is output");
+        assert_eq!(used[1].conversation, "ses_a", "a subagent's counts for its conversation");
+        assert_eq!(usage_from(&c, 2000).0.len(), 1, "only what started since");
     }
 }

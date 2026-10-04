@@ -613,6 +613,7 @@ version = "0.1.4"
 dependencies = [
  "anyhow",
  "libc",
+ "memchr",
  "rusqlite",
  "serde",
  "serde_json",

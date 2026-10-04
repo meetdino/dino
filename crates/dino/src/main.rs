@@ -5,6 +5,7 @@ mod mcp;
 mod out;
 mod search;
 mod shell;
+mod stats;
 
 use std::io;
 use std::sync::atomic::Ordering;
@@ -809,6 +810,8 @@ const USAGE: &str = "Sessions
   dino rm [--force] <id>            delete it, and the worktree dino made for it
   dino found [--all] [--json]       agents dino didn't start, to continue here
   dino continue <id>                continue one of those in dino
+  dino stats [--range 7d|30d|all] [--json]
+                                    usage across every agent: tokens, models, streaks
 
 Fan-out: one prompt to several agents, a git worktree each
   dino fan [--agents claude,codex,...] <prompt>
@@ -828,7 +831,7 @@ Setup
   dino mcp [--read-only]            an MCP server on stdio, for agents
   dino ping | stop | daemon | --version
 
-`dino <command> --help` says more about ls, rm, found, login and fan.";
+`dino <command> --help` says more about ls, rm, found, stats, login and fan.";
 
 fn main() {
     // Piped into `head`, stop quietly when it has enough, as other commands do; Rust otherwise
@@ -870,6 +873,7 @@ fn dino() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("found") => return cmd_found(&cli[1..]),
+        Some("stats") => return stats::run(&cli[1..]),
         Some("ai") => return ai::run(&cli[1..]),
         Some("search") => return search::run(&cli[1..]),
         Some("init") => return shell::init(cli.get(1).map(String::as_str)),

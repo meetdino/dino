@@ -355,6 +355,26 @@ impl Agent for Codex {
         history::codex_turns(text)
     }
 
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        let mut out = vec![];
+        for p in history::codex_rollouts() {
+            let Some(id) = history::rollout_id(&p) else { continue };
+            let Some((text, _)) = seen.new_lines(&p, b"") else { continue };
+            // What earlier reads learned of its model and folder.
+            let (mk, ck) = (format!("codex:model:{}", p.display()), format!("codex:cwd:{}", p.display()));
+            let mut model = seen.mark(&mk).map(String::from);
+            let mut cwd = seen.mark(&ck).map(String::from);
+            out.extend(history::codex_usage_in(&text, &id, &mut model, &mut cwd));
+            if let Some(m) = model {
+                seen.set_mark(&mk, m);
+            }
+            if let Some(c) = cwd {
+                seen.set_mark(&ck, c);
+            }
+        }
+        out
+    }
+
     fn login(&self) -> Option<String> {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         Some(match crate::discover::read_json(home.join(".codex/auth.json")) {

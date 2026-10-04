@@ -60,6 +60,9 @@ the app leaves them running, and dinod resumes them after a restart.
 Agent traffic goes through the proxy inside dinod and never leaves the machine except to the
 provider the agent talks to. dino-cloud sees only synced settings (over TLS, readable by the
 service so the account page can show them); API keys and tokens never leave the Mac.
+Usage statistics (`dino stats`, the Stats window) live in `stats.db` in dino's config folder:
+the proxy's per-call records, written by dinod in batches, and what agents' own transcripts say,
+read when asked or when a session ends. They are never synced.
 
 ## One config, in layers
 
