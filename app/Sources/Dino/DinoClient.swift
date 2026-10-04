@@ -638,6 +638,10 @@ private struct ConversationResponse: Decodable {
     var page: ConversationPage
 }
 
+private struct StatsResponse: Decodable {
+    var report: StatsReport
+}
+
 struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
@@ -762,6 +766,17 @@ final class DinoConnection: @unchecked Sendable {
         var body: [String: Any] = ["type": "conversation", "agent": agent, "session_id": sessionID]
         if let before { body["before"] = before }
         return try JSONDecoder().decode(ConversationResponse.self, from: send(body)).page
+    }
+
+    /// Usage statistics for `range` ("7d", "30d", "all"). dinod reads what's new in agents' own
+    /// records first, which can take a few seconds the first time: call it off the main thread.
+    func stats(range: String) throws -> StatsReport {
+        try JSONDecoder().decode(StatsResponse.self, from: send(["type": "stats", "range": range])).report
+    }
+
+    /// Forget every usage statistic dino has kept.
+    func clearStats() throws {
+        _ = try send(["type": "stats_clear"])
     }
 
     func groups() throws -> [GroupInfo] {

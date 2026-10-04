@@ -378,9 +378,74 @@ impl Agent for Copilot {
         events_of(session_id).filter(|p| p.exists())
     }
 
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(sessions_dir()).into_iter().flatten().flatten() {
+            let Some(id) = e.file_name().to_str().map(String::from) else { continue };
+            let p = e.path().join("events.jsonl");
+            let Some((text, _)) = seen.new_lines(&p, b"") else { continue };
+            let (mk, uk) = (format!("copilot:model:{id}"), format!("copilot:usage:{id}"));
+            let mut state = Tally { model: seen.mark(&mk).map(String::from), metered: seen.mark(&uk).is_some() };
+            let cwd = yaml_field(&std::fs::read_to_string(e.path().join("workspace.yaml")).unwrap_or_default(), "cwd");
+            out.extend(usage_in(&text, &id, cwd.as_deref(), &mut state));
+            if let Some(m) = state.model {
+                seen.set_mark(&mk, m);
+            }
+            if state.metered {
+                seen.set_mark(&uk, "1".into());
+            }
+        }
+        out
+    }
+
     fn turns(&self, text: &str, _path: &Path, _start: u64) -> Vec<Turn> {
         turns_in(text)
     }
+}
+
+/// What one read of its events carries to the next.
+#[derive(Default)]
+struct Tally {
+    /// The model its last start or switch named.
+    model: Option<String>,
+    /// It writes `assistant.usage` events: those are its calls, with their tokens.
+    metered: bool,
+}
+
+/// Its calls in conversation `id`'s events: its `assistant.usage` events where it writes them
+/// (each call's model and tokens), else each `assistant.message`, on the model last chosen, with
+/// no tokens.
+fn usage_in(jsonl: &str, id: &str, cwd: Option<&str>, state: &mut Tally) -> Vec<crate::usage::Used> {
+    const KINDS: [&str; 5] = ["\"assistant.usage\"", "\"assistant.message\"", "\"session.start\"", "\"session.resume\"", "\"session.model_change\""];
+    let events: Vec<Value> = jsonl.lines().filter(|l| KINDS.iter().any(|k| l.contains(k))).filter_map(|l| serde_json::from_str(l).ok()).collect();
+    state.metered |= events.iter().any(|v| v["type"] == "assistant.usage");
+    let mut out = vec![];
+    for v in &events {
+        let d = &v["data"];
+        let used = |model: Option<String>| crate::usage::Used {
+            id: v["id"].as_str().map_or_else(String::new, |e| format!("{id}:{e}")),
+            at_ms: history::ms_of(&v["timestamp"]).unwrap_or(0),
+            conversation: id.into(),
+            cwd: cwd.map(String::from),
+            model,
+            ..Default::default()
+        };
+        match v["type"].as_str() {
+            Some("session.start" | "session.resume") => state.model = d["selectedModel"].as_str().map(String::from).or(state.model.take()),
+            Some("session.model_change") => state.model = d["newModel"].as_str().map(String::from).or(state.model.take()),
+            Some("assistant.usage") => out.push(crate::usage::Used {
+                input: history::count(&d["inputTokens"]),
+                cache_read: history::count(&d["cacheReadTokens"]),
+                cache_write: history::count(&d["cacheWriteTokens"]),
+                output: history::count(&d["outputTokens"]),
+                ..used(d["model"].as_str().map(String::from).or(state.model.clone()))
+            }),
+            Some("assistant.message") if !state.metered => out.push(used(state.model.clone())),
+            _ => {}
+        }
+    }
+    out.retain(|u| !u.id.is_empty() && u.at_ms > 0);
+    out
 }
 
 #[cfg(test)]
@@ -516,5 +581,22 @@ mod tests {
         let run = " Run the test suite\n npm test\n Do you want to run this command?\n ❯ 1. Yes\n   2. Yes, and approve `npm` for the rest of the running session\n   3. No, and tell Copilot what to do differently (Esc)";
         assert!(Copilot.asking(run).is_some());
         assert_eq!(Copilot.asking("> fix the tests").as_deref(), None);
+    }
+
+    #[test]
+    fn its_answers_count_as_calls_on_the_model_chosen() {
+        let mut t = Tally::default();
+        let used = usage_in(EVENTS, "b2fc", Some("/p"), &mut t);
+        assert_eq!(used.len(), 5, "each answer, the subagent's none here");
+        assert!(used.iter().all(|u| u.model.as_deref() == Some("stub-model") && u.input == 0));
+        assert_eq!((used[0].id.as_str(), used[0].cwd.as_deref()), ("b2fc:a67dff70", Some("/p")));
+        // Where it writes each call's usage, those are its calls.
+        let metered = r#"{"type":"assistant.message","data":{"content":"x"},"id":"m1","timestamp":"2026-10-04T04:21:21.396Z"}
+{"type":"assistant.usage","data":{"model":"gpt-x","inputTokens":100,"outputTokens":9,"cacheReadTokens":50,"cacheWriteTokens":2},"id":"u1","timestamp":"2026-10-04T04:21:21.400Z"}"#;
+        let mut t = Tally::default();
+        let used = usage_in(metered, "b2fc", None, &mut t);
+        assert_eq!(used.len(), 1);
+        assert_eq!((used[0].input, used[0].cache_read, used[0].cache_write, used[0].output, used[0].model.as_deref()), (100, 50, 2, 9, Some("gpt-x")));
+        assert!(t.metered);
     }
 }

@@ -17,7 +17,7 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 
 use crate::catalog::NIM_BASE;
-use crate::{AppState, InFlight, Usage, log};
+use crate::{AppState, Call, CallStatus, InFlight, Usage, log, now_ms};
 
 const OPENAI_PARAMS: &[&str] = &[
     "model", "messages", "tools", "tool_choice", "parallel_tool_calls", "max_tokens", "max_completion_tokens",
@@ -65,6 +65,7 @@ pub(crate) async fn handle(st: AppState, session: String, rest: &str, body: Byte
     let oai = serde_json::to_value(anthropic_to_openai_request(&req)).unwrap_or_default();
     let Some((resp, model)) = send(&st, &session, tier, oai, stream, &key).await else {
         st.stats.update(&session, |s| s.errors += 1);
+        record(&st, &session, None, Usage::default(), CallStatus::Error);
         // 529 makes Claude Code back off and retry rather than give up.
         return anthropic_error(StatusCode::from_u16(529).unwrap(), "overloaded_error", "dino: every free model for this request is unavailable right now");
     };
@@ -76,7 +77,7 @@ pub(crate) async fn handle(st: AppState, session: String, rest: &str, body: Byte
     match parsed {
         Ok(r) => {
             let out = translate_response(&r, &original_model);
-            record_usage(&st, &session, &out.usage);
+            record_usage(&st, &session, &model.id, &out.usage);
             json_response(StatusCode::OK, serde_json::to_value(out).unwrap_or_default())
         }
         Err(e) => anthropic_error(StatusCode::BAD_GATEWAY, "api_error", &format!("dino: bad upstream response: {e}")),
@@ -101,12 +102,13 @@ async fn chat(st: AppState, session: String, body: Bytes) -> Response<Body> {
     }
     let Some((resp, model)) = send(&st, &session, tier, oai, stream, &key).await else {
         st.stats.update(&session, |s| s.errors += 1);
+        record(&st, &session, None, Usage::default(), CallStatus::Error);
         return openai_error(StatusCode::SERVICE_UNAVAILABLE, "dino: every free model for this request is unavailable right now");
     };
     if !stream {
         let v: Value = resp.json().await.unwrap_or_default();
         drop(in_flight);
-        record_openai_usage(&st, &session, &v["usage"]);
+        record_openai_usage(&st, &session, &model.id, &v["usage"]);
         return json_response(StatusCode::OK, v);
     }
     // Passed through as it comes; the usage is read from the chunk that carries it.
@@ -122,7 +124,7 @@ async fn chat(st: AppState, session: String, body: Bytes) -> Response<Body> {
                 let l = std::mem::take(&mut line);
                 if let Some(v) = l.strip_prefix(b"data:").and_then(|d| serde_json::from_slice::<Value>(d.trim_ascii()).ok()) {
                     if v["usage"].is_object() {
-                        record_openai_usage(&st, &session, &v["usage"]);
+                        record_openai_usage(&st, &session, &model.id, &v["usage"]);
                     }
                     if v.get("error").is_some() {
                         // Failed partway: the agent's retry goes to another model.
@@ -288,7 +290,7 @@ fn as_anthropic(oai: &Value) -> Value {
     json!({"model": oai["model"], "tools": oai["tools"], "messages": messages})
 }
 
-fn record_openai_usage(st: &AppState, session: &str, u: &Value) {
+fn record_openai_usage(st: &AppState, session: &str, model: &str, u: &Value) {
     let usage = Usage {
         input: u["prompt_tokens"].as_u64().unwrap_or(0),
         output: u["completion_tokens"].as_u64().unwrap_or(0),
@@ -296,6 +298,7 @@ fn record_openai_usage(st: &AppState, session: &str, u: &Value) {
         cache_write: 0,
     };
     st.stats.update(session, |s| s.metered(Some(&crate::RouteTag { path: "free".into(), name: "free models".into() }), &usage));
+    record(st, session, Some(model), usage, CallStatus::Ok);
 }
 
 fn openai_error(status: StatusCode, msg: &str) -> Response<Body> {
@@ -427,7 +430,7 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
                 done = true;
                 emit(translator.finish());
                 if let Some(u) = translator.usage() {
-                    record_usage(&st, &session, u);
+                    record_usage(&st, &session, &answering.id, u);
                 }
                 guard.take();
             }
@@ -465,7 +468,7 @@ fn set_identity(oai: &mut Value, model: &dino_router::Model) {
     msgs.insert(at, json!({ "role": "system", "content": note }));
 }
 
-fn record_usage(st: &AppState, session: &str, u: &anyllm_translate::anthropic::Usage) {
+fn record_usage(st: &AppState, session: &str, model: &str, u: &anyllm_translate::anthropic::Usage) {
     let usage = Usage {
         input: u.input_tokens as u64,
         output: u.output_tokens as u64,
@@ -473,6 +476,13 @@ fn record_usage(st: &AppState, session: &str, u: &anyllm_translate::anthropic::U
         cache_write: 0,
     };
     st.stats.update(session, |s| s.metered(Some(&crate::RouteTag { path: "free".into(), name: "free models".into() }), &usage));
+    record(st, session, Some(model), usage, CallStatus::Ok);
+}
+
+/// A free-tier model call, for usage statistics. Its time isn't measured: the free tier tries
+/// models in turn, which is no model's speed.
+fn record(st: &AppState, session: &str, model: Option<&str>, usage: Usage, status: CallStatus) {
+    st.stats.record_call(Call { at_ms: now_ms(), session: session.into(), route: "free".into(), model: model.map(String::from), usage, status, ..Default::default() });
 }
 
 fn json_response(status: StatusCode, v: Value) -> Response<Body> {

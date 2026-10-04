@@ -426,9 +426,64 @@ impl Agent for Kimi {
         self.log_path(session_id).filter(|p| p.exists())
     }
 
+    // Each agent's record in a conversation: its main one, and its subagents'.
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        if self.free {
+            return vec![];
+        }
+        let mut out = vec![];
+        for e in index() {
+            for agent in std::fs::read_dir(e.dir.join("agents")).into_iter().flatten().flatten() {
+                let p = agent.path().join("wire.jsonl");
+                let Some((text, from)) = seen.new_lines(&p, b"") else { continue };
+                let key = format!("kimi:model:{}", p.display());
+                let mut model = seen.mark(&key).map(String::from);
+                let name = agent.file_name().to_string_lossy().into_owned();
+                out.extend(usage_in(&text, from, &format!("{}:{name}", e.id), &e.id, &e.work_dir, &mut model));
+                if let Some(m) = model {
+                    seen.set_mark(&key, m);
+                }
+            }
+        }
+        out
+    }
+
     fn turns(&self, text: &str, _path: &Path, _start: u64) -> Vec<Turn> {
         turns_in(text)
     }
+}
+
+/// Its record's `usage.record`s, from byte `from` of the file named `file`; the model is the one
+/// its last `llm.request` asked for, carried in `model` from one read to the next.
+fn usage_in(text: &str, from: u64, file: &str, conversation: &str, cwd: &str, model: &mut Option<String>) -> Vec<crate::usage::Used> {
+    let mut out = vec![];
+    for (at, line) in history::lines_at(text, from) {
+        let request = line.contains("\"llm.request\"");
+        if !request && !line.contains("\"usage.record\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v["type"] == "llm.request" {
+            *model = v["model"].as_str().filter(|m| !m.is_empty()).map(String::from).or(model.take());
+            continue;
+        }
+        let u = &v["usage"];
+        if v["type"] != "usage.record" || !u.is_object() {
+            continue;
+        }
+        out.push(crate::usage::Used { undated: false,
+            id: format!("{file}:{at}"),
+            at_ms: history::ms_of(&v["time"]).unwrap_or(0),
+            conversation: conversation.into(),
+            cwd: Some(cwd.into()),
+            model: model.clone(),
+            input: history::count(&u["inputOther"]),
+            cache_read: history::count(&u["inputCacheRead"]),
+            cache_write: history::count(&u["inputCacheCreation"]),
+            output: history::count(&u["output"]),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -525,5 +580,20 @@ mod tests {
         assert_eq!(get("KIMI_MODEL_BASE_URL"), Some("http://127.0.0.1:9/s/3/free/v1"));
         assert_eq!(get("KIMI_MODEL_PROVIDER_TYPE"), Some("openai"));
         assert!(Kimi { free: false }.wiring(true, &|p| p.into(), None).0.is_empty(), "its own provider, untouched");
+    }
+
+    #[test]
+    fn its_usage_records_are_its_calls() {
+        let mut model = None;
+        let wire = format!("{}\n", r#"{"type":"llm.request","agentId":"main","model":"kimi-k2","time":1790739703600}
+{"type":"usage.record","agentId":"main","usage":{"inputOther":19360,"output":3,"inputCacheRead":100,"inputCacheCreation":7},"time":1790739705969}"#);
+        let used = usage_in(&wire, 50, "k1:main", "k1", "/r", &mut model);
+        assert_eq!(used.len(), 1);
+        let first_len = wire.lines().next().unwrap().len() as u64 + 1;
+        assert_eq!(used[0].id, format!("k1:main:{}", 50 + first_len), "named by where it is in its file");
+        assert_eq!((used[0].input, used[0].cache_read, used[0].cache_write, used[0].output), (19360, 100, 7, 3));
+        assert_eq!((used[0].model.as_deref(), used[0].at_ms, used[0].cwd.as_deref()), (Some("kimi-k2"), 1790739705969, Some("/r")));
+        assert_eq!(model.as_deref(), Some("kimi-k2"), "carried to the next read");
+        assert!(usage_in(WIRE, 0, "k", "k", "/r", &mut None).iter().all(|u| u.model.is_none()));
     }
 }

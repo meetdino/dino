@@ -329,6 +329,22 @@ impl Agent for Hermes {
         None
     }
 
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        if self.free {
+            return vec![];
+        }
+        let db = hermes_home().join("state.db");
+        let wal = PathBuf::from(format!("{}-wal", db.display()));
+        if !seen.changed(&db) && !seen.changed(&wal) {
+            return vec![];
+        }
+        let Some(c) = store() else { return vec![] };
+        let out = usage_from(&c, seen);
+        seen.remember(&db);
+        seen.remember(&wal);
+        out
+    }
+
     fn turns(&self, _text: &str, _path: &Path, _start: u64) -> Vec<Turn> {
         vec![]
     }
@@ -376,6 +392,63 @@ fn turns_page(c: &Connection, session: &str, before: Option<u64>) -> Option<Page
         }
     }
     Some(Page { turns, start, path: None })
+}
+
+/// Hermes keeps each session's token totals, not each answer's. Each new assistant message is an
+/// answer, and what the totals grew by since the last look goes with the newest of them. What
+/// was read is kept in `seen`: the last message id and the totals, per session.
+fn usage_from(c: &Connection, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+    let has = |col: &str| c.query_row("select count(*) from pragma_table_info('sessions') where name = ?1", params![col], |r| r.get::<_, i64>(0)).unwrap_or(0) > 0;
+    let col = |name: &str| if has(name) { format!("coalesce({name}, 0)") } else { "0".into() };
+    let model = if has("model") { "model" } else { "null" };
+    let q = format!(
+        "select id, cwd, {model}, {}, {}, {}, {}, {}, started_at from sessions",
+        col("input_tokens"),
+        col("cache_read_tokens"),
+        col("cache_write_tokens"),
+        col("output_tokens"),
+        col("reasoning_tokens")
+    );
+    let Ok(mut stmt) = c.prepare(&q) else { return vec![] };
+    type Totals = (String, Option<String>, Option<String>, [i64; 5], f64);
+    let sessions: Vec<Totals> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, [r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?], r.get(8)?)))
+        .map(|r| r.flatten().collect())
+        .unwrap_or_default();
+    let mut out = vec![];
+    for (id, cwd, model, totals, started) in sessions {
+        let key = format!("hermes:{id}");
+        let last: Vec<i64> = seen.mark(&key).map(|m| m.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
+        let (after, before) = (last.first().copied().unwrap_or(0), last.get(1..6).map(|t| t.to_vec()).unwrap_or(vec![0; 5]));
+        let Ok(mut q) = c.prepare("select id, timestamp from messages where session_id = ?1 and role = 'assistant' and id > ?2 order by id") else { continue };
+        let answers: Vec<(i64, f64)> = q.query_map(params![id, after], |r| Ok((r.get(0)?, r.get(1)?))).map(|r| r.flatten().collect()).unwrap_or_default();
+        let grew: Vec<u64> = totals.iter().zip(&before).map(|(now, then)| (now - then).max(0) as u64).collect();
+        if answers.is_empty() && grew.iter().all(|g| *g == 0) {
+            continue;
+        }
+        let used = |id: String, at: f64, tokens: bool| crate::usage::Used { undated: false,
+            id,
+            at_ms: (at * 1000.0) as i64,
+            conversation: key[7..].to_string(),
+            cwd: cwd.clone(),
+            model: model.clone(),
+            input: if tokens { grew[0] } else { 0 },
+            cache_read: if tokens { grew[1] } else { 0 },
+            cache_write: if tokens { grew[2] } else { 0 },
+            output: if tokens { grew[3] + grew[4] } else { 0 },
+        };
+        match answers.split_last() {
+            Some((newest, rest)) => {
+                out.extend(rest.iter().map(|(m, at)| used(format!("{id}:{m}"), *at, false)));
+                out.push(used(format!("{id}:{}", newest.0), newest.1, true));
+            }
+            // Its totals grew with no answer since: a call its messages don't show.
+            None => out.push(used(format!("{id}:t{}", totals.iter().sum::<i64>()), started, true)),
+        }
+        let newest = answers.last().map_or(after, |a| a.0);
+        seen.set_mark(&key, format!("{newest},{}", totals.map(|t| t.to_string()).join(",")));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -435,5 +508,26 @@ mod tests {
         let args: Vec<String> = ["--resume", "20260930_x", "-m", "auto", "--yolo", "-c"].iter().map(|s| s.to_string()).collect();
         assert_eq!(h.portable_flags(&args), ["-m", "auto", "--yolo"]);
         assert_eq!(h.read_mode(&[("--yolo", None)]).as_deref(), Some("bypass"));
+    }
+
+    #[test]
+    fn its_session_totals_go_with_its_newest_answer() {
+        let c = store_like_hermes();
+        let mut seen = crate::usage::Seen::default();
+        // No token columns in this store: answers count, with nothing used.
+        let used = usage_from(&c, &mut seen);
+        assert_eq!(used.len(), 1);
+        assert_eq!((used[0].conversation.as_str(), used[0].at_ms, used[0].input), ("20260930_001903_cdc088", 102_000, 0));
+        assert!(usage_from(&c, &mut seen).is_empty(), "nothing new");
+        c.execute_batch("alter table sessions add column model text; alter table sessions add column input_tokens integer; alter table sessions add column output_tokens integer;
+             update sessions set model = 'h-1', input_tokens = 500, output_tokens = 20 where id = '20260930_001903_cdc088';
+             insert into messages (session_id, role, content, timestamp) values ('20260930_001903_cdc088', 'assistant', 'a', 103.0);
+             insert into messages (session_id, role, content, timestamp) values ('20260930_001903_cdc088', 'assistant', 'b', 104.0);").unwrap();
+        let used = usage_from(&c, &mut seen);
+        assert_eq!(used.len(), 2);
+        assert_eq!((used[0].input, used[1].input, used[1].output, used[1].model.as_deref()), (0, 500, 20, Some("h-1")));
+        c.execute("update sessions set input_tokens = 800 where id = '20260930_001903_cdc088'", []).unwrap();
+        let used = usage_from(&c, &mut seen);
+        assert_eq!((used.len(), used[0].input), (1, 300), "what the totals grew by");
     }
 }

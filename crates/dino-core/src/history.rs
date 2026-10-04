@@ -169,6 +169,150 @@ pub fn claude_title(session_id: &str) -> Option<String> {
     claude_meta(&crate::transcript::claude_path(session_id)?).title
 }
 
+// ---- Usage: what agents' own records say each answer used (see `usage`) ----
+
+/// Ms since the epoch from a time as records keep it: RFC 3339, or a number of seconds or ms.
+pub(crate) fn ms_of(v: &Value) -> Option<i64> {
+    if let Some(n) = v.as_f64() {
+        return Some(if n > 100_000_000_000.0 { n as i64 } else { (n * 1000.0) as i64 });
+    }
+    crate::usage::parse_time(v.as_str()?)
+}
+
+/// A token count, 0 when absent.
+pub(crate) fn count(v: &Value) -> u64 {
+    v.as_u64().or_else(|| v.as_f64().map(|f| f.max(0.0) as u64)).unwrap_or(0)
+}
+
+/// The first line of `p`: a record's header, read without the rest of it.
+pub(crate) fn first_line(p: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    std::io::BufReader::new(std::fs::File::open(p).ok()?).take(PEEK).read_line(&mut line).ok()?;
+    Some(line)
+}
+
+/// The lines of `text`, which starts at byte `from` of its file, each with where it starts there.
+pub(crate) fn lines_at(text: &str, from: u64) -> impl Iterator<Item = (u64, &str)> {
+    let mut at = from;
+    text.split_inclusive('\n').map(move |l| {
+        let start = at;
+        at += l.len() as u64;
+        (start, l.trim_end_matches('\n'))
+    })
+}
+
+/// Claude's transcripts and its subagents' (`<project>/<uuid>/subagents/*.jsonl`), whose
+/// `sessionId` is the conversation that started them.
+pub(crate) fn claude_usage_files() -> Vec<PathBuf> {
+    let mut out = vec![];
+    for project in std::fs::read_dir(home().join(".claude/projects")).into_iter().flatten().flatten() {
+        for e in std::fs::read_dir(project.path()).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "jsonl") {
+                out.push(p);
+            } else if p.is_dir() {
+                let subs = std::fs::read_dir(p.join("subagents")).into_iter().flatten().flatten().map(|e| e.path());
+                out.extend(subs.filter(|p| p.extension().is_some_and(|x| x == "jsonl")));
+            }
+        }
+    }
+    out
+}
+
+/// The answers in Claude transcript lines. One answer is written as a line per content block,
+/// each with its usage: kept once, by its message and request ids (which also count a
+/// conversation copied into another file once), with the most each count reached.
+pub(crate) fn claude_usage_in(jsonl: &str) -> Vec<crate::usage::Used> {
+    let mut out: Vec<crate::usage::Used> = vec![];
+    // Answer id → where it is in `out`: a transcript has thousands.
+    let mut at: HashMap<String, usize> = HashMap::new();
+    for line in jsonl.lines().filter(|l| l.contains("\"assistant\"")) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let m = &v["message"];
+        let u = &m["usage"];
+        if v["type"] != "assistant" || !u.is_object() || m["model"] == "<synthetic>" {
+            continue;
+        }
+        let Some(mid) = m["id"].as_str() else { continue };
+        let id = match v["requestId"].as_str() {
+            Some(r) => format!("{mid}:{r}"),
+            None => mid.to_string(),
+        };
+        let next = crate::usage::Used { undated: false,
+            id,
+            at_ms: ms_of(&v["timestamp"]).unwrap_or(0),
+            conversation: v["sessionId"].as_str().unwrap_or_default().to_string(),
+            cwd: v["cwd"].as_str().map(String::from),
+            model: m["model"].as_str().map(String::from),
+            input: count(&u["input_tokens"]),
+            cache_read: count(&u["cache_read_input_tokens"]),
+            cache_write: count(&u["cache_creation_input_tokens"]),
+            output: count(&u["output_tokens"]),
+        };
+        match at.get(&next.id).map(|i| &mut out[*i]) {
+            Some(o) => {
+                o.input = o.input.max(next.input);
+                o.cache_read = o.cache_read.max(next.cache_read);
+                o.cache_write = o.cache_write.max(next.cache_write);
+                o.output = o.output.max(next.output);
+            }
+            None if next.at_ms > 0 && !next.conversation.is_empty() => {
+                at.insert(next.id.clone(), out.len());
+                out.push(next);
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+/// The answers in Codex rollout `id`'s lines: each `token_count` event's last call. It repeats an
+/// event now and then, the running total unchanged; that total names the call, so it counts
+/// once. `model` and `cwd` carry what earlier lines said (`turn_context`) from one read to the next.
+pub(crate) fn codex_usage_in(jsonl: &str, id: &str, model: &mut Option<String>, cwd: &mut Option<String>) -> Vec<crate::usage::Used> {
+    let mut out = vec![];
+    let mut seen = std::collections::HashSet::new();
+    for line in jsonl.lines() {
+        let context = line.contains("\"turn_context\"") || line.contains("\"session_meta\"");
+        if !context && !line.contains("\"token_count\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let p = &v["payload"];
+        match (v["type"].as_str(), p["type"].as_str()) {
+            (Some("turn_context"), _) => {
+                *model = p["model"].as_str().map(String::from).or(model.take());
+                *cwd = p["cwd"].as_str().map(String::from).or(cwd.take());
+            }
+            (Some("session_meta"), _) => *cwd = p["cwd"].as_str().map(String::from).or(cwd.take()),
+            (_, Some("token_count")) => {
+                let (last, total) = (&p["info"]["last_token_usage"], &p["info"]["total_token_usage"]["total_tokens"]);
+                let Some(total) = total.as_u64().filter(|t| *t > 0 && last.is_object()) else { continue };
+                // OpenAI counts cached input inside input.
+                let call = format!("{id}:{total}");
+                if !seen.insert(call.clone()) {
+                    continue;
+                }
+                let cached = count(&last["cached_input_tokens"]);
+                out.push(crate::usage::Used { undated: false,
+                    id: call,
+                    at_ms: ms_of(&v["timestamp"]).unwrap_or(0),
+                    conversation: id.to_string(),
+                    cwd: cwd.clone(),
+                    model: model.clone(),
+                    input: count(&last["input_tokens"]).saturating_sub(cached),
+                    cache_read: cached,
+                    cache_write: count(&last["cache_write_input_tokens"]),
+                    output: count(&last["output_tokens"]),
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 // ---- Codex ----
 
 pub(crate) fn codex_rollouts() -> Vec<PathBuf> {
@@ -607,5 +751,46 @@ mod tests {
         assert_eq!(read_range(&p, 2, 15).as_deref(), Some("bbbb\ncccc\n"), "starts after the cut line");
         assert_eq!(read_range(&p, 0, 12).as_deref(), Some("aaaa\nbbbb\n"), "ends before the cut line");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn claude_answers_count_once_with_their_final_usage() {
+        let jsonl = r#"{"type":"user","sessionId":"s1","timestamp":"2026-10-03T23:04:30.000Z","message":{"role":"user","content":"hi"}}
+{"type":"assistant","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:04:33.255Z","requestId":"req_1","message":{"id":"msg_1","model":"claude-x","usage":{"input_tokens":2,"cache_creation_input_tokens":640,"cache_read_input_tokens":0,"output_tokens":1}}}
+{"type":"assistant","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:04:34.424Z","requestId":"req_1","message":{"id":"msg_1","model":"claude-x","usage":{"input_tokens":2,"cache_creation_input_tokens":640,"cache_read_input_tokens":0,"output_tokens":182}}}
+{"type":"assistant","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:05:00.000Z","message":{"id":"x","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
+{"type":"assistant","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:06:00.000Z","requestId":"req_2","message":{"id":"msg_2","model":"claude-x","usage":{"input_tokens":5,"cache_read_input_tokens":640,"output_tokens":7}}}"#;
+        let used = claude_usage_in(jsonl);
+        assert_eq!(used.len(), 2, "one per answer, not per line; nothing for a synthetic one");
+        assert_eq!((used[0].id.as_str(), used[0].conversation.as_str(), used[0].cwd.as_deref()), ("msg_1:req_1", "s1", Some("/r")));
+        assert_eq!((used[0].input, used[0].cache_write, used[0].output), (2, 640, 182));
+        assert_eq!(used[0].at_ms, crate::usage::parse_time("2026-10-03T23:04:33.255Z").unwrap());
+        assert_eq!((used[1].cache_read, used[1].output, used[1].model.as_deref()), (640, 7, Some("claude-x")));
+    }
+
+    #[test]
+    fn codex_calls_come_from_token_counts_once_each() {
+        let head = r#"{"timestamp":"2026-10-04T00:46:19.760Z","type":"session_meta","payload":{"id":"r1","cwd":"/r"}}
+{"timestamp":"2026-10-04T00:46:20.019Z","type":"turn_context","payload":{"model":"gpt-x","cwd":"/r"}}
+{"timestamp":"2026-10-04T00:46:25.145Z","type":"event_msg","payload":{"type":"token_count","info":null}}
+{"timestamp":"2026-10-04T00:46:25.145Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1006},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":6}}}}
+{"timestamp":"2026-10-04T00:46:25.300Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1006},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":6}}}}"#;
+        let (mut model, mut cwd) = (None, None);
+        let used = codex_usage_in(head, "r1", &mut model, &mut cwd);
+        assert_eq!(used.len(), 1, "a repeated count is the same call");
+        assert_eq!((used[0].input, used[0].cache_read, used[0].output), (600, 400, 6), "cached input is inside input");
+        assert_eq!((used[0].id.as_str(), used[0].model.as_deref(), used[0].cwd.as_deref()), ("r1:1006", Some("gpt-x"), Some("/r")));
+        // The next read has only new lines: the model carries over.
+        let more = r#"{"timestamp":"2026-10-04T00:47:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":2100},"last_token_usage":{"input_tokens":1090,"output_tokens":4}}}}"#;
+        let used = codex_usage_in(more, "r1", &mut model, &mut cwd);
+        assert_eq!((used[0].id.as_str(), used[0].model.as_deref(), used[0].input), ("r1:2100", Some("gpt-x"), 1090));
+    }
+
+    #[test]
+    fn record_times_read_in_any_form() {
+        assert_eq!(ms_of(&serde_json::json!(1790739705969u64)), Some(1790739705969));
+        assert_eq!(ms_of(&serde_json::json!(101.5)), Some(101500));
+        assert_eq!(ms_of(&serde_json::json!("1970-01-01T00:00:01Z")), Some(1000));
+        assert_eq!(lines_at("a\nbc\nd", 10).collect::<Vec<_>>(), [(10, "a"), (12, "bc"), (15, "d")]);
     }
 }
