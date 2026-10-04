@@ -351,13 +351,21 @@ impl Agent for Cursor {
         found::drop_flags(args, &["--resume", "--new-session-id", "--output-format", "--api-key", "-w", "--worktree", "--worktree-base"], &["--continue", "-p", "--print", "--stream-partial-output", "--list-models"])
     }
 
+    fn headless(&self, args: &[String]) -> bool {
+        super::runs_with(
+            args,
+            &["-p", "--print", "--output-format"],
+            &["acp", "worker", "login", "logout", "status", "whoami", "about", "models", "update", "ls", "create-chat", "mcp", "generate-rule"],
+        )
+    }
+
     // Started as `cursor-agent` or `agent`, which name its Node process takes.
     fn may_be(&self, comm: &str) -> bool {
         matches!(comm.rsplit('/').next(), Some("cursor-agent" | "agent"))
     }
 
     // Found only in dino's shells: it runs as `node`, among every other Node program.
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, _procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         vec![]
     }
 

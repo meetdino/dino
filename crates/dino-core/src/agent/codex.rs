@@ -31,6 +31,9 @@ pub fn open_rollout(pid: u32) -> Option<PathBuf> {
         .find(|p| !history::codex_meta(p).hidden)
 }
 
+/// Each Codex process's open conversation: when it started, the descriptor, the file.
+static HELD: std::sync::Mutex<Option<std::collections::HashMap<u32, (u64, i32, String)>>> = std::sync::Mutex::new(None);
+
 /// The provider's header that carries the proxy's secret, from the environment (`keyed_urls`).
 fn key_header() -> String {
     format!(r#"model_providers.dino.env_http_headers={{"{}"="{}"}}"#, super::KEY_HEADER, super::KEY_ENV)
@@ -245,17 +248,31 @@ impl Agent for Codex {
     }
 
     /// Codex keeps its rollout file open; that names the session, the process's cwd the folder.
-    fn running(&self) -> Vec<FoundSession> {
-        let pids = procinfo::pids_named("codex");
+    fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
+        let pids = procinfo::named_in(procs, "codex");
         if pids.is_empty() {
             return vec![];
         }
         let titles = history::codex_titles();
         let mut out = vec![];
+        let mut held = HELD.lock().unwrap();
+        let held = held.get_or_insert_default();
+        held.retain(|pid, _| pids.contains(pid));
         for pid in pids {
-            let files = procinfo::open_files(pid);
-            let Some(rollout) = files.iter().find(|f| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) else { continue };
-            let rollout = Path::new(rollout);
+            // The descriptor it had its conversation open as last time, if it still does: one
+            // look instead of one per file it has open.
+            let started = procs.get(&pid).map_or(0, |p| p.started_us);
+            let known = held.get(&pid).filter(|(at, fd, path)| *at == started && procinfo::open_file(pid, *fd).as_deref() == Some(path.as_str()));
+            let rollout = match known {
+                Some((_, _, path)) => path.clone(),
+                None => {
+                    held.remove(&pid);
+                    let Some((fd, path)) = procinfo::open_fds(pid).into_iter().find(|(_, f)| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) else { continue };
+                    held.insert(pid, (started, fd, path.clone()));
+                    path
+                }
+            };
+            let rollout = Path::new(&rollout);
             let Some(sid) = history::rollout_id(rollout) else { continue };
             let (terminal, args) = found::terminal_and_flags(self, pid);
             out.push(FoundSession {
@@ -274,6 +291,20 @@ impl Agent for Codex {
             });
         }
         out
+    }
+
+    // Every command but `resume` and `fork` (its TUI on a past session) runs headless or isn't a
+    // conversation: `exec`, `review`, the app server, the sandbox…
+    fn headless(&self, args: &[String]) -> bool {
+        super::runs_with(
+            args,
+            &[],
+            &[
+                "agents", "exec", "e", "review", "login", "logout", "mcp", "mcp-server", "plugin", "app-server", "remote-control", "app", "completion", "update",
+                "doctor", "sandbox", "debug", "apply", "a", "queue", "archive", "delete", "migrate-rollouts", "unarchive", "cloud", "exec-server", "features", "help",
+                "proto",
+            ],
+        )
     }
 
     fn may_be(&self, comm: &str) -> bool {

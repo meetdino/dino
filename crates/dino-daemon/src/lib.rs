@@ -2730,14 +2730,13 @@ fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
     ours.extend(d.archived.lock().unwrap().iter().filter_map(|a| a.saved.agent_session.clone()));
     ours.extend(inside.iter().map(|f| f.session_id.clone()).filter(|id| !id.is_empty()));
     let in_shell = |f: &FoundSession| f.pid.is_some() && inside.iter().any(|i| i.pid == f.pid);
-    let mut running: Vec<FoundSession> = found::running().into_iter().filter(|f| !ours.contains(&f.session_id) && !in_shell(f)).collect();
-    // Agents started elsewhere that haven't written a conversation yet: "starting", not missing.
-    let roots: Vec<u32> = sessions.iter().filter_map(|s| s.pane.pid()).collect();
-    let known: Vec<u32> = running.iter().chain(&inside).filter_map(|f| f.pid).collect();
-    running.extend(found::starting(&roots, &known));
+    // Its own sessions' processes (and anything this dinod runs) are its own, wherever they run.
+    let mut roots: Vec<u32> = sessions.iter().filter_map(|s| s.pane.pid()).collect();
+    roots.push(std::process::id());
+    let mut running = found::scan(&roots, &|f| (!f.session_id.is_empty() && ours.contains(&f.session_id)) || in_shell(f));
     // Agents in tmux panes: which pane, and whether they're asking.
     tmux::place(&mut running);
-    let mut out = if running_only { vec![] } else { dino_core::history::finished(&running) };
+    let mut out = if running_only { vec![] } else { dino_core::history::finished(&found::live()) };
     out.retain(|f| !ours.contains(&f.session_id));
     out.splice(0..0, running);
     if cloud {

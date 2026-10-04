@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -63,22 +64,27 @@ pub(crate) fn run(cmd: &str, args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-pub(crate) fn alive(pid: u32) -> bool {
-    // Signal 0 only checks: EPERM still means it exists.
-    let sent = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
-    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+/// Process `p` lives and is the one a record written at `started_ms` (milliseconds since the
+/// epoch) speaks of: it had started by then. A record left behind by one that crashed names a pid
+/// the system may since have given another process, started later. No time: alive is enough.
+pub(crate) fn started_before(p: Option<&crate::procinfo::Proc>, started_ms: &Value) -> bool {
+    let Some(p) = p else { return false };
+    started_ms.as_u64().is_none_or(|ms| p.started_us / 1000 <= ms + 2000)
 }
 
-/// A process's terminal and launch flags never change, and finding them takes a `ps` per parent:
-/// read once per process, kept while it lives.
-static PROCS: Mutex<Option<HashMap<u32, (Option<String>, Vec<String>)>>> = Mutex::new(None);
+/// A process's terminal and launch flags never change: read once per process (its pid and
+/// start), kept while it lives.
+static PROCS: Mutex<Option<HashMap<u32, (Option<u64>, Option<String>, Vec<String>)>>> = Mutex::new(None);
 
 pub(crate) fn terminal_and_flags(agent: &dyn Agent, pid: u32) -> (Option<String>, Vec<String>) {
-    if let Some(known) = PROCS.lock().unwrap().get_or_insert_default().get(&pid) {
-        return known.clone();
+    let started = crate::procinfo::process(pid).map(|p| p.started_us);
+    if let Some((at, terminal, flags)) = PROCS.lock().unwrap().get_or_insert_default().get(&pid) {
+        if *at == started {
+            return (terminal.clone(), flags.clone());
+        }
     }
     let found = (terminal_of(pid), agent.portable_flags(&args_of(pid)));
-    PROCS.lock().unwrap().get_or_insert_default().insert(pid, found.clone());
+    PROCS.lock().unwrap().get_or_insert_default().insert(pid, (started, found.0.clone(), found.1.clone()));
     found
 }
 
@@ -86,22 +92,20 @@ pub(crate) fn terminal_and_flags(agent: &dyn Agent, pid: u32) -> (Option<String>
 pub fn terminal_of(pid: u32) -> Option<String> {
     let mut p = pid;
     for _ in 0..12 {
-        let line = run("ps", &["-o", "ppid=,comm=", "-p", &p.to_string()])?;
-        let line = line.trim();
-        let (ppid, comm) = line.split_once(' ')?;
-        let comm = comm.trim();
-        if let Some(i) = comm.find(".app/") {
-            let app = comm[..i].rsplit('/').next().unwrap_or(comm);
+        // Another user's program (`login`'s) can't be read: passed on the way up.
+        let path = crate::procinfo::exe_of(p).unwrap_or_default();
+        if let Some(i) = path.find(".app/") {
+            let app = path[..i].rsplit('/').next().unwrap_or(&path);
             return Some(match app {
                 "iTerm" | "iTerm2" => "iTerm2".into(),
                 "Code" | "Visual Studio Code" => "VS Code".into(),
                 other => other.to_string(),
             });
         }
-        if comm.ends_with("tmux") || comm.contains("tmux: server") {
+        if path.rsplit('/').next() == Some("tmux") {
             return Some("tmux".into());
         }
-        p = ppid.trim().parse().ok()?;
+        p = crate::procinfo::parent_of(p)?;
         if p <= 1 {
             return None;
         }
@@ -109,8 +113,9 @@ pub fn terminal_of(pid: u32) -> Option<String> {
     None
 }
 
+/// The arguments a process was started with, after its program.
 pub(crate) fn args_of(pid: u32) -> Vec<String> {
-    run("ps", &["-o", "args=", "-p", &pid.to_string()]).map(|s| s.split_whitespace().skip(1).map(String::from).collect()).unwrap_or_default()
+    crate::procinfo::args_and_env(pid).map(|(args, _)| args.into_iter().skip(1).collect()).unwrap_or_default()
 }
 
 /// The flags in `args` (and their values), but `drop_with_value` with theirs and `drop_alone`:
@@ -132,13 +137,6 @@ pub(crate) fn drop_flags(args: &[String], drop_with_value: &[&str], drop_alone: 
         i += 1;
     }
     out
-}
-
-/// Agent sessions running in other terminals. Not another dinod's (a test build's, another
-/// copy of dino): that one runs them, and offering to take them over would fight it for them.
-pub fn running() -> Vec<FoundSession> {
-    PROCS.lock().unwrap().get_or_insert_default().retain(|&pid, _| alive(pid));
-    crate::agent::all().into_iter().flat_map(|a| a.running()).filter(|f| !f.pid.is_some_and(crate::procinfo::under_another_dinod)).collect()
 }
 
 /// Cloud work of the agents `program` finds a CLI for: Claude Code web sessions (picked via
@@ -233,78 +231,198 @@ pub fn inside(fg: u32) -> Option<FoundSession> {
     })
 }
 
-/// How long an agent with no conversation yet counts as starting, in seconds.
-const STARTING_FOR: u64 = 120;
+/// How old an agent's process must be to be listed: one just started may be gone in a moment
+/// (a one-shot run, a helper), and listing it would make the list flicker.
+pub const MIN_AGE: Duration = Duration::from_secs(3);
+/// How long a listed agent stays listed once a scan no longer finds it while its process lives
+/// on (a conversation file caught mid-write, a moment without its file open): no blinking out.
+pub const LINGER: Duration = Duration::from_secs(3);
+/// How long an agent with no conversation yet counts as starting.
+const STARTING_FOR: Duration = Duration::from_secs(120);
 
-/// `ps`'s `etime` (`[[dd-]hh:]mm:ss`) in seconds.
-fn elapsed_secs(etime: &str) -> Option<u64> {
-    let (days, rest) = match etime.split_once('-') {
-        Some((d, r)) => (d.parse::<u64>().ok()?, r),
-        None => (0, etime),
-    };
-    let mut secs = 0;
-    for part in rest.split(':') {
-        secs = secs * 60 + part.parse::<u64>().ok()?;
-    }
-    Some(days * 86_400 + secs)
+/// An agent process scans have found, by pid.
+struct Tracked {
+    started_us: u64,
+    /// The last scan that found it, and how many scans in a row did.
+    last_scan: u64,
+    streak: u32,
+    /// What was listed for it, and when it was last found.
+    shown: Option<(FoundSession, Instant)>,
 }
 
-/// Agents running in a terminal somewhere on this Mac that haven't written a conversation yet
-/// (at a trust prompt, before the first message), so `running` can't list them: "starting". Not
-/// under `roots` (dino's own sessions, which show themselves) nor `known` (listed already), and
-/// only the outermost agent process of each (a wrapper and what it runs are one agent).
-pub fn starting(roots: &[u32], known: &[u32]) -> Vec<FoundSession> {
-    let text = run("ps", &["-A", "-o", "pid=,ppid=,etime=,tty=,comm="]).unwrap_or_default();
-    let mut young = HashSet::new();
-    let table: Vec<(u32, u32, bool, String)> = text
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let pid = it.next()?.parse().ok()?;
-            let ppid = it.next()?.parse().ok()?;
-            if elapsed_secs(it.next()?).is_some_and(|s| s < STARTING_FOR) {
-                young.insert(pid);
-            }
-            let tty = it.next()? != "??";
-            Some((pid, ppid, tty, it.collect::<Vec<_>>().join(" ")))
-        })
-        .collect();
-    let agents = crate::agent::all();
-    let agent_of = |comm: &str| agents.iter().find(|a| a.may_be(comm));
-    let parent = |pid: u32| table.iter().find(|(p, ..)| *p == pid).map(|(_, pp, ..)| *pp);
-    let ancestors = |pid: u32| {
+#[derive(Default)]
+struct Scanner {
+    scans: u64,
+    tracked: HashMap<u32, Tracked>,
+}
+
+/// Held for a whole scan: one at a time, so each sees the one before it.
+static SCANNER: Mutex<Option<Scanner>> = Mutex::new(None);
+
+/// Interpreters an agent may run under (Pi, Qwen, Cursor are Node programs): the process's
+/// title, if it set one, says which program it is.
+fn interpreter(name: &str) -> bool {
+    ["node", "bun", "deno", "ruby"].contains(&name) || name.starts_with("python")
+}
+
+/// The agents' processes among `procs`, worked out once per scan.
+struct Kinds<'a> {
+    procs: &'a HashMap<u32, crate::procinfo::Proc>,
+    agents: [&'static dyn Agent; 11],
+    memo: HashMap<u32, Option<&'static dyn Agent>>,
+}
+
+impl Kinds<'_> {
+    /// The agent process `pid` is, by its program, or the title a Node program gave itself.
+    fn of(&mut self, pid: u32) -> Option<&'static dyn Agent> {
+        if let Some(k) = self.memo.get(&pid) {
+            return *k;
+        }
+        let name = self.procs.get(&pid).map(|p| p.name.clone()).unwrap_or_default();
+        let path = crate::procinfo::exe_of(pid).unwrap_or(name);
+        let file = path.rsplit('/').next().unwrap_or(&path);
+        let kind = if interpreter(file) {
+            let title = crate::procinfo::args_and_env(pid).and_then(|(a, _)| a.into_iter().next()).unwrap_or_default();
+            let title = title.trim_end().rsplit('/').next().unwrap_or_default().to_string();
+            if interpreter(&title) { None } else { self.agents.into_iter().find(|a| a.may_be(&title)) }
+        } else {
+            self.agents.into_iter().find(|a| a.may_be(&path))
+        };
+        self.memo.insert(pid, kind);
+        kind
+    }
+
+    /// `pid`'s parents, nearest first, up to launchd.
+    fn ancestors(&self, pid: u32) -> Vec<u32> {
         let mut out = vec![];
-        let mut at = parent(pid);
-        while let Some(p) = at.filter(|&p| p > 1 && out.len() < 64) {
+        let mut at = self.procs.get(&pid).map(|p| p.parent);
+        while let Some(p) = at.filter(|&p| p > 1 && out.len() < 64 && !out.contains(&p)) {
             out.push(p);
-            at = parent(p);
+            at = self.procs.get(&p).map(|p| p.parent);
         }
         out
-    };
-    let mut out = vec![];
-    for (pid, _, tty, comm) in &table {
-        let Some(agent) = agent_of(comm) else { continue };
-        let up = ancestors(*pid);
-        let inside_agent = up.iter().any(|a| table.iter().any(|(p, _, _, c)| p == a && agent_of(c).is_some()));
-        // dino runs an agent as its session's own process, or under the session's shell.
-        // Running for minutes with no conversation isn't starting (its conversation is somewhere
-        // this dino doesn't look, e.g. under another HOME): not listed as a stray "starting".
-        if !young.contains(pid) || !tty || known.contains(pid) || roots.contains(pid) || inside_agent || up.iter().any(|a| roots.contains(a) || known.contains(a)) {
-            continue;
-        }
-        // An agent process another one already lists (its native child) counts as listed.
-        if table.iter().any(|(p, _, _, _)| known.contains(p) && ancestors(*p).contains(pid)) {
-            continue;
-        }
-        // Another dinod's session, starting (see `running`).
-        if crate::procinfo::under_another_dinod(*pid) {
-            continue;
-        }
-        // Where it runs (an app, tmux) and with which flags, as for one with a conversation.
-        let (terminal, args) = terminal_and_flags(*agent, *pid);
-        out.push(FoundSession { status: Some("starting".into()), terminal, args, ..by_hand(agent.id(), *pid) });
     }
-    out
+}
+
+fn now_us() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64)
+}
+
+/// The agents running on this Mac that a person could take over into dino: each in a terminal
+/// (it has one: not a headless run, a server, or a background job), not a one-shot (`-p`,
+/// `exec`), not some agent's helper or child, not owned by a dinod (this one's sessions list
+/// themselves; another's are that one's), not under `roots`, and not what `skip` says (dino's
+/// own conversations). Older than [`MIN_AGE`] and found by two scans in a row before it's
+/// listed (the first scan lists what's there); once listed, it lingers [`LINGER`] after it's no
+/// longer found, while its process lives. One per conversation, newest process first: an order
+/// that stays put as scans repeat.
+pub fn scan(roots: &[u32], skip: &dyn Fn(&FoundSession) -> bool) -> Vec<FoundSession> {
+    let mut guard = SCANNER.lock().unwrap();
+    let state = guard.get_or_insert_default();
+    let procs = crate::procinfo::processes();
+    let now = now_us();
+    let mut kinds = Kinds { procs: &procs, agents: crate::agent::all(), memo: HashMap::new() };
+    PROCS.lock().unwrap().get_or_insert_default().retain(|pid, _| procs.contains_key(pid));
+
+    // Conversations each agent finds running in a terminal, by its own records: none other is
+    // listed, so none other is read.
+    let in_terminals: crate::procinfo::Procs = procs.iter().filter(|(_, p)| p.tty).map(|(k, p)| (*k, p.clone())).collect();
+    let mut found: Vec<FoundSession> = kinds.agents.into_iter().flat_map(|a| a.running(&in_terminals)).collect();
+    let talking: HashSet<u32> = found.iter().filter_map(|f| f.pid).collect();
+    // Agents in a terminal that haven't written a conversation yet (at a trust prompt, before the
+    // first message): starting. Running for minutes with none isn't starting (its conversation
+    // is somewhere dino doesn't look, e.g. under another HOME).
+    let young: Vec<u32> = procs.values().filter(|p| p.tty && !talking.contains(&p.pid) && now.saturating_sub(p.started_us) < STARTING_FOR.as_micros() as u64).map(|p| p.pid).collect();
+    // A wrapper whose native child has the conversation is that one.
+    let wrappers: HashSet<u32> = talking.iter().flat_map(|&t| kinds.ancestors(t)).collect();
+    for pid in young {
+        if wrappers.contains(&pid) {
+            continue;
+        }
+        let Some(agent) = kinds.of(pid) else { continue };
+        // Only the outermost agent process of each is one.
+        if kinds.ancestors(pid).into_iter().any(|a| kinds.of(a).is_some()) {
+            continue;
+        }
+        let (terminal, args) = terminal_and_flags(agent, pid);
+        found.push(FoundSession { status: Some("starting".into()), terminal, args, ..by_hand(agent.id(), pid) });
+    }
+
+    let mut kept = vec![];
+    for f in found {
+        let Some(pid) = f.pid else { continue };
+        let Some(p) = procs.get(&pid) else { continue };
+        if !p.tty || now.saturating_sub(p.started_us) < MIN_AGE.as_micros() as u64 || skip(&f) {
+            continue;
+        }
+        let Some(agent) = crate::agent::agent(&f.agent) else { continue };
+        if agent.headless(&args_of(pid)) {
+            continue;
+        }
+        let up = kinds.ancestors(pid);
+        if up.iter().any(|a| roots.contains(a)) || crate::procinfo::under_a_dinod(&procs, pid) {
+            continue;
+        }
+        // Some agent's helper or child (a subagent, a worker it started): that agent is the one
+        // to take over. A launcher of the same agent that has no conversation of its own (a
+        // Node wrapper of a native binary) is only its way in.
+        let base = f.agent.trim_end_matches("-free");
+        if up.iter().any(|&a| talking.contains(&a) || kinds.of(a).is_some_and(|k| k.id() != base)) {
+            continue;
+        }
+        kept.push((p.started_us, f));
+    }
+
+    // Debounced: listed once found by two scans in a row; then kept while found.
+    state.scans += 1;
+    let scan_no = state.scans;
+    let at = Instant::now();
+    let mut out = vec![];
+    for (started_us, f) in kept {
+        let pid = f.pid.unwrap_or_default();
+        let t = state.tracked.entry(pid).or_insert(Tracked { started_us, last_scan: 0, streak: 0, shown: None });
+        if t.started_us != started_us {
+            *t = Tracked { started_us, last_scan: 0, streak: 0, shown: None };
+        }
+        if t.last_scan == scan_no {
+            continue;
+        }
+        t.streak = if t.last_scan + 1 == scan_no { t.streak + 1 } else { 1 };
+        t.last_scan = scan_no;
+        if t.streak >= 2 || scan_no == 1 || t.shown.is_some() {
+            t.shown = Some((f.clone(), at));
+            out.push((started_us, f));
+        }
+    }
+    // Listed before and not found now: kept a moment while its process lives.
+    state.tracked.retain(|pid, t| {
+        if t.last_scan == scan_no {
+            return true;
+        }
+        let same = procs.get(pid).is_some_and(|p| p.started_us == t.started_us);
+        match &t.shown {
+            Some((f, seen)) if same && seen.elapsed() < LINGER && !skip(f) => {
+                out.push((t.started_us, f.clone()));
+                true
+            }
+            _ => false,
+        }
+    });
+
+    // One row per conversation: its oldest process (the one the others belong to).
+    out.sort_by_key(|(started, f)| (*started, f.pid));
+    let mut seen = HashSet::new();
+    out.retain(|(_, f)| f.session_id.is_empty() || seen.insert((f.agent.clone(), f.session_id.clone())));
+    // Newest first, and the same order every scan.
+    out.sort_by_key(|(started, f)| std::cmp::Reverse((*started, f.pid)));
+    out.into_iter().map(|(_, f)| f).collect()
+}
+
+/// Every conversation an agent is running on this Mac, listed or not (dino's own, another
+/// dinod's, headless ones): none of them is a finished one.
+pub fn live() -> Vec<FoundSession> {
+    let procs = crate::procinfo::processes();
+    crate::agent::all().into_iter().flat_map(|a| a.running(&procs)).collect()
 }
 
 /// The agent's own question on screen, waiting for the user: a permission or trust dialog.
@@ -326,15 +444,6 @@ pub fn asking(agent: &str, screen: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn process_ages_from_ps() {
-        assert_eq!(elapsed_secs("00:05"), Some(5));
-        assert_eq!(elapsed_secs("01:59"), Some(119));
-        assert_eq!(elapsed_secs("02:03:04"), Some(7384));
-        assert_eq!(elapsed_secs("3-00:00:01"), Some(259_201));
-        assert_eq!(elapsed_secs("x"), None);
-    }
 
     #[test]
     fn dialogs_waiting_on_the_user() {

@@ -35,10 +35,17 @@ pub fn pids_named(name: &str) -> Vec<u32> {
     all_pids().into_iter().filter(|&pid| name_of(pid, &mut buf) == Some(name.as_bytes())).map(|pid| pid as u32).collect()
 }
 
-/// Node processes that renamed themselves `title` (`process.title`): the kernel still names them
-/// `node`, and only their arguments say what they are.
-pub fn node_titled(title: &str) -> Vec<u32> {
-    pids_named("node").into_iter().filter(|&pid| args_and_env(pid).is_some_and(|(args, _)| args.first().is_some_and(|a| a.trim_end() == title))).collect()
+/// Pids in `procs` whose process name is exactly `name`, in order.
+pub fn named_in(procs: &Procs, name: &str) -> Vec<u32> {
+    let mut out: Vec<u32> = procs.values().filter(|p| p.name == name).map(|p| p.pid).collect();
+    out.sort_unstable();
+    out
+}
+
+/// Node processes in `procs` that renamed themselves `title` (`process.title`): the kernel still
+/// names them `node`, and only their arguments say what they are.
+pub fn node_titled_in(procs: &Procs, title: &str) -> Vec<u32> {
+    named_in(procs, "node").into_iter().filter(|&pid| args_and_env(pid).is_some_and(|(args, _)| args.first().is_some_and(|a| a.trim_end() == title))).collect()
 }
 
 /// Each process this user can see with its name and working directory, like `lsof -d cwd`:
@@ -55,20 +62,60 @@ pub fn working_dirs() -> Vec<(u32, String, String)> {
         .collect()
 }
 
-/// When a process started, in seconds since the epoch, like `ps -o lstart`.
-pub fn started(pid: u32) -> Option<u64> {
+/// A process as discovery sees it, from one kernel call: like a line of `ps -A -o pid,ppid,tty,lstart,comm`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Proc {
+    pub pid: u32,
+    pub parent: u32,
+    /// When it started, in microseconds since the epoch: with the pid, which process this is
+    /// (a pid is reused once its process is gone).
+    pub started_us: u64,
+    /// It has a controlling terminal (a person's terminal tab, a tmux pane, a pty).
+    pub tty: bool,
+    /// Its name as the kernel keeps it (its program's file name, up to 32 bytes).
+    pub name: String,
+}
+
+fn bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let n = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size) };
-    (n == size).then_some(info.pbi_start_tvsec)
+    (n == size).then_some(info)
+}
+
+/// `PROC_FLAG_CONTROLT` from sys/proc_info.h: the process has a controlling terminal.
+const PROC_FLAG_CONTROLT: u32 = 0x80;
+
+/// One process, as [`processes`] lists it; `None` once it's gone.
+pub fn process(pid: u32) -> Option<Proc> {
+    let info = bsdinfo(pid)?;
+    let name = unsafe { CStr::from_ptr(info.pbi_name.as_ptr()) }.to_string_lossy();
+    let name = if name.is_empty() { unsafe { CStr::from_ptr(info.pbi_comm.as_ptr()) }.to_string_lossy() } else { name };
+    Some(Proc {
+        pid,
+        parent: info.pbi_ppid,
+        started_us: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+        tty: info.pbi_flags & PROC_FLAG_CONTROLT != 0 && info.e_tdev != u32::MAX,
+        name: name.into_owned(),
+    })
+}
+
+/// Processes by pid, as [`processes`] lists them.
+pub type Procs = std::collections::HashMap<u32, Proc>;
+
+/// Every process this user can see, by pid. A few microseconds each: no `ps` started.
+pub fn processes() -> Procs {
+    all_pids().into_iter().filter_map(|pid| process(pid as u32)).map(|p| (p.pid, p)).collect()
+}
+
+/// When a process started, in seconds since the epoch, like `ps -o lstart`.
+pub fn started(pid: u32) -> Option<u64> {
+    bsdinfo(pid).map(|i| i.pbi_start_tvsec)
 }
 
 /// A process's parent, like `ps -o ppid`.
 pub fn parent_of(pid: u32) -> Option<u32> {
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let n = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size) };
-    (n == size).then_some(info.pbi_ppid)
+    bsdinfo(pid).map(|i| i.pbi_ppid)
 }
 
 /// The program a process runs, by its full path (`node` for a Node CLI), like lsof's `txt` entry.
@@ -110,22 +157,22 @@ fn procargs(buf: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
     Some((args, env))
 }
 
-/// The process runs under another dinod (a test build's, a second user's dino): that dinod owns
-/// it, and this one leaves it alone. Its parents are looked at up to launchd; this dinod (or the
-/// command asking) isn't another.
-pub fn under_another_dinod(pid: u32) -> bool {
-    let me = std::process::id();
-    let mut buf = [0u8; 64];
-    let mut at = parent_of(pid);
-    for _ in 0..32 {
-        let Some(p) = at.filter(|&p| p > 1) else { return false };
-        if p == me {
-            return false;
-        }
-        if name_of(p as libc::c_int, &mut buf) == Some(b"dino".as_slice()) && args_and_env(p).is_some_and(|(args, _)| args.get(1).is_some_and(|a| a == "daemon")) {
+/// Process `pid` is a `dino daemon`: a dinod.
+pub fn is_dinod(pid: u32, name: &str) -> bool {
+    name == "dino" && args_and_env(pid).is_some_and(|(args, _)| args.get(1).is_some_and(|a| a == "daemon"))
+}
+
+/// The process runs under a dinod (this one, a test build's, a second user's dino): that dinod
+/// owns it and lists it as its own session, so it isn't one found "on this Mac". Its parents are
+/// looked at up to launchd, in `procs` (see [`processes`]).
+pub fn under_a_dinod(procs: &Procs, pid: u32) -> bool {
+    let mut at = procs.get(&pid).map(|p| p.parent);
+    for _ in 0..64 {
+        let Some(p) = at.filter(|&p| p > 1).and_then(|p| procs.get(&p)) else { return false };
+        if is_dinod(p.pid, &p.name) {
             return true;
         }
-        at = parent_of(p);
+        at = Some(p.parent);
     }
     false
 }
@@ -149,6 +196,19 @@ const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
 
 /// Paths of the files a process has open, like lsof's `n` entries for its descriptors.
 pub fn open_files(pid: u32) -> Vec<String> {
+    open_fds(pid).into_iter().map(|(_, p)| p).collect()
+}
+
+/// The path of the file open as descriptor `fd` of process `pid`, if that's a file.
+pub fn open_file(pid: u32, fd: i32) -> Option<String> {
+    let mut info: VnodeFdInfoWithPath = unsafe { std::mem::zeroed() };
+    let size = size_of::<VnodeFdInfoWithPath>() as libc::c_int;
+    let got = unsafe { libc::proc_pidfdinfo(pid as libc::c_int, fd, PROC_PIDFDVNODEPATHINFO, &mut info as *mut _ as *mut c_void, size) };
+    if got == size { path(&info.pvip) } else { None }
+}
+
+/// The files a process has open, with their descriptors.
+pub fn open_fds(pid: u32) -> Vec<(i32, String)> {
     let pid = pid as libc::c_int;
     let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
     if n <= 0 {
@@ -159,16 +219,7 @@ pub fn open_files(pid: u32) -> Vec<String> {
     let bytes = (fds.len() * size_of::<libc::proc_fdinfo>()) as libc::c_int;
     let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fds.as_mut_ptr() as *mut c_void, bytes) };
     fds.truncate(n.max(0) as usize / size_of::<libc::proc_fdinfo>());
-    let mut out = vec![];
-    for fd in fds.iter().filter(|f| f.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32) {
-        let mut info: VnodeFdInfoWithPath = unsafe { std::mem::zeroed() };
-        let size = size_of::<VnodeFdInfoWithPath>() as libc::c_int;
-        let got = unsafe { libc::proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDVNODEPATHINFO, &mut info as *mut _ as *mut c_void, size) };
-        if got == size {
-            out.extend(path(&info.pvip));
-        }
-    }
-    out
+    fds.iter().filter(|f| f.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32).filter_map(|f| Some((f.proc_fd, open_file(pid as u32, f.proc_fd)?))).collect()
 }
 
 fn path(v: &libc::vnode_info_path) -> Option<String> {
@@ -205,10 +256,22 @@ mod tests {
     }
 
     #[test]
-    fn only_another_dinods_agents_are_its_own() {
-        // A child of this process: no dinod above it, and this one isn't another.
+    fn reads_dinods_and_processes() {
+        // A child of this process is under a dinod when this one is (a test run from a dino tab);
+        // with no parents but launchd, it isn't.
         let mut child = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();
-        assert!(!under_another_dinod(child.id()));
+        let mut procs = processes();
+        assert_eq!(under_a_dinod(&procs, child.id()), under_a_dinod(&procs, std::process::id()));
+        let mut orphan = procs[&child.id()].clone();
+        orphan.parent = 1;
+        procs.insert(orphan.pid, orphan);
+        assert!(!under_a_dinod(&procs, child.id()));
+        let procs = processes();
+        let me = &procs[&std::process::id()];
+        assert_eq!(me.parent, std::os::unix::process::parent_id());
+        assert_eq!(procs[&child.id()].parent, me.pid);
+        assert_eq!(procs[&child.id()].name, "sleep");
+        assert!(procs[&child.id()].started_us >= me.started_us);
         let _ = child.kill();
         let _ = child.wait();
         // As the kernel lays out `dino daemon`'s arguments.

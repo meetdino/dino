@@ -748,6 +748,12 @@ struct Sidebar: View {
     /// Tree nodes the user closed, newline-joined (SceneStorage can't hold a Set).
     @SceneStorage("sidebar.collapsed") private var collapsedIDs = ""
     @AppStorage("sidebar.filter") private var filter = SessionFilter.all
+    /// "On this Mac" shows all its agents, not just the newest few.
+    @State private var allElsewhere = false
+    /// "On this Mac" closed, among the collapsed nodes.
+    static let elsewhereKey = "section:elsewhere"
+    /// How many of its agents "On this Mac" shows before "N more…".
+    static let elsewhereShown = 5
 
     private var collapsed: Binding<Set<String>> {
         Binding(
@@ -823,10 +829,31 @@ struct Sidebar: View {
                 }
                 // Other terminals' sessions aren't dino's to sort by status.
                 if !model.elsewhere.isEmpty, filter == .all, !narrowed {
-                    SidebarHeading(title: "On this Mac")
-                    ForEach(model.elsewhere) { f in
-                        // In a tmux pane: a click shows it there (tmux keeps it); elsewhere it moves to dino.
-                        ElsewhereRow(session: f).tag(f.tmux != nil ? "tmux:\(f.id)" : "move:\(f.id)")
+                    let elsewhere = model.elsewhere
+                    let open = !collapsed.wrappedValue.contains(Self.elsewhereKey)
+                    ElsewhereHeading(count: elsewhere.count, open: Binding(
+                        get: { open },
+                        set: { o in
+                            var set = collapsed.wrappedValue
+                            if o { set.remove(Self.elsewhereKey) } else { set.insert(Self.elsewhereKey) }
+                            collapsed.wrappedValue = set
+                        }
+                    ))
+                    if open {
+                        // The newest few (the list comes newest first), the rest on asking.
+                        ForEach(allElsewhere ? elsewhere : Array(elsewhere.prefix(Self.elsewhereShown))) { f in
+                            // In a tmux pane: a click shows it there (tmux keeps it); elsewhere it moves to dino.
+                            ElsewhereRow(session: f).tag(f.tmux != nil ? "tmux:\(f.id)" : "move:\(f.id)")
+                        }
+                        if elsewhere.count > Self.elsewhereShown {
+                            Button { allElsewhere.toggle() } label: {
+                                Text(allElsewhere ? "Show fewer" : "\(elsewhere.count - Self.elsewhereShown) more…")
+                            }
+                            .buttonStyle(.plain)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .selectionDisabled()
+                        }
                     }
                 }
                 if filter == .all, !narrowed {
@@ -1469,6 +1496,36 @@ struct TakeOverButton: View {
 }
 
 /// A session running in another terminal, with a one-click handoff.
+/// "On this Mac               12 ⌄": the section's heading, with how many agents it has. A click
+/// anywhere on it closes or opens the section.
+struct ElsewhereHeading: View {
+    let count: Int
+    @Binding var open: Bool
+
+    var body: some View {
+        Button { open.toggle() } label: {
+            HStack(spacing: 4) {
+                Text("On this Mac").font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(count)").font(.caption).monospacedDigit()
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: OpeningRows<EmptyView, EmptyView>.chevron, height: 16)
+            }
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 8)
+        .selectionDisabled()
+        .help(open ? "Collapse" : "Expand")
+        .accessibilityLabel("On this Mac, \(count == 1 ? "1 agent" : "\(count) agents")")
+        .accessibilityHint(open ? "Collapse" : "Expand")
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
 struct ElsewhereRow: View {
     @EnvironmentObject var model: DinoModel
     let session: FoundSession
