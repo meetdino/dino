@@ -1,5 +1,5 @@
-//! This workspace will split into repositories (ARCHITECTURE.md). Until then, these tests keep
-//! the crates from growing ties that would make the split hard.
+//! Which dino crate may use which (ARCHITECTURE.md): the public crates others build on stay free of
+//! daemon, proxy and terminal code, and the pieces stay separable.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::process::Command;
 
 /// Each crate, the repository it goes to, and the other dino crates it may use.
 const RULES: &[(&str, &str, &[&str])] = &[
-    // Public crates others build on (dino-tui, dino-cloud): no daemon, proxy or terminal code.
+    // Public crates others build on (dino-cloud): no daemon, proxy or terminal code.
     ("dino-core", "dino", &[]),
     ("dino-sync", "dino", &["dino-core"]),
     // The terminal emulation and the proxy stand on their own, so either can move out.
@@ -41,7 +41,7 @@ fn crates_only_use_what_their_repository_allows() {
     for p in packages {
         let name = p["name"].as_str().unwrap();
         let Some(allowed) = rules.get(name) else {
-            wrong.push(format!("{name} is new: add it to RULES and ARCHITECTURE.md with the repository it belongs to"));
+            wrong.push(format!("{name} is new: add it to RULES and to ARCHITECTURE.md"));
             continue;
         };
         for d in p["dependencies"].as_array().unwrap() {
