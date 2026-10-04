@@ -756,10 +756,12 @@ private struct TerminalSettingsPane: View {
                         .foregroundStyle(.orange)
                 }
                 Toggle("Hide it when you click elsewhere", isOn: $quickAutohide)
+                    .disabled(QuickTerminal.shared.place.autohide != nil)
+                    .help(QuickTerminal.shared.place.autohide != nil ? "Your Ghostty config's quick-terminal-autohide decides" : "")
             } header: {
                 Text("Quick terminal")
             } footer: {
-                Footnote("The quick terminal drops down from the top of the screen from any app, and keeps its shell while it's hidden.")
+                Footnote("The quick terminal drops down from the top of the screen from any app, and keeps its shell while it's hidden. Your Ghostty config's quick-terminal-* settings say where it shows and how big it is, and a global: keybind for toggle_quick_terminal opens it too.")
             }
             Section {
                 LabeledContent("Default terminal") {

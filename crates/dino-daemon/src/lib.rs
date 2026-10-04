@@ -234,6 +234,9 @@ struct Daemon {
     pr_poll: Mutex<()>,
     /// Sessions whose PR merged or closed, to archive once their turn is over; since when.
     closing: Mutex<HashMap<String, Instant>>,
+    /// Sessions closed with time to undo it (see `Request::Close`): gone from every list, their
+    /// program and screen kept until then.
+    closed: Mutex<Vec<Closed>>,
     /// Dev servers started for previews, each tied to a session.
     previews: Mutex<Vec<Arc<preview::Server>>>,
     /// Subagents that run in a worktree of their own, and whose session started them.
@@ -671,6 +674,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         prs: Mutex::default(),
         pr_poll: Mutex::default(),
         closing: Mutex::default(),
+        closed: Mutex::default(),
         previews: Mutex::default(),
         subagents: Mutex::new(load_subagents()),
         summaries: Mutex::default(),
@@ -976,6 +980,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 | Request::Start { .. }
                 | Request::Fanout { .. }
                 | Request::Kill { .. }
+                | Request::Close { .. }
+                | Request::Reopen { .. }
                 | Request::Keep { .. }
                 | Request::Discard { .. }
                 | Request::RemoveWorktree { .. }
@@ -1220,6 +1226,22 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     Response::Ok
                 } else {
                     Response::Error { message: format!("no session {id}") }
+                }
+            }
+            Request::Close { id, undo_ms } => {
+                if close(d, &id, undo_ms) {
+                    save(d);
+                    Response::Ok
+                } else {
+                    Response::Error { message: format!("no session {id}") }
+                }
+            }
+            Request::Reopen { id } => {
+                if reopen(d, &id) {
+                    save(d);
+                    Response::Ok
+                } else {
+                    Response::Error { message: format!("{id} can't be reopened anymore") }
                 }
             }
             Request::Attach { id, cols, rows, wait } => {
@@ -1698,6 +1720,14 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     // A shell's `cd` shows at once rather than at the next look (the sidebar files it by folder).
     let asked = d.asked.clone();
     let _ = pane.shared.on_cwd.set(Box::new(move || {
+        *asked.0.lock().unwrap() += 1;
+        asked.1.notify_all();
+    }));
+    // So does a password prompt in a shell: the app turns on secure keyboard entry as the user
+    // types. Agents read no passwords of their own, and their output isn't looked at for one.
+    pane.shared.watch_password.store(l.agent_id == "shell" && host.is_none(), Ordering::Relaxed);
+    let asked = d.asked.clone();
+    let _ = pane.shared.on_password.set(Box::new(move || {
         *asked.0.lock().unwrap() += 1;
         asked.1.notify_all();
     }));
@@ -2474,6 +2504,7 @@ fn state(d: &Daemon) -> Response {
                 inside,
                 running,
                 foreground,
+                password: s.host.is_none() && !s.pane.is_exited() && s.pane.shared.password.load(Ordering::Relaxed),
                 tmux,
                 shell_cwd: s.pane.shared.cwd.lock().unwrap().clone(),
                 last_exit: *s.pane.shared.last_exit.lock().unwrap(),
@@ -2516,7 +2547,9 @@ fn stop_all(d: &Daemon) {
     awake::stop(d);
     // Each stopped for sure (see `Pane::kill`), all at once, outside the lock; dinod exits next,
     // and an agent that outlived it would be left running unowned.
-    let sessions: Vec<_> = d.sessions.lock().unwrap().drain(..).collect();
+    // Closed ones end with them: they weren't saved.
+    let mut sessions: Vec<_> = d.sessions.lock().unwrap().drain(..).collect();
+    sessions.extend(d.closed.lock().unwrap().drain(..).map(|c| c.session));
     let stopping: Vec<_> = sessions.iter().filter_map(|s| s.pane.kill()).collect();
     for s in d.previews.lock().unwrap().drain(..) {
         s.stop();
@@ -3158,33 +3191,104 @@ fn session_name(title: &str) -> String {
     if name.is_empty() { "session".into() } else { name.chars().take(16).collect() }
 }
 
+/// End session `id` for good, closed (see `close`) or not.
 fn kill(d: &Daemon, id: &str) -> bool {
     d.proxy.forget_remote(id);
     let s = {
         let mut sessions = d.sessions.lock().unwrap();
         sessions.iter().position(|s| s.id == id).map(|i| sessions.remove(i))
     };
+    let s = s.or_else(|| {
+        let mut closed = d.closed.lock().unwrap();
+        closed.iter().position(|c| c.session.id == id).map(|i| closed.remove(i).session)
+    });
     match s {
         Some(s) => {
-            // A tmux client in it: detach it first, so its server only sees a client leave. Asked
-            // with no lock held, and given up on if its server doesn't answer.
-            let view = s.inside.lock().unwrap().tmux.as_ref().and_then(|t| t.1.clone());
-            if let Some(v) = view {
-                tmux::detach(&v);
-            }
-            s.pane.kill();
-            dino_core::agent::qwen::forget(id);
-            forget_session_files(id);
-            d.previews.lock().unwrap().retain(|p| {
-                if p.session == id {
-                    p.stop();
-                }
-                p.session != id
-            });
+            end(d, &s);
             true
         }
         None => false,
     }
+}
+
+/// What ending session `s` takes, once it's out of every list.
+fn end(d: &Daemon, s: &Session) {
+    let id = &s.id;
+    // A tmux client in it: detach it first, so its server only sees a client leave. Asked
+    // with no lock held, and given up on if its server doesn't answer.
+    let view = s.inside.lock().unwrap().tmux.as_ref().and_then(|t| t.1.clone());
+    if let Some(v) = view {
+        tmux::detach(&v);
+    }
+    s.pane.kill();
+    dino_core::agent::qwen::forget(id);
+    forget_session_files(id);
+    d.previews.lock().unwrap().retain(|p| {
+        if p.session == *id {
+            p.stop();
+        }
+        p.session != *id
+    });
+}
+
+/// A session closed with time to undo it.
+struct Closed {
+    session: Arc<Session>,
+    /// Where it was in the list, to come back there.
+    at: usize,
+    /// Which close this is: a timer left from one undone doesn't end the next.
+    close: u64,
+}
+
+/// Close session `id` for everyone, as `kill` does, but keep its program and screen unseen for
+/// `undo_ms` (see `reopen`); then it ends as killed. One sleeping thread per close, nothing polls.
+fn close(d: &Arc<Daemon>, id: &str, undo_ms: u64) -> bool {
+    if undo_ms == 0 {
+        return kill(d, id);
+    }
+    let found = {
+        let mut sessions = d.sessions.lock().unwrap();
+        sessions.iter().position(|s| s.id == id).map(|at| (at, sessions.remove(at)))
+    };
+    let Some((at, session)) = found else { return false };
+    // Its clients stop showing it, told it's gone as for a kill (see `ended_note`).
+    for (_, tx) in session.subscribers.lock().unwrap().drain(..) {
+        let _ = tx.send(Vec::new());
+    }
+    static CLOSES: AtomicU64 = AtomicU64::new(0);
+    let close = CLOSES.fetch_add(1, Ordering::Relaxed);
+    d.closed.lock().unwrap().push(Closed { session, at, close });
+    let d2 = d.clone();
+    let spawned = std::thread::Builder::new().name("close-undo".into()).spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(undo_ms));
+        let due = {
+            let mut closed = d2.closed.lock().unwrap();
+            closed.iter().position(|c| c.close == close).map(|i| closed.remove(i))
+        };
+        if let Some(c) = due {
+            d2.proxy.forget_remote(&c.session.id);
+            end(&d2, &c.session);
+        }
+    });
+    if spawned.is_err() {
+        // Not kept with nothing to end it: ended now.
+        kill(d, id);
+    }
+    true
+}
+
+/// Bring back session `id` closed with `close`, where it was in the list, as it was: clients
+/// attach to the same program and screen.
+fn reopen(d: &Daemon, id: &str) -> bool {
+    let c = {
+        let mut closed = d.closed.lock().unwrap();
+        let Some(i) = closed.iter().position(|c| c.session.id == id) else { return false };
+        closed.remove(i)
+    };
+    let mut sessions = d.sessions.lock().unwrap();
+    let at = c.at.min(sessions.len());
+    sessions.insert(at, c.session);
+    true
 }
 
 fn session_cwd(d: &Daemon, id: &str) -> anyhow::Result<PathBuf> {
@@ -4420,6 +4524,60 @@ mod tests {
             s.pane.kill();
         }
         before.save().unwrap();
+    }
+
+    /// A closed session is gone from every list but its program and screen wait, unseen, for the
+    /// time to undo it: reopened, it's back where it was, as it was; after that, it ends as killed.
+    #[test]
+    fn a_closed_session_can_be_reopened_until_its_time_is_up() {
+        let d = shell_daemon();
+        let home = test_home().display().to_string();
+        let first = spawn(&d, Launch::new("shell", vec![], Some(home.clone()))).unwrap();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(home.clone()))).unwrap();
+        let last = spawn(&d, Launch::new("shell", vec![], Some(home.clone()))).unwrap();
+        let s = session(&d, &id);
+        s.pane.write(b"echo still-$((6*7))\r".to_vec());
+        wait_for("the output", || s.pane.text(0).contains("still-42"));
+        let listed = |d: &Daemon| match state(d) {
+            Response::State { sessions, .. } => sessions.into_iter().map(|s| s.id).collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+
+        assert!(close(&d, &id, 60_000));
+        assert_eq!(listed(&d), [first.clone(), last.clone()]);
+        save(&d);
+        assert!(!load_saved().iter().any(|saved| saved.id == id), "not brought back by a restart");
+        assert!(!s.pane.is_exited(), "kept running");
+        assert!(!close(&d, &id, 60_000), "closed once");
+
+        assert!(reopen(&d, &id));
+        assert_eq!(listed(&d), [first.clone(), id.clone(), last.clone()], "where it was");
+        assert!(Arc::ptr_eq(&session(&d, &id), &s), "the same program and screen");
+        assert!(s.pane.text(0).contains("still-42"));
+        assert!(!reopen(&d, &id), "only a closed session reopens");
+
+        // Its time up: ended as killed. A timer from a close undone doesn't end a later one.
+        assert!(close(&d, &id, 100));
+        assert!(reopen(&d, &id));
+        assert!(close(&d, &id, 60_000));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!s.pane.is_exited(), "the undone close's timer left it alone");
+        assert!(kill(&d, &id), "a closed session is killed at once");
+        wait_for("it to end", || s.pane.is_exited());
+        assert!(!reopen(&d, &id));
+
+        let other = session(&d, &last);
+        assert!(close(&d, &last, 100));
+        wait_for("its time to be up", || other.pane.is_exited());
+        assert!(!reopen(&d, &last), "too late");
+        assert!(d.closed.lock().unwrap().is_empty());
+
+        // No time to undo: a kill.
+        let s = session(&d, &first);
+        assert!(close(&d, &first, 0));
+        assert!(d.closed.lock().unwrap().is_empty());
+        wait_for("it to end", || s.pane.is_exited());
+        assert!(listed(&d).is_empty());
     }
 
     /// A running session's screen is kept on disk, and a dinod that starts it again (after a

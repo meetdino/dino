@@ -121,6 +121,11 @@ pub enum Request {
         stay: bool,
     },
     Kill { id: String },
+    /// Close session `id` for everyone as `Kill` does, but keep its program and screen, unseen,
+    /// for `undo_ms`: `Reopen` brings it back as it was until then. 0 is `Kill`.
+    Close { id: String, undo_ms: u64 },
+    /// Bring back session `id`, closed with `Close` and still within its time to undo.
+    Reopen { id: String },
     /// "Keep as terminal" for shell `id`: agents typed into it stay plain processes (`on`), or
     /// report to dino again.
     KeepTerminal { id: String, on: bool },
@@ -738,6 +743,10 @@ pub struct SessionInfo {
     /// as last looked at: the program closing it would stop. None at the prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground: Option<ForegroundProcess>,
+    /// Its terminal reads a password (echo off in canonical mode, as `sudo` and `ssh` ask for
+    /// one): clients turn on secure keyboard entry. Local sessions only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub password: bool,
     /// A shell whose foreground is a tmux client: what the client shows. Closing the tab detaches
     /// it, and the tmux server keeps everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]

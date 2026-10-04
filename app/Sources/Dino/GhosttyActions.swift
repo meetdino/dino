@@ -19,7 +19,9 @@ enum GhosttyActions {
     /// Ghostty's key handling, and closing a tab or asking a question there would free or block
     /// the surface the engine is still in.
     static func handle(_ event: TerminalActionEvent) -> Bool {
-        // A title, a bell, a frame: the wrapper's, and the most frequent by far.
+        // Progress, notifications, a command's end and the bell: what the pane shows of them.
+        if event.isPaneSignal { return PaneSignals.handle(event.action, event.state) ?? false }
+        // A title, a frame: the wrapper's, and the most frequent by far.
         if event.wrapperHandles { return false }
         let action = event.action
         if let done = pane(action, event.state) { return done }
@@ -74,12 +76,12 @@ enum GhosttyActions {
         }
     }
 
-    /// Undo and redo of closed tabs and splits, the inspector, secure input, more than one window:
-    /// not in dino yet. The rest of `.other` are the engine's notices dino has no use for.
+    /// The inspector, more than one window: not in dino yet. The rest of `.other` are the engine's
+    /// notices dino has no use for.
     private static func supports(_ action: TerminalHostAction) -> Bool {
         switch action {
-        case .newWindow, .closeAllWindows, .toggleSplitZoom, .moveTab, .secureInput, .undo, .redo,
-             .inspector, .presentTerminal, .other:
+        case .newWindow, .closeAllWindows, .toggleSplitZoom, .moveTab, .inspector, .presentTerminal,
+             .progressReport, .desktopNotification, .commandFinished, .ringBell, .other:
             false
         default:
             true
@@ -188,9 +190,27 @@ enum GhosttyActions {
                 }
                 window.level = on ? .floating : .normal
             }
-        case .newWindow, .closeAllWindows, .toggleSplitZoom, .moveTab, .secureInput, .undo, .redo,
+        // Ghostty's `toggle_secure_input`: the app menu's Secure Keyboard Entry.
+        case .secureInput(let change):
+            return {
+                let s = SecureInput.shared
+                switch change {
+                case .on: s.global = true
+                case .off: s.global = false
+                case .toggle: s.global.toggle()
+                }
+            }
+        // Undo Close Tab or Pane, within `undo-timeout`; nothing to undo passes the key on.
+        case .undo:
+            guard let manager = model.undoManager, manager.canUndo else { return nil }
+            return { manager.undo() }
+        case .redo:
+            guard let manager = model.undoManager, manager.canRedo else { return nil }
+            return { manager.redo() }
+        case .newWindow, .closeAllWindows, .toggleSplitZoom, .moveTab,
              .startSearch, .endSearch, .searchTotal, .searchSelected, .mouseVisibility, .keySequence,
-             .keyTable, .inspector, .presentTerminal, .other:
+             .keyTable, .inspector, .presentTerminal, .progressReport, .desktopNotification, .commandFinished,
+             .ringBell, .other:
             return nil
         }
     }

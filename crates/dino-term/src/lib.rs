@@ -112,6 +112,10 @@ pub trait Transport: Send + Sync {
     fn foreground(&self) -> Option<u32> {
         None
     }
+    /// Whether the program reads a password (see [`Shared::password`]), when it's a local PTY.
+    fn password(&self) -> Option<bool> {
+        None
+    }
 }
 
 /// State shared between the output pump and whoever owns the pane.
@@ -147,7 +151,48 @@ pub struct Shared {
     pub last_output: Mutex<Option<String>>,
     /// Called when the shell moves to another folder, so whoever shows it needn't poll for that.
     pub on_cwd: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// The terminal reads a password: echo off in canonical mode, as `sudo`, `ssh` and `read -s`
+    /// set it. Raw mode with echo off (full-screen programs, agents) isn't one. Looked at after
+    /// short output and after input, never on a timer (see [`Pane::look_for_password`]).
+    pub password: AtomicBool,
+    /// Called when `password` changes.
+    pub on_password: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// A second look at `password` is waiting (see [`look_again_soon`]).
+    looking_again: AtomicBool,
+    /// Look for password prompts at all (on by default; dinod turns it off for agents).
+    pub watch_password: AtomicBool,
 }
+
+/// How long after a short write the terminal is looked at again: zsh's `read -s` prints its
+/// prompt first and turns echo off after, with nothing printed then.
+const LOOK_AGAIN: Duration = Duration::from_millis(80);
+
+/// Look at pane `p`'s terminal again shortly (see [`LOOK_AGAIN`]). One thread does it for every
+/// pane, blocked while nothing is written; a pane is queued once until it's been looked at.
+fn look_again_soon(p: &Arc<Pane>) {
+    static QUEUE: OnceLock<Mutex<std::sync::mpsc::Sender<(Weak<Pane>, Instant)>>> = OnceLock::new();
+    if p.shared.looking_again.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<(Weak<Pane>, Instant)>();
+        let _ = std::thread::Builder::new().name("pty-echo".into()).spawn(move || {
+            for (pane, due) in rx {
+                std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                if let Some(pane) = pane.upgrade() {
+                    pane.shared.looking_again.store(false, Ordering::Relaxed);
+                    pane.look_for_password();
+                }
+            }
+        });
+        Mutex::new(tx)
+    });
+    let _ = queue.lock().unwrap().send((Arc::downgrade(p), Instant::now() + LOOK_AGAIN));
+}
+
+/// Output longer than this isn't a password prompt, and its terminal isn't looked at: a program
+/// streaming output doesn't pay a syscall per chunk.
+const PROMPT_MAX: usize = 1024;
 
 /// The most of a command's output kept: its last lines, up to this many characters.
 pub const OUTPUT_MAX_LINES: usize = 200;
@@ -208,6 +253,8 @@ impl Dimensions for TermSize {
 struct PtyTransport {
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
+    /// `master`'s, read without its lock: open as long as `master` is.
+    fd: Option<std::os::fd::RawFd>,
 }
 
 impl Transport for PtyTransport {
@@ -220,6 +267,15 @@ impl Transport for PtyTransport {
     }
     fn foreground(&self) -> Option<u32> {
         self.master.lock().unwrap().process_group_leader().and_then(|p| u32::try_from(p).ok())
+    }
+    fn password(&self) -> Option<bool> {
+        let fd = self.fd?;
+        // SAFETY: `fd` is the master's, open while `self` is; `t` is written by tcgetattr.
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(fd, &mut t) } != 0 {
+            return None;
+        }
+        Some(t.c_lflag & libc::ICANON != 0 && t.c_lflag & libc::ECHO == 0)
     }
 }
 
@@ -277,6 +333,10 @@ impl Pane {
             prompts: AtomicU64::new(0),
             last_output: Mutex::new(None),
             on_cwd: OnceLock::new(),
+            password: AtomicBool::new(false),
+            on_password: OnceLock::new(),
+            looking_again: AtomicBool::new(false),
+            watch_password: AtomicBool::new(true),
         });
         let term = new_term(&shared, cols, rows);
         let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, osc: Vec::new(), output_from: None };
@@ -309,7 +369,8 @@ impl Pane {
             let _ = pane.pid.set(pid);
         }
         let mut reader = pair.master.try_clone_reader()?;
-        let transport = PtyTransport { writer: Mutex::new(pair.master.take_writer()?), master: Mutex::new(pair.master) };
+        let fd = pair.master.as_raw_fd();
+        let transport = PtyTransport { writer: Mutex::new(pair.master.take_writer()?), master: Mutex::new(pair.master), fd };
         let _ = pane.shared.transport.set(Arc::new(transport));
 
         let weak: Weak<Self> = Arc::downgrade(&pane);
@@ -327,6 +388,12 @@ impl Pane {
                 pane.advance(&mut term, &buf[..n]);
                 pane.shared.dirty.store(true, Ordering::Relaxed);
                 tap(&buf[..n]);
+                drop(term);
+                // A prompt is a short write, after the program turned echo off (or on again).
+                if n < PROMPT_MAX && pane.shared.watch_password.load(Ordering::Relaxed) {
+                    pane.look_for_password();
+                    look_again_soon(&pane);
+                }
             }
             if let Some(pane) = weak.upgrade() {
                 let mut term = pane.term.lock();
@@ -526,6 +593,23 @@ impl Pane {
 
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {
         write_to(&self.shared, bytes.into());
+        // Echo can go off with nothing printed after it (a prompt printed first, `stty -echo`):
+        // the user typing is the next chance to see it.
+        self.look_for_password();
+    }
+
+    /// Note whether the terminal reads a password now (see [`Shared::password`]), telling
+    /// `on_password` when that changed. One tcgetattr on a local PTY; nothing otherwise.
+    fn look_for_password(&self) {
+        if !self.shared.watch_password.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(now) = self.shared.transport.get().and_then(|t| t.password()) else { return };
+        if self.shared.password.swap(now, Ordering::Relaxed) != now {
+            if let Some(f) = self.shared.on_password.get() {
+                f();
+            }
+        }
     }
 
     pub fn is_exited(&self) -> bool {
@@ -1080,6 +1164,60 @@ mod tests {
         }
         assert!(session_members(session).is_empty());
         assert!(since.elapsed() < HANGUP_GRACE, "it wrote everything and left on the hangup, before SIGTERM: {:?}", since.elapsed());
+    }
+
+    fn shell(script: &str) -> Arc<Pane> {
+        let spec = SpawnSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: None, env: Default::default() };
+        Pane::spawn(spec, 80, 24, |_| {}).unwrap()
+    }
+
+    fn wait_for(what: &str, done: impl Fn() -> bool) {
+        let since = Instant::now();
+        while !done() {
+            assert!(since.elapsed() < Duration::from_secs(5), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_password_prompt_is_noticed_and_so_is_its_end() {
+        let pane = shell("stty -echo; printf 'Password: '; read p; stty echo; echo; echo done; sleep 2");
+        let told = Arc::new(AtomicU64::new(0));
+        let t = told.clone();
+        let _ = pane.shared.on_password.set(Box::new(move || {
+            t.fetch_add(1, Ordering::Relaxed);
+        }));
+        wait_for("the prompt", || pane.shared.password.load(Ordering::Relaxed));
+        assert!(pane.text(0).contains("Password:"));
+        pane.write(b"hunter2\r".to_vec());
+        wait_for("echo back on", || pane.text(0).contains("done") && !pane.shared.password.load(Ordering::Relaxed));
+        assert!(!pane.text(0).contains("hunter2"));
+        assert_eq!(told.load(Ordering::Relaxed), 2, "told once on, once off");
+        pane.kill();
+    }
+
+    #[test]
+    fn echo_turned_off_after_the_prompt_is_noticed_too() {
+        // As zsh's `read -s` does: the prompt first, then echo off, nothing printed after it.
+        let pane = shell("printf 'Password: '; stty -echo; sleep 2");
+        wait_for("the prompt", || pane.shared.password.load(Ordering::Relaxed));
+        pane.kill();
+    }
+
+    #[test]
+    fn echo_off_in_raw_mode_is_no_password_prompt() {
+        // As a full-screen program or an agent sets its terminal.
+        let pane = shell("stty raw -echo; printf 'ready'; sleep 2");
+        wait_for("the output", || pane.text(0).contains("ready"));
+        // Looked at again on input too.
+        pane.write(b"x".to_vec());
+        assert!(!pane.shared.password.load(Ordering::Relaxed));
+        pane.kill();
+        // A prompt with echo on isn't one either.
+        let pane = shell("printf 'Password: '; sleep 2");
+        wait_for("the prompt", || pane.text(0).contains("Password:"));
+        assert!(!pane.shared.password.load(Ordering::Relaxed));
+        pane.kill();
     }
 
     fn pane() -> Pane {

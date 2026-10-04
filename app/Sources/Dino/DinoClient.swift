@@ -83,6 +83,9 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var usage_by_route: [RouteUsage]?
     /// Started with this agent because the one asked for was at its limit.
     var instead_of: InsteadOf?
+    /// Its terminal reads a password (echo off in line mode), as of its last output or keystroke;
+    /// nil when not, and from an older dinod.
+    var password: Bool?
 
     /// All its turn left running is a server: the ports it listens on ("3000, 8080").
     var serving: String? {
@@ -972,6 +975,16 @@ final class DinoConnection: @unchecked Sendable {
     /// Start a session whose program ended again, in place: the agent resumes its conversation.
     func resume(session: String) throws {
         _ = try send(["type": "resume", "id": session])
+    }
+
+    /// Close `session` for everyone, keeping it `undoMs` ms so `reopenClosed` can bring it back as it was.
+    func closeLater(session: String, undoMs: UInt64) throws {
+        _ = try send(["type": "close", "id": session, "undo_ms": undoMs])
+    }
+
+    /// Bring back a session closed with `close` while its time to undo lasts.
+    func reopenClosed(session: String) throws {
+        _ = try send(["type": "reopen", "id": session])
     }
 
     /// Continue `session` in dino; returns the new dino session id.

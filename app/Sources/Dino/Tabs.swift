@@ -71,9 +71,15 @@ extension DinoModel {
         let shown = shownTabs
         let at = shown.firstIndex(of: tab(of: id) ?? id) ?? 0
         let members = splits.first(where: { $0.contains(id) }).map { [$0.first, $0.second] } ?? [id]
+        let before = layoutBefore()
         tabs.removeAll { members.contains($0) }
+        let shells = ending ? members.filter { m in sessions.first { $0.id == m }?.agent_id == "shell" } : []
+        // ⌘Z puts it back: a shell is kept by dinod until the time to undo is up.
+        closed(since: before, members: members, shells: shells, name: "Close Tab") { [weak self] in
+            self?.dropTab(id, ending: ending)
+        }
         if ending {
-            for m in members where sessions.first(where: { $0.id == m })?.agent_id == "shell" { kill(m) }
+            for m in shells { endShell(m) }
         } else {
             // A shell left without a tab would come straight back on the next sync.
             knownTabless.formUnion(members)
@@ -144,6 +150,7 @@ private struct TabItem: View {
             if !session.plainShell {
                 Circle().fill(status.color).frame(width: 5, height: 5)
             }
+            BellTitleMark(signal: PaneSignals.of(session.id))
             Text(partner.map { "\(model.tabName(session)) | \(model.tabName($0))" } ?? model.tabName(session))
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -175,6 +182,8 @@ private struct TabItem: View {
                 Rectangle().fill(AgentBadge.color(agent).opacity(selected ? 0.8 : 0.4)).frame(height: 1.5)
             }
         }
+        // A program's progress along the bottom, over the tab: nothing moves when it comes or goes.
+        .overlay(alignment: .bottom) { TabProgress(signal: PaneSignals.of(session.id)) }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { model.select(session.id) }
