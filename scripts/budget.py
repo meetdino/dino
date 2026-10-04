@@ -237,11 +237,14 @@ def throughput():
         before = cpu_secs(d.pid)
         t0 = time.perf_counter()
         os.write(fd, f"cat {root}/big.txt; echo CAT''DONE\r".encode())
-        seen = b""
-        while b"CATDONE" not in seen and time.perf_counter() - t0 < 60:
+        seen, done = b"", False
+        while not done and time.perf_counter() - t0 < 60:
             r, _, _ = select.select([fd], [], [], 1.0)
             if r:
-                seen = (seen + os.read(fd, 1 << 16))[-64:]
+                # Look before trimming: the marker can arrive with the next prompt behind it.
+                seen += os.read(fd, 1 << 16)
+                done = b"CATDONE" in seen
+                seen = seen[-64:]
         secs = time.perf_counter() - t0
         cpu = cpu_secs(d.pid) - before
         os.close(fd); os.kill(pid, 9); os.waitpid(pid, 0)
