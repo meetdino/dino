@@ -26,6 +26,9 @@ fn cpu_secs() -> f64 {
 }
 
 #[test]
+// A timing budget: scripts/budget.py runs it on a quiet Mac. Under `cargo test` it's skipped, since
+// other work on the machine would fail it, not dino.
+#[ignore]
 fn scans_150_agents_within_budget() {
     let mut lab = Lab::new("scale");
     let work = lab.dir("any");

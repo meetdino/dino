@@ -416,7 +416,7 @@ def found_scan():
     """The scan behind "On this Mac" with 169 stand-in agent processes running (in terminals or
     not, headless, under dinods, under other agents): dino-core's found_scale test, which starts
     them, measures and prints. The app asks dinod for one every 3 s."""
-    r = subprocess.run(["cargo", "test", "--release", "-q", "-p", "dino-core", "--test", "found_scale", "--", "--nocapture"],
+    r = subprocess.run(["cargo", "test", "--release", "-q", "-p", "dino-core", "--test", "found_scale", "--", "--ignored", "--nocapture"],
                        cwd=REPO, capture_output=True, text=True)
     m = re.search(r"median ([\d.]+) ms.*?([\d.]+) % of a core", r.stdout + r.stderr)
     if not m:
