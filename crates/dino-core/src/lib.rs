@@ -34,20 +34,23 @@ pub struct AgentKind {
     pub id: &'static str,
     pub name: &'static str,
     pub bin: &'static str,
+    /// Its command's older names, looked for when `bin` isn't found: an install from before a rename.
+    pub was: &'static [&'static str],
 }
 
 pub const KNOWN_AGENTS: &[AgentKind] = &[
-    AgentKind { id: "claude", name: "Claude Code", bin: "claude" },
-    AgentKind { id: "codex", name: "Codex", bin: "codex" },
-    AgentKind { id: "qwen", name: "Qwen Code", bin: "qwen" },
-    AgentKind { id: "kimi", name: "Kimi Code", bin: "kimi" },
-    AgentKind { id: "pi", name: "Pi", bin: "pi" },
-    AgentKind { id: "hermes", name: "Hermes Agent", bin: "hermes" },
-    AgentKind { id: "opencode", name: "OpenCode", bin: "opencode" },
-    AgentKind { id: "crush", name: "Crush", bin: "crush" },
-    AgentKind { id: "aider", name: "Aider", bin: "aider" },
-    AgentKind { id: "amp", name: "Amp", bin: "amp" },
-    AgentKind { id: "cursor", name: "Cursor Agent", bin: "cursor-agent" },
+    AgentKind { id: "claude", name: "Claude Code", bin: "claude", was: &[] },
+    AgentKind { id: "codex", name: "Codex", bin: "codex", was: &[] },
+    AgentKind { id: "qwen", name: "Qwen Code", bin: "qwen", was: &[] },
+    AgentKind { id: "kimi", name: "Kimi Code", bin: "kimi", was: &[] },
+    AgentKind { id: "pi", name: "Pi", bin: "pi", was: &[] },
+    AgentKind { id: "hermes", name: "Hermes Agent", bin: "hermes", was: &[] },
+    AgentKind { id: "codewhale", name: "CodeWhale", bin: "codewhale", was: &["deepseek-tui"] },
+    AgentKind { id: "opencode", name: "OpenCode", bin: "opencode", was: &[] },
+    AgentKind { id: "crush", name: "Crush", bin: "crush", was: &[] },
+    AgentKind { id: "aider", name: "Aider", bin: "aider", was: &[] },
+    AgentKind { id: "amp", name: "Amp", bin: "amp", was: &[] },
+    AgentKind { id: "cursor", name: "Cursor Agent", bin: "cursor-agent", was: &[] },
 ];
 
 #[derive(Clone, Debug)]
@@ -66,8 +69,22 @@ pub fn detect_agents() -> Vec<Detected> {
 pub fn detect_agents_in(path: &std::ffi::OsStr) -> Vec<Detected> {
     KNOWN_AGENTS
         .iter()
-        .filter_map(|kind| which_in(kind.bin, path).or_else(|| which_in(kind.bin, &install_dirs())).map(|path| Detected { kind: kind.clone(), path }))
+        .filter_map(|kind| find_in(kind, path).map(|path| Detected { kind: kind.clone(), path }))
         .collect()
+}
+
+/// `kind`'s command on `path`, else where installers put it: by its name now, then its older ones.
+fn find_in(kind: &AgentKind, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    let names = || std::iter::once(kind.bin).chain(kind.was.iter().copied());
+    names().find_map(|bin| which_in(bin, path)).or_else(|| {
+        let dirs = install_dirs();
+        names().find_map(|bin| which_in(bin, &dirs))
+    })
+}
+
+/// `kind`'s command on the `PATH` (see `which`), by any of its names.
+pub fn which_agent(kind: &AgentKind) -> Option<PathBuf> {
+    find_in(kind, &std::env::var_os("PATH").unwrap_or_default())
 }
 
 /// The user's login shell, for plain terminal sessions.
@@ -216,3 +233,25 @@ pub fn load_keys() -> std::collections::HashMap<String, String> {
     keys
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_agent_is_found_by_its_older_name_too() {
+        let dir = std::env::temp_dir().join(format!("dino-which-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let make = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            p
+        };
+        let codewhale = KNOWN_AGENTS.iter().find(|k| k.id == "codewhale").unwrap();
+        let old = make("deepseek-tui");
+        assert_eq!(find_in(codewhale, dir.as_os_str()), Some(old), "an install from before its rename");
+        let new = make("codewhale");
+        assert_eq!(find_in(codewhale, dir.as_os_str()), Some(new), "its name now first");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
