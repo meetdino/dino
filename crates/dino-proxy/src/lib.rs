@@ -10,6 +10,7 @@
 
 mod catalog;
 mod codex;
+pub mod computer;
 mod free;
 pub mod local;
 mod openrouter;
@@ -115,6 +116,8 @@ pub struct SessionStats {
     /// What the agent said still ran when its last turn ended (ids in `subagents` and
     /// `background`): it isn't done while that work is.
     pub(crate) waiting_on: Vec<String>,
+    /// Its use of the Mac or a browser, from the tools it calls (see `computer`).
+    pub computer: Option<computer::ComputerUse>,
 }
 
 impl SessionStats {
@@ -244,6 +247,7 @@ impl Stats {
         self.update(id, |s| {
             if s.activity == Some(Activity::Working) && s.in_flight == 0 {
                 s.activity = Some(Activity::Done);
+                s.calls_over();
             }
         });
     }
@@ -263,6 +267,10 @@ impl Stats {
     pub fn report(&self, id: &str, activity: Activity) {
         self.update(id, |s| {
             s.tracked = true;
+            // A turn that ended has no tool call out, whatever its record said last.
+            if activity == Activity::Done {
+                s.calls_over();
+            }
             s.activity = Some(activity);
         });
     }
@@ -322,6 +330,7 @@ impl Stats {
         s.todos.clear();
         s.background.clear();
         s.waiting_on.clear();
+        s.computer = None;
     }
 
     pub(crate) fn update(&self, id: &str, f: impl FnOnce(&mut SessionStats)) {
@@ -912,6 +921,18 @@ fn on_hook(st: &AppState, session: &str, body: &[u8]) -> StatusCode {
     let tool = || v["tool_name"].as_str().unwrap_or("tool").to_string();
     record_subagent(&st.stats, session, event, &v);
     tasks::record(&st.stats, session, event, &v);
+    // Its subagents' calls too: a subagent clicking in an app is the session using the Mac. A tool
+    // reached through a bridge (Qwen's `tool_call` for tools it defers) by the one it names.
+    let called = || match (v["tool_name"].as_str(), v["tool_input"]["name"].as_str()) {
+        (Some("tool_call"), Some(name)) => name.to_string(),
+        _ => tool(),
+    };
+    match event {
+        "PreToolUse" => st.stats.tool_call(session, &called(), computer::Phase::Started),
+        "PostToolUse" | "PostToolUseFailure" => st.stats.tool_call(session, &called(), computer::Phase::Ended),
+        "Stop" | "StopFailure" => st.stats.tools_done(session),
+        _ => {}
+    }
     // A subagent's own tool calls: the parent's turn may be over (background agents), and the
     // subagent's model calls show as the session thinking anyway.
     let from_subagent = v["agent_id"].is_string();
@@ -1469,6 +1490,33 @@ mod tests {
         assert_eq!(send(&here, &format!("{keyed}/v1/files"), &format!("{KEY_HEADER}: {}\r\n", "0".repeat(32)), ""), "403");
         assert_eq!(send(&here, &format!("{keyed}/v1/files"), &format!("{KEY_HEADER}: {}\r\n", proxy.secret()), ""), "404");
         assert!(hop_by_hop(&HeaderName::from_static(KEY_HEADER)));
+    }
+
+    /// Claude Code's hooks (and Qwen's, in the same shape) say when it uses the Mac or a browser.
+    #[test]
+    fn hooks_say_when_it_uses_the_mac() {
+        use std::io::{Read, Write};
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        let origin = format!("http://127.0.0.1:{}", proxy.port);
+        let hook = proxy.base_url("7", "hook");
+        let hook = hook.strip_prefix(&origin).unwrap().to_string();
+        let post = |body: serde_json::Value| {
+            let body = body.to_string();
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
+            write!(c, "POST {hook} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", proxy.port, body.len()).unwrap();
+            let _ = c.read_to_string(&mut String::new());
+        };
+        let call = |event: &str, tool: &str, input: serde_json::Value| json!({"hook_event_name": event, "tool_name": tool, "tool_input": input});
+        post(call("PreToolUse", "Bash", json!({"command": "ls"})));
+        assert_eq!(proxy.stats.using("7"), None);
+        post(call("PreToolUse", "mcp__computer-use__screenshot", json!({})));
+        assert_eq!(proxy.stats.using("7"), Some(computer::Reach::Computer));
+        post(json!({"hook_event_name": "Stop"}));
+        proxy.stats.update("7", |s| s.computer.as_mut().unwrap().last -= computer::LINGER);
+        assert_eq!(proxy.stats.using("7"), None, "the turn is over");
+        // Through Qwen's bridge for the tools it defers.
+        post(call("PreToolUse", "tool_call", json!({"name": "mcp__claude-in-chrome__navigate", "params": {}})));
+        assert_eq!(proxy.stats.using("7"), Some(computer::Reach::Browser));
     }
 
     /// Free models off (the default): a free-tier request is refused before anything leaves this

@@ -242,6 +242,11 @@ pub trait Agent: Sync {
     fn asks_on_screen(&self) -> bool {
         false
     }
+    /// The tool calls a line of that file starts (`(name, true)`, the tool's name as the agent
+    /// gives it) and ends (`(name, false)`; the name may be empty when the line doesn't repeat it).
+    fn tool_calls(&self, _line: &serde_json::Value) -> Vec<(String, bool)> {
+        vec![]
+    }
     /// For agents that can't be given a conversation id up front: the conversation a process of it
     /// started in `cwd` at `since` (seconds) began, not one of `claimed`.
     fn new_conversation(&self, _cwd: &Path, _since: u64, _claimed: &[String]) -> Option<String> {
@@ -251,6 +256,15 @@ pub trait Agent: Sync {
     /// now, in a process of it started at `since` (seconds).
     fn turn_now(&self, _session: &str, _since: u64) -> Option<bool> {
         None
+    }
+    /// What its terminal takes to interrupt a turn and stay open, as the user would press it. Ctrl+C
+    /// (`\x03`) quits some at their prompt, so it's only sent while a turn runs.
+    fn interrupt_keys(&self) -> &'static [u8] {
+        b"\x1b"
+    }
+    /// With `StatusSource::Polled`: the tools conversation `session` is calling right now, by name.
+    fn tools_now(&self, _session: &str) -> Vec<String> {
+        vec![]
     }
     /// With `StatusSource::Server`: env vars and arguments that have it serve its API on `port`
     /// of this Mac, open only with `password`.

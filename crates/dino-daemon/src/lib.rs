@@ -29,6 +29,7 @@ mod agentserver;
 mod chatgpt;
 mod cloud;
 mod codex;
+mod computer_use;
 mod lid;
 mod lifecycle;
 mod peers;
@@ -298,6 +299,8 @@ pub fn run() -> anyhow::Result<()> {
     subtoken::start();
     update::start(daemon.clone());
     tmux_mirror::start(daemon.clone());
+    // Turned off (or by the organization) while dinod wasn't running.
+    std::thread::spawn(computer_use::reconcile);
     {
         // Pick up late-discovered agent ids (Codex) and sessions that exited on their own.
         let d = daemon.clone();
@@ -761,6 +764,26 @@ fn agent_action(d: &Daemon, id: &str, action: &str) -> anyhow::Result<String> {
     Ok(session)
 }
 
+/// Interrupt the agent's turn with its own key, as if pressed in its pane: the agent stops what it
+/// does (a tool call included) and waits for you, and the session goes on. A shell's agent started
+/// by hand is interrupted the same way; a plain shell has no turn to interrupt.
+fn interrupt(d: &Daemon, s: &Session) -> anyhow::Result<()> {
+    let id = match s.agent_id.as_str() {
+        "shell" => s.inside.lock().unwrap().found.as_ref().map(|f| f.agent.clone()).ok_or_else(|| anyhow::anyhow!("no agent runs in this shell"))?,
+        id => id.to_string(),
+    };
+    let a = agent(&id).ok_or_else(|| anyhow::anyhow!("dino doesn't know how to interrupt {id}"))?;
+    let keys = a.interrupt_keys();
+    // Ctrl+C at its prompt would quit it: only mid-turn.
+    if keys == b"\x03" && matches!(d.proxy.stats.session(&s.id).activity, None | Some(Activity::Done)) {
+        return Ok(());
+    }
+    s.pane.write(keys.to_vec());
+    // What it was doing in an app or the browser is over: the banner goes once it's quiet.
+    d.proxy.stats.tools_done(&s.id);
+    Ok(())
+}
+
 /// Type `line` at a new shell's prompt and press Return, as if by hand: once the shell has drawn
 /// its prompt, so the line lands there and not in its startup.
 fn type_at_prompt(s: Arc<Session>, line: String) {
@@ -818,6 +841,19 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::ComputerUse => Response::ComputerUse { info: computer_use::info() },
+            Request::ComputerUseInstall => match computer_use::install() {
+                Ok(()) => Response::ComputerUse { info: computer_use::info() },
+                Err(e) => Response::Error { message: format!("{e:#}") },
+            },
+            Request::ComputerUsePermissions => match computer_use::permissions() {
+                Ok(()) => Response::ComputerUse { info: computer_use::info() },
+                Err(e) => Response::Error { message: format!("{e:#}") },
+            },
+            Request::ComputerUseAgent { agent, on } => match computer_use::set(&agent, on) {
+                Ok(()) => Response::ComputerUse { info: computer_use::info() },
+                Err(e) => Response::Error { message: format!("{e:#}") },
+            },
             Request::Settings => {
                 Response::Settings {
                     settings: Settings::load(),
@@ -832,6 +868,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     schedule::keep_awake(d);
                     sync_all_shell_agents(d);
                     sync::kick();
+                    // Turned off: what dino added to agents goes.
+                    std::thread::spawn(computer_use::reconcile);
                     Response::Ok
                 }
                 Err(e) => Response::Error { message: e.to_string() },
@@ -1141,6 +1179,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     s.pane.write(text.into_bytes());
                     Response::Ok
                 }
+                Some(_) => Response::Error { message: format!("{id} has exited") },
+                None => Response::Error { message: format!("no session {id}") },
+            },
+            Request::Interrupt { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                Some(s) if !s.pane.is_exited() => match interrupt(d, &s) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error { message: e.to_string() },
+                },
                 Some(_) => Response::Error { message: format!("{id} has exited") },
                 None => Response::Error { message: format!("no session {id}") },
             },
@@ -2150,6 +2196,7 @@ fn state(d: &Daemon) -> Response {
                 servers: serving.into_iter().map(|x| ipc::ServerInfo { task: x.task, command: x.command, ports: x.ports }).collect(),
                 // With the model it runs on now.
                 route: s.route.clone().map(|r| ProviderRoute { model: s.controls.model.clone().unwrap_or(r.model), ..r }),
+                using: st.computer.as_ref().filter(|c| c.active() && !s.pane.is_exited()).map(|c| c.reach.word().into()),
             }
         })
         .collect();

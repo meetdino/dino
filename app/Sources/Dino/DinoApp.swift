@@ -403,6 +403,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     TabStrip()
                     TmuxSuggestion()
+                    ComputerUseBanner()
                     Terminals()
                 }
                 if let pane = model.sidePane {
@@ -1012,6 +1013,7 @@ struct SessionRow: View {
                         .help("Started by the scheduled task “\(task)”")
                         .accessibilityLabel("Scheduled by \(task)")
                 }
+                if let reach = session.reach { UsingMark(session: session, reach: reach) }
                 if let pr = model.pr(of: session) { PRChip(pr: pr, auto: session.auto) }
                 if let split = model.splits.first(where: { $0.contains(session.id) }) {
                     let other = model.sessions.first { $0.id == split.other(session.id) }?.display ?? "another session"

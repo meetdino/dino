@@ -16,6 +16,7 @@ struct WelcomeCard: View {
     @State private var isDefault = Opening.isDefault
     @State private var asked = false
     @State private var showMissing = false
+    @State private var showComputerUse = false
     @State private var rowsHeight: CGFloat = 0
     /// Out of the way while an install or sign-in runs in its tab (a sign-in asks you things there);
     /// back with the outcome when it ends.
@@ -114,6 +115,7 @@ struct WelcomeCard: View {
                 startsPicker
             }
             group("Optional") {
+                computerUse
                 if !isDefault {
                     Button("Make dino your default terminal") {
                         guard Opening.makeDefault() else { return NSSound.beep() }
@@ -219,6 +221,78 @@ struct WelcomeCard: View {
         }
         .help(a.signed_in == nil ? (a.sign_in_hint.map { "Signs in with \($0) inside \(a.name)" } ?? a.name) : a.name)
     }
+
+    /// How each agent here turns on its own computer use; dino installs nothing for those. The
+    /// rest can get open-computer-use from Settings → Experimental.
+    @ViewBuilder private var computerUse: some View {
+        let here = Self.featured.filter(Self.computerUseAgents.contains).compactMap { id in store.setup?.first { $0.id == id && $0.installed } }
+        if !here.isEmpty {
+            DisclosureGroup(isExpanded: $showComputerUse) {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(here) { a in computerUseRow(a) }
+                    if here.contains(where: { !Self.hasOwnComputerUse($0) }) {
+                        Button("Computer use for the others (Experimental)…") {
+                            settingsPane = .experimental
+                            openWindow(id: SettingsView.windowID)
+                        }
+                        .buttonStyle(.link)
+                        .font(.callout)
+                        .help("Adds open-computer-use to the agents you pick, with each agent's own command")
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                Button { showComputerUse.toggle() } label: {
+                    Text("Agents can use your Mac's apps").font(.callout)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// The agents this step speaks for: those the Experimental option can add open-computer-use to
+    /// (dino-core's `agent_mcp::AGENTS`), Claude Code and Codex with their own among them.
+    private static let computerUseAgents: Set = ["claude", "codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode"]
+
+    /// Claude Code with a Pro or Max plan, and Codex's app, have their own.
+    private static func hasOwnComputerUse(_ a: AgentSetupInfo) -> Bool {
+        a.id == "codex" || (a.id == "claude" && ["Claude Pro", "Claude Max"].contains(a.account ?? ""))
+    }
+
+    @ViewBuilder private func computerUseRow(_ a: AgentSetupInfo) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(a.name).font(.callout.weight(.medium))
+            Group {
+                switch a.id {
+                case "claude" where Self.hasOwnComputerUse(a):
+                    Text("In Claude, run /mcp, select computer-use and choose Enable (once per project). The first time, it asks for Accessibility and Screen Recording. For your browser: with the Claude in Chrome extension installed, run /chrome and choose Enabled by default.")
+                case "claude":
+                    Text("Its own computer use needs a Pro or Max plan\(a.account.map { " (this Mac: \($0))" } ?? ""). The option below can add open-computer-use instead.")
+                case "codex":
+                    Text("In the Codex app: Plugins → Computer Use → Install plugin, then turn on its server and skill. OpenAI documents it for the app, not the Codex CLI.")
+                default:
+                    Text("Has none of its own. The option below can add open-computer-use.")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                if let docs = Self.computerUseDocs[a.id] {
+                    Link("How it works", destination: docs).font(.caption)
+                }
+                if a.id == "claude", Self.hasOwnComputerUse(a), let chrome = Self.computerUseDocs["claude-chrome"] {
+                    Link("Claude in Chrome", destination: chrome).font(.caption)
+                }
+            }
+        }
+    }
+
+    private static let computerUseDocs: [String: URL] = [
+        "claude": URL(string: "https://code.claude.com/docs/en/computer-use")!,
+        "claude-chrome": URL(string: "https://code.claude.com/docs/en/chrome")!,
+        "codex": URL(string: "https://learn.chatgpt.com/docs/computer-use")!,
+    ]
 
     @ViewBuilder private var found: some View {
         let keys = store.keys.filter { $0.source != nil }

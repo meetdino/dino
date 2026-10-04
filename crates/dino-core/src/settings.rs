@@ -40,6 +40,11 @@ pub struct Experimental {
     /// each turn. With a TypeSafe key, picking sends the turn's text (up to 8,000 characters) to
     /// api.typesafe.ai. Off, the free tier isn't offered and its requests are refused unsent.
     pub free_models: bool,
+    /// Computer use for agents that have none of their own: dino installs open-computer-use (a
+    /// pinned, checked release) in its own folder and adds it to the agents the user picks, with
+    /// each agent's own MCP command. Off, dino removes every one it added (see dinod's
+    /// `computer_use`). Nothing leaves the Mac either way.
+    pub computer_use: bool,
 }
 
 /// For people who live in tmux. Their tmux stays theirs: dino never edits its config, never takes
