@@ -4244,6 +4244,12 @@ mod tests {
         let limits = fallbacks::limits(&d);
         assert_eq!(limits.len(), 1);
         assert_eq!((limits[0].agent_id.as_str(), limits[0].instead.as_deref(), limits[0].instead_model.as_deref()), ("claude", Some("codex"), Some("gpt-5.5")));
+        // An automation of Claude's sees the limit too, and at it runs on the same fallback.
+        let claude = d.launcher("claude").unwrap();
+        let why = schedule::at_limit(&d, &claude).expect("at its limit");
+        assert!(why.starts_with("claude is at its limit (Claude) until "), "{why}");
+        let (other, switch) = schedule::fallback(&d, &claude).unwrap();
+        assert_eq!((other.short.as_str(), switch.model.as_deref()), ("codex", Some("gpt-5.5")));
 
         let s = session(&d, &start(false));
         assert_eq!((s.agent_id.as_str(), s.controls.model.as_deref()), ("codex", Some("gpt-5.5")));
@@ -4257,6 +4263,7 @@ mod tests {
         d.proxy.stats.limited.lock().unwrap().get_mut("anthropic#1").unwrap().kind = dino_proxy::fallback::Kind::Outage;
         assert!(fallbacks::limits(&d).is_empty());
         assert_eq!(session(&d, &start(false)).agent_id, "claude");
+        assert_eq!(schedule::at_limit(&d, &claude), None);
         for s in d.sessions.lock().unwrap().iter() {
             s.pane.kill();
         }

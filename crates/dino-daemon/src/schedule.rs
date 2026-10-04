@@ -20,11 +20,12 @@ use dino_core::schedule::{
     ActionKind, Event, Frequency, MAX_HISTORY, MAX_QUEUE, MAX_SEEN, Retry, ScheduledRun, ScheduledTask, TriggerKind, TriggerState, fill, fill_command, shorten,
     split_args,
 };
-use dino_core::settings::Settings;
+use dino_core::controls::Controls;
+use dino_core::settings::{AgentSwitch, Settings};
 use dino_core::worktree;
 use dino_proxy::Activity;
 
-use crate::{Daemon, Launch, finished, idle, new_uuid, now_secs, save, send_input, spawn, spawn_in_worktree, triggers, work_dir};
+use crate::{Daemon, Launch, fallbacks, finished, idle, new_uuid, now_secs, save, send_input, spawn, spawn_in_worktree, triggers, work_dir};
 
 /// Later than this after its time, a run counts as a catch-up.
 const LATE: u64 = 120;
@@ -565,7 +566,7 @@ fn hold(d: &Daemon, t: &ScheduledTask, why: &Why) -> Result<Option<String>, Hold
         return match c.on_limit.as_str() {
             "run" => Ok(None),
             "fallback" => match fallback(d, &l) {
-                Some(other) => Ok(Some(other.short)),
+                Some((other, _)) => Ok(Some(other.short)),
                 None => Err(Hold::Skip(format!("{limit}, and it has no fallback agent"))),
             },
             _ => Err(Hold::Skip(limit)),
@@ -574,14 +575,19 @@ fn hold(d: &Daemon, t: &ScheduledTask, why: &Why) -> Result<Option<String>, Hold
     Ok(None)
 }
 
-/// The agent to use when `l`'s account is at its limit. The place where an agent's fallback
-/// chain plugs in (Settings → Agents); until it has one, there's none.
-fn fallback(_d: &Daemon, _l: &LauncherInfo) -> Option<LauncherInfo> {
-    None
+/// The agent to use when `l`'s account is at its limit, and its model: the one its new sessions
+/// start with meanwhile (Settings → Agents → When it hits a limit).
+pub(crate) fn fallback(d: &Daemon, l: &LauncherInfo) -> Option<(LauncherInfo, AgentSwitch)> {
+    fallbacks::switch_to(d, &Settings::load(), &l.agent_id)
 }
 
-/// Why `l` can't take a run now: its subscription's window is used up (as the provider last said).
-fn at_limit(d: &Daemon, l: &LauncherInfo) -> Option<String> {
+/// Why `l` can't take a run now: a route its own account uses is known spent (see `fallbacks`), or
+/// its subscription's window is used up (as the provider last said).
+pub(crate) fn at_limit(d: &Daemon, l: &LauncherInfo) -> Option<String> {
+    if let Some(spent) = fallbacks::limits(d).into_iter().find(|s| s.agent_id == l.agent_id) {
+        let until = spent.resets_at.map(|r| format!(" until {}", clock(r))).unwrap_or_default();
+        return Some(format!("{} is at its {} ({}){until}", l.label, spent.reason, spent.name));
+    }
     let provider = match l.agent_id.as_str() {
         "claude" => "anthropic",
         "codex" => "chatgpt",
@@ -772,12 +778,17 @@ fn start_agent(d: &Daemon, t: &ScheduledTask, launcher: &str, prompt: &str) -> a
     };
     // Agents take the prompt as an argument (see `spawn`); a shell gets it typed in, as a command.
     let shell = l.agent_id == "shell";
+    // Instead of the task's own agent, at its limit: with the model its fallback names.
+    let model = (l.short != t.launcher).then(|| d.launcher(&t.launcher).and_then(|own| fallback(d, &own))).flatten().filter(|(o, _)| o.short == l.short).and_then(|(_, s)| s.model);
     let launch = Launch {
         name: Some(name),
         scheduled: Some(t.name.clone()),
         prompt: (!shell && !prompt.is_empty()).then(|| prompt.to_string()),
         // The fallback agent runs on its own account.
         route: t.route.clone().filter(|_| l.short == t.launcher),
+        controls: Controls { model, ..Default::default() },
+        // The task's conditions said what to run at a limit (`hold`): spawn doesn't decide again.
+        stay: true,
         ..Launch::new(&l.short, if l.short == t.launcher { split_args(&t.args) } else { vec![] }, Some(dir.display().to_string()))
     };
     let id = if t.worktree { spawn_in_worktree(d, launch)? } else { spawn(d, launch)? };
