@@ -16,6 +16,7 @@ pub mod codex;
 mod codewhale;
 mod hermes;
 mod kimi;
+mod opencode;
 mod pi;
 pub mod qwen;
 
@@ -40,6 +41,23 @@ pub enum StatusSource {
     /// dino asks the agent's own store where its turn is (`turn_now`), a database rather than a
     /// file it appends to.
     Polled,
+    /// The agent serves its own API on a port dino picks (`serve`), and dino follows the events
+    /// it streams there (`server_event`); see dinod's `agentserver`.
+    Server,
+}
+
+/// What one event from an agent's own server (`StatusSource::Server`) says.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServerEvent {
+    /// Conversation `0` (or a subagent's) is on a turn.
+    Busy(String),
+    Idle(String),
+    /// It waits on the user for `what`, until `Answered(id)`.
+    Asked { id: String, session: String, what: String },
+    Answered(String),
+    /// An answer in `session` read `used` tokens of `model`'s context.
+    Context { session: String, model: String, used: u64 },
+    Other,
 }
 
 /// What one line of an agent's own record says about where its turn is.
@@ -113,6 +131,11 @@ pub trait Agent: Sync {
     /// The models its own files list, run as `program`; `None` when it keeps no list.
     fn catalog(&self, _program: &str) -> Option<Catalog> {
         None
+    }
+    /// Its catalog is read before dinod restarts sessions, so they get the efforts its models
+    /// take. One that takes a while to ask, with no efforts to give, is read just after.
+    fn catalog_first(&self) -> bool {
+        true
     }
 
     // ---- Launching ----
@@ -217,10 +240,50 @@ pub trait Agent: Sync {
     fn asking(&self, _screen: &str) -> Option<String> {
         None
     }
+    /// With `StatusSource::Server`: env vars and arguments that have it serve its API on `port`
+    /// of this Mac, open only with `password`.
+    fn serve(&self, _port: u16, _password: &str) -> Wiring {
+        (vec![], vec![])
+    }
+    /// The user name its server takes with that password.
+    fn server_user(&self) -> &'static str {
+        ""
+    }
+    /// What an event from its server says.
+    fn server_event(&self, _event: &serde_json::Value) -> ServerEvent {
+        ServerEvent::Other
+    }
+    /// Where its server says how things stand now, read on connecting: what it was doing before
+    /// dino followed its events.
+    fn server_snapshot(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// What the answer from snapshot `path` says, as events.
+    fn server_snapshot_events(&self, _path: &str, _answer: &serde_json::Value) -> Vec<ServerEvent> {
+        vec![]
+    }
+    /// Where its server says what its providers and models are.
+    fn server_providers(&self) -> Option<&'static str> {
+        None
+    }
+    /// `model`'s context window, from what its server says of its providers; `None` when it
+    /// doesn't know.
+    fn server_context_window(&self, _providers: &serde_json::Value, _model: &str) -> Option<u64> {
+        None
+    }
+    /// Whether `session` is a conversation of its own rather than a subagent's.
+    fn is_conversation(&self, _session: &str) -> bool {
+        true
+    }
     /// For agents whose conversations aren't files: a page of `session_id`'s turns ending before
     /// position `before` (the end when `None`), in the agent's own positions.
     fn page(&self, _session_id: &str, _before: Option<u64>) -> Option<crate::history::Page> {
         None
+    }
+
+    /// The title it puts on its terminal, as dino shows it: without what it adds to every one.
+    fn shown_title(&self, title: &str) -> Option<String> {
+        Some(title.to_string())
     }
 
     // ---- Its conversations ----
@@ -273,10 +336,11 @@ static PI_FREE: pi::Pi = pi::Pi { free: true };
 static HERMES: hermes::Hermes = hermes::Hermes { free: false };
 static HERMES_FREE: hermes::Hermes = hermes::Hermes { free: true };
 static CODEWHALE: codewhale::CodeWhale = codewhale::CodeWhale;
+static OPENCODE: opencode::OpenCode = opencode::OpenCode;
 
 /// The agents dino works with, in the order they're listed and looked for.
-pub fn all() -> [&'static dyn Agent; 7] {
-    [&CLAUDE, &CODEX, &QWEN, &KIMI, &PI, &HERMES, &CODEWHALE]
+pub fn all() -> [&'static dyn Agent; 8] {
+    [&CLAUDE, &CODEX, &QWEN, &KIMI, &PI, &HERMES, &CODEWHALE, &OPENCODE]
 }
 
 /// The adapter for launcher agent id `id` (the free-tier ones, "<agent>-free", too); `None` for
@@ -364,6 +428,13 @@ mod tests {
         let chat = codewhale.provider_wiring(URL, Format::Chat, "qwen3:4b").unwrap();
         assert_eq!(env(&chat, "OPENAI_BASE_URL"), Some(format!("{URL}/v1").as_str()));
         assert!(!chat.1.iter().any(|a| a.contains(URL)), "the URL stays off its command line: {:?}", chat.1);
+
+        let opencode = agent("opencode").unwrap();
+        assert_eq!(opencode.provider_formats()[0], Format::Chat);
+        let chat = opencode.provider_wiring(URL, Format::Chat, "qwen3:4b").unwrap();
+        assert_eq!(chat.1, ["-m", "dino/qwen3:4b"]);
+        assert!(env(&chat, "OPENCODE_CONFIG_CONTENT").is_some_and(|c| c.contains(&format!("{URL}/v1"))));
+        assert!(!opencode.keyed_urls(), "its URL is in its environment");
     }
 
     /// A dino shell isn't routed itself (every program there using the Anthropic SDK would be);

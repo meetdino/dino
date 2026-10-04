@@ -281,6 +281,11 @@ impl Stats {
         self.update(id, |s| s.agent_mode = None);
     }
 
+    /// The agent said how full its context window is, other than to its statusline (OpenCode's server).
+    pub fn report_context(&self, id: &str, context: ReportedContext) {
+        self.update(id, |s| s.reported_context = Some(context));
+    }
+
     pub fn reset_context(&self, id: &str) {
         self.update(id, |s| {
             s.context.clear();
