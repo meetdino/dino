@@ -26,6 +26,7 @@ use dino_term::{Pane, SpawnSpec};
 
 mod agentlog;
 mod agentserver;
+mod awake;
 mod chatgpt;
 mod cloud;
 mod codex;
@@ -242,6 +243,8 @@ struct Daemon {
     schedule: schedule::Scheduler,
     /// Keeping agents running with the lid closed.
     lid: lid::Lid,
+    /// Who keeps the Mac awake, dinod's own assertion among them.
+    awake: awake::Awake,
     /// Stopped sessions kept to start again, newest first.
     archived: Mutex<Vec<lifecycle::Archived>>,
     /// Worktree path → its size on disk and when it was measured.
@@ -636,6 +639,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         summaries: Mutex::default(),
         schedule: schedule::Scheduler::load(),
         lid: lid::Lid::default(),
+        awake: awake::Awake::default(),
         archived: Mutex::new(lifecycle::load_archived()),
         sizes: Mutex::default(),
         pushed: Mutex::default(),
@@ -2402,7 +2406,7 @@ fn state(d: &Daemon) -> Response {
         })
         .collect();
     let limits = fallbacks::limits(d);
-    Response::State { sessions, quotas, power: Some(d.lid.info()), limits, version: None }
+    Response::State { sessions, quotas, power: Some(d.power_info()), limits, version: None }
 }
 
 /// Save and stop every session, ready to exit: the next dinod resumes them (`dino stop`).
@@ -2418,6 +2422,7 @@ fn stop_all(d: &Daemon) {
     save_live_screens(d, true);
     let _ = std::fs::write(stopped_mark(), b"");
     lid::stop(d);
+    awake::stop(d);
     // Each stopped for sure (see `Pane::kill`), all at once, outside the lock; dinod exits next,
     // and an agent that outlived it would be left running unowned.
     let sessions: Vec<_> = d.sessions.lock().unwrap().drain(..).collect();

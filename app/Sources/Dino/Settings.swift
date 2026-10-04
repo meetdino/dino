@@ -27,6 +27,8 @@ struct DinoSettings: Codable, Equatable {
         var onboarded: Bool
         /// Keep the Mac from idle-sleeping while tasks are scheduled; nil from an older dinod.
         var keep_awake: Bool?
+        /// Keep the Mac from idle-sleeping while any agent works; nil from an older dinod (on there).
+        var awake_while_working: Bool?
         /// Shells mark their prompts and say where they are; nil from an older dinod (on there).
         var shell_integration: Bool?
         /// An agent typed into a dino shell reports to dino from its start; nil from an older dinod.
@@ -890,12 +892,25 @@ private struct ShellAISection: View {
     }
 }
 
-/// Settings → Power: keeping the Mac awake for scheduled automations and for agents with the lid closed.
+/// Settings → Power: keeping the Mac awake while agents work, for scheduled automations, and for agents with the lid closed.
 private struct PowerPane: View {
     @EnvironmentObject var store: SettingsStore
 
     var body: some View {
         Form {
+            Section {
+                Toggle("Keep the Mac awake while agents work", isOn: Binding(
+                    get: { store.settings?.machine.awake_while_working ?? true },
+                    set: { on in store.update { $0.machine.awake_while_working = on } }
+                ))
+                .disabled(store.settings == nil)
+                .orgLocked("machine.awake_while_working")
+                AwakeNow()
+            } header: {
+                Text("Staying awake")
+            } footer: {
+                Footnote("While any agent is working, whichever agent it is, dino keeps the Mac from sleeping when idle, and lets it sleep again once none is. Claude Code does this for itself with caffeinate; most other agents don't. The display still sleeps, and closing the lid still sleeps the Mac unless Lid closed below keeps it awake.")
+            }
             Section {
                 Toggle("Keep your Mac awake while automations are scheduled", isOn: Binding(
                     get: { store.settings?.machine.keep_awake ?? false },
@@ -1307,6 +1322,7 @@ private struct ManagedPane: View {
         case ("machine", "shell_integration"): return make("Shell integration", "Terminal", .terminal)
         case ("machine", "shell_agents"): return make("Claude typed into a dino shell reports to dino", "Agents", .agents)
         case ("machine", "keep_awake"): return make("Keep your Mac awake while automations are scheduled", "Power", .power)
+        case ("machine", "awake_while_working"): return make("Keep the Mac awake while agents work", "Power", .power)
         case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", "Power", .power)
         case ("worktrees", "location"): return make("Worktree location", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("worktrees", "branch_prefix"): return make("Branch prefix", "Workspaces → Worktrees", .workspaces, .worktrees)

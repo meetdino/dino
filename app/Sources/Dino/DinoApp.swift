@@ -1325,12 +1325,7 @@ struct UsagePanel: View {
         let windows = windows
         let fullest = windows.max { $0.window.utilization < $1.window.utilization }
         VStack(alignment: .leading, spacing: 8) {
-            if model.power?.holding == true {
-                Label("Awake with the lid closed", systemImage: "laptopcomputer")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .help("dino turned system sleep off while agents work; it comes back when they're done (Settings → Power)")
-            }
+            AwakeStatus()
             Button { withAnimation(.easeOut(duration: 0.15)) { open.toggle() } } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")

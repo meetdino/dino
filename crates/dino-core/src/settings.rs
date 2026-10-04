@@ -306,6 +306,9 @@ pub struct Machine {
     pub onboarded: bool,
     /// Keep the Mac from idle-sleeping while automations are scheduled, so they run on time. Closing the lid still sleeps it.
     pub keep_awake: bool,
+    /// Keep the Mac from idle-sleeping while any agent is working, whichever agent it is: dinod
+    /// holds a power assertion of its own until none is. Closing the lid still sleeps it.
+    pub awake_while_working: bool,
     /// Shells dino starts mark their prompts and report their folder, as in Ghostty (new shells only).
     pub shell_integration: bool,
     /// An agent typed into a dino shell (`claude`) reports to dino from its start, as a session dino
@@ -340,7 +343,7 @@ impl Default for ClaudeTokenUse {
 
 impl Default for Machine {
     fn default() -> Self {
-        Self { onboarded: false, keep_awake: false, shell_integration: true, shell_agents: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default(), check_updates: true }
+        Self { onboarded: false, keep_awake: false, awake_while_working: true, shell_integration: true, shell_agents: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default(), check_updates: true }
     }
 }
 

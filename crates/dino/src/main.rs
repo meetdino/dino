@@ -1189,7 +1189,7 @@ fn cmd_status(tmux: bool) -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    let Response::State { sessions, .. } = client::request(&Request::State)? else { return Err(unexpected()) };
+    let Response::State { sessions, power, .. } = client::request(&Request::State)? else { return Err(unexpected()) };
     let mut agents: Vec<_> = sessions.iter().filter(|s| status::is_agent(s) && !s.exited).map(|s| (SessionStatus::of(s), s)).collect();
     agents.sort_by_key(|(st, s)| (*st, id_order(&s.id)));
     let count = |want: SessionStatus| agents.iter().filter(|(st, _)| *st == want).count();
@@ -1214,6 +1214,11 @@ fn cmd_status(tmux: bool) -> anyhow::Result<()> {
             [] => {}
             [(_, s)] => println!("\n{}", out::paint(&format!("`dino attach {}` to answer it.", printable(&s.id)), Paint::Dim)),
             _ => println!("\n{}", out::paint("`dino attach <id>` to answer one.", Paint::Dim)),
+        }
+        // What keeps the Mac awake, as the sidebar's foot says it; `dino power` lists them all.
+        let session_name = |id: &str| sessions.iter().find(|s| s.id == id).map(awake_session_name);
+        if let Some(awake) = power.and_then(|p| p.awake_line(session_name)) {
+            println!("\n{}", out::paint(&format!("{awake}  (`dino power` for who)"), Paint::Dim));
         }
     } else {
         println!("{line}");
@@ -1365,10 +1370,11 @@ fn cmd_ls(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `dino power [status|setup|remove]`: keeping agents running with the lid closed.
+/// `dino power [status|setup|remove]`: what keeps the Mac awake, and keeping agents running with
+/// the lid closed.
 fn cmd_power(action: &str) -> anyhow::Result<()> {
     if !matches!(action, "status" | "setup" | "remove") {
-        println!("usage: dino power [status|setup|remove]\n\nsetup asks for an administrator's password once, so dino can keep the Mac awake with its lid closed while agents work (Settings → Power).");
+        println!("usage: dino power [status|setup|remove]\n\nstatus says what keeps the Mac awake now: dino while agents work, an agent's caffeinate, an app.\nsetup asks for an administrator's password once, so dino can keep the Mac awake with its lid closed while agents work (Settings → Power).");
         return Ok(());
     }
     let p = match client::request(&Request::Power { action: action.into() })? {
@@ -1376,24 +1382,60 @@ fn cmd_power(action: &str) -> anyhow::Result<()> {
         Response::Error { message } => return Err(hinted(message)),
         _ => return Err(unexpected()),
     };
-    let lid = dino_core::settings::Settings::load().machine.lid;
+    let sessions = match client::request(&Request::State) {
+        Ok(Response::State { sessions, .. }) => sessions,
+        _ => vec![],
+    };
+    let session_name = |id: &str| sessions.iter().find(|s| s.id == id).map(awake_session_name);
+    let machine = dino_core::settings::Settings::load().machine;
     let mut rows = vec![
-        ("Lid closed", if lid.enabled { "agents keep running".to_string() } else { "the Mac sleeps (Settings → General keeps agents running)".into() }),
+        ("Now", p.awake_line(session_name).unwrap_or_else(|| "nothing keeps the Mac awake; it sleeps when idle".into())),
+        ("While agents work", if machine.awake_while_working { "dino keeps the Mac awake".to_string() } else { "the Mac may sleep (Settings → Power keeps it awake)".into() }),
+        ("Lid closed", if machine.lid.enabled { "agents keep running".to_string() } else { "the Mac sleeps (Settings → Power keeps agents running)".into() }),
         ("Permission", if p.ready == Some(true) { "set up".into() } else { "not set up: `dino power setup`".into() }),
     ];
-    if p.holding {
-        rows.push(("Now", "awake with the lid closed".into()));
-    } else if p.external {
-        rows.push(("Now", "sleep is off, but not by dino; dino leaves it alone".into()));
+    if p.external {
+        rows.push(("Sleep", "off, but not by dino; dino leaves it alone".into()));
     }
-    if let Some(note) = p.note {
-        rows.push(("Last time", printable(&note)));
+    if let Some(note) = &p.note {
+        rows.push(("Last time", printable(note)));
     }
-    if let Some(e) = p.error {
-        rows.push(("Error", printable(&e)));
+    if let Some(e) = &p.error {
+        rows.push(("Error", printable(e)));
     }
     print!("{}", out::fields(&rows));
+    if !p.awake.is_empty() {
+        let cols = [Column::keep("PROCESS"), Column::right("PID"), Column::end("SESSION", 10), Column::keep("KEEPS AWAY"), Column::keep("SINCE"), Column::end("SAYS", 12)];
+        let now = out::now();
+        let rows: Vec<_> = p
+            .awake
+            .iter()
+            .map(|h| {
+                // macOS's own, dim: not something you started.
+                let paint = if h.system { Paint::Dim } else { Paint::Plain };
+                vec![
+                    Cell::new(printable(&h.process)).paint(if h.ours { Paint::Green } else { paint }),
+                    Cell::new(h.pid.to_string()).paint(paint),
+                    Cell::new(h.session.as_deref().and_then(session_name).unwrap_or_default()).raw(h.session.clone().unwrap_or_default()),
+                    Cell::new(h.kind_label()).raw(h.kind.clone()).paint(paint),
+                    Cell::new(h.since.map(|t| out::ago(now.saturating_sub(t))).unwrap_or_default()).raw(h.since.map(out::iso).unwrap_or_default()).paint(paint),
+                    Cell::new(printable(&h.name)).paint(paint),
+                ]
+            })
+            .collect();
+        if out::tty() {
+            print!("\n{}", out::table(&cols, &rows, true).lines().map(|l| format!("  {l}\n")).collect::<String>());
+        } else {
+            print!("{}", out::table(&cols, &rows, false));
+        }
+    }
     Ok(())
+}
+
+/// A session as the staying-awake line names it: "Claude Code: Fix the build", a shell by its name.
+fn awake_session_name(s: &SessionInfo) -> String {
+    let agent = s.inside.as_ref().map_or(s.agent_id.as_str(), |f| f.agent.as_str());
+    if agent == "shell" { name(s) } else { format!("{}: {}", agent_name(agent), name(s)) }
 }
 
 /// An agent's name as people know it: "Claude Code" for `claude`.
