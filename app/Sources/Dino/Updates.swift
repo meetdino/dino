@@ -57,10 +57,13 @@ extension DinoModel {
     func checkDaemonVersion() {
         guard let want = Updates.bundledVersion, let conn = connection else { return }
         Task.detached {
-            let running = (try? conn.request(["type": "version"]))?.dino
+            let reply = try? conn.request(["type": "version"])
+            let running = reply?.dino
+            let unmanaged = DinodAgent.enabled && (reply?.launchd != DinodAgent.bundled?.label || DinodAgent.stale)
             await MainActor.run {
                 self.daemonVersion = running ?? "an older dino"
                 self.daemonOutdated = running != want
+                self.daemonUnmanaged = unmanaged
             }
         }
     }
@@ -85,10 +88,13 @@ extension DinoModel {
             for _ in 0..<50 where (try? DinoConnection(path: DinoEnvironment.socketPath)) != nil {
                 try? await Task.sleep(for: .milliseconds(100))
             }
+            // Stopped: the agent registered again if an update changed it, then started through it.
+            DinodAgent.setUp(stopped: true)
             try? DinoEnvironment.ensureDaemon()
             await MainActor.run {
                 self.restartingDaemon = false
                 self.daemonOutdated = false
+                self.daemonUnmanaged = false
             }
         }
     }

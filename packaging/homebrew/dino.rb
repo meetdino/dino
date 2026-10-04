@@ -20,8 +20,11 @@ cask "dino" do
   app "Dino.app"
   binary "#{appdir}/Dino.app/Contents/Helpers/dino"
 
-  zap trash: [
+  # dinod's launch agents: the app's (SMAppService; it goes with the app) and the CLI's.
+  zap launchctl: ["dev.dino.app.dinod", "dev.dino.app.dinod-cli"],
+      trash:     [
     "~/.config/dino",
+    "~/Library/LaunchAgents/dev.dino.app.dinod-cli.plist",
     "~/Library/Preferences/dev.dino.app.plist",
     "~/Library/Saved Application State/dev.dino.app.savedState",
   ]
