@@ -114,8 +114,19 @@ extension DinoModel {
     func closePane(_ id: String) {
         guard let s = splits.first(where: { $0.contains(id) }) else { return }
         if s.helper == id, let shell = sessions.first(where: { $0.id == id }), !confirmEnding([shell], in: "pane") { return }
+        dropPane(id, from: s)
+    }
+
+    /// Split `s` without pane `id`, without asking; ⌘Z puts the pane back.
+    private func dropPane(_ id: String, from s: Split) {
+        let before = layoutBefore()
         splits.removeAll { $0 == s }
-        if s.helper == id { kill(id) }
+        let shells = s.helper == id ? [id] : []
+        closed(since: before, members: [id], shells: shells, name: "Close Pane") { [weak self] in
+            guard let self, let s = self.splits.first(where: { $0.contains(id) }) else { return }
+            self.dropPane(id, from: s)
+        }
+        if s.helper == id { endShell(id) }
         select(s.other(id))
     }
 

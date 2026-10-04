@@ -42,6 +42,21 @@ enum GhosttyConfig {
     private static let colorKeys: Set<String> = ["theme", "background", "foreground", "palette", "cursor-color", "cursor-text",
                                                  "selection-background", "selection-foreground"]
 
+    /// The keys the user's config sets, and its `keybind` values, as last read.
+    private static var userKeys: Set<String> = []
+    private static var keybinds: [String] = []
+
+    /// The user's config sets `key` (rather than leaving it to Ghostty's default).
+    static func sets(_ key: String) -> Bool { userKeys.contains(key) }
+
+    /// A `global:` keybind in the user's config does `action` (`toggle_quick_terminal`).
+    static func bindsGlobally(_ action: String) -> Bool {
+        keybinds.contains { bind in
+            guard let eq = bind.lastIndex(of: "=") else { return false }
+            return bind[bind.index(after: eq)...].trimmingCharacters(in: .whitespaces) == action && bind[..<eq].contains("global:")
+        }
+    }
+
     /// The config files read last time (includes too), and lines Ghostty refused.
     private(set) static var loaded: [String] = []
     private(set) static var skipped: [String] = []
@@ -59,10 +74,19 @@ enum GhosttyConfig {
     /// one: as in Ghostty, each pane takes the half for its own light or dark (the app's look, see
     /// `Appearance`), and switches when that changes (Ghostty's soft `reload_config`).
     static func apply(to controller: TerminalController, overrides: String) {
+        // After the config is in: batch 3's readers of the pane's own settings.
+        defer {
+            PaneSignals.readConfig(controller)
+            QuickTerminal.shared.readConfig(controller)
+            SecureInput.shared.update()
+        }
         var read: [String] = []
         let all = files.flatMap { expand($0, depth: 0, read: &read) }.compactMap(resolvingTheme)
         var lines = all
         loaded = read
+        let pairs = all.map { $0.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) } }
+        userKeys = Set(pairs.compactMap(\.first))
+        keybinds = pairs.filter { $0.first == "keybind" && $0.count == 2 }.map { $0[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
         stamps = Dictionary(uniqueKeysWithValues: read.map { ($0, modified($0)) })
         skipped = []
         // The library's built-in light and dark colors go after the config: they'd hide the user's.

@@ -95,6 +95,12 @@ final class LinkTerminalView: TerminalView {
     /// The pane's terminal state, for Ghostty's binding actions.
     var terminalState: TerminalViewState? { forwarder?.state }
 
+    /// Typing in the pane has seen its bell (`bell-features` title and border), as in Ghostty.
+    override func keyDown(with event: NSEvent) {
+        PaneSignals.typed(in: forwarder?.state)
+        super.keyDown(with: event)
+    }
+
     /// The keyboard back in the terminal, from the find bar.
     func focusTerminal() {
         window?.makeFirstResponder(self)
