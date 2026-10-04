@@ -12,6 +12,7 @@
 //! | `repos`    | `<git remote> <VAR>`   | `repos.<path>.env`, by remote: paths differ between Macs |
 //! | `terminal` | `shell_integration`, and a field name | `machine.shell_integration`, `terminal` |
 //! | `tmux`     | a field name           | `tmux`                                |
+//! | `fallbacks`| the agent              | `fallbacks.<agent>`: its chain, by provider; never a key |
 //!
 //! Only values that differ from the defaults are records, so a missing record means "default".
 //! The rest of `machine` stays on each Mac, as does `experimental` (turning one on is this Mac's
@@ -24,7 +25,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 use dino_core::controls::Controls;
-use dino_core::settings::{Machine, Policies, Repo, Routing, Settings, SshHost, Terminal, Tmux, Worktrees};
+use dino_core::settings::{Fallback, Machine, Policies, Repo, Routing, Settings, SshHost, Terminal, Tmux, Worktrees};
 
 use crate::record::RecordId;
 
@@ -61,6 +62,9 @@ pub fn flatten(settings: &Settings, remote_of: &dyn Fn(&str) -> Option<String>) 
     }
     fields(&mut out, "terminal", &settings.terminal, &Terminal::default());
     fields(&mut out, "tmux", &settings.tmux, &Tmux::default());
+    for (agent, f) in settings.fallbacks.iter().filter(|(_, f)| **f != Fallback::default()) {
+        out.insert(RecordId::new("fallbacks", agent.clone()), serde_json::to_value(f).expect("fallback"));
+    }
     out
 }
 
@@ -93,6 +97,7 @@ pub fn unflatten(local: &Settings, entries: &Entries, path_of: &dyn Fn(&str) -> 
     };
     s.terminal = rebuild(entries, "terminal", Terminal::default());
     s.tmux = rebuild(entries, "tmux", Tmux::default());
+    s.fallbacks = in_collection(entries, "fallbacks").filter_map(|(id, v)| Some((id.key.clone(), serde_json::from_value::<Fallback>(v.clone()).ok()?))).collect();
 
     s.agents = BTreeMap::new();
     for (id, v) in in_collection(entries, "agents") {
@@ -154,6 +159,7 @@ pub fn describe(entries: &Entries) -> Vec<String> {
         ("policies", "policy", "policies"),
         ("worktrees", "worktree setting", "worktree settings"),
         ("routing", "routing setting", "routing settings"),
+        ("fallbacks", "fallback chain", "fallback chains"),
     ] {
         let k = count(collection);
         if k > 0 {
@@ -161,7 +167,7 @@ pub fn describe(entries: &Entries) -> Vec<String> {
         }
     }
     // From a newer dino: still synced, even if this one has no name for them.
-    let known = ["agents", "terminal", "tmux", "ssh", "repos", "policies", "worktrees", "routing"];
+    let known = ["agents", "terminal", "tmux", "ssh", "repos", "policies", "worktrees", "routing", "fallbacks"];
     let other = entries.keys().filter(|id| !known.contains(&id.collection.as_str())).count();
     if other > 0 {
         out.push(n(other, "other setting", "other settings"));

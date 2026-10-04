@@ -16,6 +16,8 @@ struct DinoSettings: Codable, Equatable {
         var allow_bypass: Bool?
         /// Give Claude sessions dino's session tools; nil from an older dinod.
         var session_tools: Bool?
+        /// Providers agents may fall back to; empty or nil: any.
+        var fallback_providers: [String]?
 
         func allows(_ short: String) -> Bool {
             short == "shell" || allowed_agents.isEmpty || allowed_agents.contains(short)
@@ -70,6 +72,9 @@ struct DinoSettings: Codable, Equatable {
     /// Features being tried out, by name, each a switch; nil from an older dinod. A map, so one
     /// this app doesn't know yet goes back to dinod as it came.
     var experimental: [String: Bool]?
+    /// Where each agent goes when its route hits a limit, by agent id; nil from an older dinod.
+    /// Kept as JSON, so what a newer dinod adds goes back as it came (see `FallbackSetting`).
+    var fallbacks: [String: [String: JSONValue]]?
 
     struct Tmux: Codable, Equatable {
         /// dino's agents as windows in your tmux, each running `dino attach`.
@@ -1294,6 +1299,7 @@ private struct ManagedPane: View {
         case ("policies", "allowed_agents"): return make("Agents you use", "Agents", .agents)
         case ("policies", "allow_bypass"): return make("Allow bypass permissions mode", "Agents → Permissions", .agents)
         case ("policies", "session_token_budget"): return make("Tokens per session", "Agents → Limits", .agents)
+        case ("policies", "fallback_providers"): return make("Providers agents may fall back to", "Agents → Limits", .agents)
         case ("policies", "session_tools"): return make("Cross-session communication", "Experimental", .experimental)
         case ("policies", "worktree_trust"): return make("Trust fan-out worktrees when the repo is trusted", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("policies", "close_merged"): return make("Archive sessions after their PR merges or closes", "Workspaces → Worktrees", .workspaces, .worktrees)
@@ -1321,6 +1327,9 @@ private struct ManagedPane: View {
             return make((r as NSString).lastPathComponent, "Workspaces → Repositories", .workspaces, .repos)
         case ("ssh", let r):
             return make(r.split(separator: ".").first.map(String.init) ?? r, "Workspaces → SSH Hosts", .workspaces, .ssh)
+        case ("fallbacks", let r):
+            let agent = agentName(r.split(separator: ".").first.map(String.init) ?? r)
+            return make("When \(agent) Hits a Limit", "Agents → Limits", .agents)
         case ("tmux", _): return make(rest, "tmux", .tmux)
         default: return make(path, "Not shown in Settings: it's in settings.toml", nil)
         }
@@ -1464,6 +1473,8 @@ private struct AgentsPane: View {
     /// until the agent is installed or signed in.
     @State private var running: [String: (session: String, action: String)] = [:]
     @State private var showMore = false
+    /// Settings → Models & Providers' providers, for the fallbacks.
+    @State private var providers: [ProviderInfo] = []
 
     /// The ones dino works with best, in this order; the rest are under More Agents.
     private static let featured = ["claude", "codex", "copilot", "cursor", "amp", "kimi", "qwen", "pi", "hermes", "codewhale", "opencode"]
@@ -1479,6 +1490,12 @@ private struct AgentsPane: View {
     private var agents: [LauncherInfo] {
         var seen = Set<String>()
         return store.agents.filter { ($0.knobs?.any ?? false) && seen.insert($0.agent_id).inserted }
+    }
+
+    /// One per agent that can run on another route than its own: those it can fall back to.
+    private var fallbackAgents: [LauncherInfo] {
+        var seen = Set<String>()
+        return store.agents.filter { !($0.formats ?? []).isEmpty && !$0.agent_id.hasSuffix("-free") && seen.insert($0.agent_id).inserted }
     }
 
     private func controls(_ agent: String) -> Binding<Controls> {
@@ -1537,11 +1554,19 @@ private struct AgentsPane: View {
             Section {} footer: {
                 Footnote("New sessions start with these unless you choose otherwise in New Session…. Default is whatever the agent's own settings say. Change a running session from its toolbar: ⇧⌘M mode, ⇧⌘I model, ⇧⌘E effort.")
             }
+            // Agents → Limits: a session's budget, then where each agent goes at its limit.
             LimitsSection()
+            ForEach(fallbackAgents) { l in
+                FallbackSection(launcher: l, providers: providers)
+            }
         }
         .formStyle(.grouped)
         .disabled(store.settings == nil)
         .onAppear { store.loadSetup() }
+        .task {
+            let all = await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).providers()) ?? [] }.value
+            if all != providers { providers = all }
+        }
         // Back from the shell: what it did shows here.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
             if (note.object as? NSWindow)?.identifier?.rawValue.hasPrefix(SettingsView.windowID) == true { store.loadSetup() }

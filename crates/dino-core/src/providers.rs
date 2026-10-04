@@ -288,6 +288,18 @@ pub fn route_path(provider: &str) -> String {
     }
 }
 
+/// The provider served at proxy path `route` (see `route_path`): `or` is "openrouter", `plan/zai`
+/// "plan-zai". The agent's own accounts (`anthropic`, `openai`, `chatgpt` passed through) aren't
+/// providers: `None`.
+pub fn provider_of_route(route: &str) -> Option<String> {
+    match route {
+        "or" => Some("openrouter".into()),
+        "siwc" => Some("chatgpt".into()),
+        "free" => Some("free".into()),
+        r => r.strip_prefix("plan/").map(|id| format!("{}{id}", crate::plans::PREFIX)).or_else(|| r.strip_prefix("local/").map(String::from)),
+    }
+}
+
 /// The first of `speaks` (an agent's formats, best first) that `serves` has.
 pub fn pick_format(speaks: &[Format], serves: &[Format]) -> Option<Format> {
     speaks.iter().copied().find(|f| serves.contains(f))
@@ -353,6 +365,10 @@ mod tests {
         assert_eq!(route_path("chatgpt"), "siwc");
         assert_eq!(route_path("ollama"), "local/ollama");
         assert_eq!(route_path("plan-zai"), "plan/zai");
+        for p in ["openrouter", "chatgpt", "free", "plan-zai", "ollama"] {
+            assert_eq!(provider_of_route(&route_path(p)).as_deref(), Some(p));
+        }
+        assert_eq!(provider_of_route("anthropic"), None);
         use Format::*;
         assert_eq!(pick_format(&[Anthropic, Chat], &[Chat, Responses]), Some(Chat));
         assert_eq!(pick_format(&[Responses], &[Anthropic, Chat]), None);

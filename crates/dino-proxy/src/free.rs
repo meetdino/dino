@@ -295,7 +295,7 @@ fn record_openai_usage(st: &AppState, session: &str, u: &Value) {
         cache_read: u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
         cache_write: 0,
     };
-    st.stats.update(session, |s| s.usage.add(&usage));
+    st.stats.update(session, |s| s.metered(Some(&crate::RouteTag { path: "free".into(), name: "free models".into() }), &usage));
 }
 
 fn openai_error(status: StatusCode, msg: &str) -> Response<Body> {
@@ -472,7 +472,7 @@ fn record_usage(st: &AppState, session: &str, u: &anyllm_translate::anthropic::U
         cache_read: u.cache_read_input_tokens.unwrap_or(0) as u64,
         cache_write: 0,
     };
-    st.stats.update(session, |s| s.usage.add(&usage));
+    st.stats.update(session, |s| s.metered(Some(&crate::RouteTag { path: "free".into(), name: "free models".into() }), &usage));
 }
 
 fn json_response(status: StatusCode, v: Value) -> Response<Body> {
