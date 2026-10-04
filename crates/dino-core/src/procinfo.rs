@@ -177,6 +177,107 @@ pub fn under_a_dinod(procs: &Procs, pid: u32) -> bool {
     false
 }
 
+/// What a process costs the Mac, from `proc_pid_rusage`, as Activity Monitor counts it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rusage {
+    /// Its physical footprint: Activity Monitor's Memory column, `footprint`'s total.
+    pub footprint: u64,
+    /// CPU time it has used, user and system, in nanoseconds.
+    pub cpu_ns: u64,
+    /// CPU time of its children that ended and that it waited for (theirs counted in turn), in
+    /// nanoseconds: a short-lived compiler a build ran shows up here once it's gone.
+    pub children_ns: u64,
+    /// When it started, on the clock `now_ns` reads: tells a reused pid from the process before.
+    pub started_ns: u64,
+}
+
+/// A process's cost now; none once it's gone (or it isn't this user's).
+pub fn rusage(pid: u32) -> Option<Rusage> {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let got = unsafe { libc::proc_pid_rusage(pid as libc::c_int, libc::RUSAGE_INFO_V4, &mut info as *mut _ as *mut libc::rusage_info_t) };
+    (got == 0).then(|| Rusage {
+        footprint: info.ri_phys_footprint,
+        cpu_ns: ticks_to_ns(info.ri_user_time + info.ri_system_time),
+        children_ns: ticks_to_ns(info.ri_child_user_time + info.ri_child_system_time),
+        started_ns: ticks_to_ns(info.ri_proc_start_abstime),
+    })
+}
+
+/// The kernel's clock (`mach_absolute_time`, stopped while the Mac sleeps) in nanoseconds: what
+/// `Rusage::started_ns` is on.
+pub fn now_ns() -> u64 {
+    unsafe extern "C" {
+        fn mach_absolute_time() -> u64;
+    }
+    ticks_to_ns(unsafe { mach_absolute_time() })
+}
+
+/// `proc_pid_rusage` counts time in the kernel's ticks: nanoseconds on Intel, 1/24 µs on Apple silicon.
+fn ticks_to_ns(ticks: u64) -> u64 {
+    static TIMEBASE: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+    /// `mach_timebase_info_data_t`; libc's is deprecated in favour of a crate dino doesn't use.
+    #[repr(C)]
+    struct Timebase {
+        numer: u32,
+        denom: u32,
+    }
+    unsafe extern "C" {
+        fn mach_timebase_info(info: *mut Timebase) -> libc::c_int;
+    }
+    let (numer, denom) = *TIMEBASE.get_or_init(|| {
+        let mut tb = Timebase { numer: 0, denom: 0 };
+        if unsafe { mach_timebase_info(&mut tb) } != 0 || tb.numer == 0 || tb.denom == 0 {
+            return (1, 1);
+        }
+        (tb.numer as u64, tb.denom as u64)
+    });
+    (ticks as u128 * numer as u128 / denom as u128) as u64
+}
+
+/// A process's children, by their parent: like `pgrep -P`.
+pub fn children_of(pid: u32) -> Vec<u32> {
+    let mut kids = vec![0 as libc::c_int; 64];
+    loop {
+        let bytes = (kids.len() * size_of::<libc::c_int>()) as libc::c_int;
+        // A count of pids, unlike the rest of libproc.
+        let n = unsafe { libc::proc_listchildpids(pid as libc::c_int, kids.as_mut_ptr() as *mut c_void, bytes) };
+        if n <= 0 {
+            return vec![];
+        }
+        if (n as usize) < kids.len() {
+            kids.truncate(n as usize);
+            break;
+        }
+        kids.resize(kids.len() * 4, 0);
+    }
+    kids.into_iter().filter(|&k| k > 0).map(|k| k as u32).collect()
+}
+
+/// A process and everything under it, each with its parent, the process first. Found by parent,
+/// so what moved to a process group or session of its own (a job, a daemonizing server) is in it;
+/// what its parent left behind for launchd isn't.
+pub fn tree(root: u32) -> Vec<(u32, u32)> {
+    let mut out = vec![(root, parent_of(root).unwrap_or(0))];
+    let mut i = 0;
+    // Bounded, should a pid be reused into its own subtree between two looks.
+    while i < out.len() && out.len() < 4096 {
+        let at = out[i].0;
+        for kid in children_of(at) {
+            if !out.iter().any(|&(p, _)| p == kid) {
+                out.push((kid, at));
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// A process's name as the kernel keeps it (cut at 32 bytes), like `ps -o comm`'s last part.
+pub fn name(pid: u32) -> Option<String> {
+    let mut buf = [0u8; 64];
+    name_of(pid as libc::c_int, &mut buf).map(|n| String::from_utf8_lossy(n).into_owned())
+}
+
 /// A process's working directory, like lsof's `cwd` entry.
 pub fn cwd_of(pid: u32) -> Option<String> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
@@ -253,6 +354,35 @@ mod tests {
         let (args, env) = args_and_env(me).unwrap();
         assert_eq!(args, std::env::args().collect::<Vec<_>>());
         assert!(env.iter().any(|e| e.starts_with("PATH=")));
+    }
+
+    #[test]
+    fn rusage_counts_as_getrusage_does() {
+        let me = std::process::id();
+        let before = rusage(me).unwrap();
+        // A child that ends and is waited for: its time moves to ours.
+        let ok = std::process::Command::new("/bin/sh").args(["-c", "i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done"]).status().unwrap();
+        assert!(ok.success());
+        let after = rusage(me).unwrap();
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) }, 0);
+        let ns = |t: libc::timeval| t.tv_sec as u64 * 1_000_000_000 + t.tv_usec as u64 * 1000;
+        let children = ns(ru.ru_utime) + ns(ru.ru_stime);
+        let later = rusage(me).unwrap();
+        assert!(after.children_ns > before.children_ns + 50_000_000, "{before:?} {after:?}");
+        // Same clock, same units: getrusage rounds to microseconds and adds its time up a little
+        // differently (a fraction of a percent apart over many children). Bracketed, as other
+        // tests may be ending children of their own meanwhile.
+        let near = |n: u64| n + n / 50 + 1_000_000;
+        assert!(after.children_ns <= near(children) && children <= near(later.children_ns), "{} ≤ {children} ≤ {}", after.children_ns, later.children_ns);
+        assert!(after.footprint > 0 && after.cpu_ns > 0 && after.started_ns < now_ns());
+        assert_eq!(rusage(me).unwrap().started_ns, after.started_ns);
+        let mut kid = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        assert!(children_of(me).contains(&kid.id()));
+        assert!(tree(me).contains(&(kid.id(), me)));
+        assert_eq!(name(kid.id()).as_deref(), Some("sleep"));
+        let _ = kid.kill();
+        let _ = kid.wait();
     }
 
     #[test]

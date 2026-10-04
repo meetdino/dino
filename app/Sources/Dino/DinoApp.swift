@@ -1033,6 +1033,7 @@ struct SessionRow: View {
     /// The repo or worktree it's filed under: a shell's folder shows only when it's somewhere else.
     var root: String?
     @State private var hovering = false
+    @State private var anchor = CostAnchorView()
 
     var body: some View {
         let status = model.status(of: session)
@@ -1120,7 +1121,13 @@ struct SessionRow: View {
             }
         }
         .padding(.vertical, 3)
-        .onHover { hovering = $0 }
+        .background(CostAnchor(holder: anchor))
+        .onHover {
+            hovering = $0
+            // What it costs the Mac, in a card beside the row; only for what runs on this Mac.
+            if !$0 || (session.host == nil && !session.exited) { CostCard.shared.hover(session.id, anchor: anchor.view, on: $0) }
+        }
+        .onDisappear { CostCard.shared.hover(session.id, anchor: nil, on: false) }
     }
 
     /// The one thing worth a second line: what it's asking, what it waits on, a server it left

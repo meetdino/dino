@@ -30,6 +30,7 @@ mod chatgpt;
 mod cloud;
 mod codex;
 mod computer_use;
+mod cost;
 mod fallbacks;
 mod fsevents;
 mod github;
@@ -258,6 +259,8 @@ struct Daemon {
     next_sub: AtomicU64,
     /// The routes each agent's sessions use, to know when an agent is at its limit.
     fallback_seen: Mutex<fallbacks::Seen>,
+    /// Sessions whose cost a client is looking at (the sidebar's hover card).
+    costs: cost::Costs,
 }
 
 /// `dino lid-watchdog <pid>`: see [`lid`].
@@ -641,6 +644,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
         fallback_seen: Mutex::default(),
+        costs: cost::Costs::default(),
     });
     // Archived ids stay theirs, so a new session never takes one.
     let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
@@ -939,7 +943,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 | Request::RemoveStored { .. }
                 | Request::FreeUpSpace
         );
-        let reads_state = matches!(req, Request::State | Request::StateChange { .. });
+        // A hover card asks for its session's cost every couple of seconds: nothing changes.
+        let reads_state = matches!(req, Request::State | Request::StateChange { .. } | Request::SessionCost { .. });
         let resp = match req {
             Request::State => state(d),
             Request::StateChange { seen } => state_change(d, seen),
@@ -1319,6 +1324,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             },
             Request::ShellOutput { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
                 Some(s) => Response::ShellOutput { output: s.pane.shared.last_output.lock().unwrap().clone(), exit: *s.pane.shared.last_exit.lock().unwrap() },
+                None => Response::Error { message: format!("no session {id}") },
+            },
+            Request::SessionCost { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                Some(s) if s.host.is_some() => Response::Error { message: format!("{id} runs on {}: dino sees only its connection here", s.host.as_deref().unwrap_or_default()) },
+                Some(s) => match s.pane.pid().filter(|_| !s.pane.is_exited()) {
+                    Some(pid) => Response::SessionCost { cost: d.costs.measure(&id, pid) },
+                    None => Response::Error { message: format!("{id} has exited") },
+                },
                 None => Response::Error { message: format!("no session {id}") },
             },
             Request::PrDraft { id } => match pr_session(d, &id) {
