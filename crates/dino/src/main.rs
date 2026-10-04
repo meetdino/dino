@@ -2,6 +2,7 @@ mod account;
 mod ai;
 mod client;
 mod mcp;
+mod out;
 mod search;
 mod shell;
 
@@ -22,6 +23,8 @@ use dino_core::discover::{self, Inventory};
 use dino_core::settings::Settings;
 use dino_core::ipc::{LauncherInfo, QuotaInfo, Request, Response, SessionInfo};
 use dino_core::providers::ProviderRoute;
+use dino_core::status::{self, Status as SessionStatus};
+use out::{Cell, Column, Paint};
 use dino_term::Pane;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -783,26 +786,59 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 /// What `dino --help` says before the full list: what dino is, and where to start.
-const INTRO: &str = "dino runs your coding agents (Claude Code, Codex, …) and keeps them running: in the dino app, or here.
+const INTRO: &str = "dino runs your coding agents (Claude Code, Codex, …) and keeps them running:
+in the dino app, or here.
 
-  dino                 the full-screen view of every session (starts dinod if needed)
-  dino claude          start Claude Code here (any agent dino knows: dino ls shows what's running)
-  dino .               a shell in this folder, in the dino app
-  dino status          what's working and what needs you
-  dino found           agents already running on this Mac, in any terminal
+  dino                every session, full screen (starts dinod if needed)
+  dino claude         start Claude Code here, or any agent dino knows
+  dino .              a shell in this folder, in the dino app
+  dino status         what's working and what needs you
+  dino found          agents already running on this Mac, in any terminal
 ";
 
-const USAGE: &str = "usage: dino [agent [args...]] | --welcome
-       dino <folder> [agent [args...]]   (a shell, or that agent, there: opens in the terminal app)
-       dino ls | new [--worktree] <agent> [--on <provider> <model>] [args...] | attach <id> | resume <id> | kill <id> | ping | stop | daemon
-       dino found | continue <session-id prefix>
-       dino status [--tmux]   (agents that need you and that are working; --tmux: for status-right)
-       dino mcp [--read-only]   (MCP server on stdio: agents list, read, message and start sessions)
-       dino fan [--agents claude,codex,...] <prompt> | groups | diff <id> | keep <id> | discard <group>
-       dino ai suggest|agent -- <request>   (the shell's AI line) | search [--json|--pick]
-       dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]";
+const USAGE: &str = "Sessions
+  dino [<agent> [args...]]          full screen; with an agent, that agent in it
+  dino <folder> [<agent> [args...]] a shell or that agent there, in the dino app
+  dino ls [--usage] [--json]        every session, what needs you first
+  dino status [--tmux]              in a line; --tmux for tmux's status-right
+  dino new [--worktree] <agent> [--on <provider> <model>] [args...]
+                                    start one in the background; prints its id
+  dino attach | resume | kill <id>
+  dino found [--all] [--json]       agents dino didn't start, to continue here
+  dino continue <id>                continue one of those in dino
 
-fn main() -> anyhow::Result<()> {
+Fan-out: one prompt to several agents, a git worktree each
+  dino fan [--agents claude,codex,...] <prompt>
+  dino groups | diff <id> | keep <id> | discard <group>
+
+Setup
+  dino login [--email | --device] | logout | sync [status|now|resolve|undo]
+  dino login openrouter|chatgpt     connect a provider in your browser
+  dino claude-token [status|create|set|remove]
+  dino power [status|setup|remove]  keep agents running with the lid closed
+  dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]
+  dino ai suggest|agent -- <request> | search [--json|--pick]
+                                    the shell's AI line and history search
+  dino mcp [--read-only]            an MCP server on stdio, for agents
+  dino ping | stop | daemon | --version
+
+`dino <command> --help` says more about ls, found, login and fan.";
+
+fn main() {
+    // Piped into `head`, stop quietly when it has enough, as other commands do; Rust otherwise
+    // ignores SIGPIPE and the next print panics. Not dinod: a client hanging up mustn't end it.
+    if !matches!(std::env::args().nth(1).as_deref(), Some("daemon" | "lid-watchdog")) {
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+    if let Err(e) = dino() {
+        out::error(&e);
+        std::process::exit(1);
+    }
+}
+
+fn dino() -> anyhow::Result<()> {
     let mut cli: Vec<String> = std::env::args().skip(1).collect();
     match cli.first().map(String::as_str) {
         Some("daemon") => return dino_daemon::run(),
@@ -814,10 +850,10 @@ fn main() -> anyhow::Result<()> {
         Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status")),
         Some("attach") => {
             let fresh = cli.iter().any(|a| a == "--fresh");
-            let id = cli.iter().skip(1).find(|a| *a != "--fresh").ok_or_else(|| anyhow::anyhow!(USAGE))?;
+            let id = cli.iter().skip(1).find(|a| *a != "--fresh").ok_or_else(|| anyhow::anyhow!("usage: dino attach <id>\n`dino ls` lists the sessions."))?;
             return client::attach_raw(id, fresh);
         }
-        Some("ls") => return cmd_ls(),
+        Some("ls") => return cmd_ls(&cli[1..]),
         Some("status") => return cmd_status(cli.iter().any(|a| a == "--tmux")),
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
         // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
@@ -826,7 +862,7 @@ fn main() -> anyhow::Result<()> {
             println!("dino {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-        Some("found") => return cmd_found(),
+        Some("found") => return cmd_found(&cli[1..]),
         Some("ai") => return ai::run(&cli[1..]),
         Some("search") => return search::run(&cli[1..]),
         Some("init") => return shell::init(cli.get(1).map(String::as_str)),
@@ -835,19 +871,31 @@ fn main() -> anyhow::Result<()> {
         Some("login") => return account::login(&cli[1..]),
         Some("logout") => {
             let Some(provider) = cli.get(1).cloned() else { return account::logout() };
-            return print_response(client::request(&Request::DisconnectProvider { provider })?);
+            done(client::request(&Request::DisconnectProvider { provider: provider.clone() })?)?;
+            say(&format!("Disconnected {}.", printable(&provider)));
+            return Ok(());
         }
         Some("sync") => return account::sync(&cli[1..]),
         Some("fan") => return cmd_fan(&cli[1..]),
         Some("groups") => return cmd_groups(),
         Some("diff") => {
-            let session = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino diff <session id>"))?.clone();
-            let Response::Diff { text, .. } = client::request(&Request::Diff { session })? else { anyhow::bail!("unexpected reply") };
+            let session = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino diff <id>\n`dino groups` lists fan-outs and their sessions."))?.clone();
+            let Response::Diff { text, .. } = client::request(&Request::Diff { session })? else { return Err(unexpected()) };
             print!("{text}");
             return Ok(());
         }
-        Some("keep") => return print_response(client::request(&Request::Keep { session: cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino keep <session id>"))?.clone() })?),
-        Some("discard") => return print_response(client::request(&Request::Discard { group: cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino discard <group>"))?.clone() })?),
+        Some("keep") => {
+            let session = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino keep <session id>\n`dino groups` lists fan-outs and their sessions."))?.clone();
+            done(client::request(&Request::Keep { session: session.clone() })?)?;
+            say(&format!("Applied session {}'s changes to your checkout, and closed its group.", printable(&session)));
+            return Ok(());
+        }
+        Some("discard") => {
+            let group = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino discard <group>\n`dino groups` lists them."))?.clone();
+            done(client::request(&Request::Discard { group: group.clone() })?)?;
+            say(&format!("Closed group {}: its agents are stopped and their worktrees removed.", printable(&group)));
+            return Ok(());
+        }
         Some("continue") => return cmd_continue(cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino continue <session-id prefix>"))?),
         // Start dinod if needed; used by the app before it attaches surfaces.
         Some("ping") => {
@@ -858,7 +906,7 @@ fn main() -> anyhow::Result<()> {
         Some("new") => {
             let worktree = cli.get(1).is_some_and(|a| a == "-w" || a == "--worktree");
             let rest = &cli[if worktree { 2 } else { 1 }..];
-            let agent = rest.first().ok_or_else(|| anyhow::anyhow!(USAGE))?.clone();
+            let agent = rest.first().ok_or_else(|| anyhow::anyhow!("usage: dino new [--worktree] <agent> [--on <provider> <model>] [args...]"))?.clone();
             let (cols, rows) = terminal::size().unwrap_or((120, 40));
             let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
             // `--on <provider> <model>`: a provider's model instead of the agent's own account.
@@ -866,17 +914,36 @@ fn main() -> anyhow::Result<()> {
                 [on, provider, model, args @ ..] if on == "--on" => (Some(ProviderRoute { provider: provider.clone(), model: model.clone(), format: None, name: String::new() }), args.to_vec()),
                 args => (None, args.to_vec()),
             };
-            let req = Request::New { launcher: agent, args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route, reveal: false };
-            return print_response(client::request(&req)?);
+            let req = Request::New { launcher: agent.clone(), args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route, reveal: false };
+            let id = created(client::request(&req)?)?;
+            // Piped, only the id, for `id=$(dino new claude)`.
+            if out::tty() {
+                println!("Started {} as session {id}. `dino attach {id}` opens it here.", printable(&agent));
+            } else {
+                println!("{id}");
+            }
+            return Ok(());
         }
-        Some("kill") => return print_response(client::request(&Request::Kill { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),
-        Some("resume") => return print_response(client::request(&Request::Resume { id: cli.get(1).ok_or_else(|| anyhow::anyhow!(USAGE))?.clone() })?),
+        Some("kill") => {
+            let id = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino kill <id>\n`dino ls` lists the sessions."))?.clone();
+            done(client::request(&Request::Kill { id: id.clone() })?)?;
+            say(&format!("Closed session {}.", printable(&id)));
+            return Ok(());
+        }
+        Some("resume") => {
+            let id = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino resume <id>\n`dino ls` lists the sessions; Ended ones resume."))?.clone();
+            done(client::request(&Request::Resume { id: id.clone() })?)?;
+            say(&format!("Resumed session {id}. `dino attach {id}` opens it here.", id = printable(&id)));
+            return Ok(());
+        }
         Some("stop") => {
             if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
-                println!("dinod is not running");
+                println!("dinod isn't running.");
                 return Ok(());
             }
-            return print_response(client::request(&Request::Shutdown)?);
+            done(client::request(&Request::Shutdown)?)?;
+            say("Stopped dinod. Its sessions resume when it next starts.");
+            return Ok(());
         }
         Some(arg) if is_folder(arg) => return cmd_open(arg, &cli[1..]),
         Some("-h" | "--help" | "help") => {
@@ -894,13 +961,23 @@ fn main() -> anyhow::Result<()> {
                 return cmd_open(".", &cli);
             }
         }
-        anyhow::bail!("already inside dino: {}\n\n{USAGE}", cli.first().map_or("run a command".into(), |a| format!("unknown command `{a}`")));
+        match cli.first() {
+            Some(a) => return Err(unknown_agent(a, true)),
+            None => anyhow::bail!("this is a dino session already: the full-screen view would show itself.\n`dino ls` lists the sessions, and `dino --help` the commands."),
+        }
     }
 
     let launchers = match client::request(&Request::Launchers)? {
         Response::Launchers { launchers } => launchers,
-        other => anyhow::bail!("unexpected reply from dinod: {other:?}"),
+        _ => return Err(unexpected()),
     };
+    // Not a command, and no agent by that name: say so, rather than open the full-screen view.
+    if let Some(a) = cli.first().filter(|a| *a != "--welcome") {
+        let a = a.to_lowercase();
+        if !launchers.iter().any(|l| l.short == a || l.label.to_lowercase().starts_with(&a)) {
+            return Err(unknown_agent(&a, true));
+        }
+    }
     let snapshot: Arc<Mutex<Option<Snapshot>>> = Arc::default();
     let mut app = App::new(launchers, snapshot.clone());
     let (cols, rows) = terminal::size()?;
@@ -998,8 +1075,8 @@ fn cmd_open(folder: &str, rest: &[String]) -> anyhow::Result<()> {
     };
     let id = match client::request(&req)? {
         Response::Created { id } => id,
-        Response::Error { message } => anyhow::bail!(message),
-        other => anyhow::bail!("unexpected reply from dinod: {other:?}"),
+        Response::Error { message } => return Err(hinted(message)),
+        _ => return Err(unexpected()),
     };
     if std::env::var_os("DINO_SESSION").is_some_and(|s| !s.is_empty()) {
         return Ok(());
@@ -1008,31 +1085,107 @@ fn cmd_open(folder: &str, rest: &[String]) -> anyhow::Result<()> {
     if opened { Ok(()) } else { client::attach_raw(&id, false) }
 }
 
-fn print_response(resp: Response) -> anyhow::Result<()> {
-    match resp {
-        Response::Created { id } => println!("{id}"),
-        Response::Ok => {}
-        Response::Error { message } => anyhow::bail!(message),
-        other => println!("{other:?}"),
+/// What a command did, in a sentence, on a terminal; piped, it says nothing, the way `cp` doesn't.
+fn say(what: &str) {
+    if out::tty() {
+        println!("{what}");
     }
-    Ok(())
+}
+
+/// dinod's answer to a command that makes something: its id.
+fn created(resp: Response) -> anyhow::Result<String> {
+    match resp {
+        Response::Created { id } => Ok(id),
+        Response::Error { message } => Err(hinted(message)),
+        _ => Err(unexpected()),
+    }
+}
+
+/// dinod's answer to a command that only does something.
+fn done(resp: Response) -> anyhow::Result<()> {
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message } => Err(hinted(message)),
+        _ => Err(unexpected()),
+    }
+}
+
+/// A reply this dino doesn't know: dinod is a different version.
+fn unexpected() -> anyhow::Error {
+    anyhow::anyhow!("dinod answered in a way this dino doesn't understand: it's probably another version.\n`dino stop` stops it (its sessions resume), and the next command starts this one's.")
+}
+
+/// dinod's error, with what to do about it when the command line knows better.
+fn hinted(message: String) -> anyhow::Error {
+    if message.starts_with("no session ") {
+        return anyhow::anyhow!("{message}\n`dino ls` lists them.");
+    }
+    if let Some(name) = message.strip_prefix("unknown agent ") {
+        return unknown_agent(name, false);
+    }
+    anyhow::anyhow!(message)
+}
+
+/// `name` isn't an agent dino can start: how to install it, when it's one dino knows, or the ones it
+/// can. `command`: it was the first word, so it could have been meant as a command.
+fn unknown_agent(name: &str, command: bool) -> anyhow::Error {
+    let name = printable(name);
+    if let Some(k) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == name || k.bin == name) {
+        let hint = discover::install_hint(k.id);
+        return anyhow::anyhow!("{} isn't installed (no `{}` on the PATH). Install it with\n\n    {hint}\n\nthen run this again.", k.name, k.bin);
+    }
+    let agents = match client::request(&Request::Launchers) {
+        Ok(Response::Launchers { launchers }) => launchers.into_iter().map(|l| l.short).collect::<Vec<_>>().join(", "),
+        _ => String::new(),
+    };
+    if command {
+        anyhow::anyhow!("`{name}` isn't a dino command or an agent dino knows.\nAgents here: {agents}. `dino --help` lists the commands.")
+    } else {
+        anyhow::anyhow!("`{name}` isn't an agent dino knows. Agents here: {agents}.")
+    }
 }
 
 /// What the agents are up to, in a line: `dino status --tmux` is short, for tmux's status bar
 /// (`set -g status-right '#(dino status --tmux)'`), and prints nothing when nothing needs saying.
+/// Without it, the agents that need you, with what they ask, and those working, under the line.
 /// It never starts dinod: a status bar asks every few seconds.
 fn cmd_status(tmux: bool) -> anyhow::Result<()> {
     if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
         if !tmux {
-            println!("dinod is not running");
+            println!("No agents: dinod isn't running. Start one with `dino claude`.");
         }
         return Ok(());
     }
-    let Response::State { sessions, .. } = client::request(&Request::State)? else { anyhow::bail!("unexpected reply") };
-    let agents: Vec<_> = sessions.iter().filter(|s| s.agent_id != "shell" && !s.exited).collect();
-    let needs = agents.iter().filter(|s| s.activity.as_deref().is_some_and(|a| a.starts_with("needs:"))).count();
-    let working = agents.iter().filter(|s| s.in_flight > 0 || s.activity.as_deref() == Some("working")).count();
-    println!("{}", status_line(tmux, agents.len(), needs, working));
+    let Response::State { sessions, .. } = client::request(&Request::State)? else { return Err(unexpected()) };
+    let mut agents: Vec<_> = sessions.iter().filter(|s| status::is_agent(s) && !s.exited).map(|s| (SessionStatus::of(s), s)).collect();
+    agents.sort_by_key(|(st, s)| (*st, id_order(&s.id)));
+    let count = |want: SessionStatus| agents.iter().filter(|(st, _)| *st == want).count();
+    let line = status_line(tmux, agents.len(), count(SessionStatus::NeedsYou), count(SessionStatus::Working));
+    if tmux {
+        println!("{line}");
+        return Ok(());
+    }
+    let cols = [Column::keep("ID"), Column::keep("STATUS"), Column::end("NAME", 12), Column::end("ASKS", 12)];
+    let rows: Vec<_> = agents
+        .iter()
+        .filter(|(st, _)| matches!(st, SessionStatus::NeedsYou | SessionStatus::Working))
+        .map(|(st, s)| vec![Cell::new(printable(&s.id)), Cell::status(*st), Cell::new(name(s)), Cell::new(printable(status::needs(s).unwrap_or("")))])
+        .collect();
+    if out::tty() {
+        println!("{line}");
+        if !rows.is_empty() {
+            print!("\n{}", out::table(&cols, &rows, false).lines().map(|l| format!("  {l}\n")).collect::<String>());
+        }
+        let asking: Vec<_> = agents.iter().filter(|(st, _)| *st == SessionStatus::NeedsYou).collect();
+        match asking.as_slice() {
+            [] => {}
+            [(_, s)] => println!("\n{}", out::paint(&format!("`dino attach {}` to answer it.", printable(&s.id)), Paint::Dim)),
+            _ => println!("\n{}", out::paint("`dino attach <id>` to answer one.", Paint::Dim)),
+        }
+    } else {
+        println!("{line}");
+        print!("{}", out::table(&cols, &rows, false));
+    }
     Ok(())
 }
 
@@ -1047,25 +1200,135 @@ fn status_line(tmux: bool, agents: usize, needs: usize, working: usize) -> Strin
     match (tmux, parts.is_empty()) {
         (true, true) => String::new(),
         (true, false) => format!("dino: {}", parts.join(" · ")),
+        (false, true) if agents == 0 => "No agents running. Start one with `dino claude`.".into(),
         (false, true) => format!("{agents} {}, none working", if agents == 1 { "agent" } else { "agents" }),
         (false, false) => format!("{agents} {}: {}", if agents == 1 { "agent" } else { "agents" }, parts.join(", ")),
     }
 }
 
-fn cmd_ls() -> anyhow::Result<()> {
-    if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
-        println!("dinod is not running");
+/// Sessions in the order dinod numbered them: `10` after `9`.
+fn id_order(id: &str) -> (usize, String) {
+    (id.parse().unwrap_or(usize::MAX), id.to_string())
+}
+
+/// What the app calls a session: the name you gave it, else what its agent calls the conversation,
+/// else its own name (`claude-2`).
+fn name(s: &SessionInfo) -> String {
+    let title = |t: &str| {
+        let t = t.trim_start_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '~' | '/' | '.'))).trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+    // Until it has a topic, an agent's title is only its own name ("Claude Code").
+    let topic = |t: String| {
+        let words: Vec<_> = t.split_whitespace().collect();
+        let only_agent = words.len() <= 2 && words.first().is_some_and(|w| s.agent_id.to_lowercase().starts_with(&w.to_lowercase()));
+        (!only_agent).then_some(t)
+    };
+    let shown = s.label.clone().or_else(|| match &s.inside {
+        Some(f) => title(&f.title),
+        None if s.agent_id != "shell" => s.title.as_deref().and_then(title).and_then(topic),
+        None => None,
+    });
+    printable(&shown.unwrap_or_else(|| s.name.clone()))
+}
+
+/// Where a session runs: its folder (a shell's, where it is now), `host:` before it over SSH.
+fn folder(s: &SessionInfo) -> String {
+    let path = s.shell_cwd.as_deref().unwrap_or(&s.cwd);
+    printable(&match &s.host {
+        Some(h) => format!("{h}:{path}"),
+        None => out::short_path(path),
+    })
+}
+
+const LS_HELP: &str = "usage: dino ls [--usage] [--json]
+
+Every session dinod runs, what needs you first, then what's working, done, idle and ended.
+Statuses are the app's, worked out the same way; a turn that ended is Done until the next one.
+
+  -u, --usage   add the tokens each one has used, in and out
+      --json    a JSON array for scripts, one object per session, with
+                  id, name, agent, status (needs_you, working, done, idle, ended, exited),
+                  needs (what it asks for, or null), folder, host (or null),
+                  last_active (ISO 8601 UTC, or null), input_tokens, output_tokens
+                Fields may be added; these keep their names and meanings.
+
+Piped, it prints a tab-separated line per session and no header: id, name, agent, status,
+folder (in full) and last active, with the values --json has.";
+
+/// `dino ls [--usage] [--json]`: every session, what wants you first.
+fn cmd_ls(args: &[String]) -> anyhow::Result<()> {
+    let usage = args.iter().any(|a| a == "-u" || a == "--usage");
+    let json = args.iter().any(|a| a == "--json");
+    if let Some(a) = args.iter().find(|a| !matches!(a.as_str(), "-u" | "--usage" | "--json")) {
+        if matches!(a.as_str(), "-h" | "--help") {
+            println!("{LS_HELP}");
+            return Ok(());
+        }
+        anyhow::bail!("dino ls doesn't take `{}`\n`dino ls --help` says what it does.", printable(a));
+    }
+    // Never starts dinod: without it there are no sessions to list.
+    let mut sessions = match std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()) {
+        Err(_) => vec![],
+        Ok(_) => match client::request(&Request::State)? {
+            Response::State { sessions, .. } => sessions,
+            _ => return Err(unexpected()),
+        },
+    };
+    sessions.sort_by_key(|s| (SessionStatus::of(s), id_order(&s.id)));
+    let now_ms = out::now() * 1000;
+    let last_active = |s: &SessionInfo| s.output_ms_ago.map(|ms| now_ms.saturating_sub(ms) / 1000);
+    if json {
+        let list: Vec<_> = sessions
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "name": name(s),
+                    "agent": s.inside.as_ref().map_or(&s.agent_id, |f| &f.agent),
+                    "status": SessionStatus::of(s).key(),
+                    "needs": status::needs(s),
+                    "folder": s.shell_cwd.as_deref().unwrap_or(&s.cwd),
+                    "host": s.host,
+                    "last_active": last_active(s).map(out::iso),
+                    "input_tokens": s.input_tokens,
+                    "output_tokens": s.output_tokens,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(());
     }
-    let Response::State { sessions, .. } = client::request(&Request::State)? else { anyhow::bail!("unexpected reply") };
     if sessions.is_empty() {
-        println!("no sessions");
+        eprintln!("No sessions. Start one with `dino claude`, or `dino .` for a shell here.");
+        return Ok(());
     }
-    for s in sessions {
-        let state = if s.exited { "exited".to_string() } else { printable(&s.activity.unwrap_or_else(|| "idle".into())) };
-        let title = printable(&s.title.unwrap_or_default());
-        println!("{:>3}  {:<16} {:<10} ↑{} ↓{}  {title}", printable(&s.id), truncate(&printable(&s.name), 16), state, tokens(s.input_tokens), tokens(s.output_tokens));
+    let mut cols = vec![Column::keep("ID"), Column::end("NAME", 12), Column::keep("AGENT"), Column::keep("STATUS"), Column::path("FOLDER", 12), Column::keep("ACTIVE")];
+    if usage {
+        cols.extend([Column::right("IN"), Column::right("OUT")]);
     }
+    let rows: Vec<_> = sessions
+        .iter()
+        .map(|s| {
+            let st = SessionStatus::of(s);
+            let agent = printable(s.inside.as_ref().map_or(&s.agent_id, |f| &f.agent));
+            let when = last_active(s).map_or_else(|| Cell::new("-").raw(""), |t| Cell::new(out::ago(out::now().saturating_sub(t))).raw(out::iso(t)));
+            let mut row = vec![
+                Cell::new(printable(&s.id)),
+                Cell::new(name(s)).paint(if st == SessionStatus::NeedsYou { Paint::Bold } else { Paint::Plain }),
+                Cell::new(agent),
+                Cell::status(st),
+                Cell::new(folder(s)).raw(printable(s.shell_cwd.as_deref().unwrap_or(&s.cwd))),
+                when.paint(Paint::Dim),
+            ];
+            if usage {
+                row.push(Cell::new(tokens(s.input_tokens)).raw(s.input_tokens.to_string()));
+                row.push(Cell::new(tokens(s.output_tokens)).raw(s.output_tokens.to_string()));
+            }
+            row
+        })
+        .collect();
+    print!("{}", out::table(&cols, &rows, true));
     Ok(())
 }
 
@@ -1077,23 +1340,26 @@ fn cmd_power(action: &str) -> anyhow::Result<()> {
     }
     let p = match client::request(&Request::Power { action: action.into() })? {
         Response::Power { power } => power,
-        Response::Error { message } => anyhow::bail!(message),
-        _ => anyhow::bail!("unexpected reply"),
+        Response::Error { message } => return Err(hinted(message)),
+        _ => return Err(unexpected()),
     };
     let lid = dino_core::settings::Settings::load().machine.lid;
-    println!("keep agents running with the lid closed: {}", if lid.enabled { "on" } else { "off" });
-    println!("permission set up: {}", if p.ready == Some(true) { "yes" } else { "no (dino power setup)" });
+    let mut rows = vec![
+        ("Lid closed", if lid.enabled { "agents keep running".to_string() } else { "the Mac sleeps (Settings → General keeps agents running)".into() }),
+        ("Permission", if p.ready == Some(true) { "set up".into() } else { "not set up: `dino power setup`".into() }),
+    ];
     if p.holding {
-        println!("now: awake with the lid closed");
+        rows.push(("Now", "awake with the lid closed".into()));
     } else if p.external {
-        println!("now: sleep is off, but not by dino; dino leaves it alone");
+        rows.push(("Now", "sleep is off, but not by dino; dino leaves it alone".into()));
     }
     if let Some(note) = p.note {
-        println!("last: {note}");
+        rows.push(("Last time", printable(&note)));
     }
     if let Some(e) = p.error {
-        println!("error: {e}");
+        rows.push(("Error", printable(&e)));
     }
+    print!("{}", out::fields(&rows));
     Ok(())
 }
 
@@ -1117,51 +1383,157 @@ fn cmd_claude_token(action: &str) -> anyhow::Result<()> {
     };
     let t = match client::request(&Request::ClaudeToken { action: action.into(), value })? {
         Response::ClaudeToken { token } => token,
-        Response::Error { message } => anyhow::bail!(message),
-        _ => anyhow::bail!("unexpected reply"),
+        Response::Error { message } => return Err(hinted(message)),
+        _ => return Err(unexpected()),
     };
-    let when = |s: u64| {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let days = s.saturating_sub(now) / 86_400;
-        format!("in {days} days")
+    let when = |s: u64| match s.saturating_sub(out::now()) / 86_400 {
+        0 => "today".to_string(),
+        1 => "tomorrow".into(),
+        days => format!("in {days} days"),
     };
-    match (&t.masked, t.expires) {
-        (Some(m), Some(e)) => println!("token: {m} (runs out {})", when(e)),
-        (Some(m), None) => println!("token: {m}"),
-        _ => println!("token: none (dino claude-token create)"),
-    }
+    let mut rows = vec![(
+        "Token",
+        match (&t.masked, t.expires) {
+            (Some(m), Some(e)) => format!("{} (runs out {})", printable(m), when(e)),
+            (Some(m), None) => printable(m),
+            _ => "none: `dino claude-token create` makes one".into(),
+        },
+    )];
     if let Some(s) = t.signed_in {
-        println!("Claude Code on this Mac: {}", if s { "signed in on its own" } else { "not signed in: sessions here use the token" });
+        rows.push(("Claude Code here", if s { "signed in on its own".into() } else { "not signed in: sessions here use the token".into() }));
     }
     if let Some(id) = t.creating {
-        println!("waiting for claude setup-token in session {id}: finish signing in in your browser");
+        rows.push(("Creating", format!("in session {}: finish signing in in your browser", printable(&id))));
     }
     if let Some(e) = t.error {
-        println!("error: {e}");
+        rows.push(("Error", printable(&e)));
     }
+    print!("{}", out::fields(&rows));
     Ok(())
 }
 
+const FOUND_HELP: &str = "usage: dino found [--all] [--json]
+
+Agent sessions dino didn't start, that `dino continue <id>` continues in dino: running in other
+terminals (tmux too), recent ones on this Mac, and Claude Code on the web.
+
+  --all    every recent one, not only the newest 25
+  --json   a JSON array, one object per session
+
+Piped, it prints a tab-separated line per session and no header: where it was found (running,
+recent or cloud), its full id, agent, title, folder, status and when it last changed.";
+
 /// Agent sessions outside dino that it can continue: running elsewhere, recent, cloud.
-fn cmd_found() -> anyhow::Result<()> {
+fn cmd_found(args: &[String]) -> anyhow::Result<()> {
     use dino_core::found::Source;
+    let all = args.iter().any(|a| a == "--all");
+    let json = args.iter().any(|a| a == "--json");
+    if let Some(a) = args.iter().find(|a| !matches!(a.as_str(), "--all" | "--json")) {
+        if matches!(a.as_str(), "-h" | "--help") {
+            println!("{FOUND_HELP}");
+            return Ok(());
+        }
+        anyhow::bail!("dino found doesn't take `{}`\n`dino found --help` says what it does.", printable(a));
+    }
     // Through dinod, so its own sessions aren't listed as "elsewhere".
-    let Response::Found { sessions } = client::request(&Request::Found { cloud: true, running_only: false })? else { anyhow::bail!("unexpected reply") };
-    // The rest are in the app's browser, and `dino continue` finds them all.
-    const SHOWN: usize = 25;
-    for (label, source) in [("RUNNING ELSEWHERE", Source::Running), ("RECENT", Source::Recent), ("CLOUD", Source::Cloud)] {
-        println!("{label}");
-        let group: Vec<_> = sessions.iter().filter(|f| f.source == source).collect();
-        if group.len() > SHOWN {
-            println!("  (newest {SHOWN} of {})", group.len());
+    let Response::Found { sessions } = client::request(&Request::Found { cloud: true, running_only: false })? else { return Err(unexpected()) };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        return Ok(());
+    }
+    let now = out::now();
+    let shown = |f: &dino_core::found::FoundSession| f.session_id.get(..8).unwrap_or(&f.session_id).to_string();
+    if !out::tty() {
+        for f in &sessions {
+            let source = match f.source {
+                Source::Running => "running",
+                Source::Recent => "recent",
+                Source::Cloud => "cloud",
+            };
+            let when = if f.updated_at > 0 { out::iso(f.updated_at) } else { String::new() };
+            let fields = [source, &f.session_id, &f.agent, &f.title, f.cwd.as_deref().unwrap_or(""), f.status.as_deref().unwrap_or(""), &when];
+            println!("{}", fields.map(printable).join("\t"));
         }
-        for f in group.into_iter().take(SHOWN) {
-            let place = f.terminal.as_deref().map(|t| format!("in {}", printable(t))).unwrap_or_default();
-            let status = printable(f.status.as_deref().unwrap_or(""));
-            let cwd = printable(&f.cwd.as_deref().unwrap_or("").replace(&std::env::var("HOME").unwrap_or_default(), "~"));
-            let id = printable(f.session_id.get(..8).unwrap_or(""));
-            println!("  {:<6} {:<38} {:<32} {:<10} {:<9} {}  {}", printable(&f.agent), truncate(&printable(&f.title), 38), truncate_left(&cwd, 32), place, status, id, printable(&f.args.join(" ")));
+        return Ok(());
+    }
+    // The rest are in the app's session browser, and `dino continue` finds them all.
+    const NEWEST: usize = 25;
+    let mut first = true;
+    let mut section = |heading: &str| {
+        if !first {
+            println!();
         }
+        first = false;
+        println!("{}", out::paint(heading, Paint::Bold));
+    };
+    let row = |f: &dino_core::found::FoundSession| {
+        vec![
+            Cell::new(printable(&shown(f))),
+            Cell::new(printable(&f.agent)),
+            Cell::new(printable(&f.title)),
+            Cell::new(printable(&out::short_path(f.cwd.as_deref().unwrap_or("")))),
+        ]
+    };
+    let running: Vec<_> = sessions.iter().filter(|f| f.source == Source::Running).collect();
+    if !running.is_empty() {
+        section("Running in other terminals");
+        let place = |f: &dino_core::found::FoundSession| f.tmux.as_ref().map(|t| format!("tmux {}", t.label)).or_else(|| f.terminal.clone());
+        // Which terminal, when dino can tell for any of them.
+        let any_place = running.iter().any(|f| place(f).is_some());
+        let mut cols = vec![Column::keep("ID"), Column::keep("AGENT"), Column::end("TITLE", 16), Column::path("FOLDER", 12), Column::keep("STATUS")];
+        if any_place {
+            cols.push(Column::end("TERMINAL", 8));
+        }
+        let rows: Vec<_> = running
+            .iter()
+            .map(|f| {
+                let state = match f.status.as_deref() {
+                    Some("busy") => SessionStatus::Working,
+                    Some("needs") => SessionStatus::NeedsYou,
+                    _ => SessionStatus::Idle,
+                };
+                let mut r = row(f);
+                r.push(Cell::status(state));
+                if any_place {
+                    r.push(Cell::new(printable(&place(f).unwrap_or_default())).paint(Paint::Dim));
+                }
+                r
+            })
+            .collect();
+        print!("{}", out::table(&cols, &rows, true));
+    }
+    let recent: Vec<_> = sessions.iter().filter(|f| f.source == Source::Recent).collect();
+    if !recent.is_empty() {
+        section("Recent");
+        let more = if all { 0 } else { recent.len().saturating_sub(NEWEST) };
+        let cols = [Column::keep("ID"), Column::keep("AGENT"), Column::end("TITLE", 16), Column::path("FOLDER", 12), Column::keep("UPDATED")];
+        let rows: Vec<_> = recent
+            .iter()
+            .take(recent.len() - more)
+            .map(|f| {
+                let mut r = row(f);
+                r.push(Cell::new(out::ago(now.saturating_sub(f.updated_at))).paint(Paint::Dim));
+                r
+            })
+            .collect();
+        print!("{}", out::table(&cols, &rows, true));
+        if more > 0 {
+            println!("{}", out::paint(&format!("… and {more} older: dino found --all"), Paint::Dim));
+        }
+    }
+    let cloud: Vec<_> = sessions.iter().filter(|f| f.source == Source::Cloud).collect();
+    if !cloud.is_empty() {
+        section("Claude Code on the web");
+        for f in cloud {
+            // Not a session yet: the app's session browser lists the web's to pick from.
+            let what = if f.session_id.is_empty() { "Pick a web session to teleport in the dino app: Session → Continue a Session… (⌘K)".into() } else { format!("{}  {}", printable(&shown(f)), printable(&f.title)) };
+            println!("{what}");
+        }
+    }
+    if first {
+        println!("No agent sessions outside dino on this Mac.");
+    } else {
+        println!("\n{}", out::paint("`dino continue <id>` continues one in dino.", Paint::Dim));
     }
     Ok(())
 }
@@ -1175,13 +1547,20 @@ fn cmd_fan(args: &[String]) -> anyhow::Result<()> {
     let (agents, prompt) = match args {
         [flag, list, rest @ ..] if flag == "--agents" => (list.split(',').map(String::from).collect(), rest.join(" ")),
         rest => {
-            let Response::Launchers { launchers } = client::request(&Request::Launchers)? else { anyhow::bail!("unexpected reply") };
+            let Response::Launchers { launchers } = client::request(&Request::Launchers)? else { return Err(unexpected()) };
             (launchers.into_iter().filter(|l| l.agent_id != "shell").map(|l| l.short).collect::<Vec<_>>(), rest.join(" "))
         }
     };
     let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
-    print_response(client::request(&Request::Fanout { prompt, launchers: agents, cwd })?)
+    let group = created(client::request(&Request::Fanout { prompt, launchers: agents.clone(), cwd })?)?;
+    if out::tty() {
+        println!("Fanned out to {} as group {group}. `dino groups` shows how each is doing.", agents.join(", "));
+    } else {
+        println!("{group}");
+    }
+    Ok(())
 }
+
 
 /// Connect a hosted provider in the browser (OpenRouter's sign-in, or Sign in with ChatGPT; no key
 /// to paste), then wait until dinod has what it gave.
@@ -1196,7 +1575,7 @@ fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
         println!("{} is already connected (dino logout {provider} disconnects it).", p.name);
         return Ok(());
     }
-    let Response::Connect { url } = client::request(&Request::ConnectProvider { provider: provider.into() })? else { anyhow::bail!("unexpected reply") };
+    let Response::Connect { url } = client::request(&Request::ConnectProvider { provider: provider.into() })? else { return Err(unexpected()) };
     println!("Opening your browser to connect {provider}. If it doesn't open, go to:\n\n  {url}\n");
     let _ = std::process::Command::new("open").arg(&url).status();
     let until = Instant::now() + std::time::Duration::from_secs(10 * 60);
@@ -1218,29 +1597,74 @@ fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
     anyhow::bail!("gave up waiting for the browser")
 }
 
+/// Fan-outs: each group's prompt, then how each of its agents is doing and what it changed.
 fn cmd_groups() -> anyhow::Result<()> {
-    let Response::Groups { groups } = client::request(&Request::Groups)? else { anyhow::bail!("unexpected reply") };
+    let Response::Groups { groups } = client::request(&Request::Groups)? else { return Err(unexpected()) };
     if groups.is_empty() {
-        println!("no fan-outs");
+        eprintln!("No fan-outs. `dino fan <prompt>` starts one: one prompt, several agents, a worktree each.");
+        return Ok(());
     }
-    for g in groups {
-        println!("{}  \"{}\"  in {}", g.id, truncate(&g.prompt, 60), g.repo);
-        for m in g.members {
-            let stat = m.stat.map_or("worktree missing".into(), |s| format!("{} files +{} -{}", s.files, s.added, s.removed));
-            println!("  {:>3}  {:<8} {stat}", m.session, m.launcher);
+    let sessions = match client::request(&Request::State)? {
+        Response::State { sessions, .. } => sessions,
+        _ => vec![],
+    };
+    let cols = [Column::keep("ID"), Column::keep("AGENT"), Column::keep("STATUS"), Column::keep("CHANGES"), Column::path("WORKTREE", 12)];
+    let rows: Vec<_> = groups
+        .iter()
+        .flat_map(|g| &g.members)
+        .map(|m| {
+            let st = sessions.iter().find(|s| s.id == m.session).map_or(SessionStatus::Ended, SessionStatus::of);
+            let changes = match &m.stat {
+                Some(s) if s.files == 0 => Cell::new("none").raw("0 +0 -0").paint(Paint::Dim),
+                Some(s) => Cell::new(format!("{} {}  +{} -{}", s.files, if s.files == 1 { "file" } else { "files" }, s.added, s.removed)).raw(format!("{} +{} -{}", s.files, s.added, s.removed)),
+                None => Cell::new("worktree missing").raw("missing").paint(Paint::Red),
+            };
+            vec![Cell::new(printable(&m.session)), Cell::new(printable(&m.launcher)), Cell::status(st), changes, Cell::new(printable(&out::short_path(&m.worktree))).raw(printable(&m.worktree))]
+        })
+        .collect();
+    // One table for all of them, so their columns line up; each group's rows under its prompt.
+    let table = out::table(&cols, &rows, out::tty());
+    let mut lines = table.lines();
+    let header = if out::tty() { lines.next().unwrap_or_default() } else { "" };
+    for (i, g) in groups.iter().enumerate() {
+        if out::tty() {
+            if i > 0 {
+                println!();
+            }
+            let prompt = out::fit_end(&printable(&g.prompt.split_whitespace().collect::<Vec<_>>().join(" ")), out::width().saturating_sub(2).max(20));
+            println!("{}", out::paint(&format!("“{prompt}”"), Paint::Bold));
+            println!("{}", out::paint(&format!("group {} in {}", printable(&g.id), printable(&out::short_path(&g.repo))), Paint::Dim));
+            println!("  {header}");
         }
+        for l in lines.by_ref().take(g.members.len()) {
+            if out::tty() { println!("  {l}") } else { println!("{}\t{l}", printable(&g.id)) }
+        }
+    }
+    if out::tty() {
+        println!("\n{}", out::paint("`dino diff <id>` shows what one changed, `dino keep <id>` applies it.", Paint::Dim));
+        println!("{}", out::paint("`dino discard <group>` stops a group and removes its worktrees.", Paint::Dim));
     }
     Ok(())
 }
 
 /// Continue a session dino didn't start (see `dino found`).
 fn cmd_continue(prefix: &str) -> anyhow::Result<()> {
-    let Response::Found { sessions } = client::request(&Request::Found { cloud: false, running_only: false })? else { anyhow::bail!("unexpected reply") };
-    let session = sessions.into_iter().find(|f| f.session_id.starts_with(prefix)).ok_or_else(|| anyhow::anyhow!("no session matching {prefix}"))?;
+    let Response::Found { sessions } = client::request(&Request::Found { cloud: false, running_only: false })? else { return Err(unexpected()) };
+    let session = sessions
+        .into_iter()
+        .find(|f| !f.session_id.is_empty() && f.session_id.starts_with(prefix))
+        .ok_or_else(|| anyhow::anyhow!("no session found starting with {}\n`dino found` lists the ones dino can continue.", printable(prefix)))?;
+    let title = printable(&session.title);
     if session.pid.is_some() {
-        eprintln!("moving \"{}\" into dino (waits for its current turn to finish)…", printable(&session.title));
+        eprintln!("Moving “{title}” into dino; it waits for its current turn to finish…");
     }
-    print_response(client::request(&Request::Adopt { session, cwd: None })?)
+    let id = created(client::request(&Request::Adopt { session, cwd: None })?)?;
+    if out::tty() {
+        println!("Continuing “{title}” as session {id}. `dino attach {id}` opens it here.");
+    } else {
+        println!("{id}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

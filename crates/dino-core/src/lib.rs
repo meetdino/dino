@@ -22,6 +22,7 @@ pub mod review;
 pub mod schedule;
 pub mod settings;
 pub mod ssh;
+pub mod status;
 pub mod statusline;
 pub mod transcript;
 pub mod trust;

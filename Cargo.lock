@@ -604,6 +604,7 @@ dependencies = [
  "libc",
  "ratatui",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

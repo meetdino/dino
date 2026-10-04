@@ -19,7 +19,7 @@ fn expect_status(r: Response) -> anyhow::Result<SyncStatus> {
     match r {
         Response::Sync { status } => Ok(status),
         Response::Error { message } => anyhow::bail!("{message}"),
-        _ => anyhow::bail!("unexpected reply"),
+        _ => Err(crate::unexpected()),
     }
 }
 
@@ -62,7 +62,7 @@ pub fn login(args: &[String]) -> anyhow::Result<()> {
         let s = expect_status(ask("login_device", rest.next())?)?;
         println!("On any device, go to\n\n  {}\n\nand enter the code  {}\n", s.device_url.as_deref().unwrap_or("?"), s.device_code.as_deref().unwrap_or("?"));
     } else {
-        let Response::Connect { url } = ask("login", rest.next())? else { anyhow::bail!("unexpected reply") };
+        let Response::Connect { url } = ask("login", rest.next())? else { return Err(crate::unexpected()) };
         println!("Opening your browser to sign in with GitHub. If it doesn't open, go to:\n\n  {url}\n");
         if std::env::var_os("DINO_NO_BROWSER").is_none() {
             let _ = std::process::Command::new("open").arg(&url).status();
@@ -115,7 +115,7 @@ pub fn sync(args: &[String]) -> anyhow::Result<()> {
             println!("Put back the settings from before the last sync changed them.");
             return Ok(());
         }
-        Some(other) => anyhow::bail!("dino sync {other}? status, now, resolve cloud|local|merge, undo"),
+        Some(_) => anyhow::bail!("usage: dino sync [status | now | resolve cloud|local|merge | undo]"),
     };
     print(&s);
     Ok(())
