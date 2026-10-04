@@ -48,7 +48,55 @@ struct StoredWorktree: Codable, Identifiable, Equatable {
     var removable: Bool { !dirty && session == nil && !fanout }
 }
 
+/// What deleting a session does, or did: the worktree dino made for it and what's in it.
+struct Deletion: Decodable, Equatable {
+    /// Removed with the session; nil for a shell, a folder of the user's, or another machine.
+    var worktree: String?
+    var branch: String?
+    /// Files with uncommitted changes, new files included.
+    var uncommitted: Int
+    /// Commits on no remote and not on the branch it came from.
+    var unpushed: Int
+    /// The branch stays: it has commits that aren't merged.
+    var keeps_branch: Bool
+    /// The worktree stays: this session is in it too.
+    var kept_for: String?
+}
+
+/// A session about to be deleted, with what that takes along (the confirmation).
+struct DeletePlan: Identifiable, Equatable {
+    var session: SessionInfo
+    var deletion: Deletion
+    var id: String { session.id }
+
+    /// The confirmation's text: what stops and goes, what in the worktree would be lost, and
+    /// that the conversation stays.
+    var message: String {
+        let d = deletion
+        let shell = session.agent_id == "shell"
+        var what = shell ? "This closes the shell and removes it from dino." : "This stops its agent and removes the session from dino."
+        if let path = d.worktree {
+            what = "This stops its agent, removes the session from dino, and removes its worktree \(URL(fileURLWithPath: path).lastPathComponent)."
+            if d.uncommitted > 0 {
+                what += " Its \(Self.count(d.uncommitted, "uncommitted change")) will be lost."
+            }
+            if d.keeps_branch, let branch = d.branch {
+                what += d.unpushed > 0
+                    ? " Its \(Self.count(d.unpushed, "unpushed commit")) stay\(d.unpushed == 1 ? "s" : "") on branch \(branch), which isn't merged."
+                    : " Its branch \(branch) stays: it isn't merged."
+            }
+        }
+        if let other = d.kept_for {
+            what += " Its worktree stays: \(other) is in it."
+        }
+        return shell ? what : what + "\n\nThe conversation stays under Continue a Session."
+    }
+
+    private static func count(_ n: Int, _ thing: String) -> String { "\(n) \(thing)\(n == 1 ? "" : "s")" }
+}
+
 private struct ArchivedResponse: Decodable { var sessions: [ArchivedInfo] }
+private struct DeletionResponse: Decodable { var deletion: Deletion }
 private struct StorageResponse: Decodable { var worktrees: [StoredWorktree] }
 /// What Free Up Space removed.
 struct Freed: Decodable { var removed: [String]; var bytes: UInt64 }
@@ -82,6 +130,11 @@ extension DinoConnection {
 
     func deleteArchived(_ id: String) throws {
         _ = try send(["type": "delete_archived", "id": id])
+    }
+
+    /// Delete a session and the worktree dino made for it; `dryRun` only says what that takes along.
+    func delete(_ id: String, dryRun: Bool) throws -> Deletion {
+        try JSONDecoder().decode(DeletionResponse.self, from: send(["type": "delete", "id": id, "dry_run": dryRun])).deletion
     }
 
     func storage() throws -> [StoredWorktree] {
@@ -146,14 +199,40 @@ extension DinoModel {
 
     func archive(_ id: String) {
         guard sessions.contains(where: { $0.id == id }) else { return }
-        if selected == id {
-            // Land on the neighbour rather than the top of the list.
-            let order = sidebarOrder
-            let i = order.firstIndex(of: id) ?? 0
-            let next = order.indices.contains(i + 1) ? order[i + 1] : i > 0 ? order[i - 1] : nil
-            select(next)
-        }
+        leave(id)
         lifecycle { try $0.archive(id) }
+    }
+
+    /// Ask before deleting: dinod says first what goes with it (its worktree, what's uncommitted
+    /// or unpushed there), for the confirmation to say.
+    func confirmDelete(_ id: String) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        Task.detached {
+            do {
+                let deletion = try DinoConnection(path: DinoEnvironment.socketPath).delete(id, dryRun: true)
+                await MainActor.run {
+                    let plan = DeletePlan(session: session, deletion: deletion)
+                    if self.deleting != plan { self.deleting = plan }
+                }
+            } catch {
+                await MainActor.run { self.error = error.localizedDescription }
+            }
+        }
+    }
+
+    func delete(_ plan: DeletePlan) {
+        let id = plan.session.id
+        guard sessions.contains(where: { $0.id == id }) else { return }
+        leave(id)
+        lifecycle { _ = try $0.delete(id, dryRun: false) }
+    }
+
+    /// Going away: if it's selected, land on its neighbour rather than the top of the list.
+    private func leave(_ id: String) {
+        guard selected == id else { return }
+        let order = sidebarOrder
+        let i = order.firstIndex(of: id) ?? 0
+        select(order.indices.contains(i + 1) ? order[i + 1] : i > 0 ? order[i - 1] : nil)
     }
 
     /// A fan-out member goes with its fan-out: it's kept or discarded instead.

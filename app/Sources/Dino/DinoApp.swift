@@ -146,6 +146,9 @@ struct DinoApp: App {
                 Button("Close Session") { if let id = model.selected { model.kill(id) } }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
                     .disabled(model.selected == nil)
+                // No key: ⌘⌫ is the terminal's (Ghostty deletes to the start of the line with it).
+                Button("Delete Session…") { if let id = model.selectedSession?.id { model.confirmDelete(id) } }
+                    .disabled(model.selectedSession == nil)
             }
             CommandGroup(after: .toolbar) {
                 Picker("Appearance", selection: Binding(get: { appearance }, set: { (Appearance(rawValue: $0) ?? .system).choose() })) {
@@ -431,6 +434,16 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text("It won't run again. Sessions it already started keep running.")
+        }
+        .alert(
+            "Delete “\(model.deleting.map { model.tabName($0.session) } ?? "")”?",
+            isPresented: Binding(get: { model.deleting != nil }, set: { if !$0, model.deleting != nil { model.deleting = nil } }),
+            presenting: model.deleting
+        ) { plan in
+            Button("Delete", role: .destructive) { model.delete(plan) }
+            Button("Cancel", role: .cancel) {}
+        } message: { plan in
+            Text(plan.message)
         }
         .sheet(isPresented: $model.showCreatePR) {
             if let s = model.selectedSession { CreatePRSheet(session: s) }

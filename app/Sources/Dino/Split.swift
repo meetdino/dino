@@ -294,6 +294,9 @@ struct SessionMenu: View {
                 .help("Stop it and keep it in Archived, to pick up again later")
         }
         Button("Close Session", role: .destructive) { model.kill(session.id) }
+        Divider()
+        Button("Delete…", role: .destructive) { model.confirmDelete(session.id) }
+            .help(session.agent_id == "shell" ? "Close it and remove it from dino" : "Stop it, remove it from dino, and remove the worktree dino made for it")
     }
 }
 
