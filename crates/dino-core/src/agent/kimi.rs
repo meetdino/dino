@@ -109,6 +109,20 @@ fn event_of(v: &Value) -> LogEvent {
     }
 }
 
+/// The tool call a line starts or ends: its loop's `tool.call` (by name) and `tool.result`
+/// (unnamed), written as each happens (Kimi Code 2.1).
+fn tool_calls_in(v: &Value) -> Vec<(String, bool)> {
+    if v["type"] != "context.append_loop_event" {
+        return vec![];
+    }
+    let e = &v["event"];
+    match e["type"].as_str() {
+        Some("tool.call") => e["name"].as_str().map(|n| vec![(n.to_string(), true)]).unwrap_or_default(),
+        Some("tool.result") => vec![(String::new(), false)],
+        _ => vec![],
+    }
+}
+
 /// Whether the latest turn in a record is still going.
 fn busy_in(jsonl: &str) -> bool {
     let mut busy = false;
@@ -328,6 +342,10 @@ impl Agent for Kimi {
         event_of(line)
     }
 
+    fn tool_calls(&self, line: &Value) -> Vec<(String, bool)> {
+        tool_calls_in(line)
+    }
+
     fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
         index()
             .into_iter()
@@ -437,6 +455,17 @@ mod tests {
 {"message":{"message":{"role":"assistant","content":[{"type":"text","text":"DONE"}],"toolCalls":[]},"meta":{"source":"llm"}},"type":"agent.message.appended","time":1790740055538,"kind":"event"}
 {"turnId":1,"outcome":"done","type":"agent.turn.ended","time":1790740055538,"kind":"event"}
 {"type":"turn.ended","agentId":"main","turnId":1,"reason":"completed","time":1790740055539}"#;
+
+    #[test]
+    fn its_record_says_which_tools_it_calls() {
+        // As Kimi Code 2.1.1 wrote a call to open-computer-use (trimmed).
+        let wire = r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","turnId":"1","step":1}}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.call","turnId":"1","step":1,"toolCallId":"call_ctreyf59","name":"mcp__open-computer-use__list_apps","args":{}},"time":1791095754711}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.result","toolCallId":"call_ctreyf59","result":{"output":"Google Chrome"}}}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.end","turnId":"1","step":1,"finishReason":"tool_use"}}"#;
+        let calls: Vec<(String, bool)> = wire.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).flat_map(|v| tool_calls_in(&v)).collect();
+        assert_eq!(calls, [("mcp__open-computer-use__list_apps".to_string(), true), (String::new(), false)]);
+    }
 
     #[test]
     fn its_record_reads_as_turns() {

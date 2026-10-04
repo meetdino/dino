@@ -71,6 +71,9 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var servers: [ServerInfo]?
     /// The provider and model it runs on, when it isn't its agent's own account.
     var route: ProviderRoute?
+    /// What its agent uses outside its terminal right now, by its tool calls: "computer" (apps on
+    /// this Mac) or "browser"; nil from an older dinod.
+    var using: String?
 
     /// All its turn left running is a server: the ports it listens on ("3000, 8080").
     var serving: String? {
@@ -701,6 +704,11 @@ final class DinoConnection: @unchecked Sendable {
     /// Type `text` into a session as a paste; `submit` presses Return after it.
     func sendInput(session: String, text: String, submit: Bool) throws {
         _ = try send(["type": "send_input", "id": session, "text": text, "submit": submit])
+    }
+
+    /// Interrupt the agent's turn with its own key (Esc in most); the session goes on.
+    func interrupt(session: String) throws {
+        _ = try send(["type": "interrupt", "id": session])
     }
 
     /// Write `text` to a session as typed keys, not a paste.

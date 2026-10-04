@@ -240,6 +240,8 @@ final class SettingsStore: ObservableObject {
     /// Hosts in ~/.ssh/config.
     @Published var configHosts: [String] = []
     @Published var error: String?
+    /// Counts the settings dinod has saved: what depends on a change being in effect waits for it.
+    @Published private(set) var saves = 0
 
     func load() {
         run { c in (try c.settingsAndLocks(), try c.keys(), try c.allLaunchers()) } done: {
@@ -278,7 +280,10 @@ final class SettingsStore: ObservableObject {
         run { c in
             try c.setSettings(saved)
             return try c.allLaunchers()
-        } done: { self.agents = $0 }
+        } done: {
+            self.agents = $0
+            self.saves += 1
+        }
     }
 
     func setKey(_ name: String, value: String?) {
@@ -1004,6 +1009,11 @@ private struct ExperimentalFeature: Identifiable {
             title: "Free models pool",
             summary: "Agents on free NVIDIA models, with dino picking one for each turn. With a TypeSafe key, each turn's prompt (up to 8,000 characters) is sent to api.typesafe.ai to pick the model. Off, nothing is sent there."
         ),
+        ExperimentalFeature(
+            id: "computer_use",
+            title: "Computer use for more agents",
+            summary: "For agents with no computer use of their own: they can see your screen and click and type in your apps, through open-computer-use (open source). Anything on screen can steer an agent: a web page or a message could tell it to do something you didn't ask. dino installs it in its own folder and adds it only to the agents you pick. Off, dino removes what it added."
+        ),
     ]
 }
 
@@ -1032,6 +1042,9 @@ private struct ExperimentalPane: View {
                         Text(f.summary)
                     }
                     .orgLocked("experimental.\(f.id)")
+                    if f.id == "computer_use", on(f.id).wrappedValue {
+                        ComputerUseOptions()
+                    }
                     if f.id == "free_models", on(f.id).wrappedValue {
                         LabeledContent("Models") {
                             Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (see Models & Providers → API Keys)")

@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, params};
+use serde_json::Value;
 
 use super::{Agent, ControlKind, StatusSource, Wiring, strings};
 use crate::found::{self, FoundSession};
@@ -98,6 +99,21 @@ fn turn_in(c: &Connection, session: &str) -> Option<bool> {
         },
         None => false,
     })
+}
+
+/// The tools its last message asks for, while their results aren't in yet: the calls out now.
+fn tools_in(c: &Connection, session: &str) -> Vec<String> {
+    let last = c.query_row(
+        "select role, tool_calls from messages where session_id = ?1 order by id desc limit 1",
+        params![session],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+    );
+    let Ok((role, Some(calls))) = last else { return vec![] };
+    if role != "assistant" {
+        return vec![];
+    }
+    let calls: Value = serde_json::from_str(&calls).unwrap_or_default();
+    calls.as_array().into_iter().flatten().filter_map(|c| c["function"]["name"].as_str().map(String::from)).collect()
 }
 
 /// Folders compared as the same folder, whatever links lead to them.
@@ -228,6 +244,15 @@ impl Agent for Hermes {
 
     fn turn_now(&self, session: &str, _since: u64) -> Option<bool> {
         turn_in(&store()?, session)
+    }
+
+    /// Ctrl+C interrupts its turn; at its prompt, it quits (see `Agent::interrupt_keys`).
+    fn interrupt_keys(&self) -> &'static [u8] {
+        b"\x03"
+    }
+
+    fn tools_now(&self, session: &str) -> Vec<String> {
+        store().map(|c| tools_in(&c, session)).unwrap_or_default()
     }
 
     fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
@@ -380,8 +405,10 @@ mod tests {
         let c = store_like_hermes();
         let id = "20260930_001903_cdc088";
         assert_eq!(turn_in(&c, id), Some(true), "asked for a tool");
+        assert_eq!(tools_in(&c, id), ["terminal"], "the call out");
         c.execute("insert into messages (session_id, role, content, timestamp) values (?1, 'tool', 'a b', 103.0)", params![id]).unwrap();
         assert_eq!(turn_in(&c, id), Some(true), "the tool's result is back");
+        assert!(tools_in(&c, id).is_empty());
         c.execute("insert into messages (session_id, role, content, timestamp, finish_reason) values (?1, 'assistant', 'Two files.', 104.0, 'stop')", params![id]).unwrap();
         assert_eq!(turn_in(&c, id), Some(false), "answered");
         assert_eq!(turn_in(&c, "nope"), None);

@@ -76,6 +76,14 @@ pub enum Request {
     AgentSetup,
     /// Run agent `id`'s own `install` or `sign_in` command in a new shell session.
     AgentAction { id: String, action: String },
+    /// Settings → Experimental's computer use for more agents: where it stands.
+    ComputerUse,
+    /// Install the pinned open-computer-use, checked, in dino's own folder.
+    ComputerUseInstall,
+    /// Run its `doctor`: what macOS has granted it, and its setup window when something's missing.
+    ComputerUsePermissions,
+    /// Add it to agent `agent` (with the agent's own MCP command), or remove what dino added.
+    ComputerUseAgent { agent: String, on: bool },
     /// Start a session; with `worktree`, in a new git worktree (and branch) of the repo at `cwd`.
     New {
         launcher: String,
@@ -162,6 +170,9 @@ pub enum Request {
     SendInput { id: String, text: String, submit: bool },
     /// Write `text` to a session as typed keys, not a paste (the app's ⌘I to a shell's AI line).
     SendKeys { id: String, text: String },
+    /// Interrupt the agent's turn the way its own key does (Esc in most), leaving the session
+    /// running: what Stop does while it uses the Mac.
+    Interrupt { id: String },
     /// What a shell's last command printed and its exit code, from its shell integration's
     /// marks: the context `dino ai` hands an agent.
     ShellOutput { id: String },
@@ -329,6 +340,7 @@ pub enum Response {
     },
     Launchers { launchers: Vec<LauncherInfo> },
     AgentSetup { agents: Vec<AgentSetupInfo> },
+    ComputerUse { info: ComputerUseInfo },
     Created { id: String },
     ShellOutput { output: Option<String>, exit: Option<i32> },
     Found { sessions: Vec<crate::found::FoundSession> },
@@ -460,6 +472,38 @@ pub struct AgentSetupInfo {
     /// What signing in means for it, when that isn't obvious ("Pi has no models of its own…").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in_note: Option<String>,
+}
+
+/// Computer use for agents that have none of their own (Settings → Experimental).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ComputerUseInfo {
+    /// The open-computer-use release dino pins.
+    pub version: String,
+    /// It's in dino's folder, checked.
+    pub installed: bool,
+    /// What macOS has granted its app, as its `doctor` last said; none until asked.
+    #[serde(default)]
+    pub accessibility: Option<bool>,
+    #[serde(default)]
+    pub screen_recording: Option<bool>,
+    /// The agents on this Mac it can be added to.
+    pub agents: Vec<ComputerUseAgentInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ComputerUseAgentInfo {
+    pub id: String,
+    pub name: String,
+    /// dino added it, and it's still there as dino left it.
+    pub on: bool,
+    /// What dino runs (or edits) to add it, exactly.
+    pub command: String,
+    /// The agent has computer use of its own, and how to turn it on; it isn't offered then.
+    #[serde(default)]
+    pub native: Option<String>,
+    /// The agent already has a server by that name that dino didn't add: left alone.
+    #[serde(default)]
+    pub theirs: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -608,6 +652,10 @@ pub struct SessionInfo {
     /// The provider and model it runs on, when it isn't its agent's own account.
     #[serde(default)]
     pub route: Option<crate::providers::ProviderRoute>,
+    /// What its agent is using outside its terminal right now, by its tool calls: "computer" (apps
+    /// on this Mac) or "browser". Stays a few seconds after the last call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub using: Option<String>,
 }
 
 /// A background command that serves: the agent's task id for it, and where it listens.
