@@ -61,7 +61,7 @@ fn track(d: &Daemon, s: &Session, claimed: &[String]) {
     if a.status_source() == StatusSource::Polled {
         l.turn = a.turn_now(&id, since).unwrap_or(false);
         // A question it asks on its screen, for agents whose store doesn't say.
-        l.needs = if l.turn { a.asking(&s.pane.text(0)) } else { None };
+        l.needs = if l.turn && a.asks_on_screen() { a.asking(&s.pane.text(0)) } else { None };
     } else {
         read_log(a, &mut l, &id, since);
     }

@@ -389,7 +389,7 @@ struct SessionControlsBar: View {
 
     /// Why a session's model can't be changed from here.
     static func keptModel(_ s: SessionInfo) -> String {
-        "\(FoundSession.name(s.agent_id)) keeps a conversation's model; start a new session to change it"
+        "\(AgentNames.of(s.agent_id)) keeps a conversation's model; start a new session to change it"
     }
 
     private func help(_ kind: ControlKind) -> String {
@@ -483,7 +483,7 @@ struct ControlPopover: View {
             }
             Divider().padding(.vertical, 6)
             if !dropped.isEmpty {
-                Text("\(FoundSession.name(session.agent_id)) drops \(dropped.map(knobs.modeLabel).joined(separator: ", ")) when it resumes a conversation; start a new session in it.")
+                Text("\(AgentNames.of(session.agent_id)) drops \(dropped.map(knobs.modeLabel).joined(separator: ", ")) when it resumes a conversation; start a new session in it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

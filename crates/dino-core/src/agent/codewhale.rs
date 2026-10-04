@@ -430,6 +430,10 @@ impl Agent for CodeWhale {
         question_in(screen)
     }
 
+    fn asks_on_screen(&self) -> bool {
+        true
+    }
+
     fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
         begun(cwd, since, claimed).map(|(id, _)| id)
     }
