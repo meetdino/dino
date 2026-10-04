@@ -20,7 +20,6 @@
         // that owns the behavior (+Input, +Lifecycle); the storage lives
         // here because extensions cannot add stored properties.
         var keyEcho: KeyEchoState = .init()
-        var pointer: PointerSelectionState = .init()
         var focusBridge: FocusBridgeState = .init()
 
         open weak var delegate: (any TerminalSurfaceViewDelegate)? {
@@ -109,26 +108,14 @@
             }
         }
 
-        // Upstream's rule: Copy is offered whenever ghostty has a selection.
-        // A cached drag rect went stale on scroll and select_all, and the
-        // quicklook-word test misses whitespace inside a selection.
-        open func selectionMenuPoint(at point: CGPoint) -> CGPoint? {
-            guard surface?.hasSelection() == true else {
-                TerminalDebugLog.log(
-                    .input,
-                    "selection menu miss point=\(selectionPointDescription(point))"
-                )
-                return nil
-            }
-
-            TerminalDebugLog.log(
-                .input,
-                "selection menu hit point=\(selectionPointDescription(point))"
-            )
-            return point
-        }
-
-        open func selectionContextMenu() -> NSMenu {
+        /// The menu a right-click shows when Ghostty leaves the click to the
+        /// host (`right-click-action = context-menu`, the default, and no
+        /// program capturing the mouse): Ghostty has already selected the
+        /// word or link under the pointer, unless the click was inside a
+        /// selection. A host overrides this for a menu of its own; nil shows
+        /// none. Upstream's: Copy, when there is a selection.
+        open func contextMenu() -> NSMenu? {
+            guard surface?.hasSelection() == true else { return nil }
             let menu = NSMenu()
             let copyItem = NSMenuItem(
                 title: "Copy",
@@ -153,10 +140,6 @@
                 "selection copied to clipboard"
             )
             return true
-        }
-
-        private func selectionPointDescription(_ point: CGPoint) -> String {
-            "\(String(format: "%.2f", point.x))x\(String(format: "%.2f", point.y))"
         }
 
         deinit {

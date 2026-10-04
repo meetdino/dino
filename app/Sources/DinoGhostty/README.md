@@ -17,7 +17,17 @@ models. Changes from upstream:
   unseen. The wrapper's own handling of those 13 is unchanged when the host returns false.
 - `TerminalSurfaceStateDelegate`: a delegate standing in front of a `TerminalViewState` says which,
   so actions name the right surface.
-- `TerminalController.configText`/`configFlag`: a config value as Ghostty resolved it.
+- `TerminalController.configText`/`configFlag`/`configColor`: a config value as Ghostty resolved it.
+- `TerminalHostAction` also types search (`searchTotal`, `searchSelected`), `mouseVisibility`,
+  `keySequence` (the key, written as the Mac writes shortcuts) and `keyTable`.
+- Right-click (`Platform/AppKit/AppTerminalView+Input.swift`): goes to Ghostty first, as in
+  Ghostty's app, so `right-click-action` decides; when Ghostty leaves it to the host (the default,
+  `context-menu`), AppKit shows `contextMenu()`, which a host overrides. Control-click is a
+  right-click when no program captures the mouse. Upstream showed a Copy menu over a selection
+  itself and sent the click to Ghostty otherwise.
+- `Resources/Ghostty/themes`: Ghostty 1.3.1's color themes (from iTerm2-Color-Schemes, MIT, see
+  `Resources/Ghostty/LICENSE-themes`), so `theme = Name` resolves without Ghostty.app. Taken from
+  Ghostty 1.3.1's `Contents/Resources/ghostty/themes`.
 
 To take a newer upstream: copy its `Sources/GhosttyTerminal` over this folder, bump the package's
 version in `app/Package.swift`, and put the changes above back.

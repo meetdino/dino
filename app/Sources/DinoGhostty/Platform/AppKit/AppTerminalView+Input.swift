@@ -14,11 +14,6 @@
         var lastPerformKeyEvent: TimeInterval?
     }
 
-    /// Mouse selection state; behavior lives in +Input.
-    struct PointerSelectionState {
-        var pendingSelectionMenuPoint: CGPoint?
-    }
-
     extension AppTerminalView {
         override open func keyDown(with event: NSEvent) {
             inputHandler?.handleKeyDown(with: event)
@@ -142,7 +137,6 @@
             window?.makeFirstResponder(self)
             let (x, y) = mousePoint(from: event)
             let mods = TerminalInputModifiers(from: event.modifierFlags)
-            pointer.pendingSelectionMenuPoint = nil
             surface?.sendMousePos(x: x, y: y, mods: mods.ghosttyMods)
             surface?.sendMouseButton(
                 state: GHOSTTY_MOUSE_PRESS,
@@ -162,44 +156,60 @@
             )
         }
 
+        // As Ghostty's own app: the click goes to Ghostty, which does what
+        // `right-click-action` says (or reports it to a program capturing
+        // the mouse) and consumes it; when it doesn't, AppKit shows
+        // `menu(for:)`. Upstream showed a Copy menu over a selection itself,
+        // whatever the config said.
         override open func rightMouseDown(with event: NSEvent) {
             window?.makeFirstResponder(self)
+            guard let surface else { return super.rightMouseDown(with: event) }
             let (x, y) = mousePoint(from: event)
             let mods = TerminalInputModifiers(from: event.modifierFlags)
-            surface?.sendMousePos(x: x, y: y, mods: mods.ghosttyMods)
-            if let menuPoint = selectionMenuPoint(at: CGPoint(x: x, y: y)) {
-                pointer.pendingSelectionMenuPoint = menuPoint
-                return
-            }
-            surface?.sendMouseButton(
+            surface.sendMousePos(x: x, y: y, mods: mods.ghosttyMods)
+            if surface.sendMouseButton(
                 state: GHOSTTY_MOUSE_PRESS,
                 button: GHOSTTY_MOUSE_RIGHT,
                 mods: mods.ghosttyMods
-            )
+            ) { return }
+            super.rightMouseDown(with: event)
         }
 
         override open func rightMouseUp(with event: NSEvent) {
+            guard let surface else { return super.rightMouseUp(with: event) }
             let (x, y) = mousePoint(from: event)
             let mods = TerminalInputModifiers(from: event.modifierFlags)
-            surface?.sendMousePos(x: x, y: y, mods: mods.ghosttyMods)
-            if pointer.pendingSelectionMenuPoint != nil {
-                pointer.pendingSelectionMenuPoint = nil
-                showSelectionCopyMenu(with: event)
-                return
-            }
-            surface?.sendMouseButton(
+            surface.sendMousePos(x: x, y: y, mods: mods.ghosttyMods)
+            if surface.sendMouseButton(
                 state: GHOSTTY_MOUSE_RELEASE,
                 button: GHOSTTY_MOUSE_RIGHT,
                 mods: mods.ghosttyMods
-            )
+            ) { return }
+            super.rightMouseUp(with: event)
         }
 
         override open func menu(for event: NSEvent) -> NSMenu? {
-            let (x, y) = mousePoint(from: event)
-            guard selectionMenuPoint(at: CGPoint(x: x, y: y)) != nil else {
-                return super.menu(for: event)
+            switch event.type {
+            case .rightMouseDown:
+                break
+            // A control-click: AppKit asks before any mouse event. A program
+            // capturing the mouse gets the click instead; otherwise Ghostty
+            // hears it as the right-click it stands for, as in Ghostty.
+            case .leftMouseDown:
+                guard event.modifierFlags.contains(.control), let surface,
+                      !surface.isMouseCaptured else { return nil }
+                let (x, y) = mousePoint(from: event)
+                let mods = TerminalInputModifiers(from: event.modifierFlags)
+                surface.sendMousePos(x: x, y: y, mods: mods.ghosttyMods)
+                surface.sendMouseButton(
+                    state: GHOSTTY_MOUSE_PRESS,
+                    button: GHOSTTY_MOUSE_RIGHT,
+                    mods: mods.ghosttyMods
+                )
+            default:
+                return nil
             }
-            return selectionContextMenu()
+            return contextMenu()
         }
 
         override open func otherMouseDown(with event: NSEvent) {
@@ -262,11 +272,6 @@
                 y: event.scrollingDeltaY,
                 mods: scrollMods.rawValue
             )
-        }
-
-        private func showSelectionCopyMenu(with event: NSEvent) {
-            let menu = selectionContextMenu()
-            NSMenu.popUpContextMenu(menu, with: event, for: self)
         }
 
         private func keyIsBinding(
