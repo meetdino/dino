@@ -278,6 +278,11 @@ impl Agent for Qwen {
         StatusSource::Hooks
     }
 
+    // `-p` (not `-i`, its TUI with a first prompt), its ACP server, `serve`.
+    fn headless(&self, args: &[String]) -> bool {
+        super::runs_with(args, &["-p", "--prompt", "--acp", "--experimental-acp", "--input-format"], &["serve", "mcp", "extensions"])
+    }
+
     fn portable_flags(&self, args: &[String]) -> Vec<String> {
         found::drop_flags(
             args,
@@ -289,13 +294,13 @@ impl Agent for Qwen {
         )
     }
 
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         let mut out = vec![];
         for e in std::fs::read_dir(qwen_home().join("sessions")).into_iter().flatten().flatten() {
             let Some(pid) = e.path().file_stem().and_then(|s| s.to_str()?.parse::<u32>().ok()) else { continue };
             let Some(v) = live(pid) else { continue };
             let Some(sid) = v["sessionId"].as_str().filter(|s| !s.is_empty()) else { continue };
-            if !found::alive(pid) {
+            if !found::started_before(procs.get(&pid), &v["startedAt"]) {
                 continue;
             }
             let (terminal, args) = found::terminal_and_flags(self, pid);

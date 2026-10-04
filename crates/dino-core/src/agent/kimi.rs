@@ -368,13 +368,18 @@ impl Agent for Kimi {
         found::drop_flags(args, &["-S", "--session", "-p", "--prompt", "--output-format", "--agent", "--agent-file"], &["-c", "--continue"])
     }
 
+    // `--print` and `--quiet`, `-p` (one prompt, then it exits), its Wire and ACP servers.
+    fn headless(&self, args: &[String]) -> bool {
+        super::runs_with(args, &["--print", "--quiet", "-p", "--prompt", "--wire", "--acp", "--output-format"], &["acp", "info", "mcp", "logout", "export", "web", "vis"])
+    }
+
     fn may_be(&self, comm: &str) -> bool {
         comm.rsplit('/').next() == Some("kimi-code")
     }
 
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         let mut out = vec![];
-        for pid in crate::procinfo::pids_named("kimi-code") {
+        for pid in crate::procinfo::named_in(procs, "kimi-code") {
             let mut s = self.found(pid, Source::Running);
             if s.session_id.is_empty() {
                 continue;

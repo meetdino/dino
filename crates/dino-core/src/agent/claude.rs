@@ -229,7 +229,7 @@ impl Agent for Claude {
     }
 
     /// Claude Code writes `~/.claude/sessions/<pid>.json` for every live process.
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         let mut out = vec![];
         for e in std::fs::read_dir(home().join(".claude/sessions")).into_iter().flatten().flatten() {
             let p = e.path();
@@ -239,7 +239,7 @@ impl Agent for Claude {
             let Some(v) = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) else { continue };
             let (Some(pid), Some(sid)) = (v["pid"].as_u64(), v["sessionId"].as_str()) else { continue };
             let pid = pid as u32;
-            if v["kind"].as_str().is_some_and(|k| k != "interactive") || !found::alive(pid) {
+            if v["kind"].as_str().is_some_and(|k| k != "interactive") || !found::started_before(procs.get(&pid), &v["startedAt"]) {
                 continue;
             }
             let title = history::claude_title(sid).or_else(|| v["name"].as_str().map(String::from)).unwrap_or_else(|| "Claude Code session".into());
@@ -264,6 +264,18 @@ impl Agent for Claude {
 
     /// Its native binary is named after its version (`…/claude/versions/2.1.288`); the installer's
     /// link is `claude`.
+    // `-p` and its formats (the Agent SDK's way in), and its commands that aren't a conversation.
+    fn headless(&self, args: &[String]) -> bool {
+        super::runs_with(
+            args,
+            &["-p", "--print", "--output-format", "--input-format", "--sdk-url"],
+            &[
+                "agents", "auth", "auto-mode", "doctor", "gateway", "import", "install", "logs", "mcp", "plugin", "plugins", "purge", "respawn", "rm", "setup-token",
+                "stop", "kill", "ultrareview", "update", "upgrade",
+            ],
+        )
+    }
+
     fn may_be(&self, comm: &str) -> bool {
         !self.free && (comm.contains("/claude/versions/") || comm.rsplit('/').next() == Some("claude"))
     }

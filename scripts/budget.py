@@ -19,13 +19,14 @@ shells and two Claude Code sessions (haiku). Then it measures, and fails (exit 1
     proxy, first byte added         median <= 1 ms, p95 <= 3 ms (a 420 kB request, to a stand-in API)
     proxy, 500-event answer added   median <= 3 ms
     100 MB streamed through proxy   <= 0.6 dinod CPU-seconds
+    "On this Mac", 150+ agents      a scan <= 20 ms (median), scans at idle <= 0.2 % (one every 3 s)
 
 Never touches the real dinod, ~/.local/bin/dino or your Dino.app; kills only its own processes.
 The app window must stay visible (not minimized or hidden) while it runs: a hidden window doesn't
 render, and the streaming numbers would read low. It warns when the window wasn't visible.
 Claude's trust entry for its test folder is removed from ~/.claude.json afterwards (0600 kept).
 """
-import fcntl, glob, http.client, http.server, json, os, pty, select, shutil, socket, socketserver, statistics, struct, subprocess, sys, termios, threading, time
+import fcntl, glob, re, http.client, http.server, json, os, pty, select, shutil, socket, socketserver, statistics, struct, subprocess, sys, termios, threading, time
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 REPO = os.path.abspath(args[0]) if args else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,7 +40,8 @@ BUNDLE = "dev.dino.budget"
 SAFE = ["--model", "haiku", "--disallowedTools", "Artifact,Write,Edit,WebFetch,WebSearch"]
 
 BUDGET = {"idle": 1.0, "cat_s": 2.0, "cat_cpu": 2.5, "ws_delta": 5.0, "shell": 10.0, "claude": 10.0, "settings": 2.0, "lat_median": 1.0, "lat_p95": 2.0,
-          "proxy_ttfb_median": 1.0, "proxy_ttfb_p95": 3.0, "proxy_total": 3.0, "proxy_cpu": 0.6}
+          "proxy_ttfb_median": 1.0, "proxy_ttfb_p95": 3.0, "proxy_total": 3.0, "proxy_cpu": 0.6,
+          "found_ms": 20.0, "found_idle": 0.2}
 results, failures, warnings = [], [], []
 
 
@@ -408,6 +410,23 @@ def proxy():
     check("proxy: dinod CPU-seconds per 100 MB", cpu, BUDGET["proxy_cpu"], " s")
 
 
+# ---- "On this Mac" -------------------------------------------------------------------------------
+
+def found_scan():
+    """The scan behind "On this Mac" with 169 stand-in agent processes running (in terminals or
+    not, headless, under dinods, under other agents): dino-core's found_scale test, which starts
+    them, measures and prints. The app asks dinod for one every 3 s."""
+    r = subprocess.run(["cargo", "test", "--release", "-q", "-p", "dino-core", "--test", "found_scale", "--", "--nocapture"],
+                       cwd=REPO, capture_output=True, text=True)
+    m = re.search(r"median ([\d.]+) ms.*?([\d.]+) % of a core", r.stdout + r.stderr)
+    if not m:
+        log("FAIL found scan: the found_scale test printed no measurement")
+        failures.append("found scan")
+        return
+    check('"On this Mac": a scan with 150+ agent processes, median', float(m[1]), BUDGET["found_ms"], " ms")
+    check('"On this Mac": its scans at idle, one every 3 s', float(m[2]), BUDGET["found_idle"])
+
+
 def build():
     log("building dinod and the app…")
     subprocess.run(["cargo", "build", "--release", "-q"], cwd=REPO, check=True)
@@ -579,6 +598,7 @@ def main():
     latency()
     throughput()
     proxy()
+    found_scan()
     shutil.rmtree(HOME, ignore_errors=True)
     shutil.rmtree(os.path.dirname(APP), ignore_errors=True)
     for w in warnings:

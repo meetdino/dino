@@ -203,12 +203,17 @@ impl Agent for Amp {
         found::drop_flags(&args, &["-x", "--execute", "--title", "-l", "--label", "--attach", "--log-file"], &["--last", "--pick", "-ox", "--orb-execute", "--stream-json", "--stream-json-thinking", "--stream-json-input"])
     }
 
+    // Execute mode, `-x`, and its stream.
+    fn headless(&self, args: &[String]) -> bool {
+        super::runs_with(args, &["-x", "--execute", "-ox", "--stream-json"], &[])
+    }
+
     fn may_be(&self, comm: &str) -> bool {
         comm.rsplit('/').next() == Some("amp")
     }
 
     // Its threads aren't on this Mac: running ones can't be told which they are.
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, _procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         vec![]
     }
 

@@ -271,12 +271,17 @@ impl Agent for Hermes {
         found::drop_flags(args, &["--resume", "-r", "-z", "--oneshot", "--usage-file"], &["-c", "--continue", "--worktree", "-w"])
     }
 
+    // `-z` and `--oneshot` (`-q` alone keeps a session open on a terminal), its servers.
+    fn headless(&self, args: &[String]) -> bool {
+        super::runs_with(args, &["-z", "--oneshot", "-Q", "--quiet", "--query-file", "--format"], &["acp", "serve", "gateway", "mcp", "dashboard"])
+    }
+
     fn may_be(&self, comm: &str) -> bool {
         comm.contains("python") || comm.rsplit('/').next() == Some("hermes")
     }
 
     // Found only in dino's shells: it runs under whatever Python installed it.
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, _procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         vec![]
     }
 

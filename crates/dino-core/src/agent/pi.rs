@@ -413,17 +413,23 @@ impl Agent for Pi {
         found::drop_flags(args, &["--session", "--session-id", "--fork", "--export", "--mode", "--name", "-n"], &["-c", "--continue", "-r", "--resume", "-p", "--print", "--no-session"])
     }
 
+    // `-p`, `--mode json|rpc` (`--mode text` is its TUI), and its package commands.
+    fn headless(&self, args: &[String]) -> bool {
+        let mode = args.iter().enumerate().find_map(|(i, a)| a.strip_prefix("--mode=").or((a == "--mode").then(|| args.get(i + 1).map(String::as_str)).flatten()));
+        mode.is_some_and(|m| m != "text") || super::runs_with(args, &["-p", "--print"], &["install", "remove", "uninstall", "update", "list", "config", "auth", "mcp"])
+    }
+
     fn may_be(&self, comm: &str) -> bool {
         comm.rsplit('/').next() == Some("pi")
     }
 
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         if self.free {
             return vec![];
         }
         let mut out = vec![];
         // Pi names itself "pi" (`process.title`), but the kernel names it `node`.
-        for pid in crate::procinfo::pids_named("pi").into_iter().chain(crate::procinfo::node_titled("pi")) {
+        for pid in crate::procinfo::named_in(procs, "pi").into_iter().chain(crate::procinfo::node_titled_in(procs, "pi")) {
             let mut s = self.found(pid);
             if s.session_id.is_empty() {
                 continue;

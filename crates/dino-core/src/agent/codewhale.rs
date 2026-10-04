@@ -476,13 +476,17 @@ impl Agent for CodeWhale {
         found::drop_flags(args, &["-r", "--resume", "--session-id", "-p", "--prompt", "--api-key", "--base-url"], &["-c", "--continue", "--fresh"])
     }
 
+    fn headless(&self, args: &[String]) -> bool {
+        super::runs_with(args, &[], &["exec", "web", "update", "completion", "doctor"])
+    }
+
     fn may_be(&self, comm: &str) -> bool {
         comm.rsplit('/').next().is_some_and(|n| NAMES.contains(&n))
     }
 
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         let mut out = vec![];
-        for pid in NAMES.iter().flat_map(|n| crate::procinfo::pids_named(n)) {
+        for pid in NAMES.iter().flat_map(|n| crate::procinfo::named_in(procs, n)) {
             let mut s = self.found(pid, &found::args_of(pid));
             if s.session_id.is_empty() || out.iter().any(|o: &FoundSession| o.session_id == s.session_id) {
                 continue;

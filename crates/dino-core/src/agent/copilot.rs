@@ -321,13 +321,22 @@ impl Agent for Copilot {
         )
     }
 
+    // `-p` (not `-i`, a session with a first prompt), its ACP server, its other commands.
+    fn headless(&self, args: &[String]) -> bool {
+        super::runs_with(
+            args,
+            &["-p", "--prompt", "--acp"],
+            &["login", "mcp", "plugin", "skill", "update", "version", "help", "completion", "instruction", "lsp", "sandbox", "workflow"],
+        )
+    }
+
     fn may_be(&self, comm: &str) -> bool {
         comm.rsplit('/').next() == Some("copilot")
     }
 
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         let mut out = vec![];
-        for pid in crate::procinfo::pids_named("copilot") {
+        for pid in crate::procinfo::named_in(procs, "copilot") {
             let mut s = self.found(pid);
             if s.session_id.is_empty() {
                 continue;
