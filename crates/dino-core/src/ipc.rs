@@ -186,6 +186,9 @@ pub enum Request {
     /// Interrupt the agent's turn the way its own key does (Esc in most), leaving the session
     /// running: what Stop does while it uses the Mac.
     Interrupt { id: String },
+    /// What runs in the foreground of session `id`'s terminal right now, when it isn't the
+    /// session's own program (a shell at its prompt): what closing it would stop.
+    Foreground { id: String },
     /// What a shell's last command printed and its exit code, from its shell integration's
     /// marks: the context `dino ai` hands an agent.
     ShellOutput { id: String },
@@ -406,6 +409,8 @@ pub enum Response {
     /// What deleting a session does, or did.
     Deletion { deletion: Deletion },
     Storage { worktrees: Vec<StoredWorktree> },
+    /// The answer to `Foreground`: nothing when the session's own program has the terminal.
+    Foreground { foreground: Option<ForegroundProcess> },
     /// What Free up space removed, and how many bytes that gave back (as last measured).
     Freed { removed: Vec<String>, bytes: u64 },
     /// A broken launch file lists nothing, and `error` says why.
@@ -594,6 +599,14 @@ pub struct LauncherInfo {
     pub formats: Vec<crate::providers::Format>,
 }
 
+/// The process group leading a session's terminal, when it isn't the session's own program.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForegroundProcess {
+    pub pid: u32,
+    /// Its process name: `vim`, `htop`, `cargo`.
+    pub name: String,
+}
+
 /// The pane a tmux client in a dino shell shows.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TmuxPane {
@@ -715,6 +728,10 @@ pub struct SessionInfo {
     /// Never for a tmux client: closing that only detaches it.
     #[serde(default)]
     pub running: bool,
+    /// What a shell runs in the foreground in place of its prompt (`vim`, `cargo`, a tmux client),
+    /// as last looked at: the program closing it would stop. None at the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<ForegroundProcess>,
     /// A shell whose foreground is a tmux client: what the client shows. Closing the tab detaches
     /// it, and the tmux server keeps everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]

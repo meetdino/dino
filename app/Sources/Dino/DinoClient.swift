@@ -64,6 +64,9 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var revealed: UInt64?
     /// A shell running a command rather than sitting at its prompt.
     var running: Bool?
+    /// What a shell runs in place of its prompt (`vim`), as dinod last looked; nil at the prompt
+    /// and from an older dinod.
+    var foreground: ForegroundProcess?
     /// A shell whose foreground is a tmux client: what it shows. Closing the tab only detaches it.
     var tmux: TmuxPane?
     var last_exit: Int?
@@ -617,6 +620,16 @@ private struct TmuxShownResponse: Decodable {
     var session: String?
 }
 
+/// The program that has a session's terminal, when it isn't the session's own (a shell's prompt).
+struct ForegroundProcess: Codable, Equatable {
+    var pid: UInt32
+    var name: String
+}
+
+private struct ForegroundResponse: Decodable {
+    var foreground: ForegroundProcess?
+}
+
 private struct TextResponse: Decodable {
     var text: String
 }
@@ -739,6 +752,13 @@ final class DinoConnection: @unchecked Sendable {
 
     deinit { close(fd) }
 
+    /// Give up on an answer, or on sending, after `seconds`: for a question the UI waits on.
+    func timeout(_ seconds: Double) {
+        var tv = timeval(tv_sec: Int(seconds), tv_usec: Int32((seconds - Double(Int(seconds))) * 1_000_000))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    }
+
     func request(_ body: [String: Any]) throws -> Response {
         try JSONDecoder().decode(Response.self, from: send(body))
     }
@@ -820,6 +840,11 @@ final class DinoConnection: @unchecked Sendable {
     }
 
     /// Write `text` to a session as typed keys, not a paste.
+    /// What has session `id`'s terminal right now, asked of its pty: nil at a shell's prompt.
+    func foreground(session: String) throws -> ForegroundProcess? {
+        try JSONDecoder().decode(ForegroundResponse.self, from: send(["type": "foreground", "id": session])).foreground
+    }
+
     func sendKeys(session: String, text: String) throws {
         _ = try send(["type": "send_keys", "id": session, "text": text])
     }

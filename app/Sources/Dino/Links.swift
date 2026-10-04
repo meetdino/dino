@@ -1,5 +1,5 @@
 import AppKit
-import GhosttyTerminal
+import DinoGhostty
 
 /// A session's terminal whose ⌘-clicked links open in dino: files in the file pane, local web
 /// pages in the preview. Any agent works: Ghostty finds the links (paths, URLs, OSC 8).
@@ -92,9 +92,11 @@ private final class LinkForwarder:
     TerminalSurfaceLifecycleDelegate,
     TerminalSurfaceTextSelectionRequestDelegate,
     TerminalSurfaceClipboardConfirmationDelegate,
-    TerminalSurfaceOpenURLDelegate
+    TerminalSurfaceOpenURLDelegate,
+    TerminalSurfaceStateDelegate
 {
     weak var state: TerminalViewState?
+    var viewState: TerminalViewState? { state }
     let onOpen: (String) -> Void
 
     init(state: TerminalViewState, onOpen: @escaping (String) -> Void) {

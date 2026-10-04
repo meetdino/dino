@@ -65,15 +65,15 @@ extension DinoModel {
         select(shown[((at + step) % shown.count + shown.count) % shown.count])
     }
 
-    /// Close tab `id` without asking: a shell ends, an agent only leaves the tabs. The next tab
-    /// along takes over, as in Ghostty.
+    /// Close tab `id` without asking: a shell ends, an agent only leaves the tabs (one beside a
+    /// shell in a split too). The next tab along takes over, as in Ghostty.
     func dropTab(_ id: String, ending: Bool) {
         let shown = shownTabs
         let at = shown.firstIndex(of: tab(of: id) ?? id) ?? 0
         let members = splits.first(where: { $0.contains(id) }).map { [$0.first, $0.second] } ?? [id]
         tabs.removeAll { members.contains($0) }
         if ending {
-            for m in members { kill(m) }
+            for m in members where sessions.first(where: { $0.id == m })?.agent_id == "shell" { kill(m) }
         } else {
             // A shell left without a tab would come straight back on the next sync.
             knownTabless.formUnion(members)

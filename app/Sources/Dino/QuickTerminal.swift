@@ -1,6 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
-import GhosttyTerminal
+import DinoGhostty
 import SwiftUI
 
 /// The quick terminal: one shell that drops down from the top of the screen on a shortcut that
@@ -56,6 +56,8 @@ final class QuickTerminal: NSObject, NSWindowDelegate {
 
     private var panel: QuickPanel?
     private var state: TerminalViewState?
+    /// Its terminal, once shown: Ghostty's actions from it aren't a tab's.
+    var surfaceState: TerminalViewState? { state }
     private var hotKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
     /// Its shell is being started.
@@ -200,6 +202,7 @@ final class QuickTerminal: NSObject, NSWindowDelegate {
             command: "\(DinoEnvironment.dinoBinary) attach --fresh \(id)",
             waitAfterCommand: false
         )
+        ClipboardConfirmation.install(on: t, session: id)
         t.makePlatformView = { [weak t] in
             // No file pane here: files are revealed in the Finder, never opened (a `.command` would run).
             LinkTerminalView(local: { true }) { link in

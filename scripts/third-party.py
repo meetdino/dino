@@ -16,6 +16,7 @@ BUNDLED = [
     ("Ghostty's shell integration (bash, zsh)", "crates/dino-daemon/shell-integration/", "MIT, see LICENSE-libghostty-spm there"),
     ("bash-preexec", "crates/dino-daemon/shell-integration/bash/bash-preexec.sh", "MIT, see LICENSE-bash-preexec.md there"),
     ("Ghostty's terminfo entries (xterm-ghostty, ghostty)", "crates/dino-daemon/terminfo/", "MIT (Ghostty)"),
+    ("GhosttyTerminal, libghostty-spm's Swift wrapper (as the module DinoGhostty)", "app/Sources/DinoGhostty/", "MIT, see LICENSE there"),
 ]
 
 
@@ -46,6 +47,7 @@ def main():
     licenses = {
         "libghostty-spm": "MIT. Builds [Ghostty](https://github.com/ghostty-org/ghostty) (MIT) and the libraries "
                           "Ghostty links, under their own licenses: see Ghostty's repository",
+        "MSDisplayLink": "MIT",
         "Sparkle": "MIT, with notices for code it includes: see its [LICENSE](https://github.com/sparkle-project/Sparkle/blob/2.x/LICENSE)",
     }
     for url, version in swift_packages():

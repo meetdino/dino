@@ -29,6 +29,12 @@ fn name_of(pid: libc::c_int, buf: &mut [u8; 64]) -> Option<&[u8]> {
     (n > 0).then(|| &buf[..n as usize])
 }
 
+/// A process's name, as `ps -o comm` shows it without the path: `vim`, `nvim`, `htop`.
+pub fn name(pid: u32) -> Option<String> {
+    let mut buf = [0u8; 64];
+    name_of(pid as libc::c_int, &mut buf).map(|n| String::from_utf8_lossy(n).into_owned())
+}
+
 /// Pids whose process name is exactly `name`, like `pgrep -x`.
 pub fn pids_named(name: &str) -> Vec<u32> {
     let mut buf = [0u8; 64];
@@ -341,6 +347,7 @@ mod tests {
         let name = exe.file_name().unwrap().to_str().unwrap();
         let name = &name[..name.len().min(32)];
         assert!(pids_named(name).contains(&me), "{name}");
+        assert_eq!(super::name(me).as_deref(), Some(name));
         let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
         assert_eq!(cwd_of(me).map(std::path::PathBuf::from), Some(cwd.clone()));
         assert!(working_dirs().iter().any(|(pid, n, c)| *pid == me && name.starts_with(n.as_str()) && std::path::Path::new(c) == cwd));

@@ -1,5 +1,5 @@
 import AppKit
-import GhosttyTerminal
+import DinoGhostty
 import SwiftUI
 import UserNotifications
 
@@ -610,6 +610,7 @@ final class DinoModel: ObservableObject {
     static let terminals: TerminalController = {
         let c = TerminalController(configSource: .generated(menuKeys))
         GhosttyConfig.apply(to: c, overrides: menuKeys)
+        GhosttyActions.install(on: c)
         return c
     }()
 
@@ -620,6 +621,7 @@ final class DinoModel: ObservableObject {
     private func watchGhosttyConfig() {
         // Read now, not at the first pane: Settings says what's in effect.
         _ = Self.terminals
+        GhosttyActions.model = self
         appearanceObservation = NSApp.observe(\.effectiveAppearance) { _, _ in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -678,6 +680,8 @@ final class DinoModel: ObservableObject {
             command: "\(DinoEnvironment.dinoBinary) attach --fresh \(id)",
             waitAfterCommand: false
         )
+        // Unsafe pastes and programs reading or writing the clipboard ask, as Ghostty's config says.
+        ClipboardConfirmation.install(on: t, session: id)
         // ⌘-clicked paths and local URLs open in dino's side pane; dropped files paste as paths.
         t.makePlatformView = { [weak self] in
             LinkTerminalView(local: { self?.sessions.first { $0.id == id }?.host == nil }) { self?.openLink($0, from: id) }

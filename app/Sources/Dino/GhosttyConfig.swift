@@ -1,6 +1,6 @@
 import AppKit
 import Foundation
-import GhosttyTerminal
+import DinoGhostty
 
 /// The user's own Ghostty config under dino's few overrides, so a pane looks and types like their
 /// Ghostty: font, theme, cursor, keybinds. Read the way Ghostty reads it, and again when it changes.
@@ -100,6 +100,30 @@ enum GhosttyConfig {
             return path(String(pair.dropFirst(mode.count))).map { "theme = \($0)" }
         }
         return path(value).map { "theme = \($0)" }
+    }
+
+    /// Ghostty's `reload_config`: read the files again now, as the two-second check would.
+    static func reload() {
+        apply(to: DinoModel.terminals, overrides: DinoModel.menuKeys)
+    }
+
+    /// Ghostty's `open_config`: the config file in the editor the Mac opens it with, the first of
+    /// Ghostty's files that exists, or a new `config.ghostty` where Ghostty would make one.
+    static func openInEditor() {
+        let fm = FileManager.default
+        let url = files.first { fm.fileExists(atPath: $0.path) } ?? files[0]
+        if !fm.fileExists(atPath: url.path) {
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            fm.createFile(atPath: url.path, contents: Data())
+        }
+        // A file with no extension or `.ghostty` has no app of its own: open it as text.
+        let editor = NSWorkspace.shared.urlForApplication(toOpen: url)
+            ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.TextEdit")
+        guard let editor else {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        NSWorkspace.shared.open([url], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration())
     }
 
     /// A config file changed, appeared or went since `apply` read them.
