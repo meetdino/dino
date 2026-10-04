@@ -3,7 +3,7 @@
 use dino_core::controls::Controls;
 use dino_core::settings::{Repo, Settings, SshHost};
 use dino_sync::record::RecordId;
-use dino_sync::settings::{Entries, diff, flatten, syncable_env, unflatten};
+use dino_sync::settings::{Entries, describe, diff, flatten, syncable_env, unflatten};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -80,6 +80,29 @@ fn settings_cross_to_another_mac() {
 fn defaults_are_nothing_to_sync() {
     let (r, _) = mac(&[]);
     assert!(flatten(&Settings::default(), &r).is_empty());
+    assert!(describe(&Entries::new()).is_empty());
+}
+
+#[test]
+fn what_is_synced_reads_as_settings() {
+    let (r, _) = mac(&[("/Users/a/code/api", "github.com/acme/api")]);
+    let mut s = realistic();
+    s.terminal.appearance = "dark".into();
+    assert_eq!(
+        describe(&flatten(&s, &r)),
+        ["Claude Code and Codex defaults", "2 terminal settings", "1 SSH host", "1 repo variable", "5 policies", "1 worktree setting", "1 routing setting"]
+    );
+    s.agents.insert("pi".into(), Controls { model: Some("x".into()), ..Controls::default() });
+    s.agents.insert("someday".into(), Controls { mode: Some("y".into()), ..Controls::default() });
+    let mut entries = flatten(&s, &r);
+    assert_eq!(describe(&entries)[0], "defaults for 4 agents");
+    s.agents.retain(|a, _| a == "someday");
+    entries.retain(|id, _| id.collection != "agents");
+    entries.extend(flatten(&s, &r).into_iter().filter(|(id, _)| id.collection == "agents"));
+    entries.insert(RecordId::new("fonts", "size"), json!(13));
+    let d = describe(&entries);
+    assert_eq!(d.first().map(String::as_str), Some("someday defaults"), "an agent this dino doesn't know goes by its id");
+    assert_eq!(d.last().map(String::as_str), Some("1 other setting"), "a newer dino's settings still count");
 }
 
 #[test]

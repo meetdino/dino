@@ -14,6 +14,8 @@ pub const DEFAULT_SERVER: &str = "https://cloud.meetdino.com";
 const CLIENT: &str = "dino";
 const SCOPE: &str = "account sync";
 
+// The sign-in, in the key store. They start with `dino_core::settings::ACCOUNT_TOKEN_PREFIX`, so
+// the lists of keys (Settings, Welcome) leave them out.
 pub const ACCESS_KEY: &str = "DINO_CLOUD_ACCESS_TOKEN";
 pub const REFRESH_KEY: &str = "DINO_CLOUD_REFRESH_TOKEN";
 const EXPIRES_KEY: &str = "DINO_CLOUD_EXPIRES_AT";
@@ -333,4 +335,14 @@ pub fn meta(server: &str) -> anyhow::Result<Meta> {
 pub fn ws_url(server: &str) -> String {
     let base = server.strip_prefix("https://").map(|r| format!("wss://{r}")).or_else(|| server.strip_prefix("http://").map(|r| format!("ws://{r}"))).unwrap_or_else(|| server.to_string());
     format!("{base}/v1/sync/ws")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_sign_in_is_not_listed_as_keys() {
+        for k in [super::ACCESS_KEY, super::REFRESH_KEY, super::EXPIRES_KEY] {
+            assert!(k.starts_with(dino_core::settings::ACCOUNT_TOKEN_PREFIX), "{k}");
+        }
+    }
 }

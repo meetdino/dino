@@ -8,7 +8,11 @@ struct SyncStatus: Codable, Equatable {
     var account_url: String?
     var last_sync: UInt64?
     var pending: Int
+    /// Settings set to something other than their default: a default isn't stored.
     var synced: Int
+    /// The same, in a person's terms ("Claude Code defaults", "2 terminal settings"); nil from an
+    /// older dinod.
+    var synced_what: [String]?
     /// Where a sign-in link went, while it waits to be opened.
     var email_sent_to: String?
     var device_code: String?
@@ -284,7 +288,9 @@ private struct Ready: View {
         Section {
             LabeledContent("Signed in as", value: status?.email ?? "")
             LabeledContent("Last synced", value: status?.last_sync.map(ago) ?? "Not yet")
-            LabeledContent("Synced settings", value: "\(status?.synced ?? 0)")
+            LabeledContent("Synced settings") {
+                Text(syncedText).multilineTextAlignment(.trailing)
+            }
             if let pending = status?.pending, pending > 0 {
                 LabeledContent("Waiting to send", value: "\(pending)")
             }
@@ -296,7 +302,7 @@ private struct Ready: View {
                 Button("Sync Now") { sync.act("now") }
             }
         } footer: {
-            Footnote("Settings sync is on. API keys and tokens, sessions, terminal content and your agents' logins never leave this Mac.")
+            Footnote("Settings sync is on. A setting you change from dino's default goes to your other Macs. API keys and tokens, sessions, terminal content and your agents' logins never leave this Mac.")
         }
         Section {
             if (status?.snapshots ?? 0) > 0 {
@@ -309,6 +315,16 @@ private struct Ready: View {
         } message: {
             Text("This Mac stops syncing. Its settings stay as they are.")
         }
+    }
+
+    /// What the account holds, never a bare count: a default isn't stored, so none means every
+    /// setting is at its default.
+    private var syncedText: String {
+        if let what = status?.synced_what {
+            return what.isEmpty ? "Nothing yet: all at their defaults" : what.joined(separator: ", ")
+        }
+        let n = status?.synced ?? 0
+        return n == 0 ? "Nothing yet: all at their defaults" : n == 1 ? "1 setting" : "\(n) settings"
     }
 
     private func ago(_ t: UInt64) -> String {

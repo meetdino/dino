@@ -131,6 +131,43 @@ pub fn unflatten(local: &Settings, entries: &Entries, path_of: &dyn Fn(&str) -> 
     Applied { settings: s, pending }
 }
 
+/// What `entries` hold, in a person's terms, most personal first: "Claude Code and Codex defaults",
+/// "2 terminal settings", "1 SSH host". Empty when every setting is at its default.
+pub fn describe(entries: &Entries) -> Vec<String> {
+    let count = |collection: &str| in_collection(entries, collection).count();
+    let n = |k: usize, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
+    let mut out = vec![];
+    let agents: Vec<&str> = in_collection(entries, "agents").filter_map(|(id, _)| id.key.rsplit_once('.').map(|(a, _)| a)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let name = |id: &str| dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id).map_or(id.to_string(), |k| k.name.to_string());
+    match agents.as_slice() {
+        [] => {}
+        [a] => out.push(format!("{} defaults", name(a))),
+        [a, b] => out.push(format!("{} and {} defaults", name(a), name(b))),
+        all => out.push(format!("defaults for {} agents", all.len())),
+    }
+    for (collection, one, many) in [
+        ("terminal", "terminal setting", "terminal settings"),
+        ("tmux", "tmux setting", "tmux settings"),
+        ("ssh", "SSH host", "SSH hosts"),
+        ("repos", "repo variable", "repo variables"),
+        ("policies", "policy", "policies"),
+        ("worktrees", "worktree setting", "worktree settings"),
+        ("routing", "routing setting", "routing settings"),
+    ] {
+        let k = count(collection);
+        if k > 0 {
+            out.push(n(k, one, many));
+        }
+    }
+    // From a newer dino: still synced, even if this one has no name for them.
+    let known = ["agents", "terminal", "tmux", "ssh", "repos", "policies", "worktrees", "routing"];
+    let other = entries.keys().filter(|id| !known.contains(&id.collection.as_str())).count();
+    if other > 0 {
+        out.push(n(other, "other setting", "other settings"));
+    }
+    out
+}
+
 /// Variables that make a shell, interpreter, loader, git or an agent run code or trust something
 /// of the setter's choosing, or change which programs run. They stay on the Mac that set them.
 const UNSYNCED_ENV: &[&str] = &[
