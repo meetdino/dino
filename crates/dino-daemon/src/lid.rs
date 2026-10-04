@@ -61,7 +61,15 @@ impl Lid {
             note_at: s.note.as_ref().map(|n| n.1),
             ready: None,
             error: s.error.clone(),
+            awake: vec![],
         }
+    }
+}
+
+impl Daemon {
+    /// The lid, and who keeps the Mac awake.
+    pub(crate) fn power_info(&self) -> PowerInfo {
+        PowerInfo { awake: self.awake.holders(), ..self.lid.info() }
     }
 }
 
@@ -98,32 +106,46 @@ fn set_sleep_disabled(off: bool) -> Result<(), String> {
     }
 }
 
-/// An agent is working, or waiting on its own background work; and whether any agent is open.
-fn agents(d: &Daemon) -> (bool, bool) {
+/// How many agents are working, or waiting on their own background work, an agent typed into a
+/// dino shell among them; and whether any agent session is open.
+fn agents(d: &Daemon) -> (usize, bool) {
     let sessions = d.sessions.lock().unwrap().clone();
-    let mut working = false;
+    let mut working = 0;
     let mut open = false;
-    for s in sessions.iter().filter(|s| s.agent_id != "shell" && !s.pane.is_exited()) {
-        open = true;
+    for s in sessions.iter().filter(|s| !s.pane.is_exited()) {
         let st = crate::stats(d, s);
+        if s.agent_id == "shell" {
+            // Only an agent reporting from the shell says it's working.
+            working += usize::from(st.activity == Some(Activity::Working));
+            continue;
+        }
+        open = true;
         let (agents, commands) = st.waiting();
         if st.activity == Some(Activity::Working) || agents + commands > 0 || st.in_flight > 0 {
-            working = true;
+            working += 1;
         }
     }
     (working, open)
 }
 
-/// Once a second or two: turn sleep off or back on as the setting and the Mac say.
+/// Once a second or two: turn sleep off or back on as the setting and the Mac say, and keep the
+/// Mac from idle sleep while agents work (see [`crate::awake`]).
 pub(crate) fn tick(d: &Daemon) {
-    let lid = Settings::load().machine.lid;
+    let settings = Settings::load();
+    let lid = &settings.machine.lid;
+    let quiet = !lid.enabled && {
+        let s = d.lid.state.lock().unwrap();
+        s.held.is_none() && s.latched.is_none() && !s.external
+    };
+    // Who's working is only worth asking when something uses it.
+    let (working, open) = if quiet && !settings.machine.awake_while_working { (0, false) } else { agents(d) };
     let changed = {
         let mut s = d.lid.state.lock().unwrap();
-        if !lid.enabled && s.held.is_none() && s.latched.is_none() && !s.external {
+        if quiet {
             s.error = None;
             false
         } else {
-            let (working, open) = agents(d);
+            let working = working > 0;
             let wanted = lid.enabled && if lid.when == dino_core::settings::LidWhen::Open { open } else { working };
             if (wanted || s.held.is_some()) && s.read_at.is_none_or(|t| t.elapsed() >= POWER_EVERY) {
                 let (adapter, battery) = power::battery(&read(&["-g", "batt"]));
@@ -134,7 +156,7 @@ pub(crate) fn tick(d: &Daemon) {
             }
             let inputs = Inputs { working, open, on_adapter: s.adapter, battery: s.battery, thermal: s.thermal, held_for: s.held.map(|h| h.0.elapsed()) };
             let mut latched = s.latched;
-            let decision = power::step(&lid, &inputs, &mut latched);
+            let decision = power::step(lid, &inputs, &mut latched);
             s.latched = latched;
             match decision {
                 Ok(()) if s.held.is_none() && !s.external => hold(&mut s),
@@ -153,6 +175,7 @@ pub(crate) fn tick(d: &Daemon) {
     if changed {
         schedule::keep_awake(d);
     }
+    crate::awake::tick(d, working, &settings);
 }
 
 /// Sleep off, unless it already was (someone else's): then leave it be.
@@ -291,7 +314,7 @@ pub(crate) fn serve(d: &Daemon, action: &str) -> Result<PowerInfo, String> {
         }
         other => return Err(format!("unknown power action “{other}”")),
     }
-    let mut info = d.lid.info();
+    let mut info = d.power_info();
     info.ready = Some(ready());
     Ok(info)
 }
