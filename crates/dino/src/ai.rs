@@ -541,6 +541,7 @@ fn agent(o: &Opts) -> anyhow::Result<()> {
         by: by.clone(),
         route: None,
         reveal: false,
+        tmux: None,
     };
     match crate::client::request(&req)? {
         Response::Created { id } if by.is_some() => {
