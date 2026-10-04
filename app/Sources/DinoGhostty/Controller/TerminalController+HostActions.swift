@@ -44,6 +44,8 @@ public enum TerminalHostAction: Equatable, Sendable {
     public enum GotoTab: Equatable, Sendable { case previous, next, last, index(Int) }
     public enum PromptTitle: Sendable { case surface, tab, window }
     public enum Toggle: Sendable { case on, off, toggle }
+    /// A key table's change: one pushed by name, the top one popped, or all of them.
+    public enum KeyTable: Equatable, Sendable { case activate(String), deactivate, deactivateAll }
 
     case quit
     case newWindow
@@ -75,6 +77,16 @@ public enum TerminalHostAction: Equatable, Sendable {
     case redo
     case startSearch(String?)
     case endSearch
+    /// Matches found so far (nil: not known yet).
+    case searchTotal(Int?)
+    /// The selected match, from 0 (nil: none).
+    case searchSelected(Int?)
+    /// `mouse-hide-while-typing`: hide the pointer until it moves, or show it.
+    case mouseVisibility(visible: Bool)
+    /// A key of a key sequence was pressed and more are expected (the key, as
+    /// "⌃A"), or the sequence ended (nil).
+    case keySequence(String?)
+    case keyTable(KeyTable)
     case inspector
     case presentTerminal
     case other
@@ -162,9 +174,77 @@ public enum TerminalHostAction: Equatable, Sendable {
             let needle = a.start_search.needle.map { String(cString: $0) }
             self = .startSearch(needle.flatMap { $0.isEmpty ? nil : $0 })
         case GHOSTTY_ACTION_END_SEARCH: self = .endSearch
+        case GHOSTTY_ACTION_SEARCH_TOTAL:
+            self = .searchTotal(a.search_total.total >= 0 ? Int(a.search_total.total) : nil)
+        case GHOSTTY_ACTION_SEARCH_SELECTED:
+            self = .searchSelected(a.search_selected.selected >= 0 ? Int(a.search_selected.selected) : nil)
+        case GHOSTTY_ACTION_MOUSE_VISIBILITY:
+            self = .mouseVisibility(visible: a.mouse_visibility != GHOSTTY_MOUSE_HIDDEN)
+        case GHOSTTY_ACTION_KEY_SEQUENCE:
+            self = .keySequence(a.key_sequence.active ? Self.describe(a.key_sequence.trigger) : nil)
+        case GHOSTTY_ACTION_KEY_TABLE:
+            switch a.key_table.tag {
+            case GHOSTTY_KEY_TABLE_ACTIVATE:
+                let v = a.key_table.value.activate
+                let name = v.name.map { ptr in
+                    String(decoding: UnsafeRawBufferPointer(start: ptr, count: v.len), as: UTF8.self)
+                } ?? ""
+                self = .keyTable(.activate(name))
+            case GHOSTTY_KEY_TABLE_DEACTIVATE: self = .keyTable(.deactivate)
+            default: self = .keyTable(.deactivateAll)
+            }
         case GHOSTTY_ACTION_INSPECTOR: self = .inspector
         case GHOSTTY_ACTION_PRESENT_TERMINAL: self = .presentTerminal
         default: self = .other
+        }
+    }
+
+    /// A trigger as the Mac writes a shortcut: "⌃⇧A", "⌘↩".
+    static func describe(_ trigger: ghostty_input_trigger_s) -> String {
+        let m = trigger.mods.rawValue
+        var text = ""
+        if m & GHOSTTY_MODS_CTRL.rawValue != 0 { text += "⌃" }
+        if m & GHOSTTY_MODS_ALT.rawValue != 0 { text += "⌥" }
+        if m & GHOSTTY_MODS_SHIFT.rawValue != 0 { text += "⇧" }
+        if m & GHOSTTY_MODS_SUPER.rawValue != 0 { text += "⌘" }
+        switch trigger.tag {
+        case GHOSTTY_TRIGGER_UNICODE:
+            text += Unicode.Scalar(trigger.key.unicode).map { String($0).uppercased() } ?? "?"
+        case GHOSTTY_TRIGGER_PHYSICAL:
+            text += TerminalKey(ghosttyKey: trigger.key.physical).map(symbol) ?? "?"
+        default:
+            text += "any key"
+        }
+        return text
+    }
+
+    private static func symbol(_ key: TerminalKey) -> String {
+        switch key {
+        case .enter: return "↩"
+        case .tab: return "⇥"
+        case .escape: return "⎋"
+        case .space: return "Space"
+        case .backspace: return "⌫"
+        case .delete: return "⌦"
+        case .arrowUp: return "↑"
+        case .arrowDown: return "↓"
+        case .arrowLeft: return "←"
+        case .arrowRight: return "→"
+        case .comma: return ","
+        case .period: return "."
+        case .slash: return "/"
+        case .semicolon: return ";"
+        case .quote: return "'"
+        case .bracketLeft: return "["
+        case .bracketRight: return "]"
+        case .backslash: return "\\"
+        case .backquote: return "`"
+        case .minus: return "-"
+        case .equal: return "="
+        default:
+            let name = "\(key)"
+            if name.hasPrefix("digit") { return String(name.dropFirst(5)) }
+            return name.count == 1 ? name.uppercased() : name.prefix(1).uppercased() + name.dropFirst()
         }
     }
 
@@ -268,6 +348,14 @@ extension TerminalController {
         var text: UnsafePointer<CChar>?
         guard ghostty_config_get(config, &text, key, UInt(key.utf8.count)), let text else { return nil }
         return String(cString: text)
+    }
+
+    /// A color config value as Ghostty resolved it (`background`), as 0–255 red, green, blue.
+    public func configColor(_ key: String) -> (red: UInt8, green: UInt8, blue: UInt8)? {
+        guard let config else { return nil }
+        var color = ghostty_config_color_s()
+        guard ghostty_config_get(config, &color, key, UInt(key.utf8.count)) else { return nil }
+        return (color.r, color.g, color.b)
     }
 
     /// A bool config value as Ghostty resolved it, defaults included. Only for bool keys.
