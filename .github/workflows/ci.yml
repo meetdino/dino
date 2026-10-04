@@ -15,6 +15,8 @@ concurrency:
 jobs:
   rust:
     # dino-core calls proc_pidinfo, so the workspace only builds on macOS.
+    # macOS runners are free for public repositories only; until launch, scripts/check.sh gates every push.
+    if: ${{ !github.event.repository.private }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +26,7 @@ jobs:
       - run: cargo test --workspace --locked
 
   app:
+    if: ${{ !github.event.repository.private }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
