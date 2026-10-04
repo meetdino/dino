@@ -1,19 +1,30 @@
-//! Scheduled tasks (see `dino_core::schedule`): each run is a new session, started with the task's
-//! prompt. Checked every 30 seconds. Like Claude Desktop, a time missed while the Mac slept or dinod
-//! wasn't running is caught up once, when it's back: only the latest one, and only if it's under a
-//! week old (the latest always is: every frequency comes round within a week).
+//! Automations (see `dino_core::schedule`): a trigger fires, the conditions are checked, the
+//! action runs, and the run is followed to its end, when its result is kept (the agent's last
+//! message, what it changed, its PR), passed on (a PR comment, the automations that come after
+//! it) and, if it failed, tried again.
+//!
+//! One thread does the deciding: it wakes every 30 seconds for the schedules (a time missed while
+//! the Mac slept or dinod wasn't running is caught up once, when it's back: only the latest one,
+//! and only if it's under a week old), every few seconds while a run is going or files changed,
+//! and at once when told. GitHub and git are looked at by a second thread (see `triggers`), and
+//! files are watched by FSEvents, so an idle automation costs nothing.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use dino_core::schedule::{Frequency, MAX_HISTORY, ScheduledRun, ScheduledTask, split_args};
 use dino_core::ipc::LauncherInfo;
+use dino_core::schedule::{
+    ActionKind, Event, Frequency, MAX_HISTORY, MAX_QUEUE, MAX_SEEN, Retry, ScheduledRun, ScheduledTask, TriggerKind, TriggerState, fill, fill_command, shorten,
+    split_args,
+};
 use dino_core::settings::Settings;
 use dino_core::worktree;
+use dino_proxy::Activity;
 
-use crate::{Daemon, Launch, finished, new_uuid, now_secs, save, send_input, spawn, spawn_in_worktree, work_dir};
+use crate::{Daemon, Launch, finished, idle, new_uuid, now_secs, save, send_input, spawn, spawn_in_worktree, triggers, work_dir};
 
 /// Later than this after its time, a run counts as a catch-up.
 const LATE: u64 = 120;
@@ -21,19 +32,111 @@ const LATE: u64 = 120;
 /// How long a shell gets to start before its task's command is typed in.
 const SHELL_READY: Duration = Duration::from_secs(30);
 
+/// How often the deciding thread looks, with nothing going on (schedules are to the minute).
+const IDLE_LOOK: Duration = Duration::from_secs(30);
+/// … while a run is going or files changed,
+const BUSY_LOOK: Duration = Duration::from_secs(2);
+/// … and while a session is followed for an automation that comes after its turn.
+const FOLLOW_LOOK: Duration = Duration::from_secs(5);
+
+/// A run's agent that is still idle this long after it was started, without having called its
+/// model once, never got going (a prompt it was waiting on, a model that isn't there).
+const NO_START: Duration = Duration::from_secs(180);
+
+/// A command gets this long.
+const COMMAND_TIME: Duration = Duration::from_secs(30 * 60);
+/// What's kept of what a command printed.
+const OUTPUT_KEEP: usize = 4000;
+/// What's kept of an agent's last message as the run's summary; the comment gets more.
+const SUMMARY_KEEP: usize = 600;
+const COMMENT_KEEP: usize = 6000;
+
+/// Files that changed settle this long before the automation fires, so one save (or a branch
+/// switch) is one run.
+pub(crate) const SETTLE: Duration = Duration::from_secs(3);
+
 #[derive(Default)]
 pub(crate) struct Scheduler {
     tasks: Mutex<Vec<ScheduledTask>>,
     /// `caffeinate`, while it keeps the Mac awake for the tasks.
     awake: Mutex<Option<Child>>,
-    /// One check at a time, so no time is run twice.
+    /// One decision at a time (a schedule, an event, a run's end), so nothing runs twice.
     ticking: Mutex<()>,
+    /// Wakes the deciding thread: set by a change to an automation, a file change, an event.
+    wake: Arc<(Mutex<bool>, Condvar)>,
+    /// Runs being followed, by run id.
+    live: Mutex<HashMap<String, Live>>,
+    /// Sessions followed for "after a session finishes" triggers: whether it was busy, since when
+    /// it has looked done, and its model calls when its last turn ended.
+    turns: Mutex<HashMap<String, (bool, Option<Instant>, u64)>>,
+    pub(crate) triggers: triggers::Triggers,
+}
+
+/// A run that hasn't finished.
+struct Live {
+    task: String,
+    /// The prompt still to send, when the session it continues was busy.
+    deliver: Option<String>,
+    /// Model calls each session had made when the run began: more since means it went to work.
+    baseline: HashMap<String, u64>,
+    since: Instant,
+    /// When it first looked done (two looks apart before it counts).
+    done_since: Option<Instant>,
+    /// Followed again after dinod restarted: the call counts started over.
+    restored: bool,
+    /// A command's result, once it's in.
+    command: Option<Arc<Mutex<Option<(Option<i32>, String)>>>>,
+    event: Option<Event>,
 }
 
 impl Scheduler {
     pub(crate) fn load() -> Self {
-        let tasks = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut tasks: Vec<ScheduledTask> = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        // Runs from before automations had no ids: give them one, so they can be followed.
+        for t in &mut tasks {
+            for r in &mut t.history {
+                if r.id.is_empty() {
+                    r.id = new_uuid()[..8].to_string();
+                }
+                if r.sessions.is_empty() {
+                    r.sessions.extend(r.session.clone());
+                }
+            }
+            if t.state.since == 0 {
+                t.state.since = t.created_at;
+            }
+        }
         Self { tasks: Mutex::new(tasks), ..Default::default() }
+    }
+
+    fn poke(&self) {
+        let (m, c) = &*self.wake;
+        *m.lock().unwrap() = true;
+        c.notify_all();
+    }
+
+    pub(crate) fn waker(&self) -> Arc<(Mutex<bool>, Condvar)> {
+        self.wake.clone()
+    }
+
+    pub(crate) fn tasks(&self) -> Vec<ScheduledTask> {
+        self.tasks.lock().unwrap().clone()
+    }
+
+    /// Change the task `id` in place and keep it, if it's still there (on disk only if it changed).
+    pub(crate) fn update<R>(&self, id: &str, f: impl FnOnce(&mut ScheduledTask) -> R) -> Option<R> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let t = tasks.iter_mut().find(|t| t.id == id)?;
+        let before = t.clone();
+        let r = f(t);
+        if *t != before {
+            store(&tasks);
+        }
+        Some(r)
+    }
+
+    pub(crate) fn busy(&self, id: &str) -> bool {
+        self.live.lock().unwrap().values().any(|l| l.task == id)
     }
 }
 
@@ -45,62 +148,129 @@ fn store(tasks: &[ScheduledTask]) {
     let _ = crate::write_private(&path(), &serde_json::to_vec_pretty(tasks).unwrap_or_default());
 }
 
-/// Check for due tasks now and every 30 seconds after.
+/// Decide now, and whenever there's reason to after.
 pub(crate) fn start(d: &Arc<Daemon>) {
+    restore_live(d);
+    triggers::start(d);
     let d = d.clone();
-    std::thread::spawn(move || {
-        loop {
-            tick(&d, now_secs());
-            keep_awake(&d);
-            std::thread::sleep(Duration::from_secs(30));
-        }
-    });
+    std::thread::Builder::new()
+        .name("dinod-automations".into())
+        .spawn(move || {
+            let mut awake_checked: Option<Instant> = None;
+            loop {
+                let now = now_secs();
+                // Runs that ended first, so what comes next doesn't wait on them.
+                follow(d.as_ref());
+                tick(d.as_ref(), now);
+                triggers::files(d.as_ref());
+                owed(d.as_ref(), now);
+                // It reads the settings: at the idle pace, however often runs are looked at.
+                if awake_checked.is_none_or(|t| t.elapsed() >= IDLE_LOOK) {
+                    keep_awake(d.as_ref());
+                    awake_checked = Some(Instant::now());
+                }
+                let wait = next_look(d.as_ref());
+                let (m, c) = &*d.schedule.wake;
+                let mut woken = m.lock().unwrap();
+                if !*woken {
+                    woken = c.wait_timeout(woken, wait).unwrap().0;
+                }
+                *woken = false;
+            }
+        })
+        .expect("dinod: no thread for automations");
 }
 
-/// The tasks, with when each runs next.
+fn next_look(d: &Daemon) -> Duration {
+    let busy = !d.schedule.live.lock().unwrap().is_empty() || d.schedule.triggers.files_pending();
+    let following = !d.schedule.turns.lock().unwrap().is_empty();
+    let now = now_secs();
+    let retry = d.schedule.tasks.lock().unwrap().iter().filter_map(|t| t.state.retry.as_ref().map(|r| r.at)).min();
+    let mut wait = if busy {
+        BUSY_LOOK
+    } else if following {
+        FOLLOW_LOOK
+    } else {
+        IDLE_LOOK
+    };
+    if let Some(at) = retry {
+        wait = wait.min(Duration::from_secs(at.saturating_sub(now).max(1)));
+    }
+    wait
+}
+
+/// The tasks, with when each runs next and what keeps a trigger from looking.
 pub(crate) fn list(d: &Daemon) -> Vec<ScheduledTask> {
     let now = now_secs();
     let mut tasks = d.schedule.tasks.lock().unwrap().clone();
+    let problems = d.schedule.triggers.problems();
     for t in &mut tasks {
-        t.next_run = if t.enabled { next_due(t.frequency, now) } else { None };
+        t.next_run = if t.enabled && t.scheduled() { next_due(t.frequency, now) } else { None };
+        t.problem = problems.get(&t.id).cloned();
+        // Only dinod needs to know which events it has seen.
+        t.state.seen.clear();
     }
     tasks
 }
 
-/// Add or replace a task. Only times after this count: an edit or a resume owes no runs from before.
+/// Add or replace a task. Only times after this count: an edit or a resume owes no runs from
+/// before. A changed trigger starts over: only events from now on count.
 pub(crate) fn put(d: &Daemon, mut t: ScheduledTask) -> anyhow::Result<ScheduledTask> {
     t.name = t.name.trim().to_string();
-    anyhow::ensure!(!t.name.is_empty(), "give the task a name");
-    let l = d.allowed_launcher(&t.launcher)?;
-    anyhow::ensure!(!t.prompt.trim().is_empty() || l.agent_id == "shell", "give the task a prompt");
-    let dir = work_dir(Some(&t.cwd));
-    anyhow::ensure!(dir.is_dir(), "{} isn't a folder", t.cwd);
-    if t.worktree {
-        worktree::repo_root(&dir).map_err(|_| anyhow::anyhow!("{} isn't in a git repository, so runs can't have their own worktree", dir.display()))?;
-    }
-    if let Frequency::Hourly { minute } | Frequency::Daily { minute, .. } | Frequency::Weekdays { minute, .. } | Frequency::Weekly { minute, .. } = t.frequency {
-        anyhow::ensure!(minute < 60, "no such minute: {minute}");
-    }
-    if let Frequency::Daily { hour, .. } | Frequency::Weekdays { hour, .. } | Frequency::Weekly { hour, .. } = t.frequency {
-        anyhow::ensure!(hour < 24, "no such hour: {hour}");
-    }
-    if let Frequency::Weekly { weekday, .. } = t.frequency {
-        anyhow::ensure!(weekday < 7, "no such weekday: {weekday}");
-    }
+    anyhow::ensure!(!t.name.is_empty(), "give the automation a name");
+    check(d, &mut t)?;
     let now = now_secs();
     let mut tasks = d.schedule.tasks.lock().unwrap();
     anyhow::ensure!(
         !tasks.iter().any(|o| o.id != t.id && o.name.eq_ignore_ascii_case(&t.name)),
-        "there's already a task called {}",
+        "there's already an automation called {}",
         t.name
     );
+    if t.trigger.on == TriggerKind::After {
+        let other = tasks.iter().find(|o| o.id == t.trigger.after || o.name.eq_ignore_ascii_case(t.trigger.after.trim()));
+        if let Some(o) = other {
+            anyhow::ensure!(o.id != t.id, "an automation can't come after itself");
+            // Stored by id: a rename keeps the chain.
+            t.trigger.after = o.id.clone();
+            // A chain that comes round again would never stop.
+            let mut at = o.clone();
+            for _ in 0..tasks.len() {
+                if at.trigger.on != TriggerKind::After {
+                    break;
+                }
+                anyhow::ensure!(at.trigger.after != t.id || t.id.is_empty(), "that would make a loop: {} already comes after {}", o.name, t.name);
+                match tasks.iter().find(|x| x.id == at.trigger.after) {
+                    Some(n) => at = n.clone(),
+                    None => break,
+                }
+            }
+        } else {
+            let sessions = d.sessions.lock().unwrap();
+            let s = sessions.iter().find(|s| s.id == t.trigger.after || s.name == t.trigger.after.trim());
+            let s = s.ok_or_else(|| anyhow::anyhow!("no automation or session {}", t.trigger.after))?;
+            t.trigger.after = s.id.clone();
+            anyhow::ensure!(
+                !(t.action.kind == ActionKind::Continue && (t.action.session == s.id || t.action.session == s.name)),
+                "continuing the session it comes after would run forever"
+            );
+        }
+    }
     t.last_due = prev_due(t.frequency, now);
     t.next_run = None;
-    match tasks.iter_mut().find(|o| !t.id.is_empty() && o.id == t.id) {
-        Some(old) => {
-            t.created_at = old.created_at;
-            t.history = std::mem::take(&mut old.history);
-            *old = t.clone();
+    t.problem = None;
+    let old = tasks.iter().find(|o| !t.id.is_empty() && o.id == t.id).cloned();
+    t.state = match &old {
+        // Same trigger, same place: what it has seen still counts.
+        Some(o) if o.trigger == t.trigger && o.cwd == t.cwd => TriggerState { runs: if t.enabled && !o.enabled { 0 } else { o.state.runs }, ..o.state.clone() },
+        _ => TriggerState { since: now, ..Default::default() },
+    };
+    match old {
+        Some(o) => {
+            t.created_at = o.created_at;
+            t.history = o.history;
+            if let Some(slot) = tasks.iter_mut().find(|x| x.id == t.id) {
+                *slot = t.clone();
+            }
         }
         None => {
             t.id = new_uuid()[..8].to_string();
@@ -112,31 +282,128 @@ pub(crate) fn put(d: &Daemon, mut t: ScheduledTask) -> anyhow::Result<ScheduledT
     store(&tasks);
     drop(tasks);
     keep_awake(d);
+    d.schedule.triggers.changed();
+    d.schedule.poke();
     Ok(t)
+}
+
+/// Whether `t` can run as set up, filling in what was left to dinod.
+fn check(d: &Daemon, t: &mut ScheduledTask) -> anyhow::Result<()> {
+    let dir = work_dir(Some(&t.cwd));
+    anyhow::ensure!(dir.is_dir(), "{} isn't a folder", t.cwd);
+    let agent = match t.action.kind {
+        ActionKind::Agent => true,
+        ActionKind::Command => {
+            anyhow::ensure!(!t.action.command.trim().is_empty(), "give the command to run");
+            anyhow::ensure!(matches!(t.action.then_agent.as_str(), "" | "never" | "failure" | "always"), "then_agent is never, failure or always");
+            matches!(t.action.then_agent.as_str(), "failure" | "always")
+        }
+        ActionKind::Continue => {
+            anyhow::ensure!(!t.prompt.trim().is_empty(), "give the prompt to send");
+            let sessions = d.sessions.lock().unwrap();
+            let s = sessions.iter().find(|s| s.id == t.action.session || s.name == t.action.session.trim());
+            let s = s.ok_or_else(|| anyhow::anyhow!("no session {} to continue", t.action.session))?;
+            anyhow::ensure!(s.agent_id != "shell", "{} is a shell: continue an agent's session", s.name);
+            t.action.session = s.id.clone();
+            false
+        }
+        ActionKind::Fanout => {
+            anyhow::ensure!(!t.prompt.trim().is_empty(), "give the prompt to fan out");
+            anyhow::ensure!(!t.action.agents.is_empty(), "pick the agents to fan out to");
+            worktree::repo_root(&dir).map_err(|_| anyhow::anyhow!("{} isn't in a git repository: a fan-out gives each agent a worktree", dir.display()))?;
+            for a in &t.action.agents {
+                let l = d.allowed_launcher(a)?;
+                anyhow::ensure!(l.agent_id != "shell", "a shell can't take a prompt");
+            }
+            false
+        }
+    };
+    if agent {
+        let l = d.allowed_launcher(&t.launcher)?;
+        let needs_prompt = t.action.kind == ActionKind::Agent && l.agent_id != "shell";
+        anyhow::ensure!(!needs_prompt || !t.prompt.trim().is_empty(), "give the automation a prompt");
+        if t.worktree {
+            worktree::repo_root(&dir).map_err(|_| anyhow::anyhow!("{} isn't in a git repository, so runs can't have their own worktree", dir.display()))?;
+        }
+        if let Some(r) = &t.route {
+            crate::provider_route(&l, r.clone())?;
+        }
+    }
+    if let Frequency::Hourly { minute } | Frequency::Daily { minute, .. } | Frequency::Weekdays { minute, .. } | Frequency::Weekly { minute, .. } = t.frequency {
+        anyhow::ensure!(minute < 60, "no such minute: {minute}");
+    }
+    if let Frequency::Daily { hour, .. } | Frequency::Weekdays { hour, .. } | Frequency::Weekly { hour, .. } = t.frequency {
+        anyhow::ensure!(hour < 24, "no such hour: {hour}");
+    }
+    if let Frequency::Weekly { weekday, .. } = t.frequency {
+        anyhow::ensure!(weekday < 7, "no such weekday: {weekday}");
+    }
+    let tr = &mut t.trigger;
+    tr.repo = tr.repo.trim().trim_start_matches("https://github.com/").trim_end_matches('/').to_string();
+    match tr.on {
+        TriggerKind::Schedule | TriggerKind::After => {}
+        k if k.github() => {
+            if !tr.repo.is_empty() {
+                anyhow::ensure!(tr.repo.split('/').count() == 2 && !tr.repo.contains(' '), "a GitHub repo is owner/name, not {}", tr.repo);
+            } else if k != TriggerKind::ReviewRequested {
+                tr.repo = crate::github::repo_of(&dir).ok_or_else(|| anyhow::anyhow!("{} isn't a clone of a GitHub repo: name the repo (owner/name)", dir.display()))?;
+            }
+            anyhow::ensure!(k != TriggerKind::IssueLabeled || !tr.label.trim().is_empty(), "name the label");
+            anyhow::ensure!(k != TriggerKind::Comment || !tr.phrase.trim().is_empty(), "give the words a comment has to say");
+        }
+        k if k.git() => {
+            worktree::repo_root(&dir).map_err(|_| anyhow::anyhow!("{} isn't in a git repository", dir.display()))?;
+        }
+        TriggerKind::Files => {
+            let folder = if tr.path.trim().is_empty() { dir.clone() } else { dir.join(tr.path.trim()) };
+            anyhow::ensure!(folder.is_dir(), "{} isn't a folder", folder.display());
+        }
+        _ => {}
+    }
+    if !matches!(t.trigger.when.as_str(), "" | "any" | "success" | "failure") {
+        anyhow::bail!("after a run's success, failure or any end, not {}", t.trigger.when);
+    }
+    anyhow::ensure!(matches!(t.conditions.on_limit.as_str(), "" | "skip" | "fallback" | "run"), "at a limit: skip, fallback or run");
+    Ok(())
 }
 
 pub(crate) fn delete(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let mut tasks = d.schedule.tasks.lock().unwrap();
     let before = tasks.len();
     tasks.retain(|t| t.id != id);
-    anyhow::ensure!(tasks.len() < before, "no scheduled task {id}");
+    anyhow::ensure!(tasks.len() < before, "no automation {id}");
     store(&tasks);
     drop(tasks);
+    d.schedule.live.lock().unwrap().retain(|_, l| l.task != id);
     keep_awake(d);
+    d.schedule.triggers.changed();
     Ok(())
 }
 
-/// Run now, paused or not; the run is in the history like any other.
+/// Run now, paused or not, whatever the conditions; the run is in the history like any other.
+/// Answers with the session it started, if it started one.
 pub(crate) fn run_now(d: &Daemon, id: &str) -> anyhow::Result<String> {
     let t = d.schedule.tasks.lock().unwrap().iter().find(|t| t.id == id).cloned();
-    let t = t.ok_or_else(|| anyhow::anyhow!("no scheduled task {id}"))?;
-    let result = fire(d, &t);
-    let run = match &result {
-        Ok(session) => ScheduledRun { at: now_secs(), session: Some(session.clone()), outcome: "started".into(), ..Default::default() },
-        Err(e) => ScheduledRun { at: now_secs(), outcome: "failed".into(), reason: Some(e.to_string()), ..Default::default() },
-    };
-    record(d, id, run, None);
-    result
+    let t = t.ok_or_else(|| anyhow::anyhow!("no automation {id}"))?;
+    let _one = d.schedule.ticking.lock().unwrap();
+    let run = run(d, &t, Why { manual: true, ..Default::default() });
+    match run {
+        Some(r) if r.outcome == "failed" => Err(anyhow::anyhow!(r.reason.unwrap_or_default())),
+        Some(r) => Ok(r.session.unwrap_or_default()),
+        None => Ok(String::new()),
+    }
+}
+
+/// Why a run starts.
+#[derive(Default)]
+struct Why {
+    /// The scheduled time it's for.
+    due: Option<u64>,
+    catch_up: bool,
+    event: Option<Event>,
+    /// Asked for (Run now): the conditions don't apply.
+    manual: bool,
+    attempt: u32,
 }
 
 /// Run every task whose latest scheduled time up to `now` hasn't been dealt with.
@@ -148,7 +415,7 @@ pub(crate) fn tick(d: &Daemon, now: u64) {
         .lock()
         .unwrap()
         .iter()
-        .filter(|t| t.enabled)
+        .filter(|t| t.enabled && t.scheduled())
         .filter_map(|t| {
             let due = prev_due(t.frequency, now)?;
             (due > t.last_due.unwrap_or(t.created_at)).then(|| (t.clone(), due))
@@ -156,43 +423,345 @@ pub(crate) fn tick(d: &Daemon, now: u64) {
         .collect();
     for (t, due) in due {
         let catch_up = now.saturating_sub(due) > LATE;
-        let run = if let Some(prev) = still_going(d, &t) {
-            ScheduledRun { outcome: "skipped".into(), reason: Some(format!("the previous run ({prev}) was still going")), ..Default::default() }
-        } else {
-            match fire(d, &t) {
-                Ok(session) => ScheduledRun { session: Some(session), outcome: "started".into(), ..Default::default() },
-                Err(e) => ScheduledRun { outcome: "failed".into(), reason: Some(e.to_string()), ..Default::default() },
+        d.schedule.update(&t.id, |t| t.last_due = Some(due));
+        run(d, &t, Why { due: Some(due), catch_up, ..Default::default() });
+    }
+}
+
+/// An event for task `id`: run it unless it already ran for this one.
+pub(crate) fn deliver(d: &Daemon, id: &str, event: Event) {
+    let _one = d.schedule.ticking.lock().unwrap();
+    let fresh = d.schedule.update(id, |t| {
+        if !t.enabled || t.state.seen.contains(&event.key) {
+            return None;
+        }
+        t.state.seen.push(event.key.clone());
+        let extra = t.state.seen.len().saturating_sub(MAX_SEEN);
+        t.state.seen.drain(..extra);
+        Some(t.clone())
+    });
+    if let Some(Some(t)) = fresh {
+        run(d, &t, Why { event: Some(event), ..Default::default() });
+    }
+}
+
+/// Retries that are due, and events that waited for the run before them.
+fn owed(d: &Daemon, now: u64) {
+    let _one = d.schedule.ticking.lock().unwrap();
+    for t in d.schedule.tasks() {
+        if let Some(r) = t.state.retry.clone().filter(|r| r.at <= now) {
+            d.schedule.update(&t.id, |t| t.state.retry = None);
+            if t.enabled {
+                run(d, &t, Why { event: r.event, attempt: r.attempt, ..Default::default() });
             }
+            continue;
+        }
+        if t.enabled && !t.state.queue.is_empty() && (t.conditions.parallel || !d.schedule.busy(&t.id)) {
+            let next = d.schedule.update(&t.id, |t| (!t.state.queue.is_empty()).then(|| t.state.queue.remove(0))).flatten();
+            if let Some(e) = next {
+                run(d, &t, Why { event: Some(e), ..Default::default() });
+            }
+        }
+    }
+}
+
+/// Start a run of `t`, conditions permitting, and keep it in the history; none when it waits
+/// for the run before it.
+fn run(d: &Daemon, t: &ScheduledTask, why: Why) -> Option<ScheduledRun> {
+    let base = ScheduledRun {
+        id: new_uuid()[..8].to_string(),
+        at: now_secs(),
+        due: why.due,
+        catch_up: why.catch_up,
+        event: why.event.clone(),
+        attempt: why.attempt,
+        ..Default::default()
+    };
+    let mut launcher = t.launcher.clone();
+    if !why.manual {
+        match hold(d, t, &why) {
+            Ok(Some(other)) => launcher = other,
+            Ok(None) => {}
+            Err(Hold::Wait) => {
+                let e = why.event?;
+                d.schedule.update(&t.id, |t| {
+                    t.state.queue.push(e);
+                    let extra = t.state.queue.len().saturating_sub(MAX_QUEUE);
+                    t.state.queue.drain(..extra);
+                });
+                return None;
+            }
+            Err(Hold::Skip(reason)) => {
+                let run = ScheduledRun { outcome: "skipped".into(), reason: Some(reason), ..base };
+                record(d, &t.id, run.clone());
+                return Some(run);
+            }
+        }
+    }
+    let fingerprint = if t.conditions.if_changed { fingerprint(&work_dir(Some(&t.cwd))) } else { None };
+    let run = match fire(d, t, &launcher, why.event.as_ref(), &base.id) {
+        Ok(started) => {
+            let run = ScheduledRun { session: started.sessions.first().cloned(), sessions: started.sessions.clone(), group: started.group.clone(), outcome: "started".into(), ..base };
+            let baseline = started.sessions.iter().map(|s| (s.clone(), d.proxy.stats.session(s).requests)).collect();
+            d.schedule.live.lock().unwrap().insert(
+                run.id.clone(),
+                Live { task: t.id.clone(), deliver: started.deliver, baseline, since: Instant::now(), done_since: None, restored: false, command: started.command, event: why.event.clone() },
+            );
+            // Followed from now on, every few seconds rather than the idle half minute.
+            d.schedule.poke();
+            run
+        }
+        Err(e) => {
+            let run = ScheduledRun { outcome: "failed".into(), reason: Some(e.to_string()), ..base };
+            retry_later(d, t, &run);
+            run
+        }
+    };
+    let started = run.outcome == "started";
+    d.schedule.update(&t.id, |t| {
+        if started {
+            t.state.runs += 1;
+            t.state.fingerprint = fingerprint;
+            // Ran its last: paused, the way a person would.
+            if !why.manual && t.conditions.max_runs > 0 && t.state.runs >= t.conditions.max_runs {
+                t.enabled = false;
+            }
+        }
+    });
+    record(d, &t.id, run.clone());
+    Some(run)
+}
+
+enum Hold {
+    /// Not now: after the run before it.
+    Wait,
+    Skip(String),
+}
+
+/// Whether `t` may run now: `Ok(Some(agent))` to run on another agent than its own.
+fn hold(d: &Daemon, t: &ScheduledTask, why: &Why) -> Result<Option<String>, Hold> {
+    let c = &t.conditions;
+    if c.max_runs > 0 && t.state.runs >= c.max_runs {
+        return Err(Hold::Skip(format!("it already ran {} times", t.state.runs)));
+    }
+    if c.ac_power && on_battery() {
+        return Err(Hold::Skip("the Mac was on battery".into()));
+    }
+    if c.lid_open && lid_closed() {
+        return Err(Hold::Skip("the lid was closed".into()));
+    }
+    if !c.parallel && let Some(prev) = still_going(d, t) {
+        // An event is owed a run; a scheduled time just comes round again.
+        return if why.event.is_some() && why.attempt == 0 { Err(Hold::Wait) } else { Err(Hold::Skip(format!("the previous run ({prev}) was still going"))) };
+    }
+    if c.if_changed && why.attempt == 0 && t.state.runs > 0 {
+        let now = fingerprint(&work_dir(Some(&t.cwd)));
+        if now.is_some() && now == t.state.fingerprint {
+            return Err(Hold::Skip("nothing changed since the last run".into()));
+        }
+    }
+    let uses_agent = matches!(t.action.kind, ActionKind::Agent) || (t.action.kind == ActionKind::Command && t.action.then_agent == "always");
+    if uses_agent && t.route.is_none() && let Some(l) = d.launcher(&t.launcher) && let Some(limit) = at_limit(d, &l) {
+        return match c.on_limit.as_str() {
+            "run" => Ok(None),
+            "fallback" => match fallback(d, &l) {
+                Some(other) => Ok(Some(other.short)),
+                None => Err(Hold::Skip(format!("{limit}, and it has no fallback agent"))),
+            },
+            _ => Err(Hold::Skip(limit)),
         };
-        record(d, &t.id, ScheduledRun { at: now, due: Some(due), catch_up, ..run }, Some(due));
     }
+    Ok(None)
 }
 
-fn record(d: &Daemon, id: &str, run: ScheduledRun, due: Option<u64>) {
-    let mut tasks = d.schedule.tasks.lock().unwrap();
-    // Deleted while it ran: nothing to keep.
-    let Some(t) = tasks.iter_mut().find(|t| t.id == id) else { return };
-    if let Some(due) = due {
-        t.last_due = Some(due);
-    }
-    t.history.push(run);
-    let extra = t.history.len().saturating_sub(MAX_HISTORY);
-    t.history.drain(..extra);
-    store(&tasks);
+/// The agent to use when `l`'s account is at its limit. The place where an agent's fallback
+/// chain plugs in (Settings → Agents); until it has one, there's none.
+fn fallback(_d: &Daemon, _l: &LauncherInfo) -> Option<LauncherInfo> {
+    None
 }
 
-/// The task's last run, by session name, while it's still working, waiting on the user, or
-/// waiting on work its turn left running.
+/// Why `l` can't take a run now: its subscription's window is used up (as the provider last said).
+fn at_limit(d: &Daemon, l: &LauncherInfo) -> Option<String> {
+    let provider = match l.agent_id.as_str() {
+        "claude" => "anthropic",
+        "codex" => "chatgpt",
+        _ => return None,
+    };
+    let q = d.proxy.stats.quota(provider)?;
+    let now = now_secs();
+    let (name, w) = q.windows.iter().find(|(_, w)| w.utilization >= 1.0 && w.resets_at.is_none_or(|r| r > now))?;
+    let until = w.resets_at.map(|r| format!(" until {}", clock(r))).unwrap_or_default();
+    Some(format!("{} is at its {name} limit{until}", l.label))
+}
+
+fn clock(t: u64) -> String {
+    let tm = local(t);
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+}
+
+/// The Mac is running on its battery (`pmset -g batt`).
+fn on_battery() -> bool {
+    let out = Command::new(dino_core::power::PMSET).args(["-g", "batt"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    out.is_ok_and(|o| dino_core::power::battery(&String::from_utf8_lossy(&o.stdout)).0 == Some(false))
+}
+
+/// The lid is closed (its clamshell state in the I/O registry).
+fn lid_closed() -> bool {
+    let out = Command::new("/usr/sbin/ioreg").args(["-r", "-k", "AppleClamshellState", "-d", "1"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    out.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("\"AppleClamshellState\" = Yes"))
+}
+
+/// The repo at `dir` as it is: its commit and its uncommitted changes. None outside a repo.
+fn fingerprint(dir: &Path) -> Option<String> {
+    use sha2::Digest;
+    let root = worktree::repo_root(dir).ok()?;
+    let git = |args: &[&str]| Command::new("git").arg("-C").arg(&root).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok().filter(|o| o.status.success()).map(|o| o.stdout);
+    let head = git(&["rev-parse", "HEAD"]).unwrap_or_default();
+    let status = git(&["status", "--porcelain=v1", "-z", "--untracked-files=normal"])?;
+    // Edits to a file already changed don't change its status line: its content counts too.
+    let diff = git(&["diff", "HEAD", "--no-ext-diff", "--binary"]).unwrap_or_default();
+    let mut h = sha2::Sha256::new();
+    h.update(&head);
+    h.update(&status);
+    h.update(&diff);
+    Some(hex::encode(&h.finalize()[..12]))
+}
+
+fn record(d: &Daemon, id: &str, run: ScheduledRun) {
+    d.schedule.update(id, |t| {
+        match t.history.iter_mut().find(|r| r.id == run.id) {
+            Some(r) => *r = run,
+            None => t.history.push(run),
+        }
+        let extra = t.history.len().saturating_sub(MAX_HISTORY);
+        t.history.drain(..extra);
+    });
+}
+
+/// The task's last run, by session name, while it's still going.
 fn still_going(d: &Daemon, t: &ScheduledTask) -> Option<String> {
-    let id = t.history.iter().rev().find_map(|r| r.session.clone())?;
-    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned()?;
-    (!s.pane.is_exited() && !finished(d, &s)).then(|| s.name.clone())
+    let live = d.schedule.live.lock().unwrap();
+    let run = t.history.iter().rev().find(|r| live.contains_key(&r.id))?;
+    let sessions = d.sessions.lock().unwrap();
+    Some(match run.session.as_ref() {
+        Some(id) => sessions.iter().find(|s| &s.id == id).map_or_else(|| id.clone(), |s| s.name.clone()),
+        None => "a command".into(),
+    })
 }
 
-/// Start a run: a new session named after the task. Claude isn't started where it would first ask
-/// whether to trust the folder: nobody is there to answer, and dino won't answer for the user.
-fn fire(d: &Daemon, t: &ScheduledTask) -> anyhow::Result<String> {
-    let l = d.allowed_launcher(&t.launcher)?;
+/// What a run started.
+#[derive(Default)]
+struct Started {
+    sessions: Vec<String>,
+    group: Option<String>,
+    deliver: Option<String>,
+    command: Option<Arc<Mutex<Option<(Option<i32>, String)>>>>,
+}
+
+/// The placeholders a run fills: its event's, and a few of its own.
+fn fields(t: &ScheduledTask, event: Option<&Event>) -> std::collections::BTreeMap<String, String> {
+    let mut f = event.map(|e| e.fields.clone()).unwrap_or_default();
+    f.insert("automation".into(), t.name.clone());
+    if let Some(e) = event {
+        f.insert("event".into(), e.title.clone());
+        f.entry("event.url".into()).or_insert_with(|| e.url.clone().unwrap_or_default());
+    }
+    f
+}
+
+/// Do what `t` does.
+fn fire(d: &Daemon, t: &ScheduledTask, launcher: &str, event: Option<&Event>, run_id: &str) -> anyhow::Result<Started> {
+    let prompt = fill(t.prompt.trim(), &fields(t, event));
+    match t.action.kind {
+        ActionKind::Agent => Ok(Started { sessions: vec![start_agent(d, t, launcher, &prompt)?], ..Default::default() }),
+        ActionKind::Continue => {
+            let s = d.sessions.lock().unwrap().iter().find(|s| s.id == t.action.session).cloned();
+            let s = s.ok_or_else(|| anyhow::anyhow!("the session it continues is gone"))?;
+            if s.pane.is_exited() {
+                crate::resume(d, &s.id)?;
+            }
+            Ok(Started { sessions: vec![s.id.clone()], deliver: Some(prompt), ..Default::default() })
+        }
+        ActionKind::Fanout => {
+            let group = crate::fanout(d, &prompt, &t.action.agents, Some(t.cwd.clone()), t.route.as_ref())?;
+            super::reshaped(d);
+            save(d);
+            let sessions = d.groups.lock().unwrap().iter().find(|g| g.id == group).map(|g| g.members.iter().map(|m| m.session.clone()).collect()).unwrap_or_default();
+            Ok(Started { sessions, group: Some(group), ..Default::default() })
+        }
+        ActionKind::Command => {
+            let dir = work_dir(Some(&t.cwd));
+            anyhow::ensure!(dir.is_dir(), "{} doesn't exist any more", t.cwd);
+            let command = fill_command(t.action.command.trim(), &fields(t, event));
+            let slot = Arc::new(Mutex::new(None));
+            let (out, wake, name) = (slot.clone(), d.schedule.waker(), format!("dinod-command-{run_id}"));
+            std::thread::Builder::new().name(name).spawn(move || {
+                let result = run_command(&command, &dir);
+                *out.lock().unwrap() = Some(result);
+                let (m, c) = &*wake;
+                *m.lock().unwrap() = true;
+                c.notify_all();
+            })?;
+            Ok(Started { command: Some(slot), ..Default::default() })
+        }
+    }
+}
+
+/// `command` with `sh -c` in `dir`: its exit status (none if it was stopped) and the end of what
+/// it printed, both streams together.
+fn run_command(command: &str, dir: &Path) -> (Option<i32>, String) {
+    use std::io::Read;
+    let child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("{{ {command}\n}} 2>&1"))
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (None, format!("couldn't start it: {e}")),
+    };
+    let mut pipe = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut all = Vec::new();
+        let mut buf = [0u8; 8192];
+        while let Some(Ok(n)) = pipe.as_mut().map(|p| p.read(&mut buf)) {
+            if n == 0 {
+                break;
+            }
+            all.extend_from_slice(&buf[..n]);
+            // The end is what matters: keep a little more than is shown.
+            if all.len() > 4 * OUTPUT_KEEP {
+                all.drain(..all.len() - 2 * OUTPUT_KEEP);
+            }
+        }
+        all
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s.code(),
+            Ok(None) if start.elapsed() > COMMAND_TIME => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Err(_) => break None,
+        }
+    };
+    let out = String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned();
+    let tail: String = { let n = out.chars().count(); out.chars().skip(n.saturating_sub(OUTPUT_KEEP)).collect() };
+    (status, if status.is_none() && start.elapsed() > COMMAND_TIME { format!("{tail}\n(stopped after {} minutes)", COMMAND_TIME.as_secs() / 60) } else { tail })
+}
+
+/// A new session named after the task. Claude isn't started where it would first ask whether to
+/// trust the folder: nobody is there to answer, and dino won't answer for the user.
+fn start_agent(d: &Daemon, t: &ScheduledTask, launcher: &str, prompt: &str) -> anyhow::Result<String> {
+    let l = d.allowed_launcher(launcher)?;
     let dir = work_dir(Some(&t.cwd));
     anyhow::ensure!(dir.is_dir(), "{} doesn't exist any more", t.cwd);
     check_trust(&l, &dir, t.worktree)?;
@@ -201,14 +770,15 @@ fn fire(d: &Daemon, t: &ScheduledTask) -> anyhow::Result<String> {
         let taken = |n: &str| sessions.iter().any(|s| s.name == n);
         std::iter::once(t.name.clone()).chain((2..).map(|n| format!("{}-{n}", t.name))).find(|n| !taken(n)).unwrap()
     };
-    let prompt = t.prompt.trim();
     // Agents take the prompt as an argument (see `spawn`); a shell gets it typed in, as a command.
     let shell = l.agent_id == "shell";
     let launch = Launch {
         name: Some(name),
         scheduled: Some(t.name.clone()),
         prompt: (!shell && !prompt.is_empty()).then(|| prompt.to_string()),
-        ..Launch::new(&l.short, split_args(&t.args), Some(dir.display().to_string()))
+        // The fallback agent runs on its own account.
+        route: t.route.clone().filter(|_| l.short == t.launcher),
+        ..Launch::new(&l.short, if l.short == t.launcher { split_args(&t.args) } else { vec![] }, Some(dir.display().to_string()))
     };
     let id = if t.worktree { spawn_in_worktree(d, launch)? } else { spawn(d, launch)? };
     // Started by dinod, not by a request: the tree learns of it here.
@@ -256,11 +826,423 @@ pub(crate) fn type_when_ready(d: &Daemon, id: &str, text: &str) {
     });
 }
 
+// ---- Following a run to its end ----
+
+/// Runs that were going when dinod stopped: followed again, now that their sessions are back.
+/// One whose sessions are all gone ended while nobody watched: when, nobody knows.
+fn restore_live(d: &Daemon) {
+    let sessions: Vec<String> = d.sessions.lock().unwrap().iter().map(|s| s.id.clone()).collect();
+    let mut live = d.schedule.live.lock().unwrap();
+    let mut tasks = d.schedule.tasks.lock().unwrap();
+    let mut changed = false;
+    for t in tasks.iter_mut() {
+        for r in t.history.iter_mut().filter(|r| r.outcome == "started" && r.finished_at.is_none()) {
+            if !r.sessions.is_empty() && !r.sessions.iter().any(|s| sessions.contains(s)) {
+                r.finished_at = Some(r.at);
+                changed = true;
+                continue;
+            }
+            let baseline = r.sessions.iter().map(|s| (s.clone(), 0)).collect();
+            live.insert(r.id.clone(), Live { task: t.id.clone(), deliver: None, baseline, since: Instant::now(), done_since: None, restored: true, command: None, event: r.event.clone() });
+        }
+    }
+    if changed {
+        store(&tasks);
+    }
+}
+
+/// How a run's session is: `None` while it's going, else whether it went well.
+fn session_done(d: &Daemon, id: &str, baseline: u64, live: &Live) -> Option<bool> {
+    let Some(s) = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() else {
+        // Closed or archived: over, as far as anyone can tell.
+        return Some(true);
+    };
+    if s.pane.is_exited() {
+        return Some(s.pane.exit_code().unwrap_or(0) == 0);
+    }
+    // A shell's command calls no model: done once it has been quiet a while.
+    if s.agent_id == "shell" {
+        let quiet = s.last_write.lock().unwrap().is_none_or(|w| w.elapsed() > Duration::from_secs(5));
+        return (quiet && live.since.elapsed() > Duration::from_secs(10)).then_some(true);
+    }
+    if !finished(d, &s) {
+        return None;
+    }
+    let st = d.proxy.stats.session(id);
+    let ok = st.last_error.is_none() && st.limit_error.is_none();
+    // A new session's first turn may end without a call through dino (an agent that reports its
+    // turns); a session continued has to call its model again, or its last turn's Done counts.
+    let worked = st.requests > baseline || (baseline == 0 && st.activity == Some(Activity::Done));
+    if worked || live.restored {
+        Some(ok)
+    } else if live.since.elapsed() > NO_START {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Look at every run that's going: send what waits to be sent, start the agent after a
+/// command, and finish the ones that are done.
+fn follow(d: &Daemon) {
+    let _one = d.schedule.ticking.lock().unwrap();
+    let ids: Vec<String> = d.schedule.live.lock().unwrap().keys().cloned().collect();
+    for run_id in ids {
+        let Some(task) = d.schedule.live.lock().unwrap().get(&run_id).map(|l| l.task.clone()) else { continue };
+        let Some(t) = d.schedule.tasks().into_iter().find(|t| t.id == task) else {
+            d.schedule.live.lock().unwrap().remove(&run_id);
+            continue;
+        };
+        // A prompt for a session that was busy: now it isn't.
+        let deliver = {
+            let live = d.schedule.live.lock().unwrap();
+            live.get(&run_id).and_then(|l| l.deliver.clone().map(|p| (p, l.baseline.keys().next().cloned())))
+        };
+        if let Some((prompt, Some(sid))) = deliver {
+            let s = d.sessions.lock().unwrap().iter().find(|s| s.id == sid).cloned();
+            match s {
+                Some(s) if !s.pane.is_exited() && idle(d, &s) && s.last_write.lock().unwrap().is_some_and(|w| w.elapsed() > Duration::from_secs(2)) => {
+                    send_input(&s, &prompt, true);
+                    let mut live = d.schedule.live.lock().unwrap();
+                    if let Some(l) = live.get_mut(&run_id) {
+                        l.deliver = None;
+                        l.baseline.insert(sid.clone(), d.proxy.stats.session(&sid).requests);
+                        l.since = Instant::now();
+                    }
+                }
+                Some(_) => {}
+                None => finish(d, &t, &run_id, false, Some("the session it continues is gone".into())),
+            }
+            continue;
+        }
+        // A command that's done: an agent with its output, or the end.
+        let command = d.schedule.live.lock().unwrap().get(&run_id).and_then(|l| l.command.clone());
+        if let Some(slot) = command {
+            let Some((exit, output)) = slot.lock().unwrap().take() else { continue };
+            let failed = exit != Some(0);
+            record_command(d, &t.id, &run_id, exit, &output);
+            let agent = match t.action.then_agent.as_str() {
+                "always" => true,
+                "failure" => failed,
+                _ => false,
+            };
+            if !agent {
+                finish(d, &t, &run_id, !failed, None);
+                continue;
+            }
+            let event = d.schedule.live.lock().unwrap().get(&run_id).and_then(|l| l.event.clone());
+            let mut f = fields(&t, event.as_ref());
+            f.insert("cmd.exit".into(), exit.map_or("none (stopped)".into(), |c| c.to_string()));
+            f.insert("cmd.output".into(), output.clone());
+            f.insert("cmd.command".into(), t.action.command.clone());
+            let prompt = if t.prompt.trim().is_empty() { default_fix_prompt(&t, exit, &output) } else { fill(t.prompt.trim(), &f) };
+            match start_agent(d, &t, &t.launcher, &prompt) {
+                Ok(sid) => {
+                    let requests = d.proxy.stats.session(&sid).requests;
+                    if let Some(l) = d.schedule.live.lock().unwrap().get_mut(&run_id) {
+                        l.command = None;
+                        l.baseline = [(sid.clone(), requests)].into();
+                        l.since = Instant::now();
+                    }
+                    d.schedule.update(&t.id, |t| {
+                        if let Some(r) = t.history.iter_mut().find(|r| r.id == run_id) {
+                            r.session = Some(sid.clone());
+                            r.sessions = vec![sid.clone()];
+                        }
+                    });
+                }
+                Err(e) => finish(d, &t, &run_id, false, Some(format!("the command failed, and the agent couldn't start: {e}"))),
+            }
+            continue;
+        }
+        // Sessions: done when every one is, two looks apart (a pause between tools isn't the end).
+        let (baseline, done) = {
+            let live = d.schedule.live.lock().unwrap();
+            let Some(l) = live.get(&run_id) else { continue };
+            let results: Vec<Option<bool>> = l.baseline.iter().map(|(s, b)| session_done(d, s, *b, l)).collect();
+            (l.baseline.len(), results.iter().all(Option::is_some).then(|| results.iter().all(|r| *r == Some(true))))
+        };
+        if baseline == 0 {
+            let restored = d.schedule.live.lock().unwrap().get(&run_id).is_some_and(|l| l.restored);
+            // A command whose result was lost when dinod stopped.
+            let why = restored.then(|| "dinod stopped while it ran".to_string());
+            finish(d, &t, &run_id, !restored, why);
+            continue;
+        }
+        let mut live = d.schedule.live.lock().unwrap();
+        let Some(l) = live.get_mut(&run_id) else { continue };
+        match done {
+            None => l.done_since = None,
+            Some(ok) => match l.done_since {
+                None => l.done_since = Some(Instant::now()),
+                Some(at) if at.elapsed() >= Duration::from_secs(4) => {
+                    drop(live);
+                    finish(d, &t, &run_id, ok, None);
+                }
+                Some(_) => {}
+            },
+        }
+    }
+    follow_sessions(d);
+}
+
+fn default_fix_prompt(t: &ScheduledTask, exit: Option<i32>, output: &str) -> String {
+    let how = exit.map_or("was stopped".to_string(), |c| format!("exited with status {c}"));
+    format!("This command {how}:\n\n    {}\n\nWhat it printed (the end of it):\n\n```\n{}\n```\n\nFind out why, and fix it.", t.action.command.trim(), output.trim_end())
+}
+
+fn record_command(d: &Daemon, id: &str, run_id: &str, exit: Option<i32>, output: &str) {
+    d.schedule.update(id, |t| {
+        if let Some(r) = t.history.iter_mut().find(|r| r.id == run_id) {
+            r.exit = exit;
+            r.output = Some(output.to_string());
+        }
+    });
+}
+
+/// A run is over: keep what it came to, pass it on, and try again if it failed.
+fn finish(d: &Daemon, t: &ScheduledTask, run_id: &str, ok: bool, reason: Option<String>) {
+    let live = d.schedule.live.lock().unwrap().remove(run_id);
+    let Some(mut run) = t.history.iter().find(|r| r.id == run_id).cloned() else { return };
+    // The task as it is now: a command's output was recorded since `t` was read.
+    if let Some(now) = d.schedule.tasks().into_iter().find(|x| x.id == t.id).and_then(|x| x.history.into_iter().find(|r| r.id == run_id)) {
+        run = now;
+    }
+    let mut messages = vec![];
+    for sid in &run.sessions {
+        let s = d.sessions.lock().unwrap().iter().find(|s| &s.id == sid).cloned();
+        let Some(s) = s else { continue };
+        if let Some(m) = last_message(&s).or_else(|| (s.agent_id == "shell").then(|| screen_tail(&s, &t.prompt)).flatten()) {
+            messages.push(if run.sessions.len() > 1 { format!("{}: {m}", s.launcher) } else { m });
+        }
+        if let Ok(Ok((dir, base, _))) = crate::changes_base(d, sid)
+            && let Ok(stat) = worktree::stat(&dir, &base)
+        {
+            let c = run.changes.get_or_insert_default();
+            c.files += stat.files;
+            c.added += stat.added;
+            c.removed += stat.removed;
+        }
+        if run.pr.is_none() {
+            run.pr = d.prs.lock().unwrap().get(sid).map(|p| p.url.clone());
+        }
+    }
+    if run.pr.is_none() {
+        run.pr = run.event.as_ref().and_then(|e| e.fields.get("pr.url")).filter(|u| !u.is_empty()).cloned();
+    }
+    let full = if !messages.is_empty() {
+        Some(messages.join("\n\n"))
+    } else {
+        run.output.as_ref().map(|o| {
+            let last: Vec<&str> = o.lines().filter(|l| !l.trim().is_empty()).collect();
+            let tail = last[last.len().saturating_sub(3)..].join("\n");
+            match run.exit {
+                Some(0) => format!("Exited 0. {tail}"),
+                Some(c) => format!("Exited {c}. {tail}"),
+                None => format!("Stopped. {tail}"),
+            }
+        })
+    };
+    run.summary = full.as_deref().map(|m| shorten(m, SUMMARY_KEEP));
+    run.finished_at = Some(now_secs());
+    run.result = Some(if ok { "success" } else { "failure" }.into());
+    if reason.is_some() {
+        run.reason = reason;
+    }
+    record(d, &t.id, run.clone());
+    if t.output.pr_comment && let Some(text) = full.clone() {
+        post_comment(d, t, &run, text);
+    }
+    if !ok {
+        retry_later(d, t, &run);
+    }
+    // What comes after it.
+    let event = Event {
+        on: TriggerKind::After,
+        key: format!("after:{}", run.id),
+        title: format!("{} {}", t.name, if ok { "succeeded" } else { "failed" }),
+        url: run.pr.clone(),
+        fields: [
+            ("after.name".to_string(), t.name.clone()),
+            ("after.outcome".into(), if ok { "success" } else { "failure" }.into()),
+            ("after.summary".into(), full.unwrap_or_default()),
+            ("after.session".into(), run.session.clone().unwrap_or_default()),
+        ]
+        .into(),
+    };
+    chain(d, &t.id, ok, &event);
+    drop(live);
+    d.schedule.poke();
+}
+
+/// Fire the automations that come after `id` (an automation, or a session) on this outcome.
+fn chain(d: &Daemon, id: &str, ok: bool, event: &Event) {
+    let next: Vec<String> = d
+        .schedule
+        .tasks()
+        .iter()
+        .filter(|n| n.enabled && n.trigger.on == TriggerKind::After && n.trigger.after == id)
+        .filter(|n| match n.trigger.when.as_str() {
+            "success" => ok,
+            "failure" => !ok,
+            _ => true,
+        })
+        .map(|n| n.id.clone())
+        .collect();
+    // The deciding lock is held already: `deliver` would wait on it.
+    for n in next {
+        deliver_held(d, &n, event.clone());
+    }
+}
+
+/// `deliver`, for a caller that already holds the deciding lock.
+fn deliver_held(d: &Daemon, id: &str, event: Event) {
+    let fresh = d.schedule.update(id, |t| {
+        if !t.enabled || t.state.seen.contains(&event.key) {
+            return None;
+        }
+        t.state.seen.push(event.key.clone());
+        let extra = t.state.seen.len().saturating_sub(MAX_SEEN);
+        t.state.seen.drain(..extra);
+        Some(t.clone())
+    });
+    if let Some(Some(t)) = fresh {
+        run(d, &t, Why { event: Some(event), ..Default::default() });
+    }
+}
+
+/// Sessions that "after a session finishes" automations wait on: a turn that ends fires them.
+fn follow_sessions(d: &Daemon) {
+    let watched: Vec<String> = d
+        .schedule
+        .tasks()
+        .iter()
+        .filter(|t| t.enabled && t.trigger.on == TriggerKind::After)
+        .map(|t| t.trigger.after.clone())
+        .filter(|id| d.sessions.lock().unwrap().iter().any(|s| &s.id == id))
+        .collect();
+    let mut turns = d.schedule.turns.lock().unwrap();
+    turns.retain(|id, _| watched.contains(id));
+    let mut ended = vec![];
+    for id in watched {
+        let Some(s) = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() else { continue };
+        let requests = d.proxy.stats.session(&id).requests;
+        let entry = turns.entry(id.clone()).or_insert((false, None, requests));
+        let done = s.pane.is_exited() || finished(d, &s);
+        if !done {
+            *entry = (true, None, entry.2);
+            continue;
+        }
+        // Two looks apart, as for runs; only after it was seen working, and only if it called its
+        // model meanwhile (an agent redrawing as it resumes is no turn).
+        match entry {
+            (true, None, _) => entry.1 = Some(Instant::now()),
+            (true, Some(at), before) if at.elapsed() >= Duration::from_secs(4) => {
+                let worked = requests > *before;
+                *entry = (false, None, requests);
+                if !worked {
+                    continue;
+                }
+                let st = d.proxy.stats.session(&id);
+                let ok = if s.pane.is_exited() { s.pane.exit_code().unwrap_or(0) == 0 } else { st.last_error.is_none() && st.limit_error.is_none() };
+                ended.push((s.clone(), ok, st.requests));
+            }
+            _ => {}
+        }
+    }
+    drop(turns);
+    for (s, ok, requests) in ended {
+        let event = Event {
+            on: TriggerKind::After,
+            key: format!("turn:{}:{requests}:{}", s.id, now_secs()),
+            title: format!("{} finished its turn", s.name),
+            url: None,
+            fields: [
+                ("after.name".to_string(), s.name.clone()),
+                ("after.outcome".into(), if ok { "success" } else { "failure" }.into()),
+                ("after.summary".into(), last_message(&s).unwrap_or_default()),
+                ("after.session".into(), s.id.clone()),
+            ]
+            .into(),
+        };
+        chain(d, &s.id, ok, &event);
+    }
+}
+
+/// What a shell printed for the command typed into it: the lines after the command, without the
+/// prompt it came back to; else its last lines on screen.
+fn screen_tail(s: &crate::Session, command: &str) -> Option<String> {
+    let text = s.pane.text(200);
+    let lines: Vec<&str> = text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let first = command.lines().next().unwrap_or_default().trim();
+    let after = (!first.is_empty()).then(|| lines.iter().rposition(|l| l.ends_with(first))).flatten();
+    let out: Vec<&str> = match after {
+        Some(i) if i + 2 < lines.len() => lines[i + 1..lines.len() - 1].to_vec(),
+        Some(_) => vec![],
+        None => lines[lines.len().saturating_sub(4)..].to_vec(),
+    };
+    let out = &out[out.len().saturating_sub(12)..];
+    (!out.is_empty()).then(|| out.join("\n"))
+}
+
+/// What the agent of `s` said last, from its own record of the conversation.
+fn last_message(s: &crate::Session) -> Option<String> {
+    let id = s.agent_session.lock().unwrap().clone().or_else(|| crate::conversation_of(s))?;
+    let page = dino_core::history::conversation(&s.agent_id, &id, None)?;
+    page.turns.iter().rev().find(|t| t.role == "assistant" && !t.text.trim().is_empty()).map(|t| shorten(&t.text, COMMENT_KEEP))
+}
+
+/// Try a failed run again later, if the automation says so.
+fn retry_later(d: &Daemon, t: &ScheduledTask, run: &ScheduledRun) {
+    if run.attempt >= t.conditions.retries {
+        return;
+    }
+    let backoff = u64::from(t.conditions.backoff.max(1)) << run.attempt.min(10);
+    let at = now_secs() + backoff;
+    d.schedule.update(&t.id, |t| t.state.retry = Some(Retry { at, attempt: run.attempt + 1, event: run.event.clone() }));
+}
+
+/// The summary, as a comment on the PR that started the run, or else the run's own PR.
+fn post_comment(d: &Daemon, t: &ScheduledTask, run: &ScheduledRun, text: String) {
+    let target = run
+        .event
+        .as_ref()
+        .and_then(|e| Some((e.fields.get("repo")?.clone(), e.fields.get("pr.number").or_else(|| e.fields.get("issue.number"))?.clone())))
+        .filter(|(r, n)| !r.is_empty() && !n.is_empty())
+        .or_else(|| {
+            let sid = run.session.as_ref()?;
+            let number = d.prs.lock().unwrap().get(sid)?.number;
+            let cwd = d.sessions.lock().unwrap().iter().find(|s| &s.id == sid)?.cwd.clone();
+            Some((crate::github::repo_of(&cwd)?, number.to_string()))
+        });
+    let Some((repo, number)) = target else {
+        let note = "no PR to comment on".to_string();
+        d.schedule.update(&t.id, |t| {
+            if let Some(r) = t.history.iter_mut().find(|r| r.id == run.id) {
+                r.commented = None;
+                r.reason.get_or_insert(note);
+            }
+        });
+        return;
+    };
+    let outcome = if run.result.as_deref() == Some("success") { "" } else { " (failed)" };
+    let body = format!("**{}**{outcome}\n\n{}\n\n{}", t.name, shorten(&text, COMMENT_KEEP), dino_core::triggers::MARK);
+    let posted = d.schedule.triggers.github.post(&format!("/repos/{repo}/issues/{number}/comments"), &serde_json::json!({ "body": body }));
+    d.schedule.update(&t.id, |t| {
+        if let Some(r) = t.history.iter_mut().find(|r| r.id == run.id) {
+            match &posted {
+                Ok(v) => r.commented = v["html_url"].as_str().map(String::from),
+                Err(e) => r.reason = Some(format!("couldn't comment on the PR: {e}")),
+            }
+        }
+    });
+}
+
 /// While the setting is on and any task runs on a schedule, or while the lid is kept awake for
 /// agents, `caffeinate -i` holds an IOPM assertion against idle sleep. It exits with dinod (`-w`).
 pub(crate) fn keep_awake(d: &Daemon) {
     // Also while the lid is kept awake for agents: idle sleep is the other way to stop them.
-    let want = d.lid.holding() || Settings::load().machine.keep_awake && d.schedule.tasks.lock().unwrap().iter().any(|t| t.enabled && t.frequency != Frequency::Manual);
+    let want = d.lid.holding() || Settings::load().machine.keep_awake && d.schedule.tasks.lock().unwrap().iter().any(|t| t.enabled && t.scheduled() && t.frequency != Frequency::Manual);
     let mut awake = d.schedule.awake.lock().unwrap();
     if let Some(c) = awake.as_mut()
         && !matches!(c.try_wait(), Ok(None))

@@ -27,6 +27,7 @@ pub mod ssh;
 pub mod status;
 pub mod statusline;
 pub mod transcript;
+pub mod triggers;
 pub mod trust;
 pub mod usage;
 pub mod worktree;

@@ -890,21 +890,21 @@ private struct ShellAISection: View {
     }
 }
 
-/// Settings → Power: keeping the Mac awake for scheduled tasks and for agents with the lid closed.
+/// Settings → Power: keeping the Mac awake for scheduled automations and for agents with the lid closed.
 private struct PowerPane: View {
     @EnvironmentObject var store: SettingsStore
 
     var body: some View {
         Form {
             Section {
-                Toggle("Keep your Mac awake while tasks are scheduled", isOn: Binding(
+                Toggle("Keep your Mac awake while automations are scheduled", isOn: Binding(
                     get: { store.settings?.machine.keep_awake ?? false },
                     set: { on in store.update { $0.machine.keep_awake = on } }
                 ))
                 .disabled(store.settings == nil)
                 .orgLocked("machine.keep_awake")
             } footer: {
-                Footnote("So scheduled tasks run on time. Closing the lid still sleeps it, unless Lid closed below keeps it awake; missed tasks run once when it wakes.")
+                Footnote("So scheduled automations run on time. Closing the lid still sleeps it, unless Lid closed below keeps it awake; a missed time runs once when it wakes.")
             }
             LidSection()
         }
@@ -1306,7 +1306,7 @@ private struct ManagedPane: View {
         case ("routing", "proxy"): return make("Route agent traffic through dino", "Models & Providers → Providers", .models, .providers)
         case ("machine", "shell_integration"): return make("Shell integration", "Terminal", .terminal)
         case ("machine", "shell_agents"): return make("Claude typed into a dino shell reports to dino", "Agents", .agents)
-        case ("machine", "keep_awake"): return make("Keep your Mac awake while tasks are scheduled", "Power", .power)
+        case ("machine", "keep_awake"): return make("Keep your Mac awake while automations are scheduled", "Power", .power)
         case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", "Power", .power)
         case ("worktrees", "location"): return make("Worktree location", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("worktrees", "branch_prefix"): return make("Branch prefix", "Workspaces → Worktrees", .workspaces, .worktrees)

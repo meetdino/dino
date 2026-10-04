@@ -559,8 +559,8 @@ extension DinoModel {
 /// row a plain row of the list. With DisclosureGroups the list (an outline view) expanded an open
 /// group only once it had made the group's own row, from inside making it: the rows that went in
 /// shifted the ones below that were already laid out, and the table lost one of those row views.
-/// It stayed where it was, drawn over whatever row came there: the scheduled task's row over a
-/// session's when a repo came into the list above the Scheduled section, as at launch. Here a
+/// It stayed where it was, drawn over whatever row came there: the automation's row over a
+/// session's when a repo came into the list above the Automations section, as at launch. Here a
 /// group's rows go in with the group, in one update.
 struct OpeningRows<Label: View, Content: View>: View {
     @Binding var open: Bool
