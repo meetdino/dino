@@ -197,7 +197,18 @@ extension DinoModel {
         lifecycle { try $0.keepTerminal(id, on) }
     }
 
+    /// Archiving stops the agent; one in the middle of a turn asks first.
     func archive(_ id: String) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        switch status(of: session) {
+        case .thinking, .working, .waiting:
+            if archiving?.id != id { archiving = session }
+        default:
+            archiveNow(id)
+        }
+    }
+
+    func archiveNow(_ id: String) {
         guard sessions.contains(where: { $0.id == id }) else { return }
         leave(id)
         lifecycle { try $0.archive(id) }

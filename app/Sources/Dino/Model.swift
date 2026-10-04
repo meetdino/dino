@@ -108,6 +108,8 @@ final class DinoModel: ObservableObject {
     @Published var archived: [ArchivedInfo] = []
     /// A session the user is about to delete, and what goes with it (the confirmation).
     @Published var deleting: DeletePlan?
+    /// A working session asked to be archived: it stops mid-turn, so ask first.
+    @Published var archiving: SessionInfo?
     @Published var renaming: Renaming?
     @Published var showShortcuts = false
     /// Help → Show Welcome: the first-open card, again.
