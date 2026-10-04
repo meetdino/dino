@@ -133,6 +133,7 @@ func whenText(_ secs: UInt64) -> String {
 struct ScheduledRow: View {
     @EnvironmentObject var model: DinoModel
     let task: ScheduledTask
+    @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -140,8 +141,19 @@ struct ScheduledRow: View {
                 Image(systemName: task.enabled ? "clock" : "pause.circle")
                     .foregroundStyle(task.enabled ? Brand.green : .secondary)
                     .frame(width: 14)
+                Image(systemName: open ? "chevron.down" : "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
                 Text(task.name).lineLimit(1)
                 Spacer()
+                if hovering {
+                    Button { model.editingTask = task } label: { Image(systemName: "pencil") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Edit…")
+                        .accessibilityLabel("Edit \(task.name)")
+                }
                 if let next = task.next_run {
                     Text(whenText(next)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 } else if !task.enabled {
@@ -163,7 +175,113 @@ struct ScheduledRow: View {
         }
         .padding(.vertical, 2)
         .opacity(task.enabled ? 1 : 0.7)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .help(task.history.isEmpty ? "Hasn't run yet" : "Click to see its runs")
         .contextMenu { ScheduledMenu(task: task) }
+    }
+
+    private var open: Bool { model.openTasks.contains(task.id) }
+}
+
+/// A task's runs, newest first, under its row: each opens the session it started, or that
+/// session's conversation once it's archived.
+struct TaskRuns: View {
+    @EnvironmentObject var model: DinoModel
+    let task: ScheduledTask
+
+    var body: some View {
+        let runs = Array(task.history.enumerated().reversed())
+        if runs.isEmpty {
+            Text(task.enabled ? "No runs yet: it runs \(task.next_run.map(whenText) ?? "next time")" : "No runs yet")
+                .font(.caption).foregroundStyle(.tertiary)
+                .padding(.leading, 22)
+        }
+        ForEach(runs, id: \.offset) { index, run in
+            TaskRunRow(task: task, run: run).tag(run.session.map { "run:\($0)" } ?? "runinfo:\(task.id):\(index)")
+        }
+    }
+}
+
+struct TaskRunRow: View {
+    @EnvironmentObject var model: DinoModel
+    let task: ScheduledTask
+    let run: ScheduledRun
+    @State private var previewing = false
+
+    var body: some View {
+        let state = model.runState(run)
+        HStack(spacing: 6) {
+            Circle().fill(state.color).frame(width: 6, height: 6).accessibilityHidden(true)
+            Text(whenText(run.at)).font(.caption.monospacedDigit())
+            Text(state.label).font(.caption).foregroundStyle(state.color).lineLimit(1).fixedSize()
+            Text(state.title ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 22)
+        .opacity(state.reachable ? 1 : 0.6)
+        .help(state.help)
+        .accessibilityElement(children: .combine)
+        .contentShape(Rectangle())
+        // Like an archived row: the popover is the row's own, shown on the click's end. Opened from
+        // the list's selection it closed again as soon as it appeared.
+        .onTapGesture {
+            guard let id = run.session else { return }
+            if model.archived.contains(where: { $0.id == id }) { previewing = true } else { model.openRun(id) }
+        }
+        .popover(isPresented: $previewing, arrowEdge: .trailing) {
+            if let id = run.session, let a = model.archived.first(where: { $0.id == id }) {
+                ArchivedPreview(session: a, delete: { previewing = false; model.deleteArchived(a) })
+                    .environmentObject(model)
+            }
+        }
+    }
+}
+
+/// What a run looks like now: the session it started, as it is now, or why there's none.
+struct RunState {
+    var label: String
+    var color: Color
+    var title: String?
+    var help: String
+    /// Clicking it shows something.
+    var reachable: Bool
+}
+
+extension DinoModel {
+    func toggleRuns(_ task: String) {
+        if openTasks.contains(task) { openTasks.remove(task) } else { openTasks.insert(task) }
+    }
+
+    func runState(_ run: ScheduledRun) -> RunState {
+        let when = run.catch_up ? " (caught up)" : run.due == nil ? " (run now)" : ""
+        switch run.outcome {
+        case "skipped":
+            return RunState(label: "Skipped", color: SessionStatus.needsYou.color, title: run.reason, help: "Skipped\(when): \(run.reason ?? "")", reachable: false)
+        case "failed":
+            return RunState(label: "Didn't start", color: SessionStatus.exited.color, title: run.reason, help: "Didn't start\(when): \(run.reason ?? "")", reachable: false)
+        default:
+            break
+        }
+        guard let id = run.session else {
+            return RunState(label: run.outcome.capitalized, color: .secondary, title: nil, help: run.outcome, reachable: false)
+        }
+        if let s = sessions.first(where: { $0.id == id }) {
+            let st = status(of: s)
+            let label = s.exited ? ((s.exit_code ?? 0) == 0 ? "Ended" : "Failed") : st.label
+            let color = s.exited ? ((s.exit_code ?? 0) == 0 ? Color.secondary : SessionStatus.exited.color) : st.color
+            return RunState(label: label, color: color, title: s.title ?? s.display, help: "Started\(when) as \(s.display): click to open it", reachable: true)
+        }
+        if let a = archived.first(where: { $0.id == id }) {
+            return RunState(label: "Archived", color: .secondary, title: a.display, help: "Started\(when) as \(a.display), now archived: click to read it", reachable: true)
+        }
+        return RunState(label: "Gone", color: .secondary, title: nil, help: "Started\(when); its session has since been closed", reachable: false)
+    }
+
+    /// A run's session, selected and its tab opened, while it's around. An archived one opens
+    /// from its row, in a popover.
+    func openRun(_ session: String) {
+        if sessions.contains(where: { $0.id == session }) { select(session) }
     }
 }
 
@@ -175,6 +293,7 @@ struct ScheduledMenu: View {
         Button("Run Now") { model.runTask(task) }
         Button(task.enabled ? "Pause" : "Resume") { model.setTask(task, enabled: !task.enabled) }
         Button("Edit…") { model.editingTask = task }
+        Button(model.openTasks.contains(task.id) ? "Hide Runs" : "Show Runs") { model.toggleRuns(task.id) }
         if let last = task.history.last(where: { $0.session != nil })?.session, model.sessions.contains(where: { $0.id == last }) {
             Button("Show Last Run") { model.select(last) }
         }
