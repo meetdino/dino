@@ -278,6 +278,13 @@ struct SessionMenu: View {
         let pinned = session.pinned == true
         Button(pinned ? "Unpin" : "Pin") { model.pin(session.id, !pinned) }
             .help(pinned ? "Let it sort with the others again" : "Keep it at the top of its group; dino won't archive it on its own")
+        if session.agent_id == "shell", session.host == nil {
+            let keep = session.keep_terminal == true
+            Button(keep ? "Let Agents Here Report to dino" : "Keep as Terminal") { model.keepTerminal(session.id, !keep) }
+                .help(keep
+                    ? "An agent you start in this shell shows in the sidebar with its turns and questions again"
+                    : "An agent you start in this shell stays a plain program: dino doesn't follow its turns")
+        }
         Button("Mark as Unread") { model.markUnread(session.id) }
             .disabled(session.exited)
             .help("Show it under Needs you until you look at it again")

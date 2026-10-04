@@ -27,6 +27,8 @@ struct DinoSettings: Codable, Equatable {
         var keep_awake: Bool?
         /// Shells mark their prompts and say where they are; nil from an older dinod (on there).
         var shell_integration: Bool?
+        /// An agent typed into a dino shell reports to dino from its start; nil from an older dinod.
+        var shell_agents: Bool?
         /// Keeping agents running with the lid closed; nil from an older dinod.
         var lid: Lid?
         /// Which Claude Code sessions get the Claude subscription token; nil from an older dinod.
@@ -1073,6 +1075,16 @@ private struct AgentsPane: View {
                 Text("On This Mac")
             } footer: {
                 Footnote("Install and Sign In run the agent's own commands in a new shell, where you can see them and answer their questions. dino never sees your logins.")
+            }
+            Section {
+                Toggle("Claude typed into a dino shell reports to dino", isOn: Binding(
+                    get: { store.settings?.machine.shell_agents ?? true },
+                    set: { on in store.update { $0.machine.shell_agents = on } }
+                ))
+                .disabled(store.settings?.machine.shell_integration == false)
+                .orgLocked("machine.shell_agents")
+            } footer: {
+                Footnote("Run `claude` in any dino shell and it shows in the sidebar from its first moment, with its turns, questions and tasks, as a session dino started. Needs Shell integration (General). A shell's own menu has Keep as Terminal, for one that should stay a plain terminal.")
             }
             if store.setup?.contains(where: { $0.id == "claude" && $0.installed }) == true {
                 ClaudeTokenSection(act: openShell)

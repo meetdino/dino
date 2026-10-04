@@ -150,16 +150,16 @@ enum SessionTree {
         for i in nodes.indices {
             var kept: [PlaceNode] = []
             for (pi, place) in nodes[i].places.enumerated() {
-                // The main checkout, dino's own and ones with sessions in them stay where they are.
-                if pi == 0 || place.dino || !place.sessions.isEmpty || place.git == nil {
+                // The main checkout and worktrees with sessions in them stay in the list. A worktree
+                // with no session (dino's own left after its session ended too) isn't somewhere you're
+                // working: it folds away, under Merged once its work landed, else Other worktrees,
+                // where it can be opened again or cleaned up.
+                if pi == 0 || !place.sessions.isEmpty {
                     kept.append(place)
                 } else if let owner = place.owner, ids.contains(owner.session) {
                     nodes[i].subagents[owner.session, default: []].append(place)
                 } else if place.git?.state == "merged", place.cleanable {
                     nodes[i].merged.append(place)
-                } else if place.owner != nil {
-                    // Its session is gone: back under the repo.
-                    kept.append(place)
                 } else {
                     nodes[i].others.append(place)
                 }

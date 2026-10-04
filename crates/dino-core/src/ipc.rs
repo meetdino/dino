@@ -105,6 +105,9 @@ pub enum Request {
         reveal: bool,
     },
     Kill { id: String },
+    /// "Keep as terminal" for shell `id`: agents typed into it stay plain processes (`on`), or
+    /// report to dino again.
+    KeepTerminal { id: String, on: bool },
     /// Change a session's mode, model or effort. The agent restarts, resuming its conversation;
     /// mid-turn, that waits until the turn is over. Each field replaces the session's, so `None`
     /// goes back to the agent's own default.
@@ -523,6 +526,9 @@ pub struct SessionInfo {
     /// Pinned: kept at the top of its group, never archived by dino on its own.
     #[serde(default)]
     pub pinned: bool,
+    /// A shell's "Keep as terminal": agents typed into it don't report to dino.
+    #[serde(default)]
+    pub keep_terminal: bool,
     /// When someone last asked for it to be shown (`dino <folder>`), in ms since the epoch.
     #[serde(default)]
     pub revealed: Option<u64>,

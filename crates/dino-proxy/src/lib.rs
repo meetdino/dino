@@ -282,6 +282,27 @@ impl Stats {
         self.quotas.lock().unwrap().get(provider).cloned()
     }
 
+    /// The agent a shell ran has exited: what its hooks said (its turn, tasks, mode, error) goes
+    /// with it, so the shell is a plain shell again. What it cost stays counted.
+    pub fn agent_left(&self, id: &str) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(s) = sessions.get_mut(id) else { return };
+        if !s.hooked && s.activity.is_none() {
+            return;
+        }
+        s.activity = None;
+        s.hooked = false;
+        s.agent_mode = None;
+        s.last_error = None;
+        s.call_error = None;
+        s.reported_context = None;
+        s.subagents.clear();
+        s.pending_agents.clear();
+        s.todos.clear();
+        s.background.clear();
+        s.waiting_on.clear();
+    }
+
     pub(crate) fn update(&self, id: &str, f: impl FnOnce(&mut SessionStats)) {
         f(self.sessions.lock().unwrap().entry(id.to_string()).or_default());
     }

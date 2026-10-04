@@ -67,26 +67,14 @@ struct DinoApp: App {
                 // Its shortcut works from any app (Settings → General); a menu key would only work here.
                 Button("Quick Terminal") { QuickTerminal.shared.toggle() }
                     .disabled(model.launchers.isEmpty)
-                Menu("New Session") {
-                    // dinod lists the default agent first: ⌘N starts it.
-                    ForEach(model.launchers) { l in
-                        if l == model.launchers.first {
-                            Button(l.label) { model.newSession(l) }.keyboardShortcut("n")
-                        } else {
-                            Button(l.label) { model.newSession(l) }
-                        }
-                    }
-                }
-                Menu("New Session in Worktree") {
-                    ForEach(model.launchers) { l in
-                        if l == model.launchers.first {
-                            Button(l.label) { model.newSession(l, worktree: true) }.keyboardShortcut("n", modifiers: [.command, .option])
-                        } else {
-                            Button(l.label) { model.newSession(l, worktree: true) }
-                        }
-                    }
-                }
-                Button("New Session…") { model.showNewSession = true }
+                // One way in: where (here, recent, GitHub, a URL, a new project), then which agent.
+                Button("New Session…") { model.startSession() }
+                    .keyboardShortcut("n")
+                    .disabled(model.launchers.isEmpty)
+                Button("New Session in Worktree…") { model.startSession(worktree: true) }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
+                    .disabled(model.launchers.isEmpty)
+                Button("New Session with Options…") { model.showNewSession = true }
                     .keyboardShortcut("n", modifiers: [.command, .control])
                 Button("Fan Out…") { model.showFanout = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -96,7 +84,7 @@ struct DinoApp: App {
                     model.showContinue = true
                 }
                 .keyboardShortcut("k")
-                Button("Choose Folder…") { model.chooseFolder() }
+                Button("Open Folder…") { model.openFolderToStart() }
                     .keyboardShortcut("o")
                 Divider()
                 SplitMenuItems().environmentObject(model)
@@ -427,6 +415,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
         .sheet(isPresented: $model.showFanout) { FanoutSheet() }
         .sheet(isPresented: $model.showNewSession) { NewSessionSheet() }
+        .sheet(item: $model.startRequest) { StartSessionSheet(request: $0) }
         .sheet(item: $model.tmuxLook) { TmuxLook(session: $0) }
         .sheet(isPresented: $model.showNewProject) { NewProjectSheet() }
         .sheet(isPresented: $model.showShortcuts) { ShortcutSheet() }
@@ -579,7 +568,6 @@ struct Terminals: View {
                     }
                 }
             }
-            ToolbarItem(placement: .primaryAction) { NewSessionMenu() }
             ToolbarItem(placement: .primaryAction) { SidePanePicker() }
             ToolbarItem(placement: .primaryAction) { PRToolbarButton() }
         }
@@ -656,28 +644,19 @@ struct TerminalPane: View {
     }
 }
 
-struct NewSessionMenu: View {
+/// The sidebar's +: the new-session picker (⌘N).
+struct NewSessionButton: View {
     @EnvironmentObject var model: DinoModel
 
     var body: some View {
-        Menu {
-            ForEach(model.launchers) { l in
-                Button(l.label) { model.newSession(l) }
-            }
-            Menu("In a New Worktree") {
-                ForEach(model.launchers) { l in
-                    Button(l.label) { model.newSession(l, worktree: true) }
-                }
-            }
-            .help("Its own worktree and branch: its edits stay off your checkout until you apply them. Ignored files listed in .worktreeinclude, like .env, are copied in")
-            Divider()
-            Button("New Session…") { model.showNewSession = true }
-                .help("Choose the agent, folder, permission mode, model and effort (⌃⌘N)")
-            Button("In \(model.folder.lastPathComponent)…") { model.chooseFolder() }
-        } label: {
-            Label("New Session", systemImage: "plus")
+        Button { model.startSession() } label: {
+            Image(systemName: "plus").font(.body.weight(.medium))
         }
-        .help("New session in \(model.folder.path)")
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("New session: pick a folder or repository, then an agent (⌘N)")
+        .accessibilityLabel("New Session")
+        .disabled(model.launchers.isEmpty)
     }
 }
 
@@ -708,29 +687,20 @@ struct EmptyState: View {
                 .tint(Brand.green)
                 Text("or start a new one").font(.caption).foregroundStyle(.tertiary)
             }
-            VStack(spacing: 8) {
-                ForEach(model.daemonDown ? [] : model.launchers) { l in
-                    Button { model.newSession(l) } label: {
-                        Text(l.label).frame(width: 240)
+            if !model.daemonDown {
+                VStack(spacing: 8) {
+                    Button { model.startSession() } label: {
+                        Label("New Session…", systemImage: "plus").frame(width: 240)
                     }
                     .controlSize(.large)
-                }
-                if !model.daemonDown {
+                    .help("Pick a folder, a recent repository, one of yours on GitHub or a URL to clone, then an agent (⌘N)")
                     Button { model.showFanout = true } label: {
                         Label("Fan Out…", systemImage: "arrow.triangle.branch").frame(width: 240)
                     }
                     .controlSize(.large)
                     .help("One prompt, several agents, each in its own worktree; keep the best (⇧⌘N)")
-                    Button { model.showNewProject = true } label: {
-                        Label("New Project…", systemImage: "folder.badge.plus").frame(width: 240)
-                    }
-                    .controlSize(.large)
-                    .help("A new folder, a git repository in it, and a tab there (⌥⇧⌘N)")
                 }
             }
-            Button("In \((model.folder.path as NSString).abbreviatingWithTildeInPath) · Choose Folder…") { model.chooseFolder() }
-                .buttonStyle(.link)
-                .font(.callout)
         }
         .padding(40)
     }
@@ -894,6 +864,8 @@ struct Sidebar: View {
                             ScopeMenu()
                         }
                         ArchiveToggle(filter: $filter)
+                        // Starting work lives with the sessions it makes: here, not in the toolbar.
+                        NewSessionButton()
                     }
                 }
                 if filter != .archived, model.findingSessions || !model.sidebarQuery.isEmpty {

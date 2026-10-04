@@ -24,6 +24,7 @@ else
         builtin source -- "$_dino_zsh_dir/dino-ai.zsh"
         builtin source -- "$_dino_zsh_dir/dino-tmux-start.zsh"
         builtin source -- "$_dino_zsh_dir/dino-term.zsh"
+        builtin source -- "$_dino_zsh_dir/dino-agents.zsh"
     }
 fi
 [[ -o interactive ]] && precmd_functions+=(_dino_late_init)
