@@ -20,7 +20,7 @@ struct DinoApp: App {
                     delegate.reopenWindow = { openWindow(id: "main") }
                     model.showWindow = { openWindow(id: "main") }
                     SyncStore.shared.showAccount = {
-                        UserDefaults.standard.set(SettingsPane.account.rawValue, forKey: "settingsTab")
+                        SettingsPane.account.select()
                         openWindow(id: SettingsView.windowID)
                     }
                     Notifier.onOpenSession = { model.select($0) }
@@ -64,7 +64,7 @@ struct DinoApp: App {
                 Button("New Project…") { model.showNewProject = true }
                     .keyboardShortcut("n", modifiers: [.command, .option, .shift])
                     .disabled(model.launchers.isEmpty)
-                // Its shortcut works from any app (Settings → General); a menu key would only work here.
+                // Its shortcut works from any app (Settings → Terminal); a menu key would only work here.
                 Button("Quick Terminal") { QuickTerminal.shared.toggle() }
                     .disabled(model.launchers.isEmpty)
                 // One way in: where (here, recent, GitHub, a URL, a new project), then which agent.
@@ -1205,7 +1205,7 @@ struct UsagePanel: View {
                 Label("Awake with the lid closed", systemImage: "laptopcomputer")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .help("dino turned system sleep off while agents work; it comes back when they're done (Settings → General)")
+                    .help("dino turned system sleep off while agents work; it comes back when they're done (Settings → Power)")
             }
             Button { withAnimation(.easeOut(duration: 0.15)) { open.toggle() } } label: {
                 HStack(spacing: 6) {

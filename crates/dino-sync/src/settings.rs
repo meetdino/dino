@@ -14,7 +14,8 @@
 //! | `tmux`     | a field name           | `tmux`                                |
 //!
 //! Only values that differ from the defaults are records, so a missing record means "default".
-//! The rest of `machine` stays on each Mac, and a repo without a remote isn't synced. Neither are
+//! The rest of `machine` stays on each Mac, as does `experimental` (turning one on is this Mac's
+//! choice), and a repo without a remote isn't synced. Neither are
 //! repo variables that could make a session run code (`syncable_env`): dinod sets repo variables
 //! in every session in the repo, so one device could otherwise run code on all the others. The key
 //! store (API keys, tokens) never syncs: secrets stay on the Mac they were set on.

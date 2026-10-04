@@ -1335,7 +1335,7 @@ fn cmd_ls(args: &[String]) -> anyhow::Result<()> {
 /// `dino power [status|setup|remove]`: keeping agents running with the lid closed.
 fn cmd_power(action: &str) -> anyhow::Result<()> {
     if !matches!(action, "status" | "setup" | "remove") {
-        println!("usage: dino power [status|setup|remove]\n\nsetup asks for an administrator's password once, so dino can keep the Mac awake with its lid closed while agents work (Settings → General).");
+        println!("usage: dino power [status|setup|remove]\n\nsetup asks for an administrator's password once, so dino can keep the Mac awake with its lid closed while agents work (Settings → Power).");
         return Ok(());
     }
     let p = match client::request(&Request::Power { action: action.into() })? {

@@ -28,6 +28,18 @@ pub struct Settings {
     pub ssh: BTreeMap<String, SshHost>,
     pub terminal: Terminal,
     pub tmux: Tmux,
+    pub experimental: Experimental,
+}
+
+/// Features still being tried out, each off until turned on, and for this Mac only (it never
+/// syncs). Every one is a switch, so a client that doesn't know one yet can carry it through.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct Experimental {
+    /// The free models pool: agents on free hosted models (NVIDIA NIM), with dino picking one for
+    /// each turn. With a TypeSafe key, picking sends the turn's text (up to 8,000 characters) to
+    /// api.typesafe.ai. Off, the free tier isn't offered and its requests are refused unsent.
+    pub free_models: bool,
 }
 
 /// For people who live in tmux. Their tmux stays theirs: dino never edits its config, never takes
@@ -536,6 +548,7 @@ mod tests {
         assert_eq!(Settings::load(), s3);
         assert!(Settings::default().policies.allow_bypass, "bypass offered by default");
         assert!(!Settings::default().policies.session_tools, "session tools off by default");
+        assert!(!Settings::load().experimental.free_models, "free models off unless turned on");
 
         let mut s4 = Settings::default();
         s4.agents.insert("claude".into(), Controls { model: Some("haiku".into()), ..Controls::default() });
