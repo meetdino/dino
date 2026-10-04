@@ -149,12 +149,14 @@ final class PaneScroller: NSScrollView {
 extension GhosttyConfig {
     /// `scrollbar` isn't `never`. Read with the config, not with each of Ghostty's reports.
     private(set) static var showsScrollbar = true
-    /// Light or dark scrollers, as the terminal's background is, as in Ghostty.
+    /// Light or dark scrollers, as the terminal's background is, as in Ghostty. nil, the pane's own
+    /// look, for a `light:…,dark:…` theme (`paired`, dino's own colors too): the pane shows the half
+    /// for its look.
     private(set) static var scrollerAppearance: NSAppearance?
 
-    static func readPaneChrome(_ controller: TerminalController) {
+    static func readPaneChrome(_ controller: TerminalController, paired: Bool) {
         showsScrollbar = controller.configText("scrollbar") != "never"
-        scrollerAppearance = controller.configColor("background").map { c in
+        scrollerAppearance = paired ? nil : controller.configColor("background").map { c in
             let light = 0.299 * Double(c.red) + 0.587 * Double(c.green) + 0.114 * Double(c.blue) > 127.5
             return NSAppearance(named: light ? .aqua : .darkAqua)
         } ?? nil
