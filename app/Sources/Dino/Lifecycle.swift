@@ -492,7 +492,7 @@ struct ArchivedPreview: View {
     @EnvironmentObject var model: DinoModel
     let session: ArchivedInfo
     let delete: () -> Void
-    /// The whole main area (a scheduled task's archived run), not a popover's size.
+    /// The whole main area (an automation's archived run), not a popover's size.
     var fill = false
     @State private var page: ConversationPage?
     @State private var failed: String?

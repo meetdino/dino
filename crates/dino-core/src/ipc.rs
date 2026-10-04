@@ -304,12 +304,14 @@ pub enum Request {
     PreviewStop { id: String, name: String },
     /// What the named dev server has printed (the tail).
     PreviewLog { id: String, name: String },
-    /// Scheduled tasks, with their history and next run.
+    /// Automations (scheduled tasks, as they began), with their history and next run. The request
+    /// names stay as they were: clients from before automations keep working.
     ScheduleList,
-    /// Add a task (no `id`) or replace one; pausing and resuming is a put with `enabled` changed.
+    /// Add an automation (no `id`) or replace one; pausing and resuming is a put with `enabled` changed.
     SchedulePut { task: crate::schedule::ScheduledTask },
     ScheduleDelete { id: String },
-    /// Run a task now, whatever its schedule; answers with the session it started.
+    /// Run an automation now, whatever its trigger and conditions; answers with the session it
+    /// started (empty when its action starts none, as a command doesn't).
     ScheduleRun { id: String },
     /// Check for due tasks now, as if the time were `now` (seconds since the epoch) when given.
     ScheduleTick { now: Option<u64> },

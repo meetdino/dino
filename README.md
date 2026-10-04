@@ -14,6 +14,9 @@ Pi, Hermes, CodeWhale and OpenCode, plus your shells.
   it, untouched.
 - **Worktrees, reviews and PRs.** A session per git worktree, a diff view to comment on, fan-out of
   one prompt to several agents, and pull requests from the app.
+- **Automations.** dino starts an agent (or continues a session, fans out, runs a command) when
+  something happens: on a schedule, when a PR opens or CI fails, when files change, when a branch
+  gets new commits, or after another run. Each run keeps its summary, its diff and its PR.
 - **Any model in any agent.** A local proxy routes an agent to another provider's model, and
   counts what each session uses. Traffic goes from your Mac to the provider, nowhere else.
 - **Keeps going at a limit.** When an agent's subscription or plan hits its limit, its calls can go
@@ -74,6 +77,7 @@ dino ls                   # every session
 dino attach <id>          # a session in this terminal
 dino found                # agents running elsewhere on this Mac
 dino stats                # usage across every agent: tokens, models, streaks
+dino automations          # what dino does by itself, and how each run went
 dino --help               # the rest
 ```
 

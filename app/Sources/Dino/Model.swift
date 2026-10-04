@@ -99,14 +99,13 @@ final class DinoModel: ObservableObject {
     /// Clean Up… waiting on the user's yes.
     @Published var cleaningUp: CleanUpPlan?
 
-    /// Prompts dinod runs on a schedule, the one open in the editor and the one about to go.
+    /// Automations (what dinod does by itself when something happens), the one open in the
+    /// editor and the one about to go.
     @Published var scheduled: [ScheduledTask] = []
     @Published var editingTask: ScheduledTask?
-    /// Scheduled tasks opened in the sidebar to show their runs.
+    /// Automations opened in the sidebar to show their runs.
     @Published var openTasks: Set<String> = []
     @Published var deletingTask: ScheduledTask?
-    /// Scheduled runs that have been working, to say when they go quiet.
-    private var scheduledBusy: Set<String> = []
 
     /// Stopped sessions kept to start again, the name being edited, and the ⌘/ sheet.
     @Published var archived: [ArchivedInfo] = []
@@ -428,15 +427,6 @@ final class DinoModel: ObservableObject {
                 // Not in front of you: say an agent started using the Mac or the browser.
                 if let sentence = s.usingSentence, prev.reach == nil, s.needs == nil, !appActive {
                     Notifier.post(session: s, title: sentence, body: "\(s.display) · Open it to watch or stop it")
-                }
-            }
-            // Nobody watched a scheduled run start: say when it's done, even if it's in front of you.
-            if let task = s.scheduled {
-                let busy = !s.exited && (s.activity == "working" || s.waitingOn != nil || s.in_flight > 0 || (s.activity == nil && (s.output_ms_ago ?? .max) < 5000))
-                if busy {
-                    scheduledBusy.insert(s.id)
-                } else if scheduledBusy.remove(s.id) != nil {
-                    Notifier.post(session: s, title: "\(task) finished", body: s.title ?? (s.exited ? "The session ended" : "Ready for your review"))
                 }
             }
             // CI runs for minutes: say when it's done, even about the session in front of you.
@@ -1172,9 +1162,9 @@ final class DinoModel: ObservableObject {
         }
     }
 
-    // MARK: Scheduled tasks
+    // MARK: Automations
 
-    /// A new task as the editor opens it: daily at 9 in the current folder, with the first agent.
+    /// A new automation as the editor opens it: daily at 9 in the current folder, with the first agent.
     func newTask() {
         var t = ScheduledTask()
         t.cwd = folder.path
@@ -1182,21 +1172,79 @@ final class DinoModel: ObservableObject {
         editingTask = t
     }
 
+    /// The editor, with a copy of `task` to save as a new one.
+    func duplicateTask(_ task: ScheduledTask) {
+        var t = task
+        t.id = ""
+        t.name = "\(task.name) copy"
+        t.history = []
+        t.state = nil
+        t.problem = nil
+        editingTask = t
+    }
+
     func launcherLabel(_ short: String) -> String {
         launchers.first { $0.short == short }?.label ?? short
     }
 
-    /// Say what happened to runs nobody asked for just now: missed times made up, skips, failures.
+    /// A run of it is going.
+    func isRunning(_ task: ScheduledTask) -> Bool {
+        guard let last = task.history.last, last.outcome == "started", last.finished_at == nil else { return false }
+        // From an older dinod, which doesn't say when runs finish: its session says.
+        if last.id == nil, let id = last.session, let s = sessions.first(where: { $0.id == id }) {
+            return [.working, .thinking, .waiting].contains(status(of: s))
+        }
+        return last.id != nil
+    }
+
+    /// What starts it, in words.
+    func triggerText(_ t: ScheduledTask) -> String {
+        let tr = t.trigger
+        let repo = tr.repo.isEmpty ? "this repo" : tr.repo
+        switch tr.on {
+        case "schedule": return t.frequency.label
+        case "pr_opened": return "PR opened in \(repo)"
+        case "review_requested": return tr.repo.isEmpty ? "Your review requested" : "Your review requested in \(repo)"
+        case "ci_failed": return tr.branch.isEmpty ? (tr.mine ? "CI failed on your PRs" : "CI failed on a PR") + " in \(repo)" : "CI failed on \(tr.branch)"
+        case "issue_labeled": return "Labeled \(tr.label) in \(repo)"
+        case "comment": return "Comment says “\(tr.phrase)”"
+        case "new_commits": return "New commits on \(tr.branch.isEmpty ? "the default branch" : tr.branch)"
+        case "behind": return "\(tr.branch.isEmpty ? "The branch" : tr.branch) falls behind"
+        case "files": return "\(tr.glob.isEmpty ? "Files" : tr.glob) changed\(tr.path.isEmpty ? "" : " in \(tr.path)")"
+        case "after":
+            let name = scheduled.first { $0.id == tr.after }?.name ?? sessions.first { $0.id == tr.after }.map { tabName($0) } ?? "another run"
+            return tr.when == "success" ? "After \(name) succeeds" : tr.when == "failure" ? "After \(name) fails" : "After \(name)"
+        default: return tr.on
+        }
+    }
+
+    /// What it does, in words.
+    func actionText(_ t: ScheduledTask) -> String {
+        switch t.action.kind {
+        case "continue": return "into \(sessions.first { $0.id == t.action.session }.map { tabName($0) } ?? "a session")"
+        case "fanout": return t.action.agents.map(launcherLabel).joined(separator: ", ")
+        case "command": return t.action.then_agent == "never" ? t.action.command : "\(t.action.command) → \(launcherLabel(t.launcher))"
+        default: return launcherLabel(t.launcher)
+        }
+    }
+
+    /// The sidebar's second line: when, and what.
+    func automationLine(_ t: ScheduledTask) -> String {
+        "\(triggerText(t)) · \(actionText(t))"
+    }
+
+    /// Say what happened to runs nobody asked for just now: missed times made up, skips,
+    /// failures, and runs that finished.
     private func applySchedule(_ tasks: [ScheduledTask]) {
         for t in tasks {
             guard let prev = scheduled.first(where: { $0.id == t.id }) else { continue }
             let seen = prev.history.last?.at ?? 0
-            for run in t.history where run.at > seen && run.due != nil {
+            for run in t.history where run.at > seen && (run.due != nil || run.event != nil) {
                 let when = run.due.map(whenText) ?? ""
                 switch run.outcome {
                 case "failed":
                     Notifier.post(key: "schedule-\(t.id)", title: "\(t.name) couldn't run", body: run.reason ?? "")
-                case "skipped":
+                case "skipped" where run.due != nil:
                     Notifier.post(key: "schedule-\(t.id)", title: "Skipped \(t.name) (\(when))", body: run.reason ?? "")
                 case _ where run.catch_up:
                     Notifier.post(key: "schedule-\(t.id)", title: "Running \(t.name)", body: "It was due \(when), while your Mac was asleep.", session: run.session)
@@ -1204,14 +1252,22 @@ final class DinoModel: ObservableObject {
                     break
                 }
             }
+            // Nobody watched it start: say when it's done, even if it's in front of you.
+            guard t.output.notify else { continue }
+            for run in t.history where run.finished_at != nil {
+                guard let id = run.id, prev.history.contains(where: { $0.id == id && $0.finished_at == nil }) else { continue }
+                let failed = run.result == "failure"
+                let body = run.summary?.firstLine ?? run.reason ?? run.event?.title ?? (failed ? "It failed" : "Ready for your review")
+                Notifier.post(key: "schedule-\(t.id)", title: "\(t.name) \(failed ? "failed" : "finished")", body: body, session: run.session)
+            }
         }
         if tasks != scheduled { scheduled = tasks }
     }
 
-    /// Throws dinod's reason the task can't run as set up (untrusted folder, no repo for a worktree, …).
+    /// Throws dinod's reason the automation can't run as set up (untrusted folder, no repo, …).
     func saveTask(_ task: ScheduledTask) async throws {
         let tasks = try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).schedulePut(task) }.value
-        scheduled = tasks
+        if tasks != scheduled { scheduled = tasks }
     }
 
     func setTask(_ task: ScheduledTask, enabled: Bool) {
@@ -1226,7 +1282,7 @@ final class DinoModel: ObservableObject {
         Task.detached {
             do {
                 let tasks = try DinoConnection(path: DinoEnvironment.socketPath).scheduleDelete(task.id)
-                await MainActor.run { self.scheduled = tasks }
+                await MainActor.run { if tasks != self.scheduled { self.scheduled = tasks } }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
             }
@@ -1241,13 +1297,13 @@ final class DinoModel: ObservableObject {
                 let id = try conn.scheduleRun(task.id)
                 let tasks = try? conn.scheduleList()
                 await MainActor.run {
-                    if let tasks { self.scheduled = tasks }
-                    self.pendingSelect = id
+                    if let tasks, tasks != self.scheduled { self.scheduled = tasks }
+                    if let id, !id.isEmpty { self.pendingSelect = id } else { self.openTasks.insert(task.id) }
                 }
             } catch {
                 let tasks = try? DinoConnection(path: DinoEnvironment.socketPath).scheduleList()
                 await MainActor.run {
-                    if let tasks { self.scheduled = tasks }
+                    if let tasks, tasks != self.scheduled { self.scheduled = tasks }
                     self.error = error.localizedDescription
                 }
             }
