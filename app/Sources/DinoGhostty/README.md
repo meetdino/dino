@@ -28,6 +28,8 @@ models. Changes from upstream:
 - `Resources/Ghostty/themes`: Ghostty 1.3.1's color themes (from iTerm2-Color-Schemes, MIT, see
   `Resources/Ghostty/LICENSE-themes`), so `theme = Name` resolves without Ghostty.app. Taken from
   Ghostty 1.3.1's `Contents/Resources/ghostty/themes`.
+- `TerminalController.reapplyConfig(to:)`: Ghostty's soft `reload_config`, the loaded config given
+  again to a surface or the app, so a `light:…,dark:…` theme follows each surface's light or dark.
 
 To take a newer upstream: copy its `Sources/GhosttyTerminal` over this folder, bump the package's
 version in `app/Package.swift`, and put the changes above back.

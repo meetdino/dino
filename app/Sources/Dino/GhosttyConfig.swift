@@ -37,36 +37,43 @@ enum GhosttyConfig {
     /// the shell or agent behind it, in its own folder.
     static let ignored: Set<String> = ["command", "initial-command", "working-directory", "wait-after-command", "input", "env"]
 
-    private static let colorKeys = ["theme", "background", "foreground", "palette", "cursor-color", "cursor-text", "selection-"]
+    /// The settings that color a pane. With none of them, the pane takes dino's own light and dark
+    /// colors; `background-opacity` and the like don't count.
+    private static let colorKeys: Set<String> = ["theme", "background", "foreground", "palette", "cursor-color", "cursor-text",
+                                                 "selection-background", "selection-foreground"]
 
     /// The config files read last time (includes too), and lines Ghostty refused.
     private(set) static var loaded: [String] = []
     private(set) static var skipped: [String] = []
     private static var stamps: [String: Date] = [:]
-    /// The light or dark the config was last read for.
-    private(set) static var applied: TerminalColorScheme?
 
-    /// Light or dark, as the app looks now: the Mac's mode, or the one picked in View > Appearance.
-    static var scheme: TerminalColorScheme {
-        NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
+    /// The look a pane takes for Ghostty's `window-theme`, which picks the light or dark a Ghostty
+    /// window (and so its theme's half) shows: nil follows the app's look (`system`, and `auto` with
+    /// a `light:…,dark:…` theme or dino's own colors); `auto` with one theme goes by how light its
+    /// background is. dino's own window keeps the app's look.
+    private(set) static var paneAppearance: NSAppearance.Name? {
+        didSet { if paneAppearance != oldValue { LinkTerminalView.paneAppearanceChanged() } }
     }
 
-    /// `overrides` go last, so they win over anything the user set. Run again when the app's look
-    /// changes: dino picks the half of a `light:…,dark:…` theme itself, as the engine won't reload.
+    /// `overrides` go last, so they win over anything the user set. A `light:…,dark:…` theme stays
+    /// one: as in Ghostty, each pane takes the half for its own light or dark (the app's look, see
+    /// `Appearance`), and switches when that changes (Ghostty's soft `reload_config`).
     static func apply(to controller: TerminalController, overrides: String) {
-        let scheme = scheme
-        applied = scheme
-        defer { controller.setColorScheme(scheme) }
-        defer { readPaneChrome(controller) }
         var read: [String] = []
-        let all = files.flatMap { expand($0, depth: 0, read: &read) }.compactMap { resolvingTheme($0, for: scheme) }
+        let all = files.flatMap { expand($0, depth: 0, read: &read) }.compactMap(resolvingTheme)
         var lines = all
         loaded = read
         stamps = Dictionary(uniqueKeysWithValues: read.map { ($0, modified($0)) })
         skipped = []
         // The library's built-in light and dark colors go after the config: they'd hide the user's.
-        let colored = all.contains { line in colorKeys.contains { line.hasPrefix($0) } }
+        let colored = all.contains { colorKeys.contains(key(of: $0)) }
         controller.setTheme(colored ? TerminalTheme() : .default)
+        // dino's own colors are a light and dark pair too, as far as `window-theme = auto` goes.
+        let paired = !colored || all.contains { $0.hasPrefix("theme = light:") }
+        defer {
+            paneAppearance = windowTheme(controller, paired: paired)
+            readPaneChrome(controller, paired: paired)
+        }
         // Ghostty takes all of a config or none of it: leave out the lines it names and try again.
         for _ in 0 ..< 2 {
             if controller.updateConfigSource(.generated((lines + [overrides]).joined(separator: "\n"))) { return }
@@ -80,10 +87,30 @@ enum GhosttyConfig {
         controller.updateConfigSource(.generated(overrides))
     }
 
-    /// A `theme` line with its name made an absolute path, as Ghostty would find it (of `light:…,dark:…`,
-    /// the one for `scheme`); nil, leaving it out, when it isn't anywhere, so the pane keeps dino's own
+    /// `window-theme` as Ghostty applies it on the Mac (see `paneAppearance`); `ghostty` works on
+    /// Linux only and acts as `auto` here.
+    private static func windowTheme(_ controller: TerminalController, paired: Bool) -> NSAppearance.Name? {
+        switch controller.configText("window-theme") {
+        case "light": return .aqua
+        case "dark": return .darkAqua
+        case "system": return nil
+        default:
+            guard !paired, let bg = controller.configColor("background") else { return nil }
+            // AppKit's light test, as Ghostty's own `isLightColor`.
+            let luminance = (0.299 * Double(bg.red) + 0.587 * Double(bg.green) + 0.114 * Double(bg.blue)) / 255
+            return luminance > 0.5 ? .aqua : .darkAqua
+        }
+    }
+
+    /// A config line's key: `background` for `background = #fff`.
+    private static func key(of line: String) -> String {
+        line.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+    }
+
+    /// A `theme` line with its names made absolute paths, as Ghostty would find them (both halves of
+    /// `light:…,dark:…`); nil, leaving it out, when one isn't anywhere, so the pane keeps dino's own
     /// light and dark colors rather than the engine's dark ones.
-    private static func resolvingTheme(_ line: String, for scheme: TerminalColorScheme) -> String? {
+    private static func resolvingTheme(_ line: String) -> String? {
         let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
         guard parts.count == 2, parts[0] == "theme" else { return line }
         let value = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
@@ -97,9 +124,11 @@ enum GhosttyConfig {
         }
         let pairs = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         if pairs.count == 2, pairs.allSatisfy({ $0.hasPrefix("light:") || $0.hasPrefix("dark:") }) {
-            let mode = scheme == .dark ? "dark:" : "light:"
-            guard let pair = pairs.first(where: { $0.hasPrefix(mode) }) else { return nil }
-            return path(String(pair.dropFirst(mode.count))).map { "theme = \($0)" }
+            func half(_ mode: String) -> String? {
+                pairs.first { $0.hasPrefix(mode) }.flatMap { path(String($0.dropFirst(mode.count))) }
+            }
+            guard let light = half("light:"), let dark = half("dark:") else { return nil }
+            return "theme = light:\(light),dark:\(dark)"
         }
         return path(value).map { "theme = \($0)" }
     }
