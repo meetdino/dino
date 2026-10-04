@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "updated": "2026-10-03",
+  "plans": [
+    {
+      "id": "zai",
+      "name": "GLM Coding Plan (Z.ai)",
+      "blurb": "Z.ai's subscription for GLM models in coding agents.",
+      "anthropic": "https://api.z.ai/api/anthropic",
+      "openai": "https://api.z.ai/api/coding/paas/v4",
+      "list": "openai",
+      "documented_models": ["glm-5.3", "glm-5.3-flash"],
+      "tools": true,
+      "keys_page": "https://z.ai/manage-apikey/apikey-list",
+      "docs": "https://docs.z.ai/devpack/tool/others",
+      "terms": "Z.ai allows the plan in coding tools such as Claude Code, Codex, OpenCode, Pi, Cline and Hermes, not in your own apps or services, and not shared (docs.z.ai/devpack/faq)."
+    },
+    {
+      "id": "zhipu",
+      "name": "GLM Coding Plan (Zhipu, China)",
+      "blurb": "The same plan bought on bigmodel.cn.",
+      "anthropic": "https://open.bigmodel.cn/api/anthropic",
+      "openai": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "list": "openai",
+      "documented_models": ["glm-5.3", "glm-5.3-flash"],
+      "tools": true,
+      "keys_page": "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys",
+      "docs": "https://docs.bigmodel.cn/cn/coding-plan/faq",
+      "terms": "Zhipu allows the plan in supported coding tools, not in your own apps or services, and not shared."
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi Code",
+      "blurb": "The Kimi membership's coding plan (not the Moonshot platform's pay-as-you-go keys).",
+      "anthropic": "https://api.kimi.ai/coding",
+      "openai": "https://api.kimi.ai/coding/v1",
+      "responses": true,
+      "list": "openai",
+      "documented_models": ["k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed"],
+      "tools": true,
+      "docs": "https://www.kimi.com/code/docs/en/third-party-tools/claude-code.html",
+      "terms": "For your own use in coding agents (Kimi's docs set up Claude Code, Codex, OpenCode and Hermes). Kimi forbids changing a client's User-Agent: dino passes each agent's own."
+    },
+    {
+      "id": "kimi-cn",
+      "name": "Kimi Code (China)",
+      "blurb": "Kimi Code bought in China.",
+      "anthropic": "https://api.kimi.com/coding",
+      "openai": "https://api.kimi.com/coding/v1",
+      "responses": true,
+      "list": "openai",
+      "documented_models": ["k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed"],
+      "tools": true,
+      "docs": "https://www.kimi.com/code/docs/en/third-party-tools/codex.html",
+      "terms": "For your own use in coding agents. Kimi forbids changing a client's User-Agent: dino passes each agent's own."
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax Token Plan",
+      "blurb": "MiniMax's subscription (formerly the Coding Plan). Its key starts sk-cp-; a pay-as-you-go key won't do.",
+      "anthropic": "https://api.minimax.io/anthropic",
+      "openai": "https://api.minimax.io/v1",
+      "list": "openai",
+      "documented_models": ["MiniMax-M3"],
+      "tools": true,
+      "docs": "https://platform.minimax.io/docs/token-plan/other-tools",
+      "terms": "For individual, interactive use in coding tools; MiniMax points production use to pay-as-you-go (platform.minimax.io/docs/token-plan/faq)."
+    },
+    {
+      "id": "minimax-cn",
+      "name": "MiniMax Token Plan (China)",
+      "blurb": "The Token Plan bought on minimaxi.com.",
+      "anthropic": "https://api.minimaxi.com/anthropic",
+      "openai": "https://api.minimaxi.com/v1",
+      "list": "openai",
+      "documented_models": ["MiniMax-M3"],
+      "tools": true,
+      "docs": "https://platform.minimaxi.com/docs/guides/text-ai-coding-tools",
+      "terms": "For individual, interactive use in coding tools."
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek API",
+      "blurb": "Pay as you go, from your DeepSeek balance.",
+      "anthropic": "https://api.deepseek.com/anthropic",
+      "openai": "https://api.deepseek.com",
+      "list": "openai",
+      "tools": true,
+      "keys_page": "https://platform.deepseek.com/api_keys",
+      "docs": "https://api-docs.deepseek.com/guides/anthropic_api/",
+      "terms": "A pay-as-you-go API key: any tool may use it."
+    },
+    {
+      "id": "atlas",
+      "name": "Atlas Cloud Coding Plan",
+      "blurb": "Atlas Cloud's plan, with its own key (Plan Management → Get API Key).",
+      "anthropic": "https://api.atlascloud.ai",
+      "openai": "https://api.atlascloud.ai/v1",
+      "list": "openai",
+      "models_note": "Atlas Cloud lists every model it serves; the plan covers some of them, and turns the others down.",
+      "docs": "https://www.atlascloud.ai/docs/coding-plan/api",
+      "terms": "Atlas Cloud allows Claude Code, Codex and other coding clients."
+    },
+    {
+      "id": "other",
+      "name": "Other (Anthropic- or OpenAI-compatible)",
+      "blurb": "Any endpoint that serves Anthropic Messages or the OpenAI API, by its base URL.",
+      "list": "openai",
+      "docs": ""
+    }
+  ]
+}
