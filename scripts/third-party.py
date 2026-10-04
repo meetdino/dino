@@ -17,6 +17,7 @@ BUNDLED = [
     ("bash-preexec", "crates/dino-daemon/shell-integration/bash/bash-preexec.sh", "MIT, see LICENSE-bash-preexec.md there"),
     ("Ghostty's terminfo entries (xterm-ghostty, ghostty)", "crates/dino-daemon/terminfo/", "MIT (Ghostty)"),
     ("GhosttyTerminal, libghostty-spm's Swift wrapper (as the module DinoGhostty)", "app/Sources/DinoGhostty/", "MIT, see LICENSE there"),
+    ("Ghostty 1.3.1's color themes, from iTerm2-Color-Schemes", "app/Sources/DinoGhostty/Resources/Ghostty/themes/", "MIT (the collection; each theme's copyright is its author's), see LICENSE-themes beside it"),
 ]
 
 

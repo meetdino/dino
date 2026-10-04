@@ -17,8 +17,8 @@ enum GhosttyConfig {
         ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
 
     /// Where Ghostty finds a theme by name, in its order: the user's own themes, then the ones that
-    /// come with Ghostty (in Ghostty.app). dino's engine ships without Ghostty's themes, so a name
-    /// it can't find here would fall back to the engine's dark colors, whatever the Mac's mode.
+    /// come with Ghostty (in Ghostty.app), then Ghostty 1.3.1's, which dino carries for a Mac
+    /// without Ghostty. A name found nowhere would fall back to the engine's dark colors.
     private static let themeFolders: [URL] = {
         var folders = [xdg.appendingPathComponent("ghostty/themes")]
         let apps = [NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty"),
@@ -28,6 +28,7 @@ enum GhosttyConfig {
             let themes = app.appendingPathComponent("Contents/Resources/ghostty/themes")
             if !folders.contains(themes) { folders.append(themes) }
         }
+        if let carried = GhosttyRuntimeResources.directoryURL?.appendingPathComponent("themes") { folders.append(carried) }
         return folders
     }()
     private static let paths = files.map(\.path)
