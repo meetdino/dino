@@ -682,6 +682,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "crossterm",
+ "libc",
  "memchr",
  "portable-pty",
  "ratatui",

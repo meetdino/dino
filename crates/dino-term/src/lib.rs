@@ -24,6 +24,55 @@ use ratatui::style::{Color, Modifier, Style};
 use terminput::{Encoding, KittyFlags};
 
 /// Colors reported to apps that query them (OSC 10/11); agents use this to pick a light/dark theme.
+/// How long a program gets to leave after the terminal hangs up on it, then after SIGTERM.
+const HANGUP_GRACE: Duration = Duration::from_secs(1);
+const TERM_GRACE: Duration = Duration::from_secs(2);
+
+/// The live processes of terminal session `session` (its program runs as the session's leader,
+/// so the session's id is its pid): the program, whatever it started, in any process group,
+/// including those that outlived it. Zombies are left to whoever reaps them.
+fn session_members(session: u32) -> Vec<libc::pid_t> {
+    let mut pids = vec![0 as libc::pid_t; 4096];
+    let n = loop {
+        let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, bytes) };
+        if n <= 0 {
+            return vec![];
+        }
+        if (n as usize) < pids.len() {
+            break n as usize;
+        }
+        pids.resize(pids.len() * 2, 0);
+    };
+    pids.truncate(n);
+    let zombie = |pid: libc::pid_t| {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size) };
+        got != size || info.pbi_status == libc::SZOMB as u32
+    };
+    // A session's id stays taken while any process is in it, so its id names only these.
+    pids.into_iter().filter(|&p| p > 0 && unsafe { libc::getsid(p) } == session as libc::pid_t && !zombie(p)).collect()
+}
+
+/// Hangup, then SIGTERM, then SIGKILL, each to every process left in the session, waiting up to
+/// a grace period between them for it to empty.
+fn stop_session(session: u32) {
+    for (signal, grace) in [(libc::SIGHUP, HANGUP_GRACE), (libc::SIGTERM, TERM_GRACE), (libc::SIGKILL, Duration::from_secs(1))] {
+        let left = session_members(session);
+        if left.is_empty() {
+            return;
+        }
+        for p in left {
+            unsafe { libc::kill(p, signal) };
+        }
+        let since = Instant::now();
+        while since.elapsed() < grace && !session_members(session).is_empty() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
 const DEFAULT_FG: Rgb = Rgb { r: 0xd8, g: 0xd8, b: 0xd8 };
 const DEFAULT_BG: Rgb = Rgb { r: 0x16, g: 0x16, b: 0x1a };
 
@@ -433,10 +482,17 @@ impl Pane {
         self.shared.dirty.store(true, Ordering::Relaxed);
     }
 
-    pub fn kill(&self) {
-        if let Some(mut k) = self.killer.lock().unwrap().take() {
-            let _ = k.kill();
-        }
+    /// Stop the program and everything it started in its terminal, for sure, off the caller's
+    /// thread: the hangup a closed terminal sends (its normal way out), SIGTERM after
+    /// `HANGUP_GRACE` for what's still there, SIGKILL after `TERM_GRACE`. A program that ignores
+    /// the first two (Pi does) still ends. Join the handle to wait for it (dinod exiting).
+    pub fn kill(&self) -> Option<std::thread::JoinHandle<()>> {
+        let mut killer = self.killer.lock().unwrap().take()?;
+        let Some(session) = self.pid() else {
+            let _ = killer.kill();
+            return None;
+        };
+        std::thread::Builder::new().name("pty-stop".into()).spawn(move || stop_session(session)).ok()
     }
 
     /// The program it was started with (a shell, an agent), on this Mac.
@@ -981,6 +1037,24 @@ fn color(c: AColor) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_that_ignores_hangup_and_term_is_stopped_with_what_it_started() {
+        // Ignores both, as does what it starts (an ignored signal stays ignored across exec).
+        let spec = SpawnSpec { program: "/bin/sh".into(), args: vec!["-c".into(), "trap '' HUP TERM; /bin/sleep 60 & /bin/sleep 60".into()], cwd: None, env: Default::default() };
+        let pane = Pane::spawn(spec, 80, 24, |_| {}).unwrap();
+        let session = pane.pid().unwrap();
+        let since = Instant::now();
+        while session_members(session).len() < 3 && since.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(session_members(session).len(), 3, "the shell and its two sleeps");
+        let started = Instant::now();
+        pane.kill().unwrap().join().unwrap();
+        assert!(session_members(session).is_empty(), "all of it, SIGKILLed");
+        assert!(started.elapsed() >= HANGUP_GRACE + TERM_GRACE - Duration::from_millis(100), "each was given its time");
+        assert!(pane.kill().is_none(), "once");
+    }
 
     fn pane() -> Pane {
         Pane::emulator(40, 6, false)
