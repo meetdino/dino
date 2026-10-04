@@ -615,29 +615,21 @@ final class DinoModel: ObservableObject {
         + ["ctrl+tab", "ctrl+shift+tab", "ctrl+backquote", "super+slash", "super+shift+a", "super+shift+f"])
         .map { "keybind = \($0)=unbind" }.joined(separator: "\n")
 
+    /// Each pane then takes the light or dark of its own window (the app's look: the Mac's mode or
+    /// View > Appearance) and follows it, as a Ghostty window does. The app starts in the app's.
     static let terminals: TerminalController = {
         let c = TerminalController(configSource: .generated(menuKeys))
+        c.setColorScheme(NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light)
         GhosttyConfig.apply(to: c, overrides: menuKeys)
         GhosttyActions.install(on: c)
         return c
     }()
-
-    /// Every pane, shown or not, takes the app's light or dark: the Mac's mode or View > Appearance.
-    private var appearanceObservation: NSKeyValueObservation?
 
     /// Picks up edits to the Ghostty config, as Ghostty does when told to reload.
     private func watchGhosttyConfig() {
         // Read now, not at the first pane: Settings says what's in effect.
         _ = Self.terminals
         GhosttyActions.model = self
-        appearanceObservation = NSApp.observe(\.effectiveAppearance) { _, _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard GhosttyConfig.scheme != GhosttyConfig.applied else { return }
-                    GhosttyConfig.apply(to: Self.terminals, overrides: Self.menuKeys)
-                }
-            }
-        }
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
             MainActor.assumeIsolated {
                 if GhosttyConfig.changed { GhosttyConfig.apply(to: Self.terminals, overrides: Self.menuKeys) }

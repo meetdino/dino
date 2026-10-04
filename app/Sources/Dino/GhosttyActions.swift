@@ -155,9 +155,10 @@ enum GhosttyActions {
             return { model.showPalette.toggle() }
         case .toggleVisibility:
             return { NSApp.isHidden ? NSApp.unhide(nil) : NSApp.hide(nil) }
-        // A soft reload re-applies the config already loaded: dino's is always applied whole.
+        // Soft: the config already loaded, again, so a pane (or the app, for `state` nil) whose
+        // light or dark just changed takes that half of a `light:…,dark:…` theme.
         case .reloadConfig(let soft):
-            return soft ? {} : { GhosttyConfig.reload() }
+            return soft ? { DinoModel.terminals.reapplyConfig(to: state) } : { GhosttyConfig.reload() }
         case .openConfig:
             return { GhosttyConfig.openInEditor() }
         case .promptTitle(let what):

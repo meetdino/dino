@@ -350,6 +350,20 @@ extension TerminalController {
         return String(cString: text)
     }
 
+    /// Ghostty's soft `reload_config`: the config already loaded, given again to `state`'s surface
+    /// (nil: the app, which passes it to every surface). Each surface applies it for its own light
+    /// or dark, so a `light:…,dark:…` theme takes the matching half. Ghostty asks for this when a
+    /// surface's or the app's color scheme changes, as its own app answers it.
+    public func reapplyConfig(to state: TerminalViewState?) {
+        guard let config else { return }
+        if let state {
+            guard let surface = state.surface?.rawValue else { return }
+            ghostty_surface_update_config(surface, config)
+        } else if let app {
+            ghostty_app_update_config(app, config)
+        }
+    }
+
     /// A color config value as Ghostty resolved it (`background`), as 0–255 red, green, blue.
     public func configColor(_ key: String) -> (red: UInt8, green: UInt8, blue: UInt8)? {
         guard let config else { return nil }

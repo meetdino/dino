@@ -21,6 +21,20 @@ final class LinkTerminalView: TerminalView {
         highlight.frame = bounds
         addSubview(highlight)
         registerForDraggedTypes(TerminalDrop.types)
+        appearance = GhosttyConfig.paneAppearance.flatMap(NSAppearance.init(named:))
+        Self.all.add(self)
+    }
+
+    /// Every pane's view, for a change of Ghostty's `window-theme`.
+    private static let all = NSHashTable<LinkTerminalView>.weakObjects()
+
+    /// Ghostty's `window-theme` (see `GhosttyConfig.paneAppearance`) on every pane: its theme's
+    /// light or dark half, and what it tells programs that ask, follow the pane's look.
+    static func paneAppearanceChanged() {
+        let look = GhosttyConfig.paneAppearance.flatMap(NSAppearance.init(named:))
+        for view in all.allObjects where view.appearance?.name != look?.name {
+            view.appearance = look
+        }
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
