@@ -733,9 +733,38 @@ pub fn put_away(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What removing worktree `dir` would lose, next to `base` (a branch of its repo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtRisk {
+    /// Files with uncommitted changes, new files included.
+    pub uncommitted: u32,
+    /// Commits on no remote and not on `base`.
+    pub unpushed: u32,
+    /// Its commits are on `base` (merged, or squashed in), or it has none: the branch can go.
+    pub landed: bool,
+}
+
+pub fn at_risk(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<AtRisk> {
+    let uncommitted = git(dir, &["status", "--porcelain", "-uall"])?.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+    // No base to compare with (gone, renamed): nothing counts as landed, and only remotes as pushed.
+    let landed = git(dir, &["rev-parse", "HEAD", base]).and_then(|tips| history(dir, branch, base, tips)).is_ok_and(|h| h.ahead == 0 || h.same_as_base);
+    let mut not = vec!["rev-list", "--count", "HEAD", "--not", "--remotes"];
+    if git(dir, &["rev-parse", "--verify", "--quiet", base]).is_ok() {
+        not.push(base);
+    }
+    let unpushed = if landed { 0 } else { git(dir, &not)?.trim().parse().unwrap_or(0) };
+    Ok(AtRisk { uncommitted, unpushed, landed })
+}
+
+/// Remove a worktree, discarding whatever is uncommitted in it, but keep its branch.
+pub fn discard(repo: &Path, dir: &Path) -> anyhow::Result<()> {
+    git(repo, &["worktree", "remove", "--force", &dir.to_string_lossy()])?;
+    Ok(())
+}
+
 /// Remove a worktree and its branch, discarding whatever is in it.
 pub fn remove(repo: &Path, dir: &Path, branch: &str) {
-    let _ = git(repo, &["worktree", "remove", "--force", &dir.to_string_lossy()]);
+    let _ = discard(repo, dir);
     let _ = git(repo, &["branch", "-D", branch]);
     // The group's folder, once its last worktree is gone.
     if let Some(parent) = dir.parent() {
@@ -772,6 +801,44 @@ mod tests {
         std::os::unix::fs::symlink(tmp.join("a.txt"), tmp.join("link.txt")).unwrap();
         assert_eq!(untracked_lines(&tmp.join("link.txt")), 0);
         assert_eq!(untracked_lines(&tmp.join("missing.txt")), 0);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn at_risk_counts_what_removing_would_lose() {
+        let tmp = std::env::temp_dir().join(format!("dino-at-risk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let commit = |dir: &Path, msg: &str| git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", msg]).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        commit(&repo, "init");
+        let wt = tmp.join("wt");
+        git(&repo, &["worktree", "add", "-q", "-b", "dino/x", &wt.to_string_lossy()]).unwrap();
+        let risk = |b| at_risk(&wt, Some("dino/x"), b).unwrap();
+
+        // Nothing done: nothing lost, the branch can go.
+        assert_eq!(risk("main"), AtRisk { uncommitted: 0, unpushed: 0, landed: true });
+        // Uncommitted work, a new file in a new folder included.
+        std::fs::write(wt.join("a.txt"), "two\n").unwrap();
+        std::fs::create_dir_all(wt.join("new")).unwrap();
+        std::fs::write(wt.join("new/b.txt"), "b\n").unwrap();
+        assert_eq!(risk("main"), AtRisk { uncommitted: 2, unpushed: 0, landed: true });
+        // Committed, not merged: the branch stays.
+        commit(&wt, "two");
+        assert_eq!(risk("main"), AtRisk { uncommitted: 1, unpushed: 1, landed: false });
+        // Squashed into main: landed, though git doesn't see it merged.
+        git(&repo, &["checkout", "-q", "dino/x", "--", "a.txt"]).unwrap();
+        commit(&repo, "squashed");
+        assert_eq!(risk("main"), AtRisk { uncommitted: 1, unpushed: 0, landed: true });
+        // A base that's gone: nothing counts as landed.
+        assert_eq!(risk("gone"), AtRisk { uncommitted: 1, unpushed: 2, landed: false });
+
+        discard(&repo, &wt).unwrap();
+        assert!(!wt.exists());
+        assert!(git(&repo, &["rev-parse", "--verify", "dino/x"]).is_ok(), "the branch stays");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
