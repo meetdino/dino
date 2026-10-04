@@ -207,7 +207,6 @@ struct TaskRunRow: View {
     @EnvironmentObject var model: DinoModel
     let task: ScheduledTask
     let run: ScheduledRun
-    @State private var previewing = false
 
     var body: some View {
         let state = model.runState(run)
@@ -222,19 +221,28 @@ struct TaskRunRow: View {
         .opacity(state.reachable ? 1 : 0.6)
         .help(state.help)
         .accessibilityElement(children: .combine)
-        .contentShape(Rectangle())
-        // Like an archived row: the popover is the row's own, shown on the click's end. Opened from
-        // the list's selection it closed again as soon as it appeared.
-        .onTapGesture {
-            guard let id = run.session else { return }
-            if model.archived.contains(where: { $0.id == id }) { previewing = true } else { model.openRun(id) }
-        }
-        .popover(isPresented: $previewing, arrowEdge: .trailing) {
-            if let id = run.session, let a = model.archived.first(where: { $0.id == id }) {
-                ArchivedPreview(session: a, delete: { previewing = false; model.deleteArchived(a) })
-                    .environmentObject(model)
+        // Selected by the list, clicked or arrowed onto alike (see Sidebar): a live run's session
+        // opens, an archived one's conversation shows in the main area. One with nothing to show
+        // can't be selected, so it never keeps a highlight nothing else agrees with.
+        .selectionDisabled(!state.reachable)
+    }
+}
+
+/// A scheduled run whose session is archived, selected in the sidebar: its conversation, in the
+/// main area, with the way back.
+struct ArchivedRunPane: View {
+    @EnvironmentObject var model: DinoModel
+    let session: ArchivedInfo
+    @State private var deleting = false
+
+    var body: some View {
+        ArchivedPreview(session: session, delete: { deleting = true }, fill: true)
+            .alert("Delete “\(session.display)”?", isPresented: $deleting) {
+                Button("Delete", role: .destructive) { model.deleteArchived(session) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(session.branch.map { "It leaves the archive for good. Its branch \($0) stays in the repo." } ?? "It leaves the archive for good.")
             }
-        }
     }
 }
 
@@ -278,10 +286,21 @@ extension DinoModel {
         return RunState(label: "Gone", color: .secondary, title: nil, help: "Started\(when); its session has since been closed or deleted", reachable: false)
     }
 
-    /// A run's session, selected and its tab opened, while it's around. An archived one opens
-    /// from its row, in a popover.
-    func openRun(_ session: String) {
-        if sessions.contains(where: { $0.id == session }) { select(session) }
+    /// A run's session, selected and its tab opened, while it's around; an archived one's
+    /// conversation, in the main area (`archivedRun`).
+    func openRun(_ session: String, keepKeyboard: Bool = false) {
+        if sessions.contains(where: { $0.id == session }) {
+            select(session, keepKeyboard: keepKeyboard)
+        } else if archived.contains(where: { $0.id == session }) {
+            select("run:\(session)", keepKeyboard: keepKeyboard)
+        }
+    }
+
+    /// The archived session whose run is selected, read-only in the main area.
+    var archivedRun: ArchivedInfo? {
+        guard let sel = selected, sel.hasPrefix("run:") else { return nil }
+        let id = sel.dropFirst(4)
+        return archived.first { $0.id == id }
     }
 }
 
