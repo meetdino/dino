@@ -550,6 +550,17 @@ impl Agent for OpenCode {
                     _ => ServerEvent::Other,
                 }
             }
+            // A tool call as it goes: pending, running (again as it says more), then completed
+            // or error. An MCP server's tool is `<server>_<tool>`, its name made safe.
+            "message.part.updated" if p["part"]["type"] == "tool" => {
+                let part = &p["part"];
+                match (part["callID"].as_str().or(part["id"].as_str()), part["tool"].as_str()) {
+                    (Some(call), Some(name)) => {
+                        ServerEvent::Tool { call: call.into(), name: name.into(), done: matches!(part["state"]["status"].as_str(), Some("completed" | "error")) }
+                    }
+                    _ => ServerEvent::Other,
+                }
+            }
             _ => ServerEvent::Other,
         }
     }
@@ -803,6 +814,22 @@ mod tests {
         let providers = json!({"providers":[{"id":"anthropic","models":{"claude-x":{"limit":{"context":200000}}}},{"id":"dino","models":{"m":{"limit":{"context":0}}}}]});
         assert_eq!(o.server_context_window(&providers, "anthropic/claude-x"), Some(200_000));
         assert_eq!(o.server_context_window(&providers, "dino/m"), None, "unknown is 0: no window rather than a wrong one");
+    }
+
+    #[test]
+    fn its_server_says_which_tools_it_calls() {
+        let o = OpenCode;
+        let ev = |s: &str| o.server_event(&serde_json::from_str(s).unwrap());
+        // OpenCode 1.18.34 on qwen3:4b, calling open-computer-use's list_apps (its output cut).
+        let pending = r#"{"id":"evt_1","type":"message.part.updated","properties":{"sessionID":"ses_b","part":{"id":"prt_1","messageID":"msg_1","sessionID":"ses_b","type":"tool","tool":"open-computer-use_list_apps","callID":"call_z1f95el9","state":{"status":"pending","input":{},"raw":""}},"time":1791129168471}}"#;
+        let running = r#"{"id":"evt_2","type":"message.part.updated","properties":{"sessionID":"ses_b","part":{"type":"tool","tool":"open-computer-use_list_apps","callID":"call_z1f95el9","state":{"status":"running","input":{},"time":{"start":1791129168843}},"id":"prt_1","sessionID":"ses_b","messageID":"msg_1"},"time":1791129168843}}"#;
+        let completed = r#"{"id":"evt_3","type":"message.part.updated","properties":{"sessionID":"ses_b","part":{"type":"tool","tool":"open-computer-use_list_apps","callID":"call_z1f95el9","state":{"status":"completed","input":{},"output":"Finder — com.apple.finder [running]"},"id":"prt_1","sessionID":"ses_b","messageID":"msg_1"},"time":1791129174440}}"#;
+        let call = |done| ServerEvent::Tool { call: "call_z1f95el9".into(), name: "open-computer-use_list_apps".into(), done };
+        assert_eq!(ev(pending), call(false));
+        assert_eq!(ev(running), call(false));
+        assert_eq!(ev(completed), call(true));
+        let text = r#"{"type":"message.part.updated","properties":{"sessionID":"ses_b","part":{"type":"text","text":"0","id":"prt_2"}}}"#;
+        assert_eq!(ev(text), ServerEvent::Other);
     }
 
     #[test]

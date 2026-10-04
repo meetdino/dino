@@ -135,6 +135,27 @@ fn event_of(v: &Value) -> LogEvent {
     }
 }
 
+/// The tool a line of its record starts or ends running, as `Agent::tool_calls` says it; its
+/// subagents' calls too, which reach the same Mac. An MCP server's tool is named
+/// `<server>-<tool>`, with the server and tool apart in `mcpServerName` and `mcpToolName` (empty
+/// for its own tools); a server whose tools it doesn't prefix still gets its name in front. Its
+/// end repeats the name in newer versions only (1.0.91 gives just the call's id).
+fn tool_calls_in(v: &Value) -> Vec<(String, bool)> {
+    let d = &v["data"];
+    let name = || {
+        let tool = d["toolName"].as_str().unwrap_or_default();
+        match (d["mcpServerName"].as_str().filter(|s| !s.is_empty()), d["mcpToolName"].as_str().filter(|t| !t.is_empty())) {
+            (Some(server), Some(own)) if !tool.starts_with(server) => format!("{server}-{own}"),
+            _ => tool.to_string(),
+        }
+    };
+    match v["type"].as_str() {
+        Some("tool.execution_start") => vec![(name(), true)].into_iter().filter(|(n, _)| !n.is_empty()).collect(),
+        Some("tool.execution_complete") => vec![(name(), false)],
+        _ => vec![],
+    }
+}
+
 fn busy_in(jsonl: &str) -> bool {
     let mut busy = false;
     for v in jsonl.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
@@ -266,6 +287,10 @@ impl Agent for Copilot {
         event_of(line)
     }
 
+    fn tool_calls(&self, line: &Value) -> Vec<(String, bool)> {
+        tool_calls_in(line)
+    }
+
     fn conversation_of(&self, pid: u32) -> Option<String> {
         conversation_in(pid)
     }
@@ -394,6 +419,22 @@ mod tests {
 {"type":"assistant.message","data":{"content":"DONE","toolRequests":[],"turnId":"1"},"id":"96b4c067","timestamp":"2026-10-04T04:23:27.870Z"}
 {"type":"assistant.turn_end","data":{"turnId":"1"},"id":"1f7d45fe","timestamp":"2026-10-04T04:23:27.872Z"}
 {"type":"session.shutdown","data":{"shutdownType":"routine"},"id":"f88abfa5","timestamp":"2026-10-04T04:23:29.963Z"}"#;
+
+    #[test]
+    fn its_record_says_which_tools_it_runs() {
+        let calls = |line: &str| tool_calls_in(&serde_json::from_str(line).unwrap());
+        // Copilot 1.0.91's own lines, on BYOK with qwen3:4b; its end doesn't name the tool.
+        let start = r#"{"type":"tool.execution_start","data":{"toolCallId":"call_14gc1jbg","toolName":"glob","arguments":{"pattern":"*.md"},"turnId":"0","model":"qwen3:4b","toolTitle":"Finding files"},"id":"f2732c74-b788-4da6-836d-c8ca3b5a862a","timestamp":"2026-10-04T15:19:59.308Z"}"#;
+        let end = r#"{"type":"tool.execution_complete","data":{"toolCallId":"call_14gc1jbg","model":"qwen3:4b","turnId":"0","rte":false,"success":true,"result":{"content":"./README.md"}},"id":"f5bfc5f8","timestamp":"2026-10-04T15:19:59.400Z"}"#;
+        assert_eq!(calls(start), [("glob".to_string(), true)]);
+        assert_eq!(calls(end), [(String::new(), false)]);
+        // An MCP server's tool, with the fields its session events give one.
+        let mcp = r#"{"type":"tool.execution_start","data":{"toolCallId":"c2","toolName":"open-computer-use-list_apps","mcpServerName":"open-computer-use","mcpToolName":"list_apps","arguments":{}}}"#;
+        assert_eq!(calls(mcp), [("open-computer-use-list_apps".to_string(), true)]);
+        let unprefixed = r#"{"type":"tool.execution_start","data":{"toolCallId":"c3","toolName":"browser_navigate","mcpServerName":"playwright","mcpToolName":"browser_navigate"}}"#;
+        assert_eq!(calls(unprefixed), [("playwright-browser_navigate".to_string(), true)]);
+        assert!(EVENTS.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).flat_map(|v| tool_calls_in(&v)).all(|(n, started)| n == "bash" || !started));
+    }
 
     #[test]
     fn its_record_reads_as_turns() {

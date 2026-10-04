@@ -119,6 +119,30 @@ fn event_of(v: &Value) -> LogEvent {
     }
 }
 
+/// The tools an answer in its transcript calls, as `Agent::tool_calls` says them. Its transcript
+/// keeps no results, so each counts as made when it's written: started and ended at once. An MCP
+/// server's tool is `CallMcpTool` (its `server` and `toolName` in its input), or
+/// `CallDynamicTool` (`namespace` and `toolName`): named here `<server>-<tool>`.
+fn tool_calls_in(v: &Value) -> Vec<(String, bool)> {
+    if v["role"] != "assistant" {
+        return vec![];
+    }
+    let calls = v["message"]["content"].as_array().into_iter().flatten().filter(|p| p["type"] == "tool_use");
+    calls
+        .filter_map(|c| {
+            let (i, name) = (&c["input"], c["name"].as_str()?);
+            let mcp = matches!(name, "CallMcpTool" | "CallDynamicTool");
+            let name = match (mcp, i["server"].as_str().or(i["namespace"].as_str()), i["toolName"].as_str()) {
+                (true, Some(server), Some(tool)) => format!("{server}-{tool}"),
+                (true, None, Some(tool)) => tool.to_string(),
+                _ => name.to_string(),
+            };
+            Some([(name.clone(), true), (name, false)])
+        })
+        .flatten()
+        .collect()
+}
+
 fn busy_in(jsonl: &str) -> bool {
     let mut busy = false;
     for v in jsonl.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
@@ -296,6 +320,10 @@ impl Agent for Cursor {
         event_of(line)
     }
 
+    fn tool_calls(&self, line: &Value) -> Vec<(String, bool)> {
+        tool_calls_in(line)
+    }
+
     fn busy(&self, pid: u32) -> Option<bool> {
         let args = found::args_of(pid);
         let id = conversation_in(pid, own_args(&args)?)?;
@@ -416,6 +444,18 @@ mod tests {
         assert!(!busy_in(TRANSCRIPT));
         let (mid, _) = TRANSCRIPT.split_once(r#"{"type":"turn_ended","status":"success"}"#).unwrap();
         assert!(busy_in(mid));
+    }
+
+    #[test]
+    fn the_tools_it_calls_mcp_servers_by_their_own_names() {
+        let calls = |line: &str| tool_calls_in(&serde_json::from_str(line).unwrap());
+        let shell = TRANSCRIPT.lines().nth(1).unwrap();
+        assert_eq!(calls(shell), [("Shell".to_string(), true), ("Shell".to_string(), false)]);
+        // As Cursor writes an MCP call (2.6+): the server and tool in the call's input.
+        let mcp = r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"CallMcpTool","input":{"server":"open-computer-use","toolName":"list_apps","arguments":{}}},{"type":"tool_use","name":"CallDynamicTool","input":{"namespace":"playwright","toolName":"browser_navigate","arguments":{"url":"https://example.com"}}}]}}"#;
+        let names: Vec<String> = calls(mcp).into_iter().filter(|(_, started)| *started).map(|(n, _)| n).collect();
+        assert_eq!(names, ["open-computer-use-list_apps", "playwright-browser_navigate"]);
+        assert!(calls(TRANSCRIPT.lines().next().unwrap()).is_empty(), "the user's line calls nothing");
     }
 
     #[test]

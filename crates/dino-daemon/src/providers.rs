@@ -114,6 +114,16 @@ fn models(id: &str) -> (Vec<ProviderModel>, bool, Option<String>) {
     (models, loading, error)
 }
 
+/// What `provider` says of `model`, from its last list. A server on this Mac that hasn't been
+/// listed yet is asked now (it answers at once); a hosted one off this thread, so none this time.
+pub fn model(provider: &str, model: &str) -> Option<ProviderModel> {
+    let listed = cache().lock().unwrap().models.contains_key(provider);
+    if !listed && find(provider).is_some_and(|p| p.local && p.connected) {
+        fetch_models(provider);
+    }
+    models(provider).0.into_iter().find(|m| m.id == model)
+}
+
 fn find_in(c: &Cache, id: &str) -> Option<ProviderInfo> {
     c.providers.get(id).map(|(_, p)| p.clone())
 }

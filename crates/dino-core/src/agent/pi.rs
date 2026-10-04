@@ -14,7 +14,7 @@ use super::{Agent, ControlKind, LogEvent, StatusSource, Wiring, strings};
 use crate::found::{self, FoundSession};
 use crate::history::{self, Meta, Turn, one_line, turn};
 use crate::models::{Catalog, ModelInfo};
-use crate::providers::Format;
+use crate::providers::{Format, ProviderModel};
 
 pub(crate) struct Pi {
     pub(crate) free: bool,
@@ -191,10 +191,35 @@ fn route_extension(base: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// What Pi itself takes for a model its `models.json` gives no context window or output limit
+/// (its `modelFromJson`). An extension's models get no such defaults, so dino gives these when the
+/// provider doesn't say: Pi's assumption, not a fact about the model.
+const PI_DEFAULT_CONTEXT: u64 = 128_000;
+const PI_DEFAULT_MAX_TOKENS: u64 = 16_384;
+
+/// The model as an extension has to give it to Pi: every field its docs ask for ("an ID, display
+/// name, input capabilities, and cost metadata… a context window… an output limit and reasoning
+/// support"). Pi 1.0 doesn't check them, and fails its first call without them ("Cannot read
+/// properties of undefined (reading 'includes')", reading `input`). What the provider says of the
+/// model comes first; the rest is what Pi assumes of a custom model.
+fn pi_model(model: &str, info: Option<&ProviderModel>) -> Value {
+    let input: &[&str] = if info.is_some_and(|i| i.vision) { &["text", "image"] } else { &["text"] };
+    let price = |p: Option<f64>| p.unwrap_or(0.0);
+    serde_json::json!({
+        "id": model,
+        "name": info.map_or(model, |i| i.name.as_str()),
+        "input": input,
+        "reasoning": info.and_then(|i| i.reasoning).unwrap_or(false),
+        "cost": {"input": price(info.and_then(|i| i.price_in)), "output": price(info.and_then(|i| i.price_out)), "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": info.and_then(|i| i.context).filter(|c| *c > 0).unwrap_or(PI_DEFAULT_CONTEXT),
+        "maxTokens": info.and_then(|i| i.max_output).filter(|m| *m > 0).unwrap_or(PI_DEFAULT_MAX_TOKENS),
+    })
+}
+
 /// An extension that gives this Pi session a provider, "dino", serving `model` at `url` (a dino
 /// proxy route) in `format`. Like the free tier's, it registers nothing else. The key is a
 /// placeholder: dino's proxy holds the real one.
-fn provider_extension(url: &str, format: Format, model: &str) -> Option<PathBuf> {
+fn provider_extension(url: &str, format: Format, model: &str, info: Option<&ProviderModel>) -> Option<PathBuf> {
     let dir = crate::config_dir().join("pi");
     std::fs::create_dir_all(&dir).ok()?;
     let session = url.split("/s/").nth(1).and_then(|r| r.split('/').next()).unwrap_or("session");
@@ -205,7 +230,7 @@ fn provider_extension(url: &str, format: Format, model: &str) -> Option<PathBuf>
         Format::Chat => ("openai-completions", format!("{url}/v1")),
         Format::Responses => ("openai-responses", format!("{url}/v1")),
     };
-    let config = serde_json::json!({"baseUrl": base, "api": api, "apiKey": "dino", "models": [{"id": model, "name": model}]});
+    let config = serde_json::json!({"baseUrl": base, "api": api, "apiKey": "dino", "models": [pi_model(model, info)]});
     let text = format!("// Written by dino: this Pi session's model, served through dino. No tools.\nexport default function (pi) {{\n  pi.registerProvider(\"dino\", {config});\n}}\n");
     std::fs::write(&path, text).ok()?;
     Some(path)
@@ -288,10 +313,14 @@ impl Agent for Pi {
     // A provider of its own for the session, from an extension that only registers it (no tools),
     // as on the free tier.
     fn provider_wiring(&self, url: &str, format: Format, model: &str) -> Option<Wiring> {
+        self.provider_wiring_for(url, format, model, None)
+    }
+
+    fn provider_wiring_for(&self, url: &str, format: Format, model: &str, info: Option<&ProviderModel>) -> Option<Wiring> {
         if self.free {
             return None;
         }
-        let ext = provider_extension(url, format, model)?;
+        let ext = provider_extension(url, format, model, info)?;
         Some((vec![], vec!["-e".into(), ext.display().to_string(), "--provider".into(), "dino".into(), "--model".into(), model.into()]))
     }
 
@@ -393,7 +422,8 @@ impl Agent for Pi {
             return vec![];
         }
         let mut out = vec![];
-        for pid in crate::procinfo::pids_named("pi") {
+        // Pi names itself "pi" (`process.title`), but the kernel names it `node`.
+        for pid in crate::procinfo::pids_named("pi").into_iter().chain(crate::procinfo::node_titled("pi")) {
             let mut s = self.found(pid);
             if s.session_id.is_empty() {
                 continue;
@@ -514,6 +544,27 @@ mod tests {
         assert_eq!(c.models[0].default_effort.as_deref(), Some("high"));
         assert!(c.models[1].efforts.is_empty(), "no thinking, no effort");
         assert!(catalog_in("provider model\n", &levels, &Value::Null).is_none());
+    }
+
+    #[test]
+    fn a_providers_model_has_every_field_pi_reads() {
+        // From dino's Ollama list for qwen3:4b: its window and thinking, no vision, no output limit.
+        let info = ProviderModel { id: "qwen3:4b".into(), name: "qwen3:4b".into(), provider: "ollama".into(), context: Some(262_144), reasoning: Some(true), local: true, free: true, ..Default::default() };
+        let m = pi_model("qwen3:4b", Some(&info));
+        assert_eq!(m["input"], serde_json::json!(["text"]));
+        assert_eq!(m["reasoning"], true);
+        assert_eq!(m["contextWindow"], 262_144);
+        assert_eq!(m["maxTokens"], PI_DEFAULT_MAX_TOKENS);
+        assert_eq!(m["cost"]["input"], 0.0);
+        // Without the provider's list, Pi's own assumptions, never a missing field.
+        let bare = pi_model("m", None);
+        for field in ["id", "name", "input", "reasoning", "cost", "contextWindow", "maxTokens"] {
+            assert!(!bare[field].is_null(), "{field}");
+        }
+        let vision = ProviderModel { vision: true, max_output: Some(8192), price_in: Some(1.5), ..info };
+        let m = pi_model("qwen3:4b", Some(&vision));
+        assert_eq!(m["input"], serde_json::json!(["text", "image"]));
+        assert_eq!((m["maxTokens"].as_u64(), m["cost"]["input"].as_f64()), (Some(8192), Some(1.5)));
     }
 
     #[test]
