@@ -46,6 +46,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var label: String?
     /// Kept at the top of its group and out of dino's own archiving; nil from an older dinod.
     var pinned: Bool?
+    /// A shell's "Keep as terminal": agents typed into it don't report to dino; nil from an older dinod.
+    var keep_terminal: Bool?
     /// Its task list, subagents and background commands, from its hooks; nil from an older dinod.
     var tasks: SessionTasks?
     /// The session whose agent started it, and the one that last messaged it (through `dino mcp`).

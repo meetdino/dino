@@ -63,6 +63,10 @@ extension DinoConnection {
         _ = try send(["type": "pin", "id": id, "pinned": pinned])
     }
 
+    func keepTerminal(_ id: String, _ on: Bool) throws {
+        _ = try send(["type": "keep_terminal", "id": id, "on": on])
+    }
+
     func archive(_ id: String) throws {
         _ = try send(["type": "archive", "id": id])
     }
@@ -130,6 +134,14 @@ extension DinoModel {
             sessions[i].pinned = pinned
         }
         lifecycle { try $0.pin(id, pinned) }
+    }
+
+    func keepTerminal(_ id: String, _ on: Bool) {
+        if let i = sessions.firstIndex(where: { $0.id == id }), sessions[i].keep_terminal != on {
+            // Show it now; the next poll agrees.
+            sessions[i].keep_terminal = on
+        }
+        lifecycle { try $0.keepTerminal(id, on) }
     }
 
     func archive(_ id: String) {

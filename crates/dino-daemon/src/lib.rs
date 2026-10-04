@@ -792,6 +792,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => {
                     d.proxy.set_budget(Settings::load().policies.session_token_budget);
                     schedule::keep_awake(d);
+                    sync_all_shell_agents(d);
                     sync::kick();
                     Response::Ok
                 }
@@ -925,6 +926,24 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::SetControls { id, controls } => match set_controls(d, &id, controls) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::KeepTerminal { id, on } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                Some(s) if s.agent_id == "shell" => {
+                    let mark = keep_terminal_mark(&id);
+                    let done = if on {
+                        private_dir(&session_files(&id)).and_then(|_| write_private(&mark, b""))
+                    } else {
+                        std::fs::remove_file(&mark).or_else(|e| if e.kind() == io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+                    };
+                    match done {
+                        Ok(()) => {
+                            sync_shell_agents(d, &s, &Settings::load());
+                            Response::Ok
+                        }
+                        Err(e) => Response::Error { message: e.to_string() },
+                    }
+                }
+                _ => Response::Error { message: format!("no shell {id}") },
             },
             Request::Kill { id } => {
                 if kill(d, &id) {
@@ -1402,7 +1421,55 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         servers: Mutex::new(vec![]),
         route,
     }));
+    let session = sessions.last().cloned();
+    drop(sessions);
+    if let Some(s) = session {
+        sync_shell_agents(d, &s, &Settings::load());
+    }
     Ok(id)
+}
+
+/// The variable a dino shell's integration reads for an agent's dino settings (`dino-agents.*`).
+const SHELL_AGENT_ENV: &str = "DINO_CLAUDE_SETTINGS";
+
+/// Claude's settings for agents typed into shell `id`: hooks that report to this shell's session.
+fn shell_agent_settings(id: &str) -> PathBuf {
+    session_files(id).join("claude-hooks.json")
+}
+
+/// "Keep as terminal" for shell `id`: agents typed there stay plain processes.
+fn keep_terminal_mark(id: &str) -> PathBuf {
+    session_files(id).join("keep-terminal")
+}
+
+fn keeps_terminal(id: &str) -> bool {
+    keep_terminal_mark(id).exists()
+}
+
+/// Write or remove shell `s`'s agent settings, as the settings and its "Keep as terminal" say. The
+/// hook URL carries the proxy's secret: the file is this user's alone.
+fn sync_shell_agents(d: &Daemon, s: &Session, settings: &Settings) {
+    if s.agent_id != "shell" || s.host.is_some() {
+        return;
+    }
+    let path = shell_agent_settings(&s.id);
+    let on = settings.machine.shell_integration && settings.machine.shell_agents && !keeps_terminal(&s.id);
+    if !on {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let json = dino_core::claude_hook_settings(&d.proxy.base_url(&s.id, "hook"), None);
+    if let Err(e) = private_dir(&session_files(&s.id)).and_then(|_| write_private(&path, json.as_bytes())) {
+        eprintln!("dinod: shell {}: couldn't write its agent settings ({e})", s.id);
+    }
+}
+
+/// Every shell's agent settings, after the settings changed.
+fn sync_all_shell_agents(d: &Daemon) {
+    let settings = Settings::load();
+    for s in d.sessions.lock().unwrap().clone() {
+        sync_shell_agents(d, &s, &settings);
+    }
 }
 
 /// Session `id` on this Mac: the agent itself, wired to dino's proxy and hooks, in `cwd`.
@@ -1476,6 +1543,9 @@ fn local_spec(
     }
     if l.agent_id == "shell" && settings.machine.shell_integration {
         shell::wire(&l.program, &mut env, &mut wired_args);
+        // Where the shell integration finds the settings that make an agent typed here report to
+        // this session (see `sync_shell_agents`); it reads the file each time, so it can come and go.
+        env.insert(SHELL_AGENT_ENV.into(), shell_agent_settings(id).display().to_string());
     }
 
     // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
@@ -1774,7 +1844,10 @@ fn stats(d: &Daemon, s: &Session) -> SessionStats {
         return d.proxy.stats.session(&s.id);
     }
     if let Some(Activity::NeedsPermission(msg)) = &st.activity {
-        if !st.tracked && s.agent_id == "claude" && question_dismissed(s, msg, quiet) {
+        // Claude: a session of its own, or typed into a shell whose hooks report here (only
+        // Claude's do, see dino-agents.zsh).
+        let claude = s.agent_id == "claude" || (s.agent_id == "shell" && st.hooked);
+        if !st.tracked && claude && question_dismissed(s, msg, quiet) {
             d.proxy.stats.end_question(&s.id, msg);
             return d.proxy.stats.session(&s.id);
         }
@@ -1951,6 +2024,7 @@ fn state(d: &Daemon) -> Response {
                 messaged_by: s.messaged_by.lock().unwrap().clone(),
                 label,
                 pinned: s.pinned.load(Ordering::Relaxed),
+                keep_terminal: s.agent_id == "shell" && keeps_terminal(&s.id),
                 revealed: Some(s.revealed.load(Ordering::Relaxed)).filter(|&t| t > 0),
                 tasks,
                 inside,
@@ -2414,6 +2488,10 @@ fn watch_shells(d: &Daemon) {
                 // So does a tmux client (its server's title, or the command line).
                 if i.found.is_some() || i.tmux.is_some() {
                     *s.pane.shared.title.lock().unwrap() = i.before.clone().flatten();
+                }
+                // Back at the prompt: what an agent's hooks said of it went with it.
+                if i.fg.is_some() {
+                    d.proxy.stats.agent_left(&s.id);
                 }
                 // Taken at the prompt: an agent can retitle before a poll sees it start.
                 *i = Inside { before: Some(s.pane.title()), ..Inside::default() };

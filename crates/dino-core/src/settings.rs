@@ -184,6 +184,9 @@ pub struct Machine {
     pub keep_awake: bool,
     /// Shells dino starts mark their prompts and report their folder, as in Ghostty (new shells only).
     pub shell_integration: bool,
+    /// An agent typed into a dino shell (`claude`) reports to dino from its start, as a session dino
+    /// started does: its turns, questions and tasks. Needs the shell integration.
+    pub shell_agents: bool,
     /// Keep agents running with the lid closed. Off unless turned on, and for this Mac only.
     pub lid: Lid,
     /// Where Claude Code gets the Claude subscription token (`crate::claude_token`).
@@ -213,7 +216,7 @@ impl Default for ClaudeTokenUse {
 
 impl Default for Machine {
     fn default() -> Self {
-        Self { onboarded: false, keep_awake: false, shell_integration: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default(), check_updates: true }
+        Self { onboarded: false, keep_awake: false, shell_integration: true, shell_agents: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default(), check_updates: true }
     }
 }
 
