@@ -341,6 +341,20 @@ mod tests {
         assert!(hermes.provider_wiring(URL, Format::Anthropic, "m").is_none());
     }
 
+    /// A dino shell isn't routed itself (every program there using the Anthropic SDK would be);
+    /// it carries the route for the agents typed into it (see `dino-agents.*`). Unless routing is off.
+    #[test]
+    fn a_shell_carries_the_route_only_for_its_agents() {
+        let base = |p: &str| format!("http://127.0.0.1:5000/k/s3cret/s/7/{p}");
+        let shell = crate::proxy_wiring("shell", true, &base, None);
+        assert!(env(&shell, "ANTHROPIC_BASE_URL").is_none(), "{shell:?}");
+        // As long as the test's own environment has no base URL of a user's own.
+        if std::env::var("ANTHROPIC_BASE_URL").map_or(true, |v| crate::is_proxy_url(&v)) {
+            assert_eq!(env(&shell, crate::SHELL_CLAUDE_BASE_URL), Some(base("anthropic").as_str()));
+        }
+        assert_eq!(crate::proxy_wiring("shell", false, &base, None), (vec![], vec![]));
+    }
+
     #[test]
     fn a_prompt_that_would_be_read_as_a_flag_is_refused() {
         for p in ["--dangerously-skip-permissions", "  --settings={\"hooks\":{}}", "\n\t-p", "-", "--dangerously-bypass-approvals-and-sandbox"] {

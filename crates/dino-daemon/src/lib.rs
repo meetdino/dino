@@ -260,6 +260,15 @@ pub fn run() -> anyhow::Result<()> {
     // other agents included: only the key store's goes out, and only to Claude Code.
     // SAFETY: as above.
     unsafe { std::env::remove_var(claude_token::KEY) };
+    // dino's own wiring, inherited when dinod was started from a dino session (a Claude's Bash tool
+    // there): another session's, maybe another dinod's. Shells don't override it, so it would send
+    // their programs, and the agents typed there, to that session.
+    for var in ["ANTHROPIC_BASE_URL", dino_core::SHELL_CLAUDE_BASE_URL] {
+        if std::env::var(var).is_ok_and(|v| dino_core::is_proxy_url(&v)) {
+            // SAFETY: as above.
+            unsafe { std::env::remove_var(var) };
+        }
+    }
     let path = ipc::socket_path();
     // Held while dinod runs: no second one takes the socket over.
     let _lock = claim_socket(&path)?;
@@ -1565,6 +1574,9 @@ fn local_spec(
         // Where the shell integration finds the settings that make an agent typed here report to
         // this session (see `sync_shell_agents`); it reads the file each time, so it can come and go.
         env.insert(SHELL_AGENT_ENV.into(), shell_agent_settings(id).display().to_string());
+    } else {
+        // Nothing there to hand it to an agent.
+        env.remove(dino_core::SHELL_CLAUDE_BASE_URL);
     }
 
     // Resume the agent's own conversation when we know it; otherwise start one we can resume later.
