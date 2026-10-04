@@ -64,6 +64,32 @@ pub struct Worktree {
     /// The agent that made it, when its agent says so (Claude's subagent hooks).
     #[serde(default)]
     pub owner: Option<Owner>,
+    /// Who made it, by where it is: "dino", "claude" (Claude Code's `.claude/worktrees`),
+    /// "codex"; None when there's no telling (made by hand or another tool).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_by: Option<String>,
+    /// Programs working in it right now (their working directory is inside it), by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<String>,
+    /// Something is working in it: a program (`users`), a subagent, or a change in the last
+    /// `RECENTLY` seconds. Clean Up leaves it alone.
+    #[serde(default)]
+    pub in_use: bool,
+}
+
+/// A worktree changed this many seconds ago or less is still being worked on: an agent between
+/// commands has no program in it, but it just edited something.
+pub const RECENTLY: u64 = 30 * 60;
+
+/// Changed within `RECENTLY` of `now` (seconds since the epoch).
+pub fn recently(changed: Option<u64>, now: u64) -> bool {
+    changed.is_some_and(|t| now.saturating_sub(t) <= RECENTLY)
+}
+
+/// When something last changed in `dir` (see `Summary::changed`).
+pub fn last_changed(dir: &Path) -> Option<u64> {
+    let status = git(dir, &["status", "--porcelain", "-uall"]).ok()?;
+    last_change(dir, &status.lines().filter(|l| l.len() > 3).collect::<Vec<_>>())
 }
 
 /// Who made a worktree: a subagent of a session.
@@ -91,6 +117,16 @@ pub struct Summary {
     /// "in_progress" (uncommitted work), "ready" (committed, not merged), "merged" (its changes
     /// are on the base branch) or "empty" (nothing done yet).
     pub state: String,
+    /// Files with uncommitted changes, new files included.
+    #[serde(default)]
+    pub uncommitted: u32,
+    /// Commits on no remote and not on the base branch: lost if its branch is deleted.
+    #[serde(default)]
+    pub unpushed: u32,
+    /// When something last changed in it (a file edited, a commit, a checkout), in seconds since
+    /// the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<u64>,
 }
 
 /// A branch name for people: `worktree-agent-a367461d…` reads "Subagent a367461", `dino/fix-x` "fix-x".
@@ -168,9 +204,58 @@ pub fn summary(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<S
         added += untracked_lines(&dir.join(path.trim_matches('"')));
     }
     let label = h.subject.clone().filter(|s| !s.is_empty()).or_else(|| branch.map(readable_branch)).unwrap_or_else(|| base_name(dir));
-    let summary = Summary { label, added, removed, dirty, ahead: h.ahead, state: state(dirty, h.ahead, h.had_commits, h.same_as_base).into() };
+    let entries: Vec<&str> = status.lines().filter(|l| l.len() > 3).collect();
+    // With no commits of its own, every commit it has is on the base branch already. Not from
+    // history: a push leaves HEAD and the base where they were.
+    let unpushed = if h.ahead == 0 { 0 } else { unpushed(dir, base) };
+    let summary = Summary {
+        label,
+        added,
+        removed,
+        dirty,
+        ahead: h.ahead,
+        state: state(dirty, h.ahead, h.had_commits, h.same_as_base).into(),
+        uncommitted: entries.len() as u32,
+        unpushed,
+        changed: last_change(dir, &entries),
+    };
     HISTORY.lock().unwrap().get_or_insert_default().insert(key, h);
     Ok(summary)
+}
+
+/// Commits at `dir`'s HEAD on no remote and not on `base`.
+fn unpushed(dir: &Path, base: &str) -> u32 {
+    git(dir, &["rev-list", "--count", "HEAD", "--not", "--remotes", base]).ok().and_then(|n| n.trim().parse().ok()).unwrap_or(0)
+}
+
+/// The newest of: its uncommitted files (`entries`, as `git status --porcelain` lists them) and
+/// its HEAD's reflog (commits, checkouts, resets). Read from the files, no git run.
+fn last_change(dir: &Path, entries: &[&str]) -> Option<u64> {
+    let modified = |p: &Path| std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok();
+    // A worktree's `.git` is a file naming its git dir; the main checkout's is the dir itself.
+    let git_dir = match std::fs::read_to_string(dir.join(".git")) {
+        Ok(s) => s.trim().strip_prefix("gitdir: ").map(|g| dir.join(g)),
+        Err(_) => Some(dir.join(".git")),
+    };
+    // A few hundred is plenty to see it's being worked on; a generated tree may list thousands.
+    let files = entries.iter().take(300).filter_map(|l| {
+        let path = l[3..].rsplit(" -> ").next()?.trim_matches('"');
+        modified(&dir.join(path))
+    });
+    let reflog = git_dir.and_then(|g| modified(&g.join("logs/HEAD")));
+    files.chain(reflog).max().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs())
+}
+
+/// Who made the worktree at `path`, by where it is: Claude Code and Codex keep theirs in a
+/// folder of their own. dino's are known to the daemon instead.
+pub fn made_by_path(path: &str) -> Option<&'static str> {
+    if path.contains("/.claude/worktrees/") {
+        Some("claude")
+    } else if path.contains("/.codex/worktrees/") {
+        Some("codex")
+    } else {
+        None
+    }
 }
 
 /// Lines in the untracked file at `file`, when it's a plain file under 1 MiB. Not through a
@@ -232,7 +317,7 @@ pub fn list(dir: &Path) -> anyhow::Result<Vec<Worktree>> {
         .filter_map(|b| {
             let path = b.lines().next()?.strip_prefix("worktree ")?.to_string();
             let branch = b.lines().find_map(|l| l.strip_prefix("branch refs/heads/")).map(String::from);
-            Some(Worktree { path, branch, dino: false, git: None, owner: None })
+            Some(Worktree { path, branch, dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false })
         })
         .collect())
 }
@@ -708,7 +793,13 @@ pub fn apply(dir: &Path, base: &str, repo: &Path) -> anyhow::Result<DiffStat> {
 /// a worktree with uncommitted work stays, and so does a branch git doesn't see merged (squashed).
 /// Says whether the branch went too.
 pub fn clean(dir: &Path) -> anyhow::Result<bool> {
-    if !git(dir, &["status", "--porcelain", "-uall"])?.trim().is_empty() {
+    clean_as(dir, false)
+}
+
+/// As `clean`; `force` removes it with uncommitted changes too, and they're lost. The branch
+/// still goes only if git sees it merged, so commits stay.
+pub fn clean_as(dir: &Path, force: bool) -> anyhow::Result<bool> {
+    if !force && !git(dir, &["status", "--porcelain", "-uall"])?.trim().is_empty() {
         anyhow::bail!("it has uncommitted changes");
     }
     let branch = git(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok().map(|b| b.trim().to_string());
@@ -716,7 +807,8 @@ pub fn clean(dir: &Path) -> anyhow::Result<bool> {
     if main == dir || std::fs::canonicalize(&main).ok() == std::fs::canonicalize(dir).ok() {
         anyhow::bail!("that's the main checkout");
     }
-    git(&main, &["worktree", "remove", &dir.to_string_lossy()])?;
+    let dir = dir.to_string_lossy();
+    git(&main, &if force { vec!["worktree", "remove", "--force", &dir] } else { vec!["worktree", "remove", &dir] })?;
     Ok(branch.is_some_and(|b| git(&main, &["branch", "-d", &b]).is_ok()))
 }
 
@@ -993,11 +1085,17 @@ mod tests {
         let b = "worktree-agent-abc1234def";
         let fresh = s(&wt, b);
         assert_eq!((fresh.label.as_str(), fresh.state.as_str(), fresh.added, fresh.dirty), ("Subagent abc1234", "empty", 0, false));
+        assert_eq!((fresh.uncommitted, fresh.unpushed), (0, 0));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert!(recently(fresh.changed, now), "just checked out: its HEAD's reflog is new");
 
         std::fs::write(wt.join("x.txt"), "x\ny\n").unwrap();
         std::fs::write(wt.join("a.txt"), "uno\n").unwrap();
         let busy = s(&wt, b);
         assert_eq!((busy.state.as_str(), busy.added, busy.removed, busy.dirty), ("in_progress", 3, 1, true));
+        assert_eq!(busy.uncommitted, 2, "an edit and a new file");
+        assert!(busy.changed.is_some_and(|t| t + 5 >= now));
+        assert!(!recently(Some(now - RECENTLY - 1), now) && recently(Some(now - 60), now) && !recently(None, now));
         assert!(git(&wt, &["diff", "--cached", "--name-only"]).unwrap().trim().is_empty(), "the index is left alone");
         assert!(git(&wt, &["status", "--porcelain"]).unwrap().contains("?? x.txt"));
         assert!(clean(&wt).is_err(), "never removes uncommitted work");
@@ -1005,6 +1103,7 @@ mod tests {
         commit(&wt, "Add x");
         let ready = s(&wt, b);
         assert_eq!((ready.label.as_str(), ready.state.as_str(), ready.ahead, ready.added), ("Add x", "ready", 1, 3));
+        assert_eq!((ready.uncommitted, ready.unpushed), (0, 1), "on no remote and not on main");
 
         // Squashed onto main: still ahead, but its changes are there.
         git(&repo, &["merge", "--squash", "-q", b]).unwrap();
@@ -1024,7 +1123,27 @@ mod tests {
         assert_eq!((merged.state.as_str(), merged.ahead, merged.label.as_str()), ("merged", 0, "two"));
         assert!(clean(&wt2).unwrap());
         assert!(git(&repo, &["branch", "--list", "two"]).unwrap().trim().is_empty());
+
+        // Forced: uncommitted work goes, an unmerged branch (and its commits) stays.
+        let wt3 = tmp.join("three");
+        git(&repo, &["worktree", "add", "-q", "-b", "three", &wt3.to_string_lossy(), "main"]).unwrap();
+        std::fs::write(wt3.join("z.txt"), "z\n").unwrap();
+        commit(&wt3, "Add z");
+        std::fs::write(wt3.join("draft.txt"), "draft\n").unwrap();
+        assert!(clean_as(&wt3, false).is_err());
+        assert!(!clean_as(&wt3, true).unwrap(), "unmerged: the branch stays");
+        assert!(!wt3.exists());
+        assert!(!git(&repo, &["branch", "--list", "three"]).unwrap().trim().is_empty());
+        assert!(clean_as(&repo, true).is_err(), "never the main checkout");
+        assert!(repo.join("a.txt").exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn makers_by_where_their_worktrees_are() {
+        assert_eq!(made_by_path("/Users/a/src/app/.claude/worktrees/fix-x"), Some("claude"));
+        assert_eq!(made_by_path("/Users/a/.codex/worktrees/1a2b/app"), Some("codex"));
+        assert_eq!(made_by_path("/Users/a/src/app-fix"), None);
     }
 
     #[test]
@@ -1047,8 +1166,8 @@ mod tests {
         let all = list(&wt).unwrap();
         let real = |p: &Path| p.canonicalize().unwrap().to_string_lossy().into_owned();
         assert_eq!(all, vec![
-            Worktree { path: real(repo), branch: Some("main".into()), dino: false, git: None, owner: None },
-            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()), dino: false, git: None, owner: None },
+            Worktree { path: real(repo), branch: Some("main".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false },
+            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false },
         ]);
 
         std::fs::write(wt.join("a.txt"), "one\ntwo\nthree\n").unwrap();

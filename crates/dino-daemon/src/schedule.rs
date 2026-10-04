@@ -211,6 +211,8 @@ fn fire(d: &Daemon, t: &ScheduledTask) -> anyhow::Result<String> {
         ..Launch::new(&l.short, split_args(&t.args), Some(dir.display().to_string()))
     };
     let id = if t.worktree { spawn_in_worktree(d, launch)? } else { spawn(d, launch)? };
+    // Started by dinod, not by a request: the tree learns of it here.
+    super::reshaped(d);
     save(d);
     if shell && !prompt.is_empty() {
         type_when_ready(d, &id, prompt);
