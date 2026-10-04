@@ -105,7 +105,7 @@ pub fn setup(id: &str) -> Setup {
         "pi" => ("https://pi.dev", Some("pi"), Some("/login")),
         "hermes" => ("https://hermes-agent.nousresearch.com/docs/", Some("hermes setup"), None),
         "codewhale" => ("https://github.com/Hmbown/CodeWhale", Some("codewhale"), Some("/provider")),
-        "opencode" => ("https://opencode.ai", None, None),
+        "opencode" => ("https://opencode.ai/docs", Some("opencode auth login"), None),
         "crush" => ("https://github.com/charmbracelet/crush", None, None),
         "aider" => ("https://aider.chat", None, None),
         "amp" => ("https://ampcode.com", None, None),
@@ -140,8 +140,29 @@ pub fn sign_in_status(id: &str, bin: &Path) -> Option<(bool, Option<String>)> {
         }
         "codex" => codex_status(&run_quietly(bin, &["login", "status"])?),
         "pi" => pi_status(bin),
+        "opencode" => opencode_status(),
         _ => None,
     }
+}
+
+/// OpenCode runs without signing in (its own free models), so only the providers it signed in to
+/// (`opencode auth login`) say anything: their names, from its `auth.json`, never what they hold.
+/// None: no verdict, since it may use keys from the environment or its free models.
+fn opencode_status() -> Option<(bool, Option<String>)> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let data = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
+    let auth: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(data.join("opencode/auth.json")).ok()?).ok()?;
+    opencode_providers(&auth)
+}
+
+fn opencode_providers(auth: &serde_json::Value) -> Option<(bool, Option<String>)> {
+    let providers: Vec<&str> = auth.as_object()?.keys().map(String::as_str).collect();
+    let how = match providers.len() {
+        0 => return None,
+        1..=2 => providers.join(", "),
+        n => format!("{n} providers"),
+    };
+    Some((true, Some(how)))
 }
 
 /// Pi has no models of its own: it's signed in once it has a provider (an account it signed in
@@ -325,6 +346,15 @@ fn scan_keys() -> Vec<KeyInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_says_which_providers_it_signed_in_to() {
+        let auth = serde_json::json!({"anthropic": {"type": "api", "key": "sk-x"}, "openrouter": {"type": "api", "key": "k"}});
+        assert_eq!(opencode_providers(&auth), Some((true, Some("anthropic, openrouter".into()))));
+        let many = serde_json::json!({"a": {}, "b": {}, "c": {}});
+        assert_eq!(opencode_providers(&many), Some((true, Some("3 providers".into()))));
+        assert_eq!(opencode_providers(&serde_json::json!({})), None, "it runs on its own free models: no verdict");
+    }
 
     #[test]
     fn pi_is_signed_in_once_it_has_a_provider() {

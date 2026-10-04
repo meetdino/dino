@@ -2,7 +2,7 @@
 
 A terminal for the agent era, on Ghostty's core. dino finds every coding agent already on your
 Mac, and runs, watches and resumes them all in one place: Claude Code, Codex, Qwen Code, Kimi Code,
-Pi, Hermes and CodeWhale, plus your shells.
+Pi, Hermes, CodeWhale and OpenCode, plus your shells.
 
 - **Finds what's already running.** Agents you started in other terminals, in tmux or in a dino
   shell show up in the sidebar with what they're doing, and you can pick any of them up in dino.

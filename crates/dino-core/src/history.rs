@@ -447,7 +447,7 @@ pub(crate) fn codex_turns(jsonl: &str) -> Vec<Turn> {
 
 /// The telling argument of a tool call: the command, the file, the pattern.
 pub(crate) fn hint(input: &Value) -> String {
-    let arg = ["command", "cmd", "file_path", "path", "pattern", "description", "url", "query", "prompt"].iter().find_map(|k| match &input[*k] {
+    let arg = ["command", "cmd", "file_path", "filePath", "path", "pattern", "description", "url", "query", "prompt"].iter().find_map(|k| match &input[*k] {
         Value::String(s) => Some(s.clone()),
         Value::Array(a) => Some(a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")),
         _ => None,

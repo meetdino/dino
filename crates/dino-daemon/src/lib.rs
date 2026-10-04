@@ -25,6 +25,7 @@ use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
 mod agentlog;
+mod agentserver;
 mod chatgpt;
 mod cloud;
 mod codex;
@@ -108,6 +109,8 @@ struct Session {
     rollout: Mutex<codex::Rollout>,
     /// The record Kimi Code and Pi write of their conversation: where their turn is.
     log: Mutex<agentlog::Log>,
+    /// Where its agent serves its own API, for agents dino follows that way (OpenCode).
+    server: Option<agentserver::Address>,
     /// A shell's: the agent someone started in it by hand.
     inside: Mutex<Inside>,
     /// Once it has ended: its last screen is on disk (see `save`).
@@ -289,7 +292,7 @@ pub fn run() -> anyhow::Result<()> {
     let daemon = new_daemon(proxy, launchers(free_tier));
     // Before sessions restart, so they get the efforts their models take.
     let mut stamps = CatalogStamps::new();
-    read_catalogs(&daemon, &mut stamps);
+    read_catalogs(&daemon, &mut stamps, true);
     restore(&daemon, saved);
     lid::start(daemon.clone());
     subtoken::start();
@@ -554,9 +557,13 @@ type CatalogStamps = HashMap<&'static str, Vec<(PathBuf, Option<SystemTime>)>>;
 
 /// Set `d.catalogs` to what each agent's own files list, for those whose files (or the agent
 /// itself) changed since `seen`.
-fn read_catalogs(d: &Daemon, seen: &mut CatalogStamps) {
+fn read_catalogs(d: &Daemon, seen: &mut CatalogStamps, starting: bool) {
     for a in dino_core::agent::all() {
         let agent = a.id();
+        // Left to the first look after (see `watch_catalogs`).
+        if starting && !a.catalog_first() {
+            continue;
+        }
         let program = d.launchers.read().unwrap().iter().find(|l| l.agent_id == agent).map(|l| l.program.clone());
         let Some(program) = program else {
             d.catalogs.write().unwrap().remove(agent);
@@ -588,7 +595,7 @@ fn read_catalogs(d: &Daemon, seen: &mut CatalogStamps) {
 fn watch_catalogs(d: &Daemon, mut seen: CatalogStamps) {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3));
-        read_catalogs(d, &mut seen);
+        read_catalogs(d, &mut seen, false);
     }
 }
 
@@ -1360,17 +1367,17 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     };
     // Ended before dinod stopped: it comes back as it was, not running, until resumed.
     let ended = restore.as_ref().filter(|r| r.ended);
-    let (spec, cwd) = match &host {
-        _ if ended.is_some() => (None, PathBuf::from(ended.map(|r| r.cwd.clone()).unwrap_or_default())),
+    let (spec, cwd, server) = match &host {
+        _ if ended.is_some() => (None, PathBuf::from(ended.map(|r| r.cwd.clone()).unwrap_or_default()), None),
         Some(host) => {
             let folder = cwd.filter(|c| !c.is_empty()).or_else(|| settings.ssh.get(host).map(|h| h.folder.clone())).filter(|f| !f.is_empty());
             let folder = folder.unwrap_or_else(|| "~".into());
             let restoring = restore.is_some();
-            (Some(remote_spec(d, &settings, &l, host, &folder, &id, &mut agent_session, restoring, &controls, &args, prompt)?), PathBuf::from(folder))
+            (Some(remote_spec(d, &settings, &l, host, &folder, &id, &mut agent_session, restoring, &controls, &args, prompt)?), PathBuf::from(folder), None)
         }
         None => {
-            let (spec, cwd) = local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.is_some(), &controls, &args, prompt, route.as_ref());
-            (Some(spec), cwd)
+            let (spec, cwd, server) = local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.is_some(), &controls, &args, prompt, route.as_ref());
+            (Some(spec), cwd, server)
         }
     };
 
@@ -1474,6 +1481,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         host,
         rollout: Mutex::default(),
         log: Mutex::default(),
+        server,
         inside: Mutex::default(),
         screen_saved: AtomicBool::new(false),
         live_saved: Mutex::default(),
@@ -1484,6 +1492,9 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     drop(sessions);
     if let Some(s) = session {
         sync_shell_agents(d, &s, &Settings::load());
+        if s.server.is_some() && !s.pane.is_exited() {
+            agentserver::follow(d.proxy.stats.clone(), s);
+        }
     }
     Ok(id)
 }
@@ -1531,7 +1542,8 @@ fn sync_all_shell_agents(d: &Daemon) {
     }
 }
 
-/// Session `id` on this Mac: the agent itself, wired to dino's proxy and hooks, in `cwd`.
+/// Session `id` on this Mac: the agent itself, wired to dino's proxy and hooks, in `cwd`; and
+/// where it serves its own API, for an agent dino follows that way.
 #[allow(clippy::too_many_arguments)]
 fn local_spec(
     d: &Daemon,
@@ -1545,7 +1557,7 @@ fn local_spec(
     args: &[String],
     prompt: Option<String>,
     route: Option<&ProviderRoute>,
-) -> (SpawnSpec, PathBuf) {
+) -> (SpawnSpec, PathBuf, Option<agentserver::Address>) {
     let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
     // Claude reports its context window to its statusline; wrap the user's, if they have one.
     let adapter = agent(&l.agent_id);
@@ -1589,6 +1601,14 @@ fn local_spec(
     if keyed {
         env.insert(dino_core::agent::KEY_ENV.into(), d.proxy.secret().into());
     }
+    // An agent dino follows through its own server serves on a port of dino's choosing, locked
+    // with a password of its own; its password goes in its environment, never its command line.
+    let server = adapter.filter(|a| a.status_source() == StatusSource::Server).and_then(|_| agentserver::address());
+    if let (Some(a), Some(addr)) = (adapter, &server) {
+        let (senv, sargs) = a.serve(addr.port, &addr.password);
+        env.extend(senv);
+        wired_args.extend(sargs);
+    }
     // Where `dino statusline` reports, read from its environment rather than its command line.
     if wired_args.iter().any(|a| a.contains(r#""statusLine""#)) {
         env.insert(dino_core::statusline::HOOK_ENV.into(), d.proxy.base_url(id, "hook"));
@@ -1622,7 +1642,7 @@ fn local_spec(
     wired_args.extend(args.iter().cloned());
     wired_args.extend(prompt.map(|p| prompt_args(&l.agent_id, p)).unwrap_or_default());
     private_settings(id, &mut wired_args);
-    (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd)
+    (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd, server)
 }
 
 /// Where a session's private files go: inside dino's own folder, which only its user can open.
@@ -2063,7 +2083,7 @@ fn state(d: &Daemon) -> Response {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 agent_id: s.agent_id.clone(),
-                title: label.clone().or_else(|| s.pane.title()),
+                title: label.clone().or_else(|| s.pane.title().and_then(|t| agent(&s.agent_id).map_or(Some(t.clone()), |a| a.shown_title(&t)))),
                 exited: s.pane.is_exited(),
                 exit_code: s.pane.exit_code(),
                 output_ms_ago: s.last_output.lock().unwrap().map(|t| t.elapsed().as_millis() as u64),

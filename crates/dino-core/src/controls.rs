@@ -263,7 +263,7 @@ mod tests {
     fn modes_in_the_agents_own_words() {
         assert_eq!(k("claude").mode_labels.get("ask").map(String::as_str), Some("Manual"));
         assert!(!knobs("claude", false, None).mode_labels.contains_key("bypass"), "only modes it offers");
-        for agent in ["claude", "codex", "kimi", "qwen", "hermes", "codewhale"] {
+        for agent in ["claude", "codex", "kimi", "qwen", "hermes", "codewhale", "opencode"] {
             let k = k(agent);
             assert!(k.mode_labels.keys().all(|m| k.modes.contains(m)), "{agent}");
         }
