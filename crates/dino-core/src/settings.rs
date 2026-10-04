@@ -745,9 +745,11 @@ mod tests {
         assert!(!status.iter().any(|k| k.name.starts_with(ACCOUNT_TOKEN_PREFIX)), "the dino account's sign-in isn't a key");
         assert!(set_key("bad name", Some("x")).is_err());
         assert!(set_key("DINO_TEST_A_KEY", Some("a\nb")).is_err());
-        // DINO_HOME is the whole test process's: another test may be writing in it right now
-        // (a lock file, an agent's extension), so the folder may not be empty to remove yet.
-        let _ = std::fs::remove_dir_all(dir);
+        // DINO_HOME is the whole test process's: other tests are using the folder right now (a lock
+        // file, an agent's extension), so only this test's own files go, never the folder.
+        for f in ["config", "settings.toml", "keys"] {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
     }
 
     /// A fallback chain saves and loads; what a newer dino added to it comes back as it went.
