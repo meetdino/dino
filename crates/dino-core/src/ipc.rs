@@ -189,6 +189,10 @@ pub enum Request {
     /// What a shell's last command printed and its exit code, from its shell integration's
     /// marks: the context `dino ai` hands an agent.
     ShellOutput { id: String },
+    /// What session `id`'s processes cost the Mac now: its program and everything under it.
+    /// dinod measures only when asked, so a client asks while it shows the answer (a row's hover
+    /// card, every couple of seconds) and stops when it's gone. Answers `SessionCost`.
+    SessionCost { id: String },
     /// Apply this member's changes to the user's checkout and close its group.
     Keep { session: String },
     /// Close a fan-out group: stop its agents, remove their worktrees and branches.
@@ -361,6 +365,7 @@ pub enum Response {
     ComputerUse { info: ComputerUseInfo },
     Created { id: String },
     ShellOutput { output: Option<String>, exit: Option<i32> },
+    SessionCost { cost: SessionCost },
     Found { sessions: Vec<crate::found::FoundSession> },
     /// Shown in the tmux client on `tty`; `session` is the dino tab that client runs in, if any.
     /// Neither when no client is attached.
@@ -438,6 +443,48 @@ pub struct Deletion {
     /// The worktree stays because another session is in it: that session's name.
     #[serde(default)]
     pub kept_for: Option<String>,
+}
+
+/// What a session's processes cost the Mac (`Request::SessionCost`), counted as Activity Monitor
+/// counts them: memory is the physical footprint, CPU is per core (100 is one core).
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct SessionCost {
+    /// Its program's and every process under it, together.
+    #[serde(default)]
+    pub mem_bytes: u64,
+    /// CPU since the last time anyone asked (a moment ago when nobody has).
+    #[serde(default)]
+    pub cpu_pct: f64,
+    /// CPU over the last `avg_secs` seconds, children that ended in that time included.
+    #[serde(default)]
+    pub cpu_avg_pct: f64,
+    #[serde(default)]
+    pub avg_secs: u32,
+    /// How many processes that is.
+    #[serde(default)]
+    pub processes: u32,
+    /// The process under it using the most memory, on its own (none when it runs nothing).
+    #[serde(default)]
+    pub top_child: Option<ProcessCost>,
+    /// Fields from a newer dinod, kept as they came.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One process of a session's (`SessionCost::top_child`).
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct ProcessCost {
+    /// Its name, as Activity Monitor shows it ("rustc", "node").
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub mem_bytes: u64,
+    #[serde(default)]
+    pub cpu_pct: f64,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The dino account on this Mac and where settings sync stands.
@@ -1003,6 +1050,22 @@ pub struct ModelRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_cost_takes_older_and_newer_dinods() {
+        // An older dinod's answer, missing fields: defaults.
+        let old: Response = serde_json::from_str(r#"{"type":"session_cost","cost":{"mem_bytes":5}}"#).unwrap();
+        let Response::SessionCost { cost } = old else { panic!() };
+        assert_eq!((cost.mem_bytes, cost.cpu_pct, cost.top_child), (5, 0.0, None));
+        // A newer one's fields come back out as they went in.
+        let json = r#"{"mem_bytes":1,"cpu_pct":2.5,"cpu_avg_pct":1.0,"avg_secs":30,"processes":3,"top_child":{"name":"rustc","pid":9,"mem_bytes":4,"cpu_pct":85.0,"gpu":7},"energy":12}"#;
+        let cost: SessionCost = serde_json::from_str(json).unwrap();
+        assert_eq!(cost.top_child.as_ref().unwrap().name, "rustc");
+        let back: serde_json::Value = serde_json::to_value(&cost).unwrap();
+        assert_eq!(back, serde_json::from_str::<serde_json::Value>(json).unwrap());
+        let req: Request = serde_json::from_str(r#"{"type":"session_cost","id":"4"}"#).unwrap();
+        assert!(matches!(req, Request::SessionCost { id } if id == "4"));
+    }
 
     #[test]
     fn frames_round_trip_up_to_the_limit() {
