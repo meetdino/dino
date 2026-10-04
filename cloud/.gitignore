@@ -1,0 +1,6 @@
+target/
+.env
+*.db
+.cargo/config.toml
+.vercel
+.env*
