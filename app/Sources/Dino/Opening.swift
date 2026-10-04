@@ -21,7 +21,7 @@ enum Opening {
         return apps.allSatisfy { $0.flatMap { Bundle(url: $0)?.bundleIdentifier } == me }
     }
 
-    /// Settings → General's "Make dino the Default Terminal". LaunchServices' own calls, as iTerm2
+    /// Settings → Terminal's "Make dino the Default Terminal". LaunchServices' own calls, as iTerm2
     /// makes them: NSWorkspace's replacement waits on a confirmation macOS doesn't always show for
     /// an app that isn't notarized, and never returns. False if LaunchServices refused one; macOS
     /// applies them up to a minute or so later.

@@ -89,7 +89,9 @@ pub(crate) async fn keep_fresh(st: AppState, path: PathBuf) {
     let (listed, featured) = cached(&path);
     st.router.set_probes(probes(&listed, &load(&path), &featured));
     loop {
-        let key = st.keys.read().unwrap().get("NVIDIA_API_KEY").cloned();
+        // Only while the free tier is on (Settings → Experimental).
+        let on = st.free_models.load(std::sync::atomic::Ordering::Relaxed);
+        let key = st.keys.read().unwrap().get("NVIDIA_API_KEY").cloned().filter(|_| on);
         let done = match key {
             Some(key) => refresh(&st, &key, &path).await,
             None => false,

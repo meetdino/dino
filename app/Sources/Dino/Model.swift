@@ -673,7 +673,7 @@ final class DinoModel: ObservableObject {
     @discardableResult
     func newShell() -> Bool {
         guard connection != nil, let l = launchers.first(where: { $0.short == "shell" }) else { return false }
-        // Settings → General → tmux: a new tab goes straight into that tmux session (kept here
+        // Settings → tmux: a new tab goes straight into that tmux session (kept here
         // too, so the first tab at launch does, before dinod has answered).
         let tabs = UserDefaults.standard.string(forKey: Self.tmuxTabsKey) ?? ""
         let line = DinoSettings.Tmux.valid(tabs) ? "tmux new -A -s \(tabs)" : nil
@@ -683,7 +683,7 @@ final class DinoModel: ObservableObject {
 
     static let tmuxTabsKey = "tmux.newTabs"
 
-    /// What Settings → General → tmux says, as dinod last had it.
+    /// What Settings → tmux says, as dinod last had it.
     private func noteTmuxSettings(_ t: DinoSettings.Tmux?) {
         let t = t ?? .defaults
         if UserDefaults.standard.string(forKey: Self.tmuxTabsKey) != t.new_tabs {
@@ -802,7 +802,7 @@ final class DinoModel: ObservableObject {
     }
 
     var pendingSelect: String?
-    /// One of Settings → General → tmux's options is on (then dino stops suggesting them).
+    /// One of Settings → tmux's options is on (then dino stops suggesting them).
     @Published var tmuxOptionsOn = false
     /// Per shell running tmux: the newest of its bells and notifications seen (Tabs.swift).
     @Published var tmuxSeen: [String: UInt64] = [:]

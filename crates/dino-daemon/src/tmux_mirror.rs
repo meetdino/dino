@@ -1,4 +1,4 @@
-//! "Show my agents in tmux" (Settings → General → tmux): dino's agents as windows in the user's
+//! "Show my agents in tmux" (Settings → tmux): dino's agents as windows in the user's
 //! own tmux, each running `dino attach`, so `tmux attach` from anywhere reaches them.
 //!
 //! dinod keeps owning the agents: a window is only a view. Closing it, or the whole server, leaves

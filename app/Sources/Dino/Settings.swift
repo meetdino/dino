@@ -67,6 +67,9 @@ struct DinoSettings: Codable, Equatable {
     var terminal: Terminal?
     /// For people who live in tmux; nil from an older dinod.
     var tmux: Tmux?
+    /// Features being tried out, by name, each a switch; nil from an older dinod. A map, so one
+    /// this app doesn't know yet goes back to dinod as it came.
+    var experimental: [String: Bool]?
 
     struct Tmux: Codable, Equatable {
         /// dino's agents as windows in your tmux, each running `dino attach`.
@@ -304,19 +307,26 @@ final class SettingsStore: ObservableObject {
     }
 }
 
-/// Settings' sections, in sidebar order.
+/// Settings' sections, in sidebar order: the app and the Mac first, then what agents do.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case account, general, agents, models, workspaces, policies
+    case account, general, terminal, tmux, power, agents, models, workspaces, policies, experimental
     var id: String { rawValue }
+
+    /// The sidebar's groups, under the account row.
+    static let groups: [[SettingsPane]] = [[.general, .terminal, .tmux, .power], [.agents, .models, .workspaces, .policies], [.experimental]]
 
     var title: String {
         switch self {
         case .account: "Dino Account"
         case .general: "General"
+        case .terminal: "Terminal"
+        case .tmux: "tmux"
+        case .power: "Power"
         case .agents: "Agents"
         case .models: "Models & Providers"
         case .workspaces: "Workspaces"
         case .policies: "Policies"
+        case .experimental: "Experimental"
         }
     }
 
@@ -324,10 +334,14 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .account: "person.crop.circle.fill"
         case .general: "gearshape.fill"
+        case .terminal: "terminal.fill"
+        case .tmux: "rectangle.split.3x1.fill"
+        case .power: "bolt.fill"
         case .agents: "cpu.fill"
         case .models: "cube.fill"
         case .workspaces: "folder.fill"
         case .policies: "checkmark.shield.fill"
+        case .experimental: "flask.fill"
         }
     }
 
@@ -335,11 +349,20 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .account: .blue
         case .general: .gray
+        case .terminal: Color(white: 0.35)
+        case .tmux: .green
+        case .power: .orange
         case .agents: .purple
         case .models: .pink
         case .workspaces: .teal
         case .policies: .indigo
+        case .experimental: .brown
         }
+    }
+
+    /// Open Settings at this pane next time it shows.
+    func select() {
+        UserDefaults.standard.set(rawValue, forKey: "settingsTab")
     }
 
     /// The parts a pane is split into, shown as tabs at its top; none for a single-part pane.
@@ -379,7 +402,7 @@ enum SettingsPart: String, Identifiable {
 
     /// Open Settings at this part next time it shows.
     func select() {
-        UserDefaults.standard.set(pane.rawValue, forKey: "settingsTab")
+        pane.select()
         UserDefaults.standard.set(rawValue, forKey: Self.key(pane))
     }
 }
@@ -398,13 +421,15 @@ struct SettingsView: View {
             List(selection: Binding(get: { pane }, set: { if let p = $0 { pane = p } })) {
                 AccountRow().tag(SettingsPane.account)
                     .padding(.vertical, 4)
-                Section {
-                    ForEach(SettingsPane.allCases.filter { $0 != .account }) { p in
-                        HStack(spacing: 8) {
-                            SettingsIcon(pane: p, size: 22)
-                            Text(p.title)
+                ForEach(SettingsPane.groups, id: \.self) { group in
+                    Section {
+                        ForEach(group) { p in
+                            HStack(spacing: 8) {
+                                SettingsIcon(pane: p, size: 22)
+                                Text(p.title)
+                            }
+                            .tag(p)
                         }
-                        .tag(p)
                     }
                 }
             }
@@ -416,14 +441,19 @@ struct SettingsView: View {
                 switch pane {
                 case .account: AccountPane()
                 case .general: GeneralPane()
+                case .terminal: TerminalSettingsPane()
+                case .tmux: Form { TmuxSection() }.formStyle(.grouped)
+                case .power: PowerPane()
                 case .agents: AgentsPane()
                 case .models, .workspaces: PartedPane(pane: pane)
                 case .policies: PoliciesPane()
+                case .experimental: ExperimentalPane()
                 }
                 StoreError()
             }
             .navigationTitle(pane.title)
         }
+        .modifier(TerminalChoicesSync())
         .environmentObject(store)
         // Resizable: the model list and the storage list use the room.
         .frame(minWidth: 715, idealWidth: 820, minHeight: 470, idealHeight: 620)
@@ -543,10 +573,64 @@ private struct StoreError: View {
     }
 }
 
-struct GeneralPane: View {
+/// The terminal's choices, which dinod keeps too so they sync to your other Macs. Watched for the
+/// whole window: they're split between General and Terminal.
+private struct TerminalChoicesSync: ViewModifier {
     @EnvironmentObject var store: SettingsStore
     @AppStorage(QuitChoice.key) private var quitChoice = ""
     @AppStorage(StartWith.key) private var startWith = StartWith.last.rawValue
+    @AppStorage(QuickTerminal.Key.storageKey) private var quickKey = QuickTerminal.Key.commandGrave.rawValue
+    @AppStorage(QuickTerminal.autohideKey) private var quickAutohide = true
+    @AppStorage(Appearance.key) private var appearance = Appearance.system.rawValue
+
+    func body(content: Content) -> some View {
+        content.onChange(of: DinoSettings.Terminal(start_with: startWith, quick_key: quickKey, quick_autohide: quickAutohide, on_quit: quitChoice, appearance: appearance)) { _, t in
+            if store.settings?.terminal != t { store.update { $0.terminal = t } }
+        }
+    }
+}
+
+/// Settings → General: how dino starts and quits, updates, and where its files are.
+private struct GeneralPane: View {
+    @AppStorage(QuitChoice.key) private var quitChoice = ""
+    @AppStorage(StartWith.key) private var startWith = StartWith.last.rawValue
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("When dino opens", selection: $startWith) {
+                    Text("Your last session").tag(StartWith.last.rawValue)
+                    Text("A new shell").tag(StartWith.shell.rawValue)
+                }
+                Picker("When you quit with agents running", selection: $quitChoice) {
+                    Text("Ask").tag("")
+                    Text("Keep them running").tag(QuitChoice.keep.rawValue)
+                    Text("Stop them").tag(QuitChoice.stop.rawValue)
+                }
+            } footer: {
+                Footnote("With no session to come back to, dino opens a shell; ⌘T opens another where you are. Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
+            }
+            UpdatesSection()
+            Section {
+                LabeledContent("Settings and keys") {
+                    HStack {
+                        Text(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: DinoEnvironment.home)
+                        }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// Settings → Terminal: how it looks, the shell, the quick terminal, and opening from other apps.
+private struct TerminalSettingsPane: View {
+    @EnvironmentObject var store: SettingsStore
     @AppStorage(QuickTerminal.Key.storageKey) private var quickKey = QuickTerminal.Key.commandGrave.rawValue
     @AppStorage(QuickTerminal.autohideKey) private var quickAutohide = true
     @AppStorage(Appearance.key) private var appearance = Appearance.system.rawValue
@@ -554,36 +638,12 @@ struct GeneralPane: View {
     @State private var isDefault = false
     @State private var makingDefault = false
 
-    /// A section asked for when Settings opens ("tmux", from the tab strip's suggestion): shown
-    /// at once rather than below the fold.
-    static let scrollKey = "settings.general.scrollTo"
-
     var body: some View {
-        ScrollViewReader { proxy in
         Form {
-            Section {
-                Picker("When you quit with agents running", selection: $quitChoice) {
-                    Text("Ask").tag("")
-                    Text("Keep them running").tag(QuitChoice.keep.rawValue)
-                    Text("Stop them").tag(QuitChoice.stop.rawValue)
-                }
-            } footer: {
-                Footnote("Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
-            }
             Section {
                 Picker("Appearance", selection: Binding(get: { appearance }, set: { (Appearance(rawValue: $0) ?? .system).choose() })) {
                     ForEach(Appearance.allCases) { Text($0.label).tag($0.rawValue) }
                 }
-                Picker("When dino opens", selection: $startWith) {
-                    Text("Your last session").tag(StartWith.last.rawValue)
-                    Text("A new shell").tag(StartWith.shell.rawValue)
-                }
-                Toggle("Shell integration", isOn: Binding(
-                    get: { store.settings?.machine.shell_integration ?? true },
-                    set: { on in store.update { $0.machine.shell_integration = on } }
-                ))
-                .disabled(store.settings == nil)
-                .orgLocked("machine.shell_integration")
                 LabeledContent("Ghostty config") {
                     let files = GhosttyConfig.loaded.map { NSString(string: $0).abbreviatingWithTildeInPath }
                     Text(files.isEmpty ? "None: Ghostty's defaults" : files.joined(separator: "\n"))
@@ -600,12 +660,24 @@ struct GeneralPane: View {
                     }
                 }
             } header: {
-                Text("Terminal")
+                Text("Appearance")
             } footer: {
-                Footnote("With no session to come back to, dino opens a shell; ⌘T opens another where you are. Shell integration has zsh and bash mark each prompt and say which folder they're in, as in Ghostty, without touching your startup files (new shells). Panes take your Ghostty font, colors, cursor and keybinds, and edits as you save them; dino keeps its own shortcuts and starts each pane itself, so command and working-directory don't apply.")
+                Footnote("Panes take your Ghostty font, colors, cursor and keybinds, and edits as you save them; dino keeps its own shortcuts and starts each pane itself, so command and working-directory don't apply.")
             }
             Section {
-                Picker("Quick terminal", selection: Binding(
+                Toggle("Shell integration", isOn: Binding(
+                    get: { store.settings?.machine.shell_integration ?? true },
+                    set: { on in store.update { $0.machine.shell_integration = on } }
+                ))
+                .disabled(store.settings == nil)
+                .orgLocked("machine.shell_integration")
+            } header: {
+                Text("Shell")
+            } footer: {
+                Footnote("Shell integration has zsh and bash mark each prompt and say which folder they're in, as in Ghostty, without touching your startup files (new shells).")
+            }
+            Section {
+                Picker("Shortcut", selection: Binding(
                     get: { quickKey },
                     set: {
                         quickKey = $0
@@ -621,6 +693,12 @@ struct GeneralPane: View {
                         .foregroundStyle(.orange)
                 }
                 Toggle("Hide it when you click elsewhere", isOn: $quickAutohide)
+            } header: {
+                Text("Quick terminal")
+            } footer: {
+                Footnote("The quick terminal drops down from the top of the screen from any app, and keeps its shell while it's hidden.")
+            }
+            Section {
                 LabeledContent("Default terminal") {
                     if isDefault {
                         Text("dino").foregroundStyle(.secondary)
@@ -645,13 +723,23 @@ struct GeneralPane: View {
                     }
                 }
             } footer: {
-                Footnote("The quick terminal drops down from the top of the screen from any app, and keeps its shell while it's hidden. As the default terminal, dino opens scripts (.command, .tool), programs and man pages you open from the Finder or other apps; a folder opened with dino, or \"New dino Shell at Folder\" in the Finder's Services menu, opens a shell there.")
+                Footnote("As the default terminal, dino opens scripts (.command, .tool), programs and man pages you open from the Finder or other apps; a folder opened with dino, or \"New dino Shell at Folder\" in the Finder's Services menu, opens a shell there.")
             }
-            .onAppear {
-                isDefault = Opening.isDefault
-                quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
-            }
-            TmuxSection().id("tmux")
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            isDefault = Opening.isDefault
+            quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
+        }
+    }
+}
+
+/// Settings → Power: keeping the Mac awake for scheduled tasks and for agents with the lid closed.
+private struct PowerPane: View {
+    @EnvironmentObject var store: SettingsStore
+
+    var body: some View {
+        Form {
             Section {
                 Toggle("Keep your Mac awake while tasks are scheduled", isOn: Binding(
                     get: { store.settings?.machine.keep_awake ?? false },
@@ -663,35 +751,12 @@ struct GeneralPane: View {
                 Footnote("So scheduled tasks run on time. Closing the lid still sleeps it, unless Lid closed below keeps it awake; missed tasks run once when it wakes.")
             }
             LidSection()
-            UpdatesSection()
-            Section {
-                LabeledContent("Settings and keys") {
-                    HStack {
-                        Text(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                        Button("Show in Finder") {
-                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: DinoEnvironment.home)
-                        }
-                    }
-                }
-            }
         }
         .formStyle(.grouped)
-        // dinod keeps them too, so they sync to your other Macs.
-        .onChange(of: DinoSettings.Terminal(start_with: startWith, quick_key: quickKey, quick_autohide: quickAutohide, on_quit: quitChoice, appearance: appearance)) { _, t in
-            if store.settings?.terminal != t { store.update { $0.terminal = t } }
-        }
-        .onAppear {
-            guard let target = UserDefaults.standard.string(forKey: Self.scrollKey) else { return }
-            UserDefaults.standard.removeObject(forKey: Self.scrollKey)
-            DispatchQueue.main.async { withAnimation { proxy.scrollTo(target, anchor: .top) } }
-        }
-        }
     }
 }
 
-/// Settings → General → tmux. For people who live in tmux, and theirs stays theirs: dino never
+/// Settings → tmux. For people who live in tmux, and theirs stays theirs: dino never
 /// edits its config, takes none of its keys, and only touches windows it made.
 private struct TmuxSection: View {
     @EnvironmentObject var store: SettingsStore
@@ -731,8 +796,6 @@ private struct TmuxSection: View {
             if !tmux.new_tabs.isEmpty {
                 name("Session", text: $tabs, field: .tabs)
             }
-        } header: {
-            Text("tmux")
         } footer: {
             Footnote("Your agents show up as tmux windows (running `dino attach`), so `tmux attach` from anywhere reaches them. They still run in dino: closing a window, or quitting tmux, leaves the agent running and its window comes back. dino never starts tmux for this, never changes your tmux config or your own windows. New tabs run `tmux new -A -s` with the name you give. For your status bar: set -g status-right '#(dino status --tmux)'.")
         }
@@ -906,12 +969,10 @@ private struct PoliciesPane: View {
     }
 }
 
-/// Whether agents' traffic goes through dino, and the free tier: the top of Models & Providers.
+/// Whether agents' traffic goes through dino: the top of Models & Providers.
 /// Sections only, for the providers' form to hold.
 struct RoutingSections: View {
     @EnvironmentObject var store: SettingsStore
-
-    private func has(_ key: String) -> Bool { store.keys.contains { $0.name == key && $0.source != nil } }
 
     var body: some View {
         Section {
@@ -921,18 +982,72 @@ struct RoutingSections: View {
             ))
             .disabled(store.settings == nil)
             .orgLocked("routing.proxy")
-            LabeledContent("Free tier models") {
-                Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (see API Keys)")
-                    .foregroundStyle(has("NVIDIA_API_KEY") ? .primary : .secondary)
-            }
-            LabeledContent("Free tier picks the model per turn") {
-                Text(has("TYPESAFE_API_KEY") ? "Jev, then built-in rules" : "Built-in rules")
-            }
         } header: {
             Text("Routing")
         } footer: {
-            Footnote("dino's local proxy counts tokens per session, serves the free tier and connects agents to the providers below. Off, agents talk to their providers directly. Applies to sessions you start from now on.")
+            Footnote("dino's local proxy counts tokens per session, serves the free models pool (see Experimental) and connects agents to the providers below. Off, agents talk to their providers directly. Applies to sessions you start from now on.")
         }
+    }
+}
+
+/// A feature being tried out: off until turned on, and for this Mac only.
+private struct ExperimentalFeature: Identifiable {
+    /// Its name in settings.toml's [experimental].
+    let id: String
+    let title: String
+    /// What it does, and what leaves this Mac when it's on.
+    let summary: String
+
+    static let all = [
+        ExperimentalFeature(
+            id: "free_models",
+            title: "Free models pool",
+            summary: "Agents on free NVIDIA models, with dino picking one for each turn. With a TypeSafe key, each turn's prompt (up to 8,000 characters) is sent to api.typesafe.ai to pick the model. Off, nothing is sent there."
+        ),
+    ]
+}
+
+/// Settings → Experimental: one switch per feature being tried out.
+private struct ExperimentalPane: View {
+    @EnvironmentObject var store: SettingsStore
+
+    private func on(_ id: String) -> Binding<Bool> {
+        Binding(
+            get: { store.settings?.experimental?[id] ?? false },
+            set: { on in
+                guard (store.settings?.experimental?[id] ?? false) != on else { return }
+                store.update { $0.experimental = ($0.experimental ?? [:]).merging([id: on]) { $1 } }
+            }
+        )
+    }
+
+    private func has(_ key: String) -> Bool { store.keys.contains { $0.name == key && $0.source != nil } }
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(ExperimentalFeature.all) { f in
+                    Toggle(isOn: on(f.id)) {
+                        Text(f.title)
+                        Text(f.summary)
+                    }
+                    .orgLocked("experimental.\(f.id)")
+                    if f.id == "free_models", on(f.id).wrappedValue {
+                        LabeledContent("Models") {
+                            Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (see Models & Providers → API Keys)")
+                                .foregroundStyle(has("NVIDIA_API_KEY") ? .primary : .secondary)
+                        }
+                        LabeledContent("Picks the model per turn with") {
+                            Text(has("TYPESAFE_API_KEY") ? "TypeSafe Jev, then built-in rules" : "Built-in rules")
+                        }
+                    }
+                }
+            } footer: {
+                Footnote("Features still being tried out. Each is off until you turn it on, and only on this Mac.")
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
     }
 }
 

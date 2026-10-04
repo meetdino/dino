@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Settings → General: keep agents running with the lid closed. dinod does the work; this sets
+/// Settings → Power: keep agents running with the lid closed. dinod does the work; this sets
 /// when, and installs (once, with an administrator's password) the permission it needs.
 struct LidSection: View {
     @EnvironmentObject var store: SettingsStore
