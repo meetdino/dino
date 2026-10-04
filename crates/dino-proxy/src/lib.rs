@@ -92,6 +92,9 @@ pub enum Activity {
 #[derive(Clone, Debug, Default)]
 pub struct SessionStats {
     pub activity: Option<Activity>,
+    /// Counts the questions its hooks asked (a permission prompt), so the same words asked again
+    /// are told apart from the last time.
+    pub questions: u64,
     pub requests: u64,
     pub in_flight: u32,
     pub errors: u64,
@@ -359,6 +362,16 @@ impl Stats {
         self.update(id, |s| {
             if matches!(&s.activity, Some(Activity::NeedsPermission(m)) if m == asked) {
                 s.activity = Some(Activity::Done);
+            }
+        });
+    }
+
+    /// The question `asked` was answered and the agent went on (an approved tool runs), although
+    /// no hook said so: it's working. A newer question since is left alone.
+    pub fn question_answered(&self, id: &str, asked: &str) {
+        self.update(id, |s| {
+            if matches!(&s.activity, Some(Activity::NeedsPermission(m)) if m == asked) {
+                s.activity = Some(Activity::Working);
             }
         });
     }
@@ -1450,6 +1463,9 @@ fn on_hook(st: &AppState, session: &str, body: &[u8]) -> StatusCode {
         // A notification about the same prompt shouldn't clobber the more specific tool name.
         st.stats.update(session, |s| {
             if !(event == "Notification" && matches!(s.activity, Some(Activity::NeedsPermission(_)))) {
+                if matches!(a, Activity::NeedsPermission(_)) {
+                    s.questions += 1;
+                }
                 s.activity = Some(a);
             }
         });

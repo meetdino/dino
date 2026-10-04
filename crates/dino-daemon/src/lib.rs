@@ -87,8 +87,8 @@ struct Session {
     last_output: Arc<Mutex<Option<Instant>>>,
     /// When the agent last wrote anything at all.
     last_write: Arc<Mutex<Option<Instant>>>,
-    /// The question it's waiting on the user for, and when dinod first saw it.
-    asked: Mutex<Option<(String, Instant)>>,
+    /// The question it's waiting on the user for, as dinod watches its dialog (see [`Asked`]).
+    asked: Mutex<Option<Asked>>,
     /// The user's last keystroke, resize or attach.
     poked: Arc<Mutex<Option<Instant>>>,
     /// The last local web address the agent printed.
@@ -2220,9 +2220,19 @@ fn stats(d: &Daemon, s: &Session) -> SessionStats {
         // Claude: a session of its own, or typed into a shell whose hooks report here (only
         // Claude's do, see dino-agents.zsh).
         let claude = s.agent_id == "claude" || (s.agent_id == "shell" && st.hooked);
-        if !st.tracked && claude && question_dismissed(s, msg, quiet) {
-            d.proxy.stats.end_question(&s.id, msg);
-            return d.proxy.stats.session(&s.id);
+        if !st.tracked && claude {
+            match question_answered(s, "claude", msg, st.questions, quiet) {
+                Answer::Waiting => {}
+                // Approved: the tool runs, and Claude says nothing until it's done.
+                Answer::Approved => {
+                    d.proxy.stats.question_answered(&s.id, msg);
+                    return d.proxy.stats.session(&s.id);
+                }
+                Answer::Dismissed => {
+                    d.proxy.stats.end_question(&s.id, msg);
+                    return d.proxy.stats.session(&s.id);
+                }
+            }
         }
     } else {
         *s.asked.lock().unwrap() = None;
@@ -2276,20 +2286,64 @@ fn pi_setup_prompt(screen: &str) -> Option<&'static str> {
     only_warning.then_some("Connect a provider: type /login in Pi")
 }
 
-/// Esc on Claude Code's permission prompt (or its question) sends no hook, so the session would
-/// stay on "Needs you". It's over when the screen has changed since the prompt came up, has gone
-/// quiet, and no longer shows a dialog (each ends in "Esc to cancel").
-fn question_dismissed(s: &Session, msg: &str, quiet: bool) -> bool {
+/// A question an agent asks in a dialog on its screen, as dinod watches it.
+pub(crate) struct Asked {
+    what: String,
+    /// Which time it was asked, by the agent's count of its questions.
+    nth: u64,
+    /// When dinod first saw it asked.
+    at: Instant,
+    /// Its dialog has been on the screen.
+    shown: bool,
+    /// When its dialog was first seen gone again.
+    gone: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum Answer {
+    Waiting,
+    /// Answered, and the agent went on: it's working again.
+    Approved,
+    /// Answered or dismissed, and the agent stopped: the turn is over.
+    Dismissed,
+}
+
+/// The agent drawing for this long after its dialog went means it went on with the work.
+const GOES_ON: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Neither Claude Code nor Codex says when you answer one of its dialogs by typing: Claude sends
+/// nothing until the approved tool is done (its PostToolUse), Esc sends nothing at all, and Codex
+/// writes nothing to its rollout. So dinod watches the dialog (see [`found::asking`]): once it has
+/// been on the screen and is gone, the agent still drawing (Claude's spinner, Codex's) means the
+/// answer let it go on; the screen gone quiet, that the turn ended there.
+pub(crate) fn question_answered(s: &Session, agent: &str, what: &str, nth: u64, quiet: bool) -> Answer {
     let mut asked = s.asked.lock().unwrap();
-    let since = match &*asked {
-        Some((m, at)) if m == msg => *at,
+    let a = match &mut *asked {
+        Some(a) if a.what == what && a.nth == nth => a,
         _ => {
-            *asked = Some((msg.to_string(), Instant::now()));
-            return false;
+            *asked = Some(Asked { what: what.to_string(), nth, at: Instant::now(), shown: false, gone: None });
+            return Answer::Waiting;
         }
     };
-    let redrawn = s.last_write.lock().unwrap().is_some_and(|t| t > since);
-    redrawn && quiet && !s.pane.text(0).contains("Esc to cancel")
+    if found::asking(agent, &s.pane.text(0)) {
+        a.shown = true;
+        a.gone = None;
+        return Answer::Waiting;
+    }
+    let last = *s.last_write.lock().unwrap();
+    // Not drawn yet (the hook comes just before the dialog), unless it was missed: answered
+    // between two looks.
+    if !a.shown && (a.at.elapsed() < std::time::Duration::from_secs(1) || !last.is_some_and(|t| t > a.at)) {
+        return Answer::Waiting;
+    }
+    let gone = *a.gone.get_or_insert_with(Instant::now);
+    if quiet {
+        Answer::Dismissed
+    } else if last.is_some_and(|t| t > gone + GOES_ON) {
+        Answer::Approved
+    } else {
+        Answer::Waiting
+    }
 }
 
 /// Tokens in the context window, and its size as the agent reports it: Claude to its statusline,
@@ -4402,31 +4456,42 @@ mod tests {
         assert!(!file.exists(), "a gone session's screen goes");
     }
 
-    /// A question dismissed without a hook (Esc on Claude's permission prompt) ends once the screen
-    /// has changed since it came up and shows no dialog; a dialog still up keeps it.
+    /// A question answered without a hook: once its dialog has been on the screen and is gone, the
+    /// agent still drawing means it went on (an approved tool runs), the screen quiet that it
+    /// stopped (Esc). A dialog still up keeps it a question, however long.
     #[test]
-    fn a_dismissed_question_ends() {
+    fn an_answered_question_ends() {
+        use std::time::Duration;
         let home = std::env::temp_dir().join(format!("dino-asked-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let d = shell_daemon();
         let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
         let s = session(&d, &id);
-        s.pane.write(b"clear; printf 'Do you want to proceed?\\n  Esc to cancel\\n'\r".to_vec());
-        wait_for("the dialog", || s.pane.text(0).contains("Esc to cancel"));
+        let dialog = |s: &Session| {
+            s.pane.write(b"clear; printf 'Do you want to proceed?\\n  Esc to cancel\\n'\r".to_vec());
+            wait_for("the dialog", || s.pane.text(0).contains("Esc to cancel"));
+        };
+        dialog(&s);
         // First sight: noted, never over at once.
-        assert!(!question_dismissed(&s, "Run: ls?", true));
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        // The dialog still up, however long it waits: still a question.
+        assert_eq!(question_answered(&s, "claude", "Run: ls?", 1, true), Answer::Waiting);
         s.pane.write(b"printf ''\r".to_vec());
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!question_dismissed(&s, "Run: ls?", true));
-        // Gone from the screen, and not still drawing: over.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(question_answered(&s, "claude", "Run: ls?", 1, true), Answer::Waiting, "the dialog is still up");
+        // Approved: the dialog goes and the agent keeps drawing.
+        s.pane.write(b"clear; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do printf .; sleep 0.1; done\r".to_vec());
+        wait_for("the dialog to go", || !s.pane.text(0).contains("Esc to cancel"));
+        assert_eq!(question_answered(&s, "claude", "Run: ls?", 1, false), Answer::Waiting, "just gone");
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(question_answered(&s, "claude", "Run: ls?", 1, false), Answer::Approved);
+        std::thread::sleep(Duration::from_millis(1200));
+        // The same words asked again are another question; Esc'd, it goes quiet.
+        dialog(&s);
+        assert_eq!(question_answered(&s, "claude", "Run: ls?", 2, false), Answer::Waiting);
+        assert_eq!(question_answered(&s, "claude", "Run: ls?", 2, false), Answer::Waiting);
         s.pane.write(b"clear\r".to_vec());
         wait_for("the dialog to go", || !s.pane.text(0).contains("Esc to cancel"));
-        assert!(!question_dismissed(&s, "Run: ls?", false), "still drawing");
-        assert!(question_dismissed(&s, "Run: ls?", true));
-        // A different question starts over.
-        assert!(!question_dismissed(&s, "Edit main.rs?", true));
+        assert_eq!(question_answered(&s, "claude", "Run: ls?", 2, false), Answer::Waiting, "still drawing");
+        assert_eq!(question_answered(&s, "claude", "Run: ls?", 2, true), Answer::Dismissed);
         kill(&d, &id);
         let _ = std::fs::remove_dir_all(&home);
     }

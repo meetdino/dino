@@ -37,6 +37,8 @@ pub(crate) struct Rollout {
     notice: Option<(Instant, String)>,
     /// What it waits on the user for, while it does.
     needs: Option<String>,
+    /// That's an approval, in a dialog on its screen.
+    approval: bool,
     reported: Option<Activity>,
     /// Its calls that reach the Mac or a browser and haven't answered yet: (call id, tool).
     calls: Vec<(String, String)>,
@@ -103,10 +105,22 @@ fn track(d: &Daemon, s: &Session) {
             r.notice = None;
         } else if let Some(command) = text.strip_prefix(APPROVAL) {
             r.needs = Some(command.to_string());
+            r.approval = true;
             r.notice = None;
         } else if at.elapsed() >= SETTLE {
             r.needs = Some(text);
             r.notice = None;
+        }
+    }
+    // Answering its approval dialog writes nothing to the rollout until the command is done: the
+    // dialog gone from its screen says it (see `question_answered`).
+    if r.needs.is_none() {
+        r.approval = false;
+    } else if r.approval && let Some(what) = r.needs.clone() {
+        let quiet = s.last_write.lock().unwrap().is_none_or(|t| t.elapsed() > super::TURN_OVER_QUIET);
+        if super::question_answered(s, "codex", &what, r.notices, quiet) != super::Answer::Waiting {
+            r.needs = None;
+            r.approval = false;
         }
     }
     let now = match (&r.needs, r.turn) {
