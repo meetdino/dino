@@ -848,18 +848,22 @@ struct Sidebar: View {
                 }
             }
         }
-        // Double-clicking a session renames it. The list's own double-click, not a gesture on
-        // the name: that swallowed the single click meant to select the row. The rows keep their
-        // own menus; this adds none.
+        // Return on a session opens it and gives its terminal the keyboard, as a click does;
+        // double-clicking it renames it (so does its menu). The list's own primary action, not a
+        // gesture on the name: that swallowed the single click meant to select the row. The rows
+        // keep their own menus; this adds none.
         .contextMenu(forSelectionType: String.self, menu: { _ in EmptyView() }, primaryAction: { tags in
+            let returnKey = NSApp.currentEvent?.type == .keyDown
             if tags.count == 1, let tag = tags.first, tag.hasPrefix("tmux:") || tag.hasPrefix("move:") {
                 actOnElsewhere(tag)
             } else if tags.count == 1, let tag = tags.first, tag.hasPrefix("task:") {
                 // Return; a click already opened it (see the selection above).
                 let task = String(tag.dropFirst(5))
-                if NSApp.currentEvent?.type == .keyDown { DispatchQueue.main.async { model.toggleRuns(task) } }
+                if returnKey { DispatchQueue.main.async { model.toggleRuns(task) } }
+            } else if tags.count == 1, let tag = tags.first, tag.hasPrefix("run:") {
+                if returnKey { model.openRun(String(tag.dropFirst(4))) }
             } else if tags.count == 1, let id = tags.first, model.sessions.contains(where: { $0.id == id }) {
-                model.renaming = Renaming(id: id, place: .sidebar)
+                if returnKey { model.select(id) } else { model.renaming = Renaming(id: id, place: .sidebar) }
             }
         })
         // Not rebuilt when rows come or go (that replaced every row, and froze the window for

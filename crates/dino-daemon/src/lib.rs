@@ -706,9 +706,9 @@ fn launchers_from(free_tier: bool, agents: Vec<dino_core::Detected>) -> Vec<Laun
     out
 }
 
-/// Every agent dino knows, as it is on this Mac now. Looked up on the login shell's current `PATH`,
-/// so one installed since dinod started is found, and becomes one dino can start.
-fn agent_setup(d: &Daemon) -> Vec<ipc::AgentSetupInfo> {
+/// The agents on the login shell's current `PATH` (and dinod's own): one installed since dinod
+/// started becomes one dino can start.
+fn rediscover(d: &Daemon) -> Vec<dino_core::Detected> {
     let mut path = dino_core::discover::login_path().unwrap_or_default();
     if let Some(own) = std::env::var_os("PATH") {
         path.push(":");
@@ -719,6 +719,33 @@ fn agent_setup(d: &Daemon) -> Vec<ipc::AgentSetupInfo> {
     if found.iter().any(|a| !startable.iter().any(|s| s == a.kind.id)) {
         *d.launchers.write().unwrap() = launchers_from(free_tier(&load_keys()), found.clone());
     }
+    found
+}
+
+/// What runs agent `id`, to continue a session found running as process `pid`: a launcher dino
+/// has, or finds now on the login `PATH`, else the program the process itself runs (see
+/// `dino_core::program_of`), kept as a launcher from then on. Why not, when none of those has it.
+fn launcher_for(d: &Daemon, id: &str, pid: Option<u32>) -> anyhow::Result<()> {
+    if d.launcher(id).is_some() || (rediscover(d).iter().any(|a| a.kind.id == id) && d.launcher(id).is_some()) {
+        return Ok(());
+    }
+    let Some(kind) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id) else { anyhow::bail!("dino doesn't know how to run {id}, so it's left running where it is") };
+    if let Some(program) = pid.and_then(|p| dino_core::program_of(kind, p)) {
+        let program = program.display().to_string();
+        d.launchers.write().unwrap().push(LauncherInfo { short: id.into(), agent_id: id.into(), label: kind.name.into(), program, knobs: Default::default(), answers_once: agent(id).is_some_and(|a| a.answers_once()) });
+        return Ok(());
+    }
+    anyhow::bail!(
+        "dino couldn't find {name}'s `{bin}`: it isn't on your login shell's PATH or in the folders installers use (~/.local/bin, ~/.npm-global/bin, /opt/homebrew/bin…), and the running {name} doesn't say where it is. So it's left running where it is. In the terminal it runs in, `command -v {bin}` shows its folder: add that folder to PATH in your shell's login profile (~/.zprofile for zsh), then try again.",
+        name = kind.name,
+        bin = kind.bin
+    )
+}
+
+/// Every agent dino knows, as it is on this Mac now. Looked up on the login shell's current `PATH`,
+/// so one installed since dinod started is found, and becomes one dino can start.
+fn agent_setup(d: &Daemon) -> Vec<ipc::AgentSetupInfo> {
+    let found = rediscover(d);
     std::thread::scope(|s| {
         let probes: Vec<_> = dino_core::KNOWN_AGENTS
             .iter()
@@ -1707,7 +1734,7 @@ fn local_spec(
     }
     // The model picked since (the model control), over the one it started on.
     let model = route.map(|r| controls.model.clone().unwrap_or_else(|| r.model.clone()));
-    let provider = route.zip(adapter).zip(model.as_deref()).and_then(|((r, a), m)| a.provider_wiring(&base(&route_path(&r.provider)), r.format?, m));
+    let provider = route.zip(adapter).zip(model.as_deref()).and_then(|((r, a), m)| a.provider_wiring_for(&base(&route_path(&r.provider)), r.format?, m, providers::model(&r.provider, m).as_ref()));
     // The repo's environment first: dino's own wiring must win, or metering and hooks break.
     let mut env: HashMap<String, String> = repo_env(settings, &cwd).into_iter().collect();
     env.extend(wiring_env);
@@ -1767,6 +1794,16 @@ fn local_spec(
     wired_args.extend(args.iter().cloned());
     wired_args.extend(prompt.map(|p| prompt_args(&l.agent_id, p)).unwrap_or_default());
     private_settings(id, &mut wired_args);
+    // Its program's own folder on its PATH, last: a Node CLI's `#!/usr/bin/env node` finds the
+    // node installed next to it (nvm, fnm, Volta), when the PATH dino has doesn't.
+    if l.agent_id != "shell" {
+        if let Some(dir) = Path::new(&l.program).parent().filter(|d| d.is_absolute()) {
+            let path = env.get("PATH").cloned().or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
+            if !std::env::split_paths(&path).any(|p| p == dir) {
+                env.insert("PATH".into(), if path.is_empty() { dir.display().to_string() } else { format!("{path}:{}", dir.display()) });
+            }
+        }
+    }
     (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd, server)
 }
 
@@ -2669,7 +2706,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
 
     // Whatever would stop it starting here is checked before the running one is stopped: a
     // conversation is never left with nothing running it.
-    anyhow::ensure!(d.launcher(&launcher).is_some(), "{} isn't installed for dino to run, so it's left running where it is", f.agent);
+    launcher_for(d, &launcher, f.pid.filter(|_| f.source == Source::Running))?;
     if let Some(dir) = &f.cwd {
         anyhow::ensure!(Path::new(dir).is_dir(), "{dir} is gone, so it's left running where it is");
     }

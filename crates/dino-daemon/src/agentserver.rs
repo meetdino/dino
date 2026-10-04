@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dino_core::agent::{Agent, ServerEvent, agent};
+use dino_proxy::computer::Phase;
 use dino_proxy::{Activity, ReportedContext, Stats};
 
 use super::Session;
@@ -75,6 +76,7 @@ fn run(a: &'static dyn Agent, stats: &Stats, s: &Session, addr: &Address) {
             }
             let Some(v) = line.strip_prefix("data:").and_then(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok()) else { continue };
             match a.server_event(&v) {
+                ServerEvent::Tool { call, name, done } => st.tool(stats, s, call, name, done),
                 ServerEvent::Context { session, model, used } => {
                     if s.agent_session.lock().unwrap().as_deref() != Some(session.as_str()) {
                         continue;
@@ -101,6 +103,8 @@ fn run(a: &'static dyn Agent, stats: &Stats, s: &Session, addr: &Address) {
 /// that may say something about the turn are parsed.
 fn worth_reading(line: &str) -> bool {
     ["\"session.", "\"permission.", "\"question.", "\"message.updated\""].iter().any(|k| line.contains(k))
+        // A part that's a tool call, not each of the answer's.
+        || (line.contains("\"message.part.updated\"") && line.contains("\"type\":\"tool\""))
 }
 
 /// What its server has said so far.
@@ -113,12 +117,32 @@ struct State {
     reported: Option<Activity>,
     /// Each model's context window, as its server says; `None` when it doesn't know.
     windows: HashMap<String, Option<u64>>,
+    /// Tool calls out: (call, tool).
+    calls: HashMap<String, String>,
 }
 
 impl State {
     fn reset(&mut self) {
         self.busy.clear();
         self.asked.clear();
+    }
+
+    /// A tool call it says is out or has ended, told once each to what notices the Mac or a
+    /// browser in use (see `dino_proxy::computer`).
+    fn tool(&mut self, stats: &Stats, s: &Session, call: String, name: String, done: bool) {
+        let phase = match (done, self.calls.contains_key(&call)) {
+            (false, false) => Phase::Started,
+            (false, true) => return,
+            (true, true) => Phase::Ended,
+            // Ended before it was seen out (a stream opened again meanwhile): a call made.
+            (true, false) => Phase::Called,
+        };
+        if done {
+            self.calls.remove(&call);
+        } else {
+            self.calls.insert(call, name.clone());
+        }
+        stats.tool_call(&s.id, &name, phase);
     }
 
     fn take(&mut self, a: &dyn Agent, s: &Session, e: ServerEvent) {
@@ -139,7 +163,7 @@ impl State {
                 self.asked.push((id, session, what));
             }
             ServerEvent::Answered(id) => self.asked.retain(|(r, ..)| *r != id),
-            ServerEvent::Context { .. } | ServerEvent::Other => {}
+            ServerEvent::Context { .. } | ServerEvent::Tool { .. } | ServerEvent::Other => {}
         }
     }
 
@@ -173,6 +197,8 @@ mod tests {
         assert!(worth_reading(r#"data: {"type":"message.updated","properties":{}}"#));
         assert!(!worth_reading(r#"data: {"type":"message.part.delta","properties":{"delta":"hel"}}"#));
         assert!(!worth_reading(r#"data: {"type":"server.heartbeat","properties":{}}"#));
+        assert!(worth_reading(r#"data: {"type":"message.part.updated","properties":{"part":{"type":"tool","tool":"open-computer-use_list_apps","callID":"c","state":{"status":"running"}}}}"#));
+        assert!(!worth_reading(r#"data: {"type":"message.part.updated","properties":{"part":{"type":"text","text":"hi"}}}"#));
     }
 
     #[test]
