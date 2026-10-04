@@ -115,6 +115,10 @@ pub enum Request {
         /// tmux), in place of `prompt`; it stays a plain shell, saying so, when tmux doesn't answer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tmux: Option<String>,
+        /// Start this agent even while it's at its limit, rather than the agent its fallback
+        /// names for new sessions (Settings → Agents).
+        #[serde(default)]
+        stay: bool,
     },
     Kill { id: String },
     /// "Keep as terminal" for shell `id`: agents typed into it stay plain processes (`on`), or
@@ -338,6 +342,9 @@ pub enum Response {
         /// Whether the Mac is being kept awake with its lid closed; absent from an older dinod.
         #[serde(default)]
         power: Option<PowerInfo>,
+        /// Agents at their limit (Settings → Agents says what new sessions start with instead).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        limits: Vec<AgentLimit>,
         /// Tags this state for `StateChange`; only in a reply to one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<u64>,
@@ -526,6 +533,10 @@ pub struct LauncherInfo {
     /// It can answer one request with no tools, as the shell's ⌘I asks (`Agent::answers_once`).
     #[serde(default)]
     pub answers_once: bool,
+    /// The APIs it can talk to a provider's model in, best first: what a route must serve for it
+    /// (to run on, or fall back to).
+    #[serde(default)]
+    pub formats: Vec<crate::providers::Format>,
 }
 
 /// The pane a tmux client in a dino shell shows.
@@ -666,6 +677,72 @@ pub struct SessionInfo {
     /// on this Mac) or "browser". Stays a few seconds after the last call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub using: Option<String>,
+    /// Answered by a route it fell back to, because the one it uses is spent (Settings → Agents).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FallbackInfo>,
+    /// What each route answered: its agent's own account, and any it fell back to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage_by_route: Vec<RouteUsageInfo>,
+    /// Started with this agent instead of the one asked for, which was at its limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instead_of: Option<InsteadOf>,
+}
+
+/// A session on a fallback route, and why.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct FallbackInfo {
+    /// The provider answering, as Settings → Models & Providers knows it ("plan-zai", "ollama",
+    /// "openrouter", "chatgpt", "free"), its name and the model.
+    pub provider: String,
+    pub name: String,
+    pub model: String,
+    /// The route it uses otherwise: "Claude", "GLM Coding Plan".
+    pub from: String,
+    /// "limit", "balance" or "outage".
+    pub reason: String,
+    /// What that route said.
+    pub said: String,
+    /// When it resets, in Unix seconds, when it said.
+    pub resets_at: Option<u64>,
+    /// When dino tries it again: the next turn after this.
+    pub retry_at: Option<u64>,
+    /// Since when, in Unix seconds.
+    pub since: u64,
+}
+
+/// What one route answered for a session.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RouteUsageInfo {
+    /// Where dino's proxy serves it: "anthropic", "plan/zai", "local/ollama".
+    pub route: String,
+    pub name: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// The agent a session was asked for, at its limit when it started.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct InsteadOf {
+    pub agent_id: String,
+    /// The route that was spent: "Claude".
+    pub name: String,
+    pub resets_at: Option<u64>,
+}
+
+/// An agent whose route is spent: new sessions with it would hit the limit.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AgentLimit {
+    pub agent_id: String,
+    /// The route that's spent ("Claude"), why ("limit", "balance") and in its words.
+    pub name: String,
+    pub reason: String,
+    pub said: String,
+    pub resets_at: Option<u64>,
+    /// When dino tries it again.
+    pub retry_at: u64,
+    /// The agent new sessions start with meanwhile, and its model (Settings → Agents).
+    pub instead: Option<String>,
+    pub instead_model: Option<String>,
 }
 
 /// A background command that serves: the agent's task id for it, and where it listens.

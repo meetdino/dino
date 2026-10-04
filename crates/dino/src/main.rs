@@ -162,6 +162,7 @@ impl App {
             route: None,
             reveal: false,
             tmux: None,
+            stay: false,
         };
         match client::request(&req) {
             Ok(Response::Created { id }) => {
@@ -802,7 +803,7 @@ const USAGE: &str = "Sessions
   dino <folder> [<agent> [args...]] a shell or that agent there, in the dino app
   dino ls [--usage] [--json]        every session, what needs you first
   dino status [--tmux]              in a line; --tmux for tmux's status-right
-  dino new [--worktree] <agent> [--on <provider> <model>] [args...]
+  dino new [--worktree] [--stay] <agent> [--on <provider> <model>] [args...]
                                     start one in the background; prints its id
   dino attach | resume | kill <id>
   dino rm [--force] <id>            delete it, and the worktree dino made for it
@@ -818,6 +819,8 @@ Setup
   dino login openrouter|chatgpt     connect a provider in your browser
   dino login <plan> [--base <url>]  connect a coding plan with its key, read from stdin
   dino claude-token [status|create|set|remove]
+  dino fallback [<agent> [<provider>:<model>... | off] [--outages] [--new-sessions <agent>[:<model>]]]
+                                    where an agent goes when it hits a limit
   dino power [status|setup|remove]  keep agents running with the lid closed
   dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]
   dino ai suggest|agent -- <request> | search [--json|--pick]
@@ -851,6 +854,7 @@ fn dino() -> anyhow::Result<()> {
         }
         Some("power") => return cmd_power(cli.get(1).map(String::as_str).unwrap_or("status")),
         Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status")),
+        Some("fallback") => return cmd_fallback(&cli[1..]),
         Some("attach") => {
             let fresh = cli.iter().any(|a| a == "--fresh");
             let id = cli.iter().skip(1).find(|a| *a != "--fresh").ok_or_else(|| anyhow::anyhow!("usage: dino attach <id>\n`dino ls` lists the sessions."))?;
@@ -909,9 +913,12 @@ fn dino() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("new") => {
-            let worktree = cli.get(1).is_some_and(|a| a == "-w" || a == "--worktree");
-            let rest = &cli[if worktree { 2 } else { 1 }..];
-            let agent = rest.first().ok_or_else(|| anyhow::anyhow!("usage: dino new [--worktree] <agent> [--on <provider> <model>] [args...]"))?.clone();
+            // Its own flags, before the agent: everything after the agent is the agent's.
+            let flags = cli[1..].iter().take_while(|a| matches!(a.as_str(), "-w" | "--worktree" | "--stay")).count();
+            let worktree = cli[1..=flags].iter().any(|a| a == "-w" || a == "--worktree");
+            let stay = cli[1..=flags].iter().any(|a| a == "--stay");
+            let rest = &cli[1 + flags..];
+            let agent = rest.first().ok_or_else(|| anyhow::anyhow!("usage: dino new [--worktree] [--stay] <agent> [--on <provider> <model>] [args...]"))?.clone();
             let (cols, rows) = terminal::size().unwrap_or((120, 40));
             let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
             // `--on <provider> <model>`: a provider's model instead of the agent's own account.
@@ -919,10 +926,18 @@ fn dino() -> anyhow::Result<()> {
                 [on, provider, model, args @ ..] if on == "--on" => (Some(ProviderRoute { provider: provider.clone(), model: model.clone(), format: None, name: String::new() }), args.to_vec()),
                 args => (None, args.to_vec()),
             };
-            let req = Request::New { launcher: agent.clone(), args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route, reveal: false, tmux: None };
+            let req = Request::New { launcher: agent.clone(), args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route, reveal: false, tmux: None, stay };
             let id = created(client::request(&req)?)?;
             // Piped, only the id, for `id=$(dino new claude)`.
             if out::tty() {
+                // Its agent was at its limit: another one started (Settings → Agents).
+                if let Ok(Response::State { sessions, .. }) = client::request(&Request::State)
+                    && let Some(s) = sessions.iter().find(|s| s.id == id)
+                    && let Some(why) = &s.instead_of
+                {
+                    let until = why.resets_at.map(|t| format!(", back in {}", duration(t.saturating_sub(out::now())))).unwrap_or_default();
+                    println!("{} is at its limit ({}{until}): started {} instead. `dino new --stay {}` starts it anyway.", agent_name(&why.agent_id), printable(&why.name), agent_name(&s.agent_id), printable(&agent));
+                }
                 println!("Started {} as session {id}. `dino attach {id}` opens it here.", printable(&agent));
             } else {
                 println!("{id}");
@@ -1079,6 +1094,7 @@ fn cmd_open(folder: &str, rest: &[String]) -> anyhow::Result<()> {
         route: None,
         reveal: true,
         tmux: None,
+        stay: false,
     };
     let id = match client::request(&req)? {
         Response::Created { id } => id,
@@ -1368,6 +1384,113 @@ fn cmd_power(action: &str) -> anyhow::Result<()> {
     }
     print!("{}", out::fields(&rows));
     Ok(())
+}
+
+/// An agent's name as people know it: "Claude Code" for `claude`.
+fn agent_name(id: &str) -> String {
+    dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id).map_or_else(|| printable(id), |k| k.name.to_string())
+}
+
+const FALLBACK_USAGE: &str = "usage: dino fallback [<agent> [<provider>:<model>... | off] [--outages] [--new-sessions <agent>[:<model>]]]
+
+When an agent's route hits its limit (its plan's window, its subscription's limit, its balance), dino
+sends its calls on to these routes, in order, until it resets: the agent never sees the failure.
+Providers are as Settings → Models & Providers lists them (`dino login` connects them): plan-zai,
+openrouter, ollama, chatgpt, …, and free (the free models, when they're on). Each must serve the API
+the agent speaks. --outages also falls back when a route is down. --new-sessions starts new sessions
+and scheduled tasks with another agent while this one is at its limit.
+
+  dino fallback claude plan-zai:glm-4.6 ollama:qwen3:4b --new-sessions codex
+  dino fallback codex off";
+
+/// `dino fallback`: Settings → Agents' \"When it hits a limit\", for scripts.
+fn cmd_fallback(args: &[String]) -> anyhow::Result<()> {
+    use dino_core::settings::{AgentSwitch, Fallback, FallbackStep};
+    if args.first().is_some_and(|a| a == "--help" || a == "-h") {
+        println!("{FALLBACK_USAGE}");
+        return Ok(());
+    }
+    let (mut settings, locked) = match client::request(&Request::Settings)? {
+        Response::Settings { settings, locked, .. } => (settings, locked),
+        Response::Error { message } => return Err(hinted(message)),
+        _ => return Err(unexpected()),
+    };
+    let names: std::collections::HashMap<String, String> = match client::request(&Request::Providers)? {
+        Response::Providers { providers } => providers.into_iter().map(|p| (p.id, p.name)).chain([("free".to_string(), "free models".to_string())]).collect(),
+        _ => Default::default(),
+    };
+    let provider_name = |id: &str| names.get(id).cloned().unwrap_or_else(|| printable(id));
+    let Some(agent) = args.first() else {
+        if settings.fallbacks.values().all(|f| f.steps.is_empty() && f.new_sessions.is_none()) {
+            println!("No agent falls back to anything. {}", FALLBACK_USAGE.lines().next().unwrap_or_default());
+        }
+        for id in settings.fallbacks.keys() {
+            print!("{}", show_fallback(&settings, id, &provider_name));
+        }
+        return Ok(());
+    };
+    let agent = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == agent || k.bin == agent).map(|k| k.id.to_string()).ok_or_else(|| unknown_agent(agent, false))?;
+    let rest = &args[1..];
+    if rest.is_empty() {
+        print!("{}", show_fallback(&settings, &agent, &provider_name));
+        return Ok(());
+    }
+    anyhow::ensure!(!locked.iter().any(|p| p == "fallbacks" || *p == format!("fallbacks.{agent}") || p.starts_with(&format!("fallbacks.{agent}."))), "{}'s fallbacks are set by your organization", agent_name(&agent));
+    if rest == ["off"] {
+        settings.fallbacks.remove(&agent);
+    } else {
+        let mut f = Fallback { extra: settings.fallbacks.get(&agent).map(|f| f.extra.clone()).unwrap_or_default(), ..Default::default() };
+        let mut words = rest.iter();
+        while let Some(w) = words.next() {
+            match w.as_str() {
+                "--outages" => f.on_outage = true,
+                "--new-sessions" => {
+                    let to = words.next().ok_or_else(|| anyhow::anyhow!("--new-sessions needs an agent: --new-sessions codex[:<model>]"))?;
+                    let (id, model) = to.split_once(':').map_or((to.as_str(), None), |(a, m)| (a, Some(m.to_string())));
+                    let id = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id || k.bin == id).map(|k| k.id.to_string()).ok_or_else(|| unknown_agent(id, false))?;
+                    anyhow::ensure!(id != agent, "new sessions can't fall back to the agent itself");
+                    f.new_sessions = Some(AgentSwitch { agent: id, model, ..Default::default() });
+                }
+                step => {
+                    // Models have colons of their own (qwen3:4b); provider ids don't.
+                    let (provider, model) = step.split_once(':').filter(|(p, m)| !p.is_empty() && !m.is_empty()).ok_or_else(|| anyhow::anyhow!("{} isn't <provider>:<model>\n\n{FALLBACK_USAGE}", printable(step)))?;
+                    anyhow::ensure!(names.contains_key(provider), "dino doesn't know a provider called {}. `dino login` connects one.", printable(provider));
+                    anyhow::ensure!(settings.policies.allows_fallback(provider), "your policies don't let agents fall back to {}", provider_name(provider));
+                    f.steps.push(FallbackStep { provider: provider.into(), model: model.into(), ..Default::default() });
+                }
+            }
+        }
+        settings.fallbacks.insert(agent.clone(), f);
+    }
+    match client::request(&Request::SetSettings { settings: settings.clone() })? {
+        Response::Ok => {}
+        Response::Error { message } => return Err(hinted(message)),
+        _ => return Err(unexpected()),
+    }
+    print!("{}", show_fallback(&settings, &agent, &provider_name));
+    Ok(())
+}
+
+/// One agent's fallbacks, and whether it's at its limit now.
+fn show_fallback(settings: &dino_core::settings::Settings, agent: &str, provider_name: &dyn Fn(&str) -> String) -> String {
+    let f = settings.fallbacks.get(agent).cloned().unwrap_or_default();
+    let steps = if f.steps.is_empty() {
+        "nothing: its route's own answer".to_string()
+    } else {
+        f.steps.iter().enumerate().map(|(i, s)| format!("{}. {} · {}", i + 1, provider_name(&s.provider), printable(&s.model))).collect::<Vec<_>>().join("  ")
+    };
+    let mut rows = vec![("When it hits a limit", steps), ("Also when it's down", if f.on_outage { "yes".into() } else { "no".into() })];
+    if let Some(n) = &f.new_sessions {
+        let model = n.model.as_deref().map(|m| format!(" · {}", printable(m))).unwrap_or_default();
+        rows.push(("New sessions at its limit", format!("{}{model}", agent_name(&n.agent))));
+    }
+    if let Ok(Response::State { limits, .. }) = client::request(&Request::State)
+        && let Some(l) = limits.iter().find(|l| l.agent_id == agent)
+    {
+        let back = l.resets_at.map(|t| format!(", back in {}", duration(t.saturating_sub(out::now())))).unwrap_or_default();
+        rows.push(("Now", format!("at its limit ({}{back})", printable(&l.name))));
+    }
+    format!("{}\n{}", out::paint(&agent_name(agent), out::Paint::Bold), out::fields(&rows))
 }
 
 /// The Claude subscription token (`claude setup-token`), for the Claude Code dino starts where it

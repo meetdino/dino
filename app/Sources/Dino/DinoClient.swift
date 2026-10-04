@@ -74,6 +74,12 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     /// What its agent uses outside its terminal right now, by its tool calls: "computer" (apps on
     /// this Mac) or "browser"; nil from an older dinod.
     var using: String?
+    /// Answered by a route it fell back to while the one it uses is spent; nil when it isn't.
+    var fallback: FallbackInfo?
+    /// What each route answered: its agent's own account and any it fell back to; nil from an older dinod.
+    var usage_by_route: [RouteUsage]?
+    /// Started with this agent because the one asked for was at its limit.
+    var instead_of: InsteadOf?
 
     /// All its turn left running is a server: the ports it listens on ("3000, 8080").
     var serving: String? {
@@ -90,6 +96,86 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var waitingOn: String? {
         guard let a = activity, a.hasPrefix("waiting:") else { return nil }
         return String(a.dropFirst(8))
+    }
+}
+
+/// A session on a fallback route, and why (see crates/dino-core/src/ipc.rs).
+struct FallbackInfo: Codable, Equatable {
+    /// The provider answering ("plan-zai", "ollama"), its name and model.
+    var provider: String
+    var name: String
+    var model: String
+    /// The route it uses otherwise: "Claude".
+    var from: String
+    /// "limit", "balance" or "outage".
+    var reason: String
+    var said: String
+    var resets_at: UInt64?
+    var retry_at: UInt64?
+    var since: UInt64
+
+    /// "Claude limit resets 14:00", "GLM out of balance", "Claude down".
+    var why: String {
+        switch reason {
+        case "balance": return "\(from) out of balance"
+        case "outage": return "\(from) down"
+        default:
+            if let t = resets_at { return "\(from) limit resets \(Clock.short(t))" }
+            return "\(from) at its limit"
+        }
+    }
+}
+
+/// What one route answered for a session.
+struct RouteUsage: Codable, Equatable {
+    var route: String
+    var name: String
+    var input_tokens: UInt64
+    var output_tokens: UInt64
+}
+
+/// The agent a session was asked for, at its limit when it started.
+struct InsteadOf: Codable, Equatable {
+    var agent_id: String
+    /// The route that was spent: "Claude".
+    var name: String
+    var resets_at: UInt64?
+}
+
+/// An agent at its limit, and what new sessions start with meanwhile.
+struct AgentLimit: Codable, Equatable {
+    var agent_id: String
+    var name: String
+    var reason: String
+    var said: String
+    var resets_at: UInt64?
+    var retry_at: UInt64
+    var instead: String?
+    var instead_model: String?
+
+    /// "Claude is at its limit until 14:00".
+    var sentence: String {
+        let until = resets_at.map { " until \(Clock.short($0))" } ?? ""
+        return reason == "balance" ? "\(name) is out of balance" : "\(name) is at its limit\(until)"
+    }
+}
+
+/// Times as the Mac shows them: "14:00" today, "Mon 14:00" within a week, else the date.
+enum Clock {
+    static func short(_ unix: UInt64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(unix))
+        let cal = Calendar.current
+        let f = DateFormatter()
+        if cal.isDateInToday(date) {
+            f.timeStyle = .short
+            f.dateStyle = .none
+        } else if date.timeIntervalSinceNow < 6 * 86_400 {
+            f.setLocalizedDateFormatFromTemplate("EEE jj:mm")
+        } else {
+            f.dateStyle = .medium
+            f.timeStyle = .short
+        }
+        return f.string(from: date)
     }
 }
 
@@ -228,6 +314,8 @@ struct LauncherInfo: Codable, Identifiable, Equatable {
     var knobs: Knobs?
     /// It can answer the shell's ⌘I with no tools; nil from an older dinod.
     var answers_once: Bool?
+    /// The APIs it talks to a provider's model in ("anthropic", "chat", "responses"); nil from an older dinod.
+    var formats: [String]?
     var id: String { short }
 }
 
@@ -554,7 +642,7 @@ struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
 
-    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, launchers, id, message, version, dino, installed }
+    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, limits, launchers, id, message, version, dino, installed }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -563,6 +651,7 @@ struct Response: Decodable {
         sessions = type == "state" ? try c.decodeIfPresent([SessionInfo].self, forKey: .sessions) : nil
         quotas = try c.decodeIfPresent([QuotaInfo].self, forKey: .quotas)
         power = try c.decodeIfPresent(PowerInfo.self, forKey: .power)
+        limits = try c.decodeIfPresent([AgentLimit].self, forKey: .limits)
         launchers = try c.decodeIfPresent([LauncherInfo].self, forKey: .launchers)
         id = try c.decodeIfPresent(String.self, forKey: .id)
         message = try c.decodeIfPresent(String.self, forKey: .message)
@@ -572,6 +661,8 @@ struct Response: Decodable {
     }
     var quotas: [QuotaInfo]?
     var power: PowerInfo?
+    /// Agents at their limit; nil when none is (and from an older dinod).
+    var limits: [AgentLimit]?
     var launchers: [LauncherInfo]?
     var id: String?
     var message: String?
