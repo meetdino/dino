@@ -46,6 +46,14 @@
       "needs": ["tools"],
       "notes": "Speaks OpenAI's chat API or Anthropic's Messages; its Responses route is only for a ChatGPT sign-in.",
       "source": "https://github.com/Hmbown/CodeWhale/blob/main/docs/PROVIDERS.md"
+    },
+    "opencode": {
+      "formats": ["chat", "anthropic", "responses"],
+      "min_context": 32000,
+      "min_context_hard": 16000,
+      "needs": ["tools"],
+      "notes": "Its system prompt and tools are about 9k tokens; a model given less loses its tools.",
+      "source": "https://opencode.ai/docs/providers/#ollama"
     }
   },
   "models": [

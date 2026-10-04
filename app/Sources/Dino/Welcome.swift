@@ -22,7 +22,7 @@ struct WelcomeCard: View {
     @State private var away = false
 
     /// The ones dino works with best, in this order.
-    private static let featured = ["claude", "codex", "kimi", "qwen", "pi", "hermes", "codewhale"]
+    private static let featured = ["claude", "codex", "kimi", "qwen", "pi", "hermes", "codewhale", "opencode"]
 
     private var shown: Bool {
         guard let machine = store.settings?.machine else { return false }
