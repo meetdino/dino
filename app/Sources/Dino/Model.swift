@@ -232,6 +232,17 @@ final class DinoModel: ObservableObject {
     }
 
     @Published private(set) var daemonDown = false
+    /// dinod has answered for the sessions and for the scheduled tasks once: the sidebar is built
+    /// then, whole (see Sidebar).
+    @Published private(set) var sidebarReady = false
+    private var sessionsPolled = false
+    private var schedulePolled = false
+
+    private func notePolled(sessions: Bool = false, schedule: Bool = false) {
+        sessionsPolled = sessionsPolled || sessions
+        schedulePolled = schedulePolled || schedule
+        if !sidebarReady, sessionsPolled, schedulePolled { sidebarReady = true }
+    }
     /// dinod isn't the dino this app carries (it's from before an update); see Updates.swift.
     @Published var daemonOutdated = false
     @Published var daemonVersion: String?
@@ -428,6 +439,7 @@ final class DinoModel: ObservableObject {
            here != sessions.first(where: { $0.id == id })?.here { folder = URL(fileURLWithPath: here) }
         placeHandedOff(next)
         if next != sessions { sessions = next }
+        notePolled(sessions: true)
         syncTabs(next)
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
@@ -511,20 +523,41 @@ final class DinoModel: ObservableObject {
         return .idle
     }
 
-    func select(_ id: String?) {
-        selected = id
+    /// The selection came from arrowing through the sidebar: the keyboard stays there, so the next
+    /// arrow goes on to the next row. A click on the row or into the terminal hands it over.
+    private(set) var selectingFromSidebarKeys = false
+
+    func select(_ id: String?, keepKeyboard: Bool = false) {
+        selectingFromSidebarKeys = keepKeyboard
+        // Each only when it changes: a write of the same value still redraws everything watching.
+        if selected != id { selected = id }
         guard let id else { return }
-        if id.hasPrefix("dir:") {
-            folder = URL(fileURLWithPath: String(id.dropFirst(4)))
+        // A folder's row (a repo's, or one of its checkouts): new sessions start there.
+        if let path = Self.folderPath(id) {
+            moveFolder(to: path)
             return
         }
         openTab(id)
         shownOne = true
         // New sessions start next to the one you're looking at.
-        if let cwd = sessions.first(where: { $0.id == id })?.here { folder = URL(fileURLWithPath: cwd) }
-        attention.remove(id)
-        unseenDone.remove(id)
-        terminals[id]?.requestFocus()
+        if let cwd = sessions.first(where: { $0.id == id })?.here { moveFolder(to: cwd) }
+        if attention.contains(id) { attention.remove(id) }
+        if unseenDone.contains(id) { unseenDone.remove(id) }
+        if !keepKeyboard { terminals[id]?.requestFocus() }
+    }
+
+    /// The folder a sidebar selection stands for: "dir:" a checkout, "repo:" a repo's own row.
+    static func folderPath(_ selection: String?) -> String? {
+        guard let selection else { return nil }
+        for prefix in ["dir:", "repo:"] where selection.hasPrefix(prefix) {
+            return String(selection.dropFirst(prefix.count))
+        }
+        return nil
+    }
+
+    private func moveFolder(to path: String) {
+        let url = URL(fileURLWithPath: path)
+        if folder != url { folder = url }
     }
 
     /// Back to finished-and-not-looked-at, under Needs you, until it's selected again.
@@ -849,6 +882,7 @@ final class DinoModel: ObservableObject {
                     let archived = try? conn.archived()
                     await MainActor.run {
                         if let tasks { self.applySchedule(tasks) }
+                        self.notePolled(schedule: true)
                         if let archived, archived != self.archived { self.archived = archived }
                         if let launchers, launchers != self.launchers { self.launchers = launchers }
                         if list != self.groups { self.groups = list }
@@ -857,6 +891,9 @@ final class DinoModel: ObservableObject {
                             self.select("group:\(want)")
                         }
                     }
+                } else {
+                    // A dinod that can't answer this still gets a sidebar.
+                    await MainActor.run { self.notePolled(schedule: true) }
                 }
                 try? await Task.sleep(for: .seconds(2))
             }

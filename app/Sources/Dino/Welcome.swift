@@ -20,7 +20,6 @@ struct WelcomeCard: View {
     /// Out of the way while an install or sign-in runs in its tab (a sign-in asks you things there);
     /// back with the outcome when it ends.
     @State private var away = false
-    @FocusState private var doneFocused: Bool
 
     /// The ones dino works with best, in this order.
     private static let featured = ["claude", "codex", "kimi", "qwen", "pi", "hermes"]
@@ -94,19 +93,12 @@ struct WelcomeCard: View {
                         model.newSession(first)
                     }
                 }
-                Button("Done", action: close)
-                    .keyboardShortcut(.defaultAction)
-                    .focused($doneFocused)
+                DoneButton(action: close)
             }
         }
         .padding(20)
         .frame(width: 460)
         .onExitCommand(perform: close)
-        // Done has the keyboard first (with keyboard navigation on, the first link took it, so Space
-        // would have made dino the default terminal). Set as the sheet's default, and again once it's
-        // the key window: set at onAppear alone it came too early to take.
-        .defaultFocus($doneFocused, true)
-        .onAppear { DispatchQueue.main.async { doneFocused = true } }
     }
 
     // MARK: Rows
@@ -327,5 +319,21 @@ struct WelcomeCard: View {
     /// The card never keeps the keyboard: back to the terminal you were in.
     private func focusTerminal() {
         if let id = model.selected { model.select(id) }
+    }
+}
+
+/// Done, with the keyboard first: with keyboard navigation on, the first control took it (the ⌘N
+/// picker, or the default-terminal link, so Space would have made dino the default terminal). Its
+/// own focus state: one declared on the view that presents the sheet never reached the sheet's
+/// window, so setting it did nothing. Set once the sheet is the key window (at onAppear it isn't yet).
+private struct DoneButton: View {
+    let action: () -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Button("Done", action: action)
+            .keyboardShortcut(.defaultAction)
+            .focused($focused)
+            .onAppear { DispatchQueue.main.async { focused = true } }
     }
 }

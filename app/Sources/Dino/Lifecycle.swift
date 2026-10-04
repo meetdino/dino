@@ -481,6 +481,8 @@ struct ArchivedPreview: View {
     @EnvironmentObject var model: DinoModel
     let session: ArchivedInfo
     let delete: () -> Void
+    /// The whole main area (a scheduled task's archived run), not a popover's size.
+    var fill = false
     @State private var page: ConversationPage?
     @State private var failed: String?
 
@@ -514,11 +516,13 @@ struct ArchivedPreview: View {
                 Button("Delete…", role: .destructive, action: delete)
                 Spacer()
                 Button(session.resumable ? "Continue" : "Unarchive") { model.unarchive(session) }
-                    .keyboardShortcut(.defaultAction)
+                    // Return, in a popover; not in the main window, where it would answer every Return.
+                    .keyboardShortcut(fill ? nil : .defaultAction)
             }
             .padding(12)
         }
-        .frame(width: 440, height: 520)
+        .frame(width: fill ? nil : 440, height: fill ? nil : 520)
+        .frame(maxWidth: fill ? .infinity : nil, maxHeight: fill ? .infinity : nil)
     }
 }
 

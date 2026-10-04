@@ -1423,16 +1423,31 @@ private struct EnvironmentsPane: View {
     @EnvironmentObject var store: SettingsStore
     @State private var entering = false
     @State private var draft = ""
+    /// Why the host typed can't be added, said under the field.
+    @State private var problem: String?
 
     private var hosts: [String: DinoSettings.SshHost] { store.settings?.ssh ?? [:] }
     private var suggested: [String] { store.configHosts.filter { hosts[$0] == nil } }
 
     private func add(_ host: String) {
         let host = host.trimmingCharacters(in: .whitespaces)
-        guard !host.isEmpty, !host.hasPrefix("-"), !host.contains(" "), hosts[host] == nil else { return }
+        if let why = Self.problem(with: host, hosts: hosts) {
+            problem = why
+            return
+        }
         store.update { $0.ssh = ($0.ssh ?? [:]).merging([host: .init(folder: "")]) { a, _ in a } }
         draft = ""
+        problem = nil
         entering = false
+    }
+
+    /// What's wrong with a host as typed, if anything: it goes to ssh as one argument.
+    static func problem(with host: String, hosts: [String: DinoSettings.SshHost]) -> String? {
+        if host.isEmpty { return "Type a host: a name from ~/.ssh/config, or user@host." }
+        if host.hasPrefix("-") { return "A host can't start with “-”: ssh would read it as an option." }
+        if host.contains(where: \.isWhitespace) { return "A host is one word, as you'd type it after ssh. Ports and options go in ~/.ssh/config." }
+        if hosts[host] != nil { return "\(host) is already in the list." }
+        return nil
     }
 
     var body: some View {
@@ -1458,16 +1473,23 @@ private struct EnvironmentsPane: View {
                     .orgLocked("ssh.\(host)")
                 }
                 if entering {
-                    HStack {
-                        TextField("Host", text: $draft, prompt: Text("devbox or user@host"))
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit { add(draft) }
-                        Button("Add") { add(draft) }.disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
-                        Button("Cancel") {
-                            entering = false
-                            draft = ""
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            TextField("Host", text: $draft, prompt: Text("devbox or user@host"))
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit { add(draft) }
+                            Button("Add") { add(draft) }.disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                            Button("Cancel") {
+                                entering = false
+                                draft = ""
+                                problem = nil
+                            }
+                        }
+                        if let problem {
+                            Text(problem).font(.caption).foregroundStyle(.red)
                         }
                     }
+                    .onChange(of: draft) { _, _ in if problem != nil { problem = nil } }
                 }
                 if hosts.isEmpty && !entering {
                     Text("No hosts yet.").foregroundStyle(.secondary)
