@@ -595,7 +595,9 @@ async fn forward(
     let Ok(mut body) = axum::body::to_bytes(body, MAX_BODY).await else {
         return error(StatusCode::BAD_REQUEST, "unreadable body, or over 64 MiB".into());
     };
-    let requested = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["model"].as_str().map(String::from));
+    let requested = model_of(&body);
+    // The model the request names as it goes out.
+    let mut model = requested.clone();
     // The ChatGPT plan streams; an agent that asked for one JSON answer gets it put together.
     let collect = provider == siwc::PROVIDER && is_model_call && !siwc::wants_stream(&body);
     if provider == siwc::PROVIDER && is_model_call && let Some(b) = siwc::shape(&body) {
@@ -604,8 +606,11 @@ async fn forward(
     // A Codex model the backend already rejected: go straight to the one that answered instead.
     if provider == "chatgpt" {
         let sub = requested.as_ref().and_then(|m| st.substitutes.lock().unwrap().get(m).cloned());
-        if let Some(b) = sub.and_then(|m| codex::with_model(&body, &m)) {
+        if let Some(m) = sub
+            && let Some(b) = codex::with_model(&body, &m)
+        {
             body = b;
+            model = Some(m);
         }
     }
 
@@ -614,7 +619,7 @@ async fn forward(
             s.requests += 1;
             s.in_flight += 1;
             s.last_request = Some(Instant::now());
-            if let Some(m) = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["model"].as_str().map(String::from)) {
+            if let Some(m) = model {
                 s.last_model = Some(m);
             }
         });
@@ -749,6 +754,16 @@ async fn forward(
         chunk
     });
     builder.body(Body::from_stream(stream)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()))
+}
+
+/// The model a request names. Read without building the rest of it: an agent's request carries its
+/// whole conversation, often hundreds of kilobytes, and this is on the way to the first byte.
+fn model_of(body: &[u8]) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Named {
+        model: Option<String>,
+    }
+    serde_json::from_slice::<Named>(body).ok()?.model
 }
 
 /// An upstream answer's body, up to `limit` bytes; the rest isn't read.
@@ -1102,24 +1117,59 @@ impl Meter {
             }
             return;
         }
-        for &b in bytes.iter() {
-            if b == b'\n' {
+        let mut rest: &[u8] = bytes;
+        while let Some(i) = memchr::memchr(b'\n', rest) {
+            let (part, after) = (&rest[..i], &rest[i + 1..]);
+            rest = after;
+            if self.line.is_empty() {
+                self.line_ended(part);
+            } else {
+                self.keep(part);
                 let line = std::mem::take(&mut self.line);
-                if let Some(data) = line.strip_prefix(b"data:") {
-                    let data = data.trim_ascii();
-                    if let Ok(v) = serde_json::from_slice::<Value>(data) {
-                        self.observe(&v);
-                        // Anthropic's last event, and the Responses API's ways to end.
-                        let last = ["message_stop", "error", "response.completed", "response.incomplete", "response.failed"];
-                        self.complete |= v["type"].as_str().is_some_and(|t| last.contains(&t));
-                    }
-                    // Chat Completions.
-                    self.complete |= data == b"[DONE]";
-                }
-            } else if self.line.len() < METER_LIMIT {
-                self.line.push(b);
+                self.line_ended(&line);
+                self.line = line;
+                self.line.clear();
             }
         }
+        self.keep(rest);
+    }
+
+    /// Part of an SSE line, kept until its end comes.
+    fn keep(&mut self, part: &[u8]) {
+        let room = METER_LIMIT.saturating_sub(self.line.len());
+        self.line.extend_from_slice(&part[..part.len().min(room)]);
+    }
+
+    fn line_ended(&mut self, line: &[u8]) {
+        let Some(data) = line.strip_prefix(b"data:") else { return };
+        let data = data.trim_ascii();
+        // Chat Completions.
+        self.complete |= data == b"[DONE]";
+        if !self.worth_reading(data) {
+            return;
+        }
+        if let Ok(v) = serde_json::from_slice::<Value>(data) {
+            self.observe(&v);
+            // Anthropic's last event, and the Responses API's ways to end.
+            let last = ["message_stop", "error", "response.completed", "response.incomplete", "response.failed"];
+            self.complete |= v["type"].as_str().is_some_and(|t| last.contains(&t));
+        }
+    }
+
+    /// Whether an event can say anything `observe` or the end of a stream reads: usage, the model
+    /// (until it's known), an error, a last event. Text and tool-input deltas, nearly all of a
+    /// stream, can't, and aren't parsed: they'd cost more CPU than passing the answer on.
+    /// Quoted, so the words inside an answer's text (where quotes are escaped) don't count.
+    fn worth_reading(&self, data: &[u8]) -> bool {
+        use memchr::memmem::Finder;
+        static MARKS: std::sync::LazyLock<Vec<Finder<'static>>> = std::sync::LazyLock::new(|| {
+            [&b"\"usage\""[..], b"\"error\"", b"\"message_stop\"", b"\"response.completed\"", b"\"response.incomplete\"", b"\"response.failed\""]
+                .into_iter()
+                .map(Finder::new)
+                .collect()
+        });
+        static MODEL: std::sync::LazyLock<Finder<'static>> = std::sync::LazyLock::new(|| Finder::new(b"\"model\""));
+        MARKS.iter().any(|f| f.find(data).is_some()) || (self.model.is_none() && MODEL.find(data).is_some())
     }
 
     /// The body ended (or the agent hung up): a plain JSON answer is read now.
@@ -1333,6 +1383,35 @@ mod tests {
         }
         let s = stats.session("1");
         assert_eq!((s.usage.input, s.usage.output), (500, 7));
+    }
+
+    /// An Anthropic stream cut anywhere (past its first bytes, which say it's a stream): usage, the
+    /// model and its end are read wherever the chunks break, and text about errors and usage is
+    /// only text.
+    #[test]
+    fn a_stream_in_any_pieces_reads_the_same() {
+        let delta = |t: &str| format!("event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":{}}}}}\n\n", json!(t));
+        let mut stream = String::from("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5\",\"usage\":{\"input_tokens\":120,\"cache_read_input_tokens\":3000,\"output_tokens\":1}}}\n\n");
+        for t in ["The \"error\" field ", "and \"usage\": {\"output_tokens\": 99999} ", "are \"message_stop\" words."] {
+            stream += &delta(t);
+        }
+        stream += "event: message_delta\r\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\r\n\r\n";
+        let ends = stream.len();
+        stream += "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        for size in [7, 13, 64, 300, stream.len()] {
+            let mut m = Meter::default();
+            for piece in stream.as_bytes().chunks(size) {
+                m.feed(&Bytes::copy_from_slice(piece));
+            }
+            let u = m.seen.clone().unwrap();
+            assert_eq!((u.input, u.cache_read, u.output), (120, 3000, 42), "pieces of {size}");
+            assert_eq!(m.model.as_deref(), Some("claude-haiku-4-5"));
+            assert!(m.complete && m.error.is_none(), "pieces of {size}");
+        }
+        // Cut off before its last event: not complete.
+        let mut m = Meter::default();
+        m.feed(&Bytes::copy_from_slice(&stream.as_bytes()[..ends]));
+        assert!(!m.complete);
     }
 
     #[test]
