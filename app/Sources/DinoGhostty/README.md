@@ -17,7 +17,12 @@ models. Changes from upstream:
   unseen. The wrapper's own handling of those 13 is unchanged when the host returns false.
 - `TerminalSurfaceStateDelegate`: a delegate standing in front of a `TerminalViewState` says which,
   so actions name the right surface.
-- `TerminalController.configText`/`configFlag`/`configColor`: a config value as Ghostty resolved it.
+- `TerminalController.configText`/`configFlag`/`configColor`/`configBits`/`configMilliseconds`/
+  `configNumber`/`configPath`/`configQuickTerminalSize`: a config value as Ghostty resolved it;
+  `configTrigger`: the key an action is bound to, as a Mac key code and Carbon modifiers.
+- `TerminalHostAction` types `progressReport`, `desktopNotification`, `commandFinished` and
+  `ringBell` (`TerminalActionEvent.isPaneSignal`), so a host can take them before the wrapper
+  publishes them to the surface's state.
 - `TerminalHostAction` also types search (`searchTotal`, `searchSelected`), `mouseVisibility`,
   `keySequence` (the key, written as the Mac writes shortcuts) and `keyTable`.
 - Right-click (`Platform/AppKit/AppTerminalView+Input.swift`): goes to Ghostty first, as in

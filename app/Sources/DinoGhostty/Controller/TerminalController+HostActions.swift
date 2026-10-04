@@ -21,6 +21,14 @@ public struct TerminalActionEvent {
     public var tag: ghostty_action_tag_e { raw.tag }
     public var isAppTarget: Bool { state == nil }
 
+    /// A program's progress or notification, a command's end, or the bell.
+    public var isPaneSignal: Bool {
+        switch raw.tag {
+        case GHOSTTY_ACTION_PROGRESS_REPORT, GHOSTTY_ACTION_DESKTOP_NOTIFICATION, GHOSTTY_ACTION_COMMAND_FINISHED, GHOSTTY_ACTION_RING_BELL: true
+        default: false
+        }
+    }
+
     /// What it asks for, typed, for the actions a host can implement; `.other` for the rest.
     public var action: TerminalHostAction { TerminalHostAction(raw) }
 
@@ -89,6 +97,13 @@ public enum TerminalHostAction: Equatable, Sendable {
     case keyTable(KeyTable)
     case inspector
     case presentTerminal
+    /// OSC 9;4: a program's progress (percent 0–100, nil when it gave none).
+    case progressReport(TerminalProgressState, percent: Int?)
+    /// OSC 9 or OSC 777: a program asks for a desktop notification (an empty title when it gave none).
+    case desktopNotification(title: String, body: String)
+    /// Shell integration (OSC 133): a command ended, with its exit code when known.
+    case commandFinished(exitCode: Int?, durationNanos: UInt64)
+    case ringBell
     case other
 
     init(_ raw: ghostty_action_s) {
@@ -195,6 +210,16 @@ public enum TerminalHostAction: Equatable, Sendable {
             }
         case GHOSTTY_ACTION_INSPECTOR: self = .inspector
         case GHOSTTY_ACTION_PRESENT_TERMINAL: self = .presentTerminal
+        case GHOSTTY_ACTION_PROGRESS_REPORT:
+            let r = a.progress_report
+            self = .progressReport(TerminalProgressState(r.state) ?? .set, percent: r.progress < 0 ? nil : Int(min(r.progress, 100)))
+        case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
+            let n = a.desktop_notification
+            self = .desktopNotification(title: n.title.map { String(cString: $0) } ?? "", body: n.body.map { String(cString: $0) } ?? "")
+        case GHOSTTY_ACTION_COMMAND_FINISHED:
+            let f = a.command_finished
+            self = .commandFinished(exitCode: f.exit_code < 0 ? nil : Int(f.exit_code), durationNanos: f.duration)
+        case GHOSTTY_ACTION_RING_BELL: self = .ringBell
         default: self = .other
         }
     }
@@ -370,6 +395,113 @@ extension TerminalController {
         var color = ghostty_config_color_s()
         guard ghostty_config_get(config, &color, key, UInt(key.utf8.count)) else { return nil }
         return (color.r, color.g, color.b)
+    }
+
+    /// A packed set of flags as Ghostty resolved it (`bell-features`, `notify-on-command-finish-action`):
+    /// bit n is the nth flag in the order Ghostty's docs list them.
+    public func configBits(_ key: String) -> UInt32? {
+        guard let config else { return nil }
+        var bits: UInt32 = 0
+        guard ghostty_config_get(config, &bits, key, UInt(key.utf8.count)) else { return nil }
+        return bits
+    }
+
+    /// A duration as Ghostty resolved it (`undo-timeout`), in milliseconds, as its C API gives one.
+    public func configMilliseconds(_ key: String) -> UInt64? {
+        guard let config else { return nil }
+        var ms: UInt = 0
+        guard ghostty_config_get(config, &ms, key, UInt(key.utf8.count)) else { return nil }
+        return UInt64(ms)
+    }
+
+    /// A floating-point config value (`quick-terminal-animation-duration`, `bell-audio-volume`).
+    /// Ghostty writes an f64 for its f64 keys and an f32 for its f32 keys: `single` reads the latter.
+    public func configNumber(_ key: String, single: Bool = false) -> Double? {
+        guard let config else { return nil }
+        if single {
+            var v: Float = 0
+            guard ghostty_config_get(config, &v, key, UInt(key.utf8.count)) else { return nil }
+            return Double(v)
+        }
+        var v: Double = 0
+        guard ghostty_config_get(config, &v, key, UInt(key.utf8.count)) else { return nil }
+        return v
+    }
+
+    /// A path config value (`bell-audio-path`), nil when unset.
+    public func configPath(_ key: String) -> String? {
+        guard let config else { return nil }
+        var v = ghostty_config_path_s()
+        guard ghostty_config_get(config, &v, key, UInt(key.utf8.count)), let p = v.path else { return nil }
+        let path = String(cString: p)
+        return path.isEmpty ? nil : path
+    }
+
+    /// One side of `quick-terminal-size`.
+    public enum QuickTerminalSize: Equatable, Sendable {
+        case percent(Double), pixels(Double)
+    }
+
+    /// `quick-terminal-size`: its primary and secondary size, each nil when not given.
+    public func configQuickTerminalSize() -> (primary: QuickTerminalSize?, secondary: QuickTerminalSize?) {
+        guard let config else { return (nil, nil) }
+        var v = ghostty_config_quick_terminal_size_s()
+        let key = "quick-terminal-size"
+        guard ghostty_config_get(config, &v, key, UInt(key.utf8.count)) else { return (nil, nil) }
+        func size(_ s: ghostty_quick_terminal_size_s) -> QuickTerminalSize? {
+            switch s.tag {
+            case GHOSTTY_QUICK_TERMINAL_SIZE_PERCENTAGE: .percent(Double(s.value.percentage))
+            case GHOSTTY_QUICK_TERMINAL_SIZE_PIXELS: .pixels(Double(s.value.pixels))
+            default: nil
+            }
+        }
+        return (size(v.primary), size(v.secondary))
+    }
+
+    /// The key bound to `action` (`toggle_quick_terminal`), as a Mac virtual key code and the
+    /// modifiers (Carbon's `cmdKey`, `shiftKey`, `optionKey`, `controlKey` bits); nil when it isn't
+    /// bound, or bound to a key with no Mac key code.
+    public func configTrigger(_ action: String) -> (keyCode: UInt32, carbonModifiers: UInt32)? {
+        guard let config else { return nil }
+        let t = ghostty_config_trigger(config, action, UInt(action.utf8.count))
+        let key: ghostty_input_key_e
+        switch t.tag {
+        case GHOSTTY_TRIGGER_PHYSICAL:
+            key = t.key.physical
+        case GHOSTTY_TRIGGER_UNICODE:
+            guard let k = Unicode.Scalar(t.key.unicode).flatMap({ Self.physicalKey(for: Character($0)) }) else { return nil }
+            key = k
+        default:
+            return nil
+        }
+        guard key != GHOSTTY_KEY_UNIDENTIFIED else { return nil }
+        let code = TerminalHardwareKeyRouter.appKitKeyCode(for: key)
+        guard code != TerminalHardwareKeyRouter.unidentifiedAppKitKeyCode else { return nil }
+        let m = t.mods.rawValue
+        var carbon: UInt32 = 0
+        // Carbon's modifier bits (Events.h): cmdKey 1<<8, shiftKey 1<<9, optionKey 1<<11, controlKey 1<<12.
+        if m & GHOSTTY_MODS_SUPER.rawValue != 0 { carbon |= 1 << 8 }
+        if m & GHOSTTY_MODS_SHIFT.rawValue != 0 { carbon |= 1 << 9 }
+        if m & GHOSTTY_MODS_ALT.rawValue != 0 { carbon |= 1 << 11 }
+        if m & GHOSTTY_MODS_CTRL.rawValue != 0 { carbon |= 1 << 12 }
+        return (code, carbon)
+    }
+
+    /// The key a character is on, on a US layout, as Ghostty reads a trigger like `cmd+a`.
+    private static func physicalKey(for c: Character) -> ghostty_input_key_e? {
+        let lower = Character(c.lowercased())
+        if let a = lower.asciiValue, a >= 97, a <= 122 {
+            return ghostty_input_key_e(rawValue: GHOSTTY_KEY_A.rawValue + UInt32(a - 97))
+        }
+        if let d = lower.asciiValue, d >= 48, d <= 57 {
+            return ghostty_input_key_e(rawValue: GHOSTTY_KEY_DIGIT_0.rawValue + UInt32(d - 48))
+        }
+        let keys: [Character: ghostty_input_key_e] = [
+            "`": GHOSTTY_KEY_BACKQUOTE, "-": GHOSTTY_KEY_MINUS, "=": GHOSTTY_KEY_EQUAL, "[": GHOSTTY_KEY_BRACKET_LEFT,
+            "]": GHOSTTY_KEY_BRACKET_RIGHT, "\\": GHOSTTY_KEY_BACKSLASH, ";": GHOSTTY_KEY_SEMICOLON, "'": GHOSTTY_KEY_QUOTE,
+            ",": GHOSTTY_KEY_COMMA, ".": GHOSTTY_KEY_PERIOD, "/": GHOSTTY_KEY_SLASH, " ": GHOSTTY_KEY_SPACE,
+        ]
+        return keys[lower]
     }
 
     /// A bool config value as Ghostty resolved it, defaults included. Only for bool keys.

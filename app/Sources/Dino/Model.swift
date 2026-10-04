@@ -203,7 +203,9 @@ final class DinoModel: ObservableObject {
     /// One live Ghostty surface per session, kept mounted so switching is instant.
     private(set) var terminals: [String: TerminalViewState] = [:]
     /// The session whose terminal has keyboard focus, for ⌘W.
-    @Published var focusedTerminal: String?
+    @Published var focusedTerminal: String? {
+        didSet { if focusedTerminal != oldValue { SecureInput.shared.update() } }
+    }
     private(set) var connection: DinoConnection?
     private var polling = false
 
@@ -381,7 +383,18 @@ final class DinoModel: ObservableObject {
 
     private func apply(_ next: [SessionInfo], _ quotas: [QuotaInfo]) {
         // The quick terminal's shell is its own, not a session in the sidebar.
-        QuickTerminal.shared.sessionAlive = next.contains { $0.id == QuickTerminal.shared.sessionID && !$0.exited }
+        let quick = next.first { $0.id == QuickTerminal.shared.sessionID }
+        QuickTerminal.shared.sessionAlive = quick.map { !$0.exited } ?? false
+        let prompts = (quick?.password ?? false, next.filter { $0.password == true }.map(\.id))
+        defer {
+            // A password prompt came or went: Secure Keyboard Entry follows (only the one with the
+            // keyboard counts).
+            if prompts.0 != QuickTerminal.shared.passwordPrompt || prompts.1 != passwordPrompts {
+                QuickTerminal.shared.passwordPrompt = prompts.0
+                passwordPrompts = prompts.1
+                SecureInput.shared.update()
+            }
+        }
         let raw = next.filter { $0.id != QuickTerminal.shared.sessionID }
         // Only which side of 1.5s and 5s the last output is matters here. Kept exact, a session
         // printing anything differs on every tick and the whole window redraws four times a second.
@@ -466,9 +479,11 @@ final class DinoModel: ObservableObject {
         if next != sessions { sessions = next }
         notePolled(sessions: true)
         syncTabs(next)
+        restoreReopened(Set(next.map(\.id)))
         if quotas != self.quotas { self.quotas = quotas }
         let live = Set(next.map(\.id))
         terminals = terminals.filter { live.contains($0.key) }
+        PaneSignals.keep(live.union([QuickTerminal.shared.sessionID].compactMap { $0 }))
         if !unseenDone.isSubset(of: live) { unseenDone.formIntersection(live) }
         webPages = webPages.filter { $0.key.isEmpty || live.contains($0.key) }
         for s in next { webPages[s.id]?.follow(s.previews ?? []) }
@@ -890,6 +905,13 @@ final class DinoModel: ObservableObject {
     }
     /// Shells whose tab was put away without ending them (dropped from a split): not reopened.
     var knownTabless = Set<String>()
+    /// Closes that ⌘Z can still undo (and closes undone, that Redo can do again), until each one's
+    /// time is up (UndoClose.swift).
+    var undoRecords: [ClosedLayout] = []
+    /// A close being undone, waiting for dinod to list its shells again.
+    var reopening: ClosedLayout?
+    /// Sessions whose terminal reads a password, as of the last state.
+    var passwordPrompts: [String] = []
     /// Opens the main window again when it was closed; set once the first one has appeared.
     var showWindow: (() -> Void)?
     /// Reveals up to here are handled: ones from before the app started (and opened it) count too.

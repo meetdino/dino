@@ -143,7 +143,9 @@ extension DinoModel {
     /// "Close Session" (⇧⌘⌫, the sidebar's menu): a shell asks first when something runs in it;
     /// an agent stops as before.
     func closeSession(_ id: String) {
-        if let s = sessions.first(where: { $0.id == id }), s.agent_id == "shell", !confirmEnding([s], in: "tab") { return }
-        kill(id)
+        guard let s = sessions.first(where: { $0.id == id }), s.agent_id == "shell" else { return kill(id) }
+        guard confirmEnding([s], in: "tab") else { return }
+        // As closing its tab: ⌘Z brings the shell back.
+        dropTab(id, ending: true)
     }
 }

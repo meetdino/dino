@@ -23,7 +23,10 @@ struct DinoApp: App {
                         SettingsPane.account.select()
                         openWindow(id: SettingsView.windowID)
                     }
-                    Notifier.onOpenSession = { model.select($0) }
+                    Notifier.onOpenSession = { id in
+                        // The quick terminal's own shell isn't a tab: it drops down instead.
+                        if id == QuickTerminal.shared.sessionID { QuickTerminal.shared.show() } else { model.select(id) }
+                    }
                     Notifier.setUp()
                     model.start()
                     // Back in a reopened window: the session you had keeps the keyboard.
@@ -37,6 +40,7 @@ struct DinoApp: App {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { openWindow(id: SettingsView.windowID) }
                     .keyboardShortcut(",")
+                SecureInputCommand()
                 Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
                     .keyboardShortcut("u", modifiers: [.command, .shift])
                 Button("Check for Updates…") { Updates.shared.checkNow() }
@@ -662,9 +666,15 @@ struct TerminalPane: View {
             }
             .onChange(of: visible) { _, v in state.isSurfaceVisible = v }
             .onChange(of: focused) { _, f in if f, !model.selectingFromSidebarKeys { state.requestFocus() } }
+            // What its programs say beside their text: progress along the top, the bell's border,
+            // the lock while Secure Keyboard Entry is on.
+            .overlay(alignment: .top) { PaneProgressBar(signal: PaneSignals.of(id)) }
+            .overlay { PaneBellBorder(signal: PaneSignals.of(id)) }
+            .overlay(alignment: .topTrailing) { SecureInputMark(id: id, focused: state.isFocused) }
             // Clicking into the other half of a split selects that session.
             .onChange(of: state.isFocused) { _, f in
                 if f {
+                    PaneSignals.seen(id)
                     model.focusedTerminal = id
                 } else if model.focusedTerminal == id {
                     model.focusedTerminal = nil
@@ -1044,6 +1054,7 @@ struct SessionRow: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 StatusDot(status: status)
+                    .overlay { RowProgress(signal: PaneSignals.of(session.id)) }
                 SessionName(session: session, place: .sidebar, font: .body.weight(.semibold))
                     .layoutPriority(1)
                 if let branch {
