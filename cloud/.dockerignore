@@ -1,5 +1,0 @@
-target
-.git
-.cargo/config.toml
-*.log
-.env

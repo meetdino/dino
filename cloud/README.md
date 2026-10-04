@@ -59,7 +59,7 @@ tokens carry audience `dino-harness` and don't open the `/v1` API; the harness c
 
 ## Run it locally
 
-One command runs a copy on this machine, standing in for the remote one:
+Commands here run in `cloud/`, the server's own Cargo workspace. One command runs a copy on this machine, standing in for the remote one:
 
 ```sh
 scripts/dev.sh start     # Postgres, migrations, the server on http://127.0.0.1:8787
@@ -86,9 +86,9 @@ or sign a dino in to it directly with `dino login http://127.0.0.1:8787`.
 Development mode serves plain http only on 127.0.0.1 or localhost; anywhere else, and always in
 production, the server needs https.
 
-`crates/dino-sync` is a copy of the sync protocol crate from the [dino](https://github.com/asdf9384/dino)
-repository (see `crates/dino-sync/UPSTREAM`), so the server builds on its own;
-`scripts/update-dino-sync.sh` refreshes it from a dino checkout.
+The sync protocol is the repository's own `crates/dino-sync` (`../crates/dino-sync`), the same
+crate dinod uses, without its `settings` feature. A change to the protocol shows in the server's
+build and tests at once; CI runs them whenever `cloud/` or `crates/dino-sync` changes.
 
 To run the server by hand instead: `cp .env.example .env`, load it, and `cargo run -p dino-cloud`.
 
@@ -126,7 +126,8 @@ connection with Postgres' advisory lock, so instances starting together take tur
 transaction-mode pooler never sees the lock.
 
 1. Import the repository as a Vercel project with the **Services** framework preset (it picks up
-   `vercel.json`).
+   `vercel.json`). Set the project's **Root Directory** to `cloud`, and turn on **Include files
+   outside the root directory in the Build Step**: the server builds on `crates/dino-sync`.
 2. Connect a Postgres database. With a pooler in front (Neon's integration, say), set both
    `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct), which migrations use.
 3. Set the environment variables (mark the secrets as sensitive):
@@ -171,16 +172,16 @@ open WebSockets (with push on), so run as many as you like against one database.
 assigns the port through `PORT` is followed.
 
 ```sh
-docker build -t dino-cloud .
+docker build -f cloud/Dockerfile -t dino-cloud .     # from the repository root
 ```
 
 ## Contributing
 
-Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md), which covers setup,
-tests and signing off your commits (DCO). Report security issues privately, as
-[SECURITY.md](SECURITY.md) says.
+Issues and pull requests are welcome: see the repository's [CONTRIBUTING.md](../CONTRIBUTING.md),
+which covers setup, tests and signing off your commits (DCO). Report security issues privately, as
+[SECURITY.md](../SECURITY.md) says.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Third-party licenses are listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+MIT, see [LICENSE](../LICENSE). The third-party code the server builds on, and its licenses, are
+listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

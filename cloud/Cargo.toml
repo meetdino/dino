@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/server", "crates/dino-sync"]
+members = ["crates/server"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/asdf9384/dino-cloud"
+repository = "https://github.com/asdf9384/dino"
 
 [profile.release]
 lto = "thin"

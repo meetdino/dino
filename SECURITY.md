@@ -1,6 +1,7 @@
 # Security
 
-dino runs coding agents, holds their API keys and sees their traffic, so we take reports seriously.
+dino runs coding agents, holds their API keys and sees their traffic, and its account server holds
+accounts and synced settings, so we take reports seriously.
 
 ## Reporting a vulnerability
 
@@ -16,11 +17,14 @@ you'd like.
 ## Supported versions
 
 Only the latest release gets security fixes. dino updates itself, and `dino --version` says which
-you have.
+you have. For the account server, the latest commit on `main`, which is what dino's own instance
+(cloud.meetdino.com) runs; if you host your own, keep it up to date.
 
 ## What's in scope
 
 dino, `dinod` and Dino.app from this repository: the local socket and its permissions, the proxy
 and the keys it handles, sign-in and settings sync, updates and their signatures, and anything
 that lets one local user or a website reach another user's sessions or agents. The account server
-is [dino-cloud](https://github.com/asdf9384/dino-cloud) and follows the same policy.
+in `cloud/`: sign-in (OAuth, device flow, email links and codes), tokens and their revocation,
+account and device data, settings sync, rate limits, and anything that lets one account reach
+another's data.

@@ -82,6 +82,8 @@ Settings window edits the same file.
   of it over a Unix socket.
 - The app (Swift, SwiftUI) draws terminals with [libghostty](https://github.com/Lakr233/libghostty-spm).
 - `dino` (Rust) is the command line, and `dinod` itself.
+- `cloud/` is the account server (Rust, Postgres) that signing in and settings sync use, at
+  cloud.meetdino.com. You can host your own: see [cloud/README.md](cloud/README.md).
 
 [ARCHITECTURE.md](ARCHITECTURE.md) has the whole picture: crates, how they may depend on each
 other, and the contracts other projects build on.
@@ -95,4 +97,5 @@ see [SECURITY.md](SECURITY.md).
 ## License
 
 MIT, see [LICENSE](LICENSE). Third-party code dino includes, and its licenses, are listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and the account server's in
+[cloud/THIRD_PARTY_NOTICES.md](cloud/THIRD_PARTY_NOTICES.md).

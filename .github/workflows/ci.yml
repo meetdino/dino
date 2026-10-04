@@ -1,9 +1,12 @@
 name: CI
 
+# The account server in cloud/ has its own workflow (cloud.yml).
 on:
   push:
     branches: [main]
+    paths-ignore: ["cloud/**", ".github/workflows/cloud.yml"]
   pull_request:
+    paths-ignore: ["cloud/**", ".github/workflows/cloud.yml"]
 
 concurrency:
   group: ci-${{ github.ref }}
