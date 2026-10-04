@@ -17,7 +17,7 @@ pub mod tasks;
 mod upstream;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -350,6 +350,7 @@ impl Proxy {
         let keys = Arc::new(RwLock::new(keys));
         let budget = Arc::new(AtomicU64::new(0));
         let state = AppState {
+            free_models: Arc::default(),
             stats: stats.clone(),
             upstream: Arc::default(),
             router: Arc::default(),
@@ -400,6 +401,16 @@ impl Proxy {
     /// Use these keys from the next request on.
     pub fn set_keys(&self, keys: HashMap<String, String>) {
         *self.keys.write().unwrap() = keys;
+    }
+
+    /// Serve the free tier (Settings → Experimental). Off, its requests are refused before anything
+    /// leaves this Mac, and its model list isn't refreshed.
+    pub fn set_free_models(&self, on: bool) {
+        self.state.free_models.store(on, Ordering::Relaxed);
+    }
+
+    pub fn free_models(&self) -> bool {
+        self.state.free_models.load(Ordering::Relaxed)
     }
 
     /// Most tokens one session may use before its model calls are refused; 0 means no limit.
@@ -481,6 +492,8 @@ fn clean_path(rest: &str) -> Option<&str> {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    /// The free tier is turned on (see `Proxy::set_free_models`).
+    free_models: Arc<AtomicBool>,
     stats: Arc<Stats>,
     upstream: Arc<upstream::Upstream>,
     router: Arc<dino_router::Router>,
@@ -1282,6 +1295,31 @@ mod tests {
         assert_eq!(send(&here, &format!("{keyed}/v1/files"), &format!("{KEY_HEADER}: {}\r\n", "0".repeat(32)), ""), "403");
         assert_eq!(send(&here, &format!("{keyed}/v1/files"), &format!("{KEY_HEADER}: {}\r\n", proxy.secret()), ""), "404");
         assert!(hop_by_hop(&HeaderName::from_static(KEY_HEADER)));
+    }
+
+    /// Free models off (the default): a free-tier request is refused before anything leaves this
+    /// Mac, keys or not, so no turn's text reaches a free model or the classifier.
+    #[test]
+    fn free_models_off_sends_nothing() {
+        use std::io::{Read, Write};
+        let keys = HashMap::from([("NVIDIA_API_KEY".to_string(), "nv".to_string()), ("TYPESAFE_API_KEY".to_string(), "ts".to_string())]);
+        let proxy = Proxy::start(keys).unwrap();
+        assert!(!proxy.free_models());
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let send = |rest: &str| {
+            let path = proxy.base_url("7", "free").strip_prefix(&format!("http://{here}")).unwrap().to_string() + rest;
+            let body = r#"{"model":"auto","max_tokens":10,"messages":[{"role":"user","content":"refactor the parser"}]}"#;
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        let out = send("/v1/messages");
+        assert!(out.starts_with("HTTP/1.1 403") && out.contains("Settings → Experimental"), "{out}");
+        assert!(send("/v1/chat/completions").starts_with("HTTP/1.1 403"));
+        let s = proxy.stats.session("7");
+        assert_eq!((s.classifier, s.tier), (None, None), "never classified");
     }
 
     #[test]

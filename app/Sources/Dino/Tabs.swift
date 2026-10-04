@@ -262,7 +262,7 @@ struct TmuxLook: View {
 }
 
 /// Once, for someone whose tabs are mostly tmux: dino can show their agents in it and open new
-/// tabs in it (Settings → General → tmux). Gone for good once answered either way.
+/// tabs in it (Settings → tmux). Gone for good once answered either way.
 struct TmuxSuggestion: View {
     @EnvironmentObject var model: DinoModel
     @AppStorage("tmux.suggested") private var answered = false
@@ -280,8 +280,7 @@ struct TmuxSuggestion: View {
                 Spacer(minLength: 8)
                 Button("Set Up…") {
                     answered = true
-                    UserDefaults.standard.set(SettingsPane.general.rawValue, forKey: "settingsTab")
-                    UserDefaults.standard.set("tmux", forKey: GeneralPane.scrollKey)
+                    SettingsPane.tmux.select()
                     openWindow(id: SettingsView.windowID)
                 }
                 Button("Not Now") { answered = true }

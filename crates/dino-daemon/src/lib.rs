@@ -270,9 +270,10 @@ pub fn run() -> anyhow::Result<()> {
     let saved = load_saved();
 
     let keys = load_keys();
-    let free_tier = keys.contains_key("NVIDIA_API_KEY");
+    let free_tier = free_tier(&keys);
     let proxy = Proxy::start(keys)?;
     proxy.set_budget(Settings::load().policies.session_token_budget);
+    proxy.set_free_models(Settings::load().experimental.free_models);
     proxy.keep_free_models(dino_core::config_dir().join("free-models.json"));
     let daemon = new_daemon(proxy, launchers(free_tier));
     // Before sessions restart, so they get the efforts their models take.
@@ -358,6 +359,7 @@ pub fn run() -> anyhow::Result<()> {
             }),
             Box::new(move || {
                 d2.proxy.set_budget(Settings::load().policies.session_token_budget);
+                d2.proxy.set_free_models(Settings::load().experimental.free_models);
                 schedule::keep_awake(&d2);
                 keys_changed(&d2);
             }),
@@ -634,9 +636,23 @@ fn save_chatgpt(d: &Daemon, t: &chatgpt::Tokens) -> anyhow::Result<()> {
 
 fn keys_changed(d: &Daemon) {
     let keys = load_keys();
-    *d.launchers.write().unwrap() = launchers(keys.contains_key("NVIDIA_API_KEY"));
+    *d.launchers.write().unwrap() = launchers(free_tier(&keys));
     d.proxy.set_keys(keys);
     std::thread::spawn(|| providers::refresh(true));
+}
+
+/// The free tier is offered: turned on in Settings → Experimental, and there's a key for it.
+fn free_tier(keys: &HashMap<String, String>) -> bool {
+    Settings::load().experimental.free_models && keys.contains_key("NVIDIA_API_KEY")
+}
+
+/// Settings → Experimental's free models were turned on or off: the proxy, and what can be started.
+fn free_models_changed(d: &Daemon) {
+    let on = Settings::load().experimental.free_models;
+    if d.proxy.free_models() != on {
+        d.proxy.set_free_models(on);
+        *d.launchers.write().unwrap() = launchers(free_tier(&load_keys()));
+    }
 }
 
 fn launchers_from(free_tier: bool, agents: Vec<dino_core::Detected>) -> Vec<LauncherInfo> {
@@ -677,7 +693,7 @@ fn agent_setup(d: &Daemon) -> Vec<ipc::AgentSetupInfo> {
     let found = dino_core::detect_agents_in(&path);
     let startable: Vec<String> = d.launchers.read().unwrap().iter().map(|l| l.agent_id.clone()).collect();
     if found.iter().any(|a| !startable.iter().any(|s| s == a.kind.id)) {
-        *d.launchers.write().unwrap() = launchers_from(load_keys().contains_key("NVIDIA_API_KEY"), found.clone());
+        *d.launchers.write().unwrap() = launchers_from(free_tier(&load_keys()), found.clone());
     }
     std::thread::scope(|s| {
         let probes: Vec<_> = dino_core::KNOWN_AGENTS
@@ -791,6 +807,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::SetSettings { settings } => match settings.save() {
                 Ok(()) => {
                     d.proxy.set_budget(Settings::load().policies.session_token_budget);
+                    free_models_changed(d);
                     schedule::keep_awake(d);
                     sync_all_shell_agents(d);
                     sync::kick();

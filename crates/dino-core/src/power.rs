@@ -157,7 +157,7 @@ pub fn valid_user(user: &str) -> bool {
 pub fn sudoers(user: &str) -> String {
     format!(
         "# dino: keep agents running with the lid closed. Lets {user} turn system sleep off and on,\n\
-         # nothing else. Remove it in dino (Settings → General) or delete this file.\n\
+         # nothing else. Remove it in dino (Settings → Power) or delete this file.\n\
          {user} ALL=(root) NOPASSWD: {PMSET} -a disablesleep 0, {PMSET} -a disablesleep 1\n"
     )
 }

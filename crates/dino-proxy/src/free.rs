@@ -26,6 +26,11 @@ const OPENAI_PARAMS: &[&str] = &[
 ];
 
 pub(crate) async fn handle(st: AppState, session: String, rest: &str, body: Bytes) -> Response<Body> {
+    // Off: nothing goes to a free model or to the classifier, whatever the session sends.
+    if !st.free_models.load(std::sync::atomic::Ordering::Relaxed) {
+        const OFF: &str = "dino: free models are off; turn them on in dino's Settings → Experimental";
+        return if rest.ends_with("chat/completions") { openai_error(StatusCode::FORBIDDEN, OFF) } else { anthropic_error(StatusCode::FORBIDDEN, "permission_error", OFF) };
+    }
     if rest.ends_with("count_tokens") {
         // Rough estimate; agents only use it for context-window bookkeeping.
         return json_response(StatusCode::OK, json!({ "input_tokens": body.len() / 4 }));

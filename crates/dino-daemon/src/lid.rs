@@ -1,4 +1,4 @@
-//! Keeping agents running with the lid closed, when Settings → General says so.
+//! Keeping agents running with the lid closed, when Settings → Power says so.
 //!
 //! dinod turns system sleep off (`pmset -a disablesleep 1`, through the sudoers rule
 //! [`dino_core::power`] installs) only while [`power::step`] holds, and back on the moment it
@@ -92,7 +92,7 @@ fn set_sleep_disabled(off: bool) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else if String::from_utf8_lossy(&out.stderr).contains("password") {
-        Err("dino doesn't have permission to keep the lid awake yet: set it up in Settings → General".into())
+        Err("dino doesn't have permission to keep the lid awake yet: set it up in Settings → Power".into())
     } else {
         Err(format!("pmset: {}", String::from_utf8_lossy(&out.stderr).trim()))
     }
