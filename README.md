@@ -25,7 +25,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="docs/images/screenshot-light.png">
-    <img src="docs/images/screenshot-light.png" width="900" alt="The dino window: agent sessions grouped by project in the sidebar, one of them needing you, and Qwen Code in the terminal asking to write a file">
+    <img src="docs/images/screenshot-light.png" width="900" alt="The dino window: Claude Code sessions grouped by project in the sidebar, one of them needing you, and Claude Code in the terminal asking to run a command">
   </picture>
 </p>
 
