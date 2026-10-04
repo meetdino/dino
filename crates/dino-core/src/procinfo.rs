@@ -4,8 +4,8 @@
 use std::ffi::{c_void, CStr};
 use std::mem::{size_of, size_of_val};
 
-/// Pids whose process name is exactly `name`, like `pgrep -x`.
-pub fn pids_named(name: &str) -> Vec<u32> {
+/// Every pid on the system, like `ps -A`.
+fn all_pids() -> Vec<libc::c_int> {
     let mut pids = vec![0 as libc::c_int; 4096];
     loop {
         let bytes = (pids.len() * size_of::<libc::c_int>()) as libc::c_int;
@@ -20,14 +20,32 @@ pub fn pids_named(name: &str) -> Vec<u32> {
         }
         pids.resize(pids.len() * 2, 0);
     }
+    pids.retain(|&pid| pid > 0);
+    pids
+}
+
+fn name_of(pid: libc::c_int, buf: &mut [u8; 64]) -> Option<&[u8]> {
+    let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
+    (n > 0).then(|| &buf[..n as usize])
+}
+
+/// Pids whose process name is exactly `name`, like `pgrep -x`.
+pub fn pids_named(name: &str) -> Vec<u32> {
     let mut buf = [0u8; 64];
-    pids.into_iter()
-        .filter(|&pid| pid > 0)
-        .filter(|&pid| {
-            let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
-            n > 0 && &buf[..n as usize] == name.as_bytes()
+    all_pids().into_iter().filter(|&pid| name_of(pid, &mut buf) == Some(name.as_bytes())).map(|pid| pid as u32).collect()
+}
+
+/// Each process this user can see with its name and working directory, like `lsof -d cwd`:
+/// what's working in a folder right now.
+pub fn working_dirs() -> Vec<(u32, String, String)> {
+    let mut buf = [0u8; 64];
+    all_pids()
+        .into_iter()
+        .filter_map(|pid| {
+            let cwd = cwd_of(pid as u32)?;
+            let name = String::from_utf8_lossy(name_of(pid, &mut buf)?).into_owned();
+            Some((pid as u32, name, cwd))
         })
-        .map(|pid| pid as u32)
         .collect()
 }
 
@@ -99,7 +117,8 @@ mod tests {
         let name = &name[..name.len().min(32)];
         assert!(pids_named(name).contains(&me), "{name}");
         let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
-        assert_eq!(cwd_of(me).map(std::path::PathBuf::from), Some(cwd));
+        assert_eq!(cwd_of(me).map(std::path::PathBuf::from), Some(cwd.clone()));
+        assert!(working_dirs().iter().any(|(pid, n, c)| *pid == me && name.starts_with(n.as_str()) && std::path::Path::new(c) == cwd));
         let f = std::env::temp_dir().join(format!("dino-procinfo-{me}"));
         let _open = std::fs::File::create(&f).unwrap();
         let f = f.canonicalize().unwrap();
