@@ -12,3 +12,4 @@ serde_json = { version = "1.0.151", features = ["preserve_order"] }
 toml = "1.1.6"
 # Hermes Agent keeps its sessions in SQLite; read-only, with the system's SQLite.
 rusqlite = "0.37"
+memchr = "2"

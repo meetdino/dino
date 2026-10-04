@@ -158,6 +158,11 @@ pub enum Request {
     },
     /// Read a conversation, a found session's or a subagent's (see `history::conversation`).
     Conversation { agent: String, session_id: String, before: Option<u64> },
+    /// Usage statistics over `range` (see `usage::report`): what the proxy carried, and agents'
+    /// own records, read first for what's new.
+    Stats { range: crate::usage::Range },
+    /// Forget all usage statistics.
+    StatsClear,
     /// Continue a found session in dino: running ones are handed off (waited on until idle,
     /// stopped, resumed here). `cwd` is where cloud sessions land.
     Adopt { session: crate::found::FoundSession, cwd: Option<String> },
@@ -359,6 +364,7 @@ pub enum Response {
     /// Neither when no client is attached.
     TmuxShown { tty: Option<String>, session: Option<String> },
     Conversation { page: crate::history::Page },
+    Stats { report: Box<crate::usage::Report> },
     Groups { groups: Vec<GroupInfo> },
     Tree { repos: Vec<RepoInfo> },
     Diff { stat: DiffStat, text: String },

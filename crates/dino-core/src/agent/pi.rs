@@ -475,9 +475,53 @@ impl Agent for Pi {
         transcripts().into_iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&end)))
     }
 
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        if self.free {
+            return vec![];
+        }
+        let mut out = vec![];
+        for p in transcripts() {
+            let Some(id) = id_of(&p) else { continue };
+            let Some((text, _)) = seen.new_lines(&p, b"\"usage\"") else { continue };
+            let found = usage_in(&text, &id);
+            if found.is_empty() {
+                continue;
+            }
+            // Its folder is in the file's header.
+            let cwd = history::first_line(&p).and_then(|l| serde_json::from_str::<Value>(&l).ok()).and_then(|v| v["cwd"].as_str().map(String::from));
+            out.extend(found.into_iter().map(|u| crate::usage::Used { cwd: cwd.clone(), ..u }));
+        }
+        out
+    }
+
     fn turns(&self, text: &str, _path: &Path, _start: u64) -> Vec<Turn> {
         turns_in(text)
     }
+}
+
+/// The answers in conversation `id`'s lines, with the usage Pi wrote on each.
+fn usage_in(jsonl: &str, id: &str) -> Vec<crate::usage::Used> {
+    let mut out = vec![];
+    for v in jsonl.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+        let (m, entry) = (&v["message"], v["id"].as_str());
+        let u = &m["usage"];
+        let Some(entry) = entry else { continue };
+        if v["type"] != "message" || m["role"] != "assistant" || !u.is_object() {
+            continue;
+        }
+        out.push(crate::usage::Used { undated: false,
+            id: format!("{id}:{entry}"),
+            at_ms: history::ms_of(&v["timestamp"]).or_else(|| history::ms_of(&m["timestamp"])).unwrap_or(0),
+            conversation: id.into(),
+            cwd: None,
+            model: m["model"].as_str().map(String::from),
+            input: history::count(&u["input"]),
+            cache_read: history::count(&u["cacheRead"]),
+            cache_write: history::count(&u["cacheWrite"]),
+            output: history::count(&u["output"]),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -577,5 +621,15 @@ mod tests {
         assert_eq!(before[0], "--session-id");
         assert_eq!(none.as_deref(), Some(before[1].as_str()), "picked up front");
         assert!(p.modes().is_empty(), "it never asks");
+    }
+
+    #[test]
+    fn its_answers_carry_their_usage() {
+        let jsonl = r#"{"type":"message","id":"a6","parentId":"a5","timestamp":"2026-09-30T04:06:22.000Z","message":{"role":"assistant","content":[],"model":"qwen3:4b","usage":{"input":30,"output":4,"cacheRead":200,"cacheWrite":0,"totalTokens":234}}}
+{"type":"message","id":"a7","timestamp":"2026-09-30T04:06:23.000Z","message":{"role":"user","content":[]}}"#;
+        let used = usage_in(jsonl, "11111111-2222-4333-8444-555555555555");
+        assert_eq!(used.len(), 1);
+        assert_eq!(used[0].id, "11111111-2222-4333-8444-555555555555:a6");
+        assert_eq!((used[0].input, used[0].cache_read, used[0].output, used[0].model.as_deref()), (30, 200, 4, Some("qwen3:4b")));
     }
 }

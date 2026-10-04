@@ -267,6 +267,51 @@ pub struct Quota {
     pub windows: Vec<(String, Window)>,
 }
 
+/// How a model call ended, for usage statistics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CallStatus {
+    #[default]
+    Ok,
+    Error,
+    /// The route's limit turned it down: a plan's window or balance, a 429.
+    Limit,
+}
+
+/// One model call the proxy carried, kept until dinod takes it (`Stats::take_calls`) for usage
+/// statistics. Recorded once per call, as it ends: nothing per chunk.
+#[derive(Clone, Debug, Default)]
+pub struct Call {
+    /// When it came in, in ms since the epoch.
+    pub at_ms: i64,
+    pub session: String,
+    /// The route it went out on, as its URL names it: "anthropic", "or", "local/ollama", "plan/<id>"…
+    pub route: String,
+    /// The model the answer named, or else the one the request asked for.
+    pub model: Option<String>,
+    pub usage: Usage,
+    /// Until the answer's first byte, for streamed answers.
+    pub ttft_ms: Option<u32>,
+    /// Until its last byte.
+    pub duration_ms: Option<u32>,
+    pub status: CallStatus,
+    /// Answered by a fallback: the route it stood in for (`route` is the one that answered);
+    /// `None` when the session's own route answered.
+    pub fallback: Option<String>,
+    /// What the route said it cost (OpenRouter's `usage.cost`).
+    pub cost: Option<f64>,
+}
+
+/// Calls kept for dinod at most; past that (dinod not taking them) the newest are dropped.
+const MAX_CALLS: usize = 100_000;
+
+fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+fn ms(d: std::time::Duration) -> u32 {
+    d.as_millis().min(u32::MAX as u128) as u32
+}
+
 #[derive(Default)]
 pub struct Stats {
     pub sessions: Mutex<HashMap<String, SessionStats>>,
@@ -277,9 +322,23 @@ pub struct Stats {
     /// Routes found spent (a window, a balance) or down, by key (see `fallback::route_key`),
     /// until they're tried again.
     pub limited: Mutex<fallback::LimitedRoutes>,
+    /// Model calls not yet taken by dinod for usage statistics.
+    calls: Mutex<Vec<Call>>,
 }
 
 impl Stats {
+    /// The model calls that ended since the last take.
+    pub fn take_calls(&self) -> Vec<Call> {
+        std::mem::take(&mut *self.calls.lock().unwrap())
+    }
+
+    pub(crate) fn record_call(&self, call: Call) {
+        let mut calls = self.calls.lock().unwrap();
+        if calls.len() < MAX_CALLS {
+            calls.push(call);
+        }
+    }
+
     pub fn session(&self, id: &str) -> SessionStats {
         self.sessions.lock().unwrap().get(id).cloned().unwrap_or_default()
     }
@@ -683,6 +742,7 @@ async fn forward(
     Path((key, session, provider, rest)): Path<(String, String, String, String)>,
     req: Request,
 ) -> Response<Body> {
+    let (started, at_ms) = (Instant::now(), now_ms());
     if !admitted(&st.secret, st.port, &key, req.headers()) {
         return error(StatusCode::FORBIDDEN, "dino proxy: not for you".into());
     }
@@ -715,6 +775,12 @@ async fn forward(
     }
     // Only model calls count toward activity; ignore e.g. token counting and telemetry.
     let is_model_call = rest.ends_with("messages") || rest.ends_with("chat/completions") || rest.ends_with("responses");
+    // The route, as statistics name it.
+    let route = match (&runtime, &coding_plan) {
+        (Some((id, ..)), _) => format!("{provider}/{id}"),
+        (_, Some((id, _))) => format!("{provider}/{id}"),
+        _ => provider.clone(),
+    };
     if is_model_call && let Some(resp) = over_budget(&st, &session, &provider) {
         return resp;
     }
@@ -796,8 +862,8 @@ async fn forward(
             s.requests += 1;
             s.in_flight += 1;
             s.last_request = Some(Instant::now());
-            if let Some(m) = model {
-                s.last_model = Some(m);
+            if let Some(m) = &model {
+                s.last_model = Some(m.clone());
             }
             if let Some(p) = &primary
                 && s.primary.as_ref().is_none_or(|(k, _)| *k != p.key)
@@ -850,9 +916,16 @@ async fn forward(
             up
         })
     };
+    // A model call that got no answer to count, for statistics.
+    let failed = |status: CallStatus, model: Option<String>| {
+        if is_model_call {
+            st.stats.record_call(Call { at_ms, session: session.clone(), route: route.clone(), model, duration_ms: Some(ms(started.elapsed())), status, ..Default::default() });
+        }
+    };
     // Answered as the provider would when it's briefly unreachable, so the agent's own retries
     // take over, as they would without dino in between.
     let upstream_error = |e: reqwest::Error| {
+        failed(CallStatus::Error, model.clone());
         let msg = match &runtime {
             Some((_, name, base)) if e.is_connect() => local::unreachable(name, base),
             _ => format!("dino couldn't reach {}: {}", upstream.trim_start_matches("https://"), reason(&e)),
@@ -872,6 +945,7 @@ async fn forward(
                 && let Some(why) = st.stats.outage(&session, &p.key, &p.tag.name, format!("couldn't reach it ({})", reason(&e)))
                 && let Some(r) = steps(&st, &session, chain, api, &body, &parts.headers, &parts.method, query_ref, p, &why, &mut guard).await
             {
+                failed(CallStatus::Error, model.clone());
                 return r;
             }
             return upstream_error(e);
@@ -926,6 +1000,8 @@ async fn forward(
                 if let (Some(why), Some(chain), Some(api)) = (why, chain.as_ref().filter(|_| !tried), api)
                     && let Some(r) = steps(&st, &session, chain, api, &body, &parts.headers, &parts.method, query_ref, p, &why, &mut guard).await
                 {
+                    // Its own route's refusal is a call of its own, for statistics.
+                    failed(if why.kind == fallback::Kind::Outage { CallStatus::Error } else { CallStatus::Limit }, model.clone());
                     return r;
                 }
             }
@@ -937,6 +1013,7 @@ async fn forward(
             };
             // The plan's key, balance or limit: the plan's state, not just this call's.
             let limit = coding_plan.is_some() && plan::limited(status.as_u16(), &codex::error_message(&text)).is_some();
+            failed(if limit || status == StatusCode::TOO_MANY_REQUESTS { CallStatus::Limit } else { CallStatus::Error }, model.clone());
             if let Some((id, _)) = coding_plan.as_ref().filter(|_| limit || matches!(status.as_u16(), 401 | 403)) {
                 st.stats.plan_errors.lock().unwrap().insert(id.clone(), msg.clone());
             }
@@ -996,14 +1073,14 @@ async fn forward(
             Ok(w) => w,
             Err(e) => return upstream_error(e),
         };
-        let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, route: primary.map(|p| p.tag), _in_flight: guard };
+        let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, route: primary.map(|p| p.tag), _in_flight: guard, call: is_model_call.then(|| Call { at_ms, route, model, ..Default::default() }), started, first: None };
         tap.meter.feed(&whole);
         let answer = siwc::collect(&whole).unwrap_or_else(|| whole.to_vec());
         return builder.header("content-type", "application/json").body(Body::from(answer)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()));
     }
 
     // Tee the body: pass every chunk through immediately, scan a copy for usage.
-    let tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, route: primary.map(|p| p.tag), _in_flight: guard };
+    let tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, route: primary.map(|p| p.tag), _in_flight: guard, call: is_model_call.then(|| Call { at_ms, route, model, ..Default::default() }), started, first: None };
     builder.body(tapped(resp, tap)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()))
 }
 
@@ -1011,6 +1088,9 @@ async fn forward(
 fn tapped(resp: reqwest::Response, mut tap: Tap) -> Body {
     Body::from_stream(resp.bytes_stream().map(move |chunk| {
         if let Ok(bytes) = &chunk {
+            if tap.first.is_none() {
+                tap.first = Some(Instant::now());
+            }
             tap.meter.feed(bytes);
         }
         chunk
@@ -1124,6 +1204,17 @@ async fn steps(
             continue;
         }
         let url = format!("{}{query}", target.url);
+        // For statistics: a call to this route, in place of the session's own.
+        let (step_started, step_at) = (Instant::now(), now_ms());
+        let call = |status: CallStatus| Call {
+            at_ms: step_at,
+            session: session.to_string(),
+            route: step.route.clone(),
+            model: Some(step.model.clone()),
+            status,
+            fallback: Some(primary.tag.path.clone()),
+            ..Default::default()
+        };
         let sent = st
             .upstream
             .send(target.local, |client| {
@@ -1141,6 +1232,7 @@ async fn steps(
             Ok(r) => r,
             Err(e) => {
                 log(format_args!("{session} fallback {}: {}", step.route, reason(&e)));
+                st.stats.record_call(Call { duration_ms: Some(ms(step_started.elapsed())), ..call(CallStatus::Error) });
                 st.stats.mark_limited(&step.route, &step.name, &fallback::Trigger { kind: fallback::Kind::Outage, resets_at: None, said: reason(&e) });
                 continue;
             }
@@ -1149,9 +1241,12 @@ async fn steps(
         if !status.is_success() {
             let h = resp.headers().clone();
             let text = read_capped(resp, 1 << 20).await.unwrap_or_default();
-            if let Some(t) = fallback::classify(status.as_u16(), &h, &text) {
-                st.stats.mark_limited(&step.route, &step.name, &t);
+            let trigger = fallback::classify(status.as_u16(), &h, &text);
+            if let Some(t) = &trigger {
+                st.stats.mark_limited(&step.route, &step.name, t);
             }
+            let limit = trigger.is_some_and(|t| t.kind != fallback::Kind::Outage) || status == StatusCode::TOO_MANY_REQUESTS;
+            st.stats.record_call(Call { duration_ms: Some(ms(step_started.elapsed())), ..call(if limit { CallStatus::Limit } else { CallStatus::Error }) });
             log(format_args!("{session} fallback {} -> {status}: {}", step.route, codex::error_message(&text)));
             continue;
         }
@@ -1163,7 +1258,7 @@ async fn steps(
             builder = builder.header(name, value);
         }
         let route = Some(RouteTag { path: step.route.clone(), name: step.name.clone() });
-        let tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session: session.to_string(), route, _in_flight: in_flight };
+        let tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session: session.to_string(), route, _in_flight: in_flight, call: Some(call(CallStatus::Ok)), started: step_started, first: None };
         return Some(builder.body(tapped(resp, tap)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into())));
     }
     log(format_args!("{session} {} spent, and no fallback answered", primary.tag.name));
@@ -1235,6 +1330,11 @@ struct Tap {
     /// The route answering, to count what it answered toward.
     route: Option<RouteTag>,
     _in_flight: Option<InFlight>,
+    /// A model call's record so far, finished as the answer ends.
+    call: Option<Call>,
+    started: Instant,
+    /// When the answer's first byte came, streamed.
+    first: Option<Instant>,
 }
 
 impl Drop for Tap {
@@ -1246,6 +1346,20 @@ impl Drop for Tap {
         }
         if let Some(e) = &self.meter.error {
             log(format_args!("{} model call answered 200 with an error: {e}", self.session));
+        }
+        if let Some(mut call) = self.call.take() {
+            call.session = self.session.clone();
+            if let Some(m) = &self.meter.model {
+                call.model = Some(m.clone());
+            }
+            call.usage = self.meter.seen.clone().unwrap_or_default();
+            call.cost = self.meter.cost;
+            call.ttft_ms = self.first.filter(|_| self.meter.sse == Some(true)).map(|f| ms(f - self.started));
+            call.duration_ms = Some(ms(self.started.elapsed()));
+            if self.meter.error.is_some() {
+                call.status = CallStatus::Error;
+            }
+            self.stats.record_call(call);
         }
         self.stats.update(&self.session, |s| {
             if let Some(e) = self.meter.error.take() {
@@ -1561,6 +1675,8 @@ struct Meter {
     /// The whole answer came through. Agents hang up once they have it, so the body running
     /// out can't tell a finished answer from an interrupted one; its last event can.
     complete: bool,
+    /// What the route said the call cost (OpenRouter's `usage.cost`).
+    cost: Option<f64>,
     /// The answer was an error after all, though it came with 200: OpenRouter passes an upstream
     /// failure ("provider_overloaded") on in the body, and a stream can end in an error event.
     error: Option<String>,
@@ -1674,6 +1790,9 @@ impl Meter {
                 cache_read: get(&["cache_read_input_tokens"]) + cached_openai,
                 cache_write: get(&["cache_creation_input_tokens"]),
             };
+            if let Some(c) = u["cost"].as_f64() {
+                self.cost = Some(c);
+            }
             let seen = self.seen.get_or_insert_with(Usage::default);
             seen.input = seen.input.max(next.input);
             seen.output = seen.output.max(next.output);
@@ -1785,6 +1904,14 @@ mod tests {
         let said = proxy.stats.plan_error("zai").unwrap();
         assert!(said.contains("usage limit was reached") && said.contains("reset at 2026-10-04 02:00:00"), "{said}");
         assert_eq!(proxy.stats.session("7").limit_error.as_deref(), Some(said.as_str()));
+        // Statistics: the refused call is a limit hit on that plan; what never went out (no key, not
+        // a model call) isn't a call.
+        let calls = proxy.stats.take_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let hit = &calls[0];
+        assert_eq!(hit.route, "plan/zai");
+        assert_eq!((hit.status, hit.session.as_str(), hit.model.as_deref()), (CallStatus::Limit, "7", Some("glm-x")));
+        assert!(proxy.stats.take_calls().is_empty(), "taken once");
         // Another key: what the old one was told no longer holds.
         proxy.set_plans(HashMap::from([("zai".to_string(), plan::Plan { name: "GLM Coding Plan".into(), anthropic: None, openai: None, key: "plan-key-2".into() })]));
         assert_eq!(proxy.stats.plan_error("zai"), None);
@@ -1929,6 +2056,12 @@ mod tests {
         let used: Vec<(&str, u64, u64)> = s.by_route.iter().map(|r| (r.route.as_str(), r.usage.input, r.usage.output)).collect();
         assert_eq!(used, [("plan/b", 360, 27), ("plan/a", 120, 9)]);
         assert_eq!(s.usage.output, 36);
+        // Statistics: Plan A's limit hit, then three calls Plan B answered in its place, then
+        // Plan A again, its own.
+        let calls: Vec<(String, Option<String>, CallStatus)> = proxy.stats.take_calls().into_iter().map(|c| (c.route, c.fallback, c.status)).collect();
+        let call = |route: &str, fallback: Option<&str>, status| (route.to_string(), fallback.map(String::from), status);
+        let b = call("plan/b", Some("plan/a"), CallStatus::Ok);
+        assert_eq!(calls, [call("plan/a", None, CallStatus::Limit), b.clone(), b.clone(), b, call("plan/a", None, CallStatus::Ok)]);
     }
 
     /// What isn't a spent route doesn't move a session: a short rate limit the agent waits out,
@@ -2111,7 +2244,7 @@ mod tests {
     fn a_json_answer_in_pieces_is_read_once_it_is_all_there() {
         let stats = Arc::new(Stats::default());
         {
-            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), route: None, _in_flight: None };
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), route: None, _in_flight: None, call: None, started: Instant::now(), first: None };
             tap.meter.feed(&Bytes::from_static(br#"{"model":"m","usage":{"prompt"#));
             assert!(tap.meter.seen.is_none());
             tap.meter.feed(&Bytes::from_static(br#"_tokens":500,"completion_tokens":7}}"#));
@@ -2149,11 +2282,41 @@ mod tests {
         assert!(!m.complete);
     }
 
+    /// Each model call is written down once, as it ends: its tokens, the model that answered, how
+    /// long its first byte took, and what the route said it cost.
+    #[test]
+    fn a_finished_call_is_recorded_once_with_its_timing_and_cost() {
+        let stats = Arc::new(Stats::default());
+        let started = Instant::now() - std::time::Duration::from_millis(900);
+        let mut tap = Tap {
+            meter: Meter::default(),
+            stats: stats.clone(),
+            session: "4".into(),
+            route: None,
+            _in_flight: None,
+            call: Some(Call { at_ms: 1, route: "or".into(), model: Some("asked/model".into()), ..Default::default() }),
+            started,
+            first: Some(started + std::time::Duration::from_millis(300)),
+        };
+        tap.meter.feed(&Bytes::from_static(b"data: {\"model\":\"answered/model\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"));
+        tap.meter.feed(&Bytes::from_static(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":100},\"cost\":0.00042}}\n\ndata: [DONE]\n\n"));
+        drop(tap);
+        let calls = stats.take_calls();
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        assert_eq!((c.session.as_str(), c.route.as_str(), c.model.as_deref()), ("4", "or", Some("answered/model")));
+        assert_eq!((c.usage.input, c.usage.cache_read, c.usage.output), (20, 100, 40));
+        assert_eq!(c.cost, Some(0.00042));
+        assert_eq!(c.ttft_ms, Some(300));
+        assert!(c.duration_ms.unwrap() >= 900);
+        assert_eq!(c.status, CallStatus::Ok);
+    }
+
     #[test]
     fn a_200_that_is_an_error_counts_as_one() {
         let stats = Arc::new(Stats::default());
         let call = |body: &str| {
-            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), route: None, _in_flight: None };
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), route: None, _in_flight: None, call: None, started: Instant::now(), first: None };
             tap.meter.feed(&Bytes::from(body.to_string()));
         };
         // OpenRouter, as it answered for real: HTTP 200, and an upstream 503 in the body.
@@ -2180,7 +2343,7 @@ mod tests {
     fn context_from_the_last_call_per_model() {
         let stats = Arc::new(Stats::default());
         let call = |events: String| {
-            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), route: None, _in_flight: None };
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), route: None, _in_flight: None, call: None, started: Instant::now(), first: None };
             tap.meter.feed(&Bytes::from(events));
         };
         let start = |model: &str, input: u64, cached: u64| {

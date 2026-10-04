@@ -405,9 +405,41 @@ impl Agent for Cursor {
         transcript_of(session_id)
     }
 
+    // Its transcript keeps no time, model or tokens: each new answer counts as a call, at the time
+    // its chat was last updated, on the model its chat says when it does.
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        let mut out = vec![];
+        for (id, dir) in chats() {
+            let Some(p) = transcript_of(&id) else { continue };
+            let Some((text, from)) = seen.new_lines(&p, b"") else { continue };
+            let meta = chat_meta(&dir);
+            let at = meta["updatedAtMs"].as_i64().or_else(|| history::modified(&p).checked_mul(1000).map(|t| t as i64)).unwrap_or(0);
+            let model = ["model", "lastUsedModel", "modelName"].iter().find_map(|k| meta[*k].as_str()).map(String::from);
+            out.extend(usage_in(&text, from, &id, at, meta["cwd"].as_str(), model));
+        }
+        out
+    }
+
     fn turns(&self, text: &str, _path: &Path, _start: u64) -> Vec<Turn> {
         turns_in(text)
     }
+}
+
+/// Its answers in transcript lines from byte `from` of conversation `id`'s file, at `at`.
+fn usage_in(jsonl: &str, from: u64, id: &str, at: i64, cwd: Option<&str>, model: Option<String>) -> Vec<crate::usage::Used> {
+    history::lines_at(jsonl, from)
+        .filter(|(_, l)| l.contains("\"assistant\""))
+        .filter(|(_, l)| serde_json::from_str::<Value>(l).is_ok_and(|v| v["role"] == "assistant"))
+        .map(|(offset, _)| crate::usage::Used {
+            id: format!("{id}:{offset}"),
+            at_ms: at,
+            conversation: id.into(),
+            cwd: cwd.map(String::from),
+            model: model.clone(),
+            undated: true,
+            ..Default::default()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -495,5 +527,13 @@ mod tests {
         assert_eq!(Cursor.asking("Workspace Trust Required\nDo you trust the contents of this directory?").as_deref(), Some("Trust this folder?"));
         assert_eq!(Cursor.asking("Cursor Agent\nv2026.10.01\nPress any key to log in...").as_deref(), Some("Sign in to Cursor"));
         assert_eq!(Cursor.asking("→ list the files").as_deref(), None);
+    }
+
+    #[test]
+    fn its_answers_count_as_calls() {
+        let used = usage_in(TRANSCRIPT, 0, "c1", 5000, Some("/me"), None);
+        assert_eq!(used.len(), 2);
+        let second = TRANSCRIPT.find(r#"{"role":"assistant","message":{"content":[{"type":"text","text":"There"#).unwrap();
+        assert_eq!((used[1].id.clone(), used[1].at_ms, used[1].cwd.as_deref()), (format!("c1:{second}"), 5000, Some("/me")));
     }
 }

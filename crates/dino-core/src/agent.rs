@@ -362,6 +362,13 @@ pub trait Agent: Sync {
         None
     }
 
+    /// The model answers its own records hold that `seen` hasn't read yet: what it used, for
+    /// usage statistics. Only what's new is read (see `usage::Seen`); empty for an agent whose
+    /// records don't say.
+    fn usage(&self, _seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        vec![]
+    }
+
     // ---- This Mac ----
 
     /// How it's signed in: "Claude Max", "ChatGPT login", "signed out".

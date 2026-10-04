@@ -356,9 +356,42 @@ impl Agent for Qwen {
         std::fs::read_dir(qwen_home().join("projects")).ok()?.flatten().map(|d| d.path().join("chats").join(format!("{session_id}.jsonl"))).find(|p| p.exists())
     }
 
+    fn usage(&self, seen: &mut crate::usage::Seen) -> Vec<crate::usage::Used> {
+        if self.free {
+            return vec![];
+        }
+        transcripts().iter().filter_map(|p| seen.new_lines(p, b"\"usageMetadata\"")).flat_map(|(t, _)| usage_in(&t)).collect()
+    }
+
     fn turns(&self, text: &str, _path: &Path, _start: u64) -> Vec<Turn> {
         turns_in(text)
     }
+}
+
+/// Its answers' usage, as Gemini counts it: the prompt includes what was cached, the answer
+/// leaves its thoughts apart.
+fn usage_in(jsonl: &str) -> Vec<crate::usage::Used> {
+    let mut out = vec![];
+    for v in jsonl.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+        let u = &v["usageMetadata"];
+        let (Some(id), Some(conversation)) = (v["uuid"].as_str(), v["sessionId"].as_str()) else { continue };
+        if v["type"] != "assistant" || !u.is_object() {
+            continue;
+        }
+        let cached = history::count(&u["cachedContentTokenCount"]);
+        out.push(crate::usage::Used { undated: false,
+            id: id.into(),
+            at_ms: history::ms_of(&v["timestamp"]).unwrap_or(0),
+            conversation: conversation.into(),
+            cwd: v["cwd"].as_str().map(String::from),
+            model: v["model"].as_str().map(String::from),
+            input: history::count(&u["promptTokenCount"]).saturating_sub(cached),
+            cache_read: cached,
+            cache_write: 0,
+            output: history::count(&u["candidatesTokenCount"]) + history::count(&u["thoughtsTokenCount"]),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -424,5 +457,14 @@ mod tests {
     fn continuing_drops_what_picks_the_session() {
         let args: Vec<String> = ["--resume", "abc", "-m", "qwen3-coder-plus", "--approval-mode", "plan", "-i", "hi", "--continue"].iter().map(|s| s.to_string()).collect();
         assert_eq!(Qwen { free: false }.portable_flags(&args), ["-m", "qwen3-coder-plus", "--approval-mode", "plan"]);
+    }
+
+    #[test]
+    fn its_answers_usage_counts_cached_input_apart() {
+        let jsonl = r#"{"uuid":"3","sessionId":"s1","timestamp":"2026-09-29T10:00:03Z","type":"assistant","cwd":"/r","model":"qwen3-coder-plus","message":{"role":"model","parts":[]},"usageMetadata":{"promptTokenCount":1200,"candidatesTokenCount":40,"thoughtsTokenCount":5,"cachedContentTokenCount":200,"totalTokenCount":1245}}"#;
+        let used = usage_in(jsonl);
+        assert_eq!(used.len(), 1);
+        assert_eq!((used[0].id.as_str(), used[0].conversation.as_str(), used[0].model.as_deref()), ("3", "s1", Some("qwen3-coder-plus")));
+        assert_eq!((used[0].input, used[0].cache_read, used[0].output), (1000, 200, 45));
     }
 }
