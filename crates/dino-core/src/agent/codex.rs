@@ -68,9 +68,33 @@ fn cloud_tasks(codex: &Path) -> Vec<Value> {
     vec![]
 }
 
+/// Codex's command line (`codex --help`), for finding a prompt in it.
+const CLI: super::Cli = super::Cli {
+    value: &[
+        "-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env", "-m", "--model", "--local-provider", "-p", "--profile", "-s",
+        "--sandbox", "-C", "--cd", "--add-dir", "-a", "--ask-for-approval",
+    ],
+    optional: &[],
+    variadic: &["-i", "--image"],
+    flags: &[
+        "--strict-config", "--oss", "--approve-for-me", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--worktree",
+        "--search", "--no-alt-screen", "--no-daemon", "--full-auto", "--yolo", "-h", "--help", "-V", "--version",
+    ],
+    commands: &[
+        "agents", "exec", "e", "review", "login", "logout", "mcp", "plugin", "app-server", "remote-control", "app", "completion", "update", "doctor",
+        "sandbox", "debug", "apply", "a", "resume", "queue", "archive", "delete", "migrate-rollouts", "unarchive", "fork", "cloud", "exec-server",
+        "features", "help", "mcp-server",
+    ],
+};
+
 impl Agent for Codex {
     fn id(&self) -> &'static str {
         "codex"
+    }
+
+    // `codex [options] [prompt]`.
+    fn launch_prompt(&self, args: &[String]) -> Option<(Vec<String>, String)> {
+        super::positional_prompt(args, &CLI)
     }
 
     fn answers_once(&self) -> bool {
