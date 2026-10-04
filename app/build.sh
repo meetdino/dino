@@ -13,6 +13,10 @@ cp -R "$BIN"/*.bundle "$APP/Contents/Resources/"
 mkdir -p "$APP/Contents/Frameworks"
 cp -R "$BIN/Sparkle.framework" "$APP/Contents/Frameworks/"
 cp Info.plist "$APP/Contents/Info.plist"
+# Its own identity: macOS pins a privacy grant (Screen Recording, Accessibility…) to the code that
+# got it, and an ad hoc build's changes with every rebuild. Sharing the release's bundle id would
+# leave the installed dino's grants pinned to a dev build that no longer exists.
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier dev.dino.app.dev" -c "Set :CFBundleName dino dev" -c "Set :CFBundleDisplayName dino dev" "$APP/Contents/Info.plist"
 [ -f AppIcon.icns ] && cp AppIcon.icns "$APP/Contents/Resources/"
 # Hardened runtime: no DYLD_INSERT_LIBRARIES or other injection into dino, which holds your
 # folder and automation grants. No --deep: nested code is signed first, inside out (Sparkle, as
