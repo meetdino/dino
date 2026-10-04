@@ -7,7 +7,7 @@ use std::process::Command;
 
 /// Each crate, the repository it goes to, and the other dino crates it may use.
 const RULES: &[(&str, &str, &[&str])] = &[
-    // Public crates others build on (dino-cloud): no daemon, proxy or terminal code.
+    // Public crates others build on (the account server in cloud/): no daemon, proxy or terminal code.
     ("dino-core", "dino", &[]),
     ("dino-sync", "dino", &["dino-core"]),
     // The terminal emulation and the proxy stand on their own, so either can move out.

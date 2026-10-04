@@ -1,0 +1,10 @@
+# The build context is the repository root (docker build -f cloud/Dockerfile .); the server needs
+# only cloud/, crates/dino-sync and the root Cargo.toml it inherits from.
+*
+!Cargo.toml
+!crates/dino-sync
+!cloud
+cloud/target
+cloud/.cargo/config.toml
+cloud/**/*.log
+cloud/.env*

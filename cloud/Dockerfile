@@ -1,13 +1,18 @@
 # syntax=docker/dockerfile:1.7
 #
-# docker build -t dino-cloud .
+# From the repository root, since the server builds on crates/dino-sync:
+#
+#   docker build -f cloud/Dockerfile -t dino-cloud .
 
 FROM rust:1.94-bookworm AS build
 WORKDIR /src
-COPY . .
+COPY Cargo.toml ./
+COPY crates/dino-sync crates/dino-sync
+COPY cloud cloud
+WORKDIR /src/cloud
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/src/cloud/target \
     cargo build --release --locked -p dino-cloud \
  && cp target/release/dino-cloud /dino-cloud
 

@@ -16,7 +16,7 @@ fi
 cargo build --release
 cargo test --workspace --release
 (cd app && swift build -c release)
-if git grep -n 'TEST-ONLY' -- crates app >/dev/null; then
+if git grep -n 'TEST-ONLY' -- crates app cloud >/dev/null; then
     echo "TEST-ONLY code is still in the tree" >&2
     exit 1
 fi

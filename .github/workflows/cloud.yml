@@ -1,15 +1,19 @@
-name: CI
+name: Cloud
 
+# The account server in cloud/, its own workspace (it builds on Linux; the rest of the repository
+# doesn't). Runs when it or the sync protocol it shares with dinod changes.
 on:
   push:
     branches: [main]
+    paths: ["cloud/**", "crates/dino-sync/**", "Cargo.toml", ".github/workflows/cloud.yml"]
   pull_request:
+    paths: ["cloud/**", "crates/dino-sync/**", "Cargo.toml", ".github/workflows/cloud.yml"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: cloud-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -30,10 +34,15 @@ jobs:
           --health-retries 30
     env:
       DINO_TEST_DATABASE_URL: postgres://dino:dino@127.0.0.1:55432/postgres
+    defaults:
+      run:
+        working-directory: cloud
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml picks the version.
+      # cloud/rust-toolchain.toml picks the version.
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cloud
       - run: cargo build --workspace --all-targets --locked
       - run: cargo test --workspace --locked
