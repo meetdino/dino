@@ -90,6 +90,35 @@ pub fn which_agent(kind: &AgentKind) -> Option<PathBuf> {
     find_in(kind, &std::env::var_os("PATH").unwrap_or_default())
 }
 
+/// Where a running agent's program is, as its process says, for one dino didn't find on the
+/// `PATH` (installed by a version manager only an interactive shell sets up, in a folder of its
+/// own): a native program is its own path; a Node or Bun CLI is run as `node <script>`, so it's
+/// the command it was started as (still in its arguments, unless it renamed itself; else as its
+/// shell noted it, `$_`), npm's link to its package's script, or the one next to the `node` that
+/// runs it (nvm, fnm, Volta).
+pub fn program_of(kind: &AgentKind, pid: u32) -> Option<PathBuf> {
+    let names: Vec<&str> = std::iter::once(kind.bin).chain(kind.was.iter().copied()).collect();
+    let named = |p: &Path| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| names.contains(&n)) && is_executable(p);
+    let exe = procinfo::exe_of(pid).map(PathBuf::from);
+    if let Some(e) = exe.as_ref().filter(|e| named(e)) {
+        return Some(e.clone());
+    }
+    let (args, env) = procinfo::args_and_env(pid).unwrap_or_default();
+    let started_as = args.iter().skip(1).take(2).map(String::as_str).filter(|a| a.starts_with('/')).chain(env.iter().filter_map(|e| e.strip_prefix("_="))).map(PathBuf::from);
+    for c in started_as {
+        if named(&c) {
+            return Some(c);
+        }
+        // `<prefix>/lib/node_modules/<package>/…`: npm links its command at `<prefix>/bin`.
+        let prefix = c.ancestors().find(|a| a.ends_with("lib/node_modules")).and_then(|m| m.parent()?.parent());
+        if let Some(found) = prefix.and_then(|p| names.iter().map(|n| p.join("bin").join(n)).find(|b| is_executable(b))) {
+            return Some(found);
+        }
+    }
+    let dir = exe?.parent()?.to_path_buf();
+    names.iter().map(|n| dir.join(n)).find(|p| is_executable(p))
+}
+
 /// The user's login shell, for plain terminal sessions.
 pub fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
@@ -240,6 +269,32 @@ pub fn load_keys() -> std::collections::HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_running_script_says_where_its_command_is() {
+        // npm's layout, run as `<interpreter> <prefix>/lib/node_modules/<package>/cli` (sh standing in for node).
+        let prefix = std::env::temp_dir().join(format!("dino-program-{}", std::process::id()));
+        let script = prefix.join("lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::fs::write(&script, "sleep 5\n").unwrap();
+        let link = prefix.join("bin/pi");
+        std::os::unix::fs::symlink(&script, &link).unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut child = std::process::Command::new("/bin/sh").arg(&script).spawn().unwrap();
+        let pi = KNOWN_AGENTS.iter().find(|k| k.id == "pi").unwrap();
+        let found = (0..50).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            program_of(pi, child.id())
+        });
+        let codex = KNOWN_AGENTS.iter().find(|k| k.id == "codex").unwrap();
+        let other = program_of(codex, child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(&prefix).unwrap();
+        assert_eq!(found, Some(link));
+        assert_eq!(other, None, "only its own command");
+    }
 
     #[test]
     fn an_agent_is_found_by_its_older_name_too() {

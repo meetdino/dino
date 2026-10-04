@@ -252,7 +252,7 @@ struct WelcomeCard: View {
 
     /// The agents this step speaks for: those the Experimental option can add open-computer-use to
     /// (dino-core's `agent_mcp::AGENTS`), Claude Code and Codex with their own among them.
-    private static let computerUseAgents: Set = ["claude", "codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode"]
+    private static let computerUseAgents: Set = ["claude", "codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode", "copilot"]
 
     /// Claude Code with a Pro or Max plan, and Codex's app, have their own.
     private static func hasOwnComputerUse(_ a: AgentSetupInfo) -> Bool {
@@ -270,6 +270,8 @@ struct WelcomeCard: View {
                     Text("Its own computer use needs a Pro or Max plan\(a.account.map { " (this Mac: \($0))" } ?? ""). The option below can add open-computer-use instead.")
                 case "codex":
                     Text("In the Codex app: Plugins → Computer Use → Install plugin, then turn on its server and skill. OpenAI documents it for the app, not the Codex CLI.")
+                case "copilot":
+                    Text("Has none of its own. The option below can add open-computer-use, where your organization's Copilot policy allows MCP servers.")
                 default:
                     Text("Has none of its own. The option below can add open-computer-use.")
                 }

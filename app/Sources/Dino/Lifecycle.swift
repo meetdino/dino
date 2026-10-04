@@ -557,6 +557,7 @@ struct ShortcutSheet: View {
 
     /// Keys dino handles outside the menus.
     private static let extra = MenuGroup(menu: "Sidebar", entries: [
+        Entry(title: "Open the session and go to its terminal", keys: "↩"),
         Entry(title: "Rename a session", keys: "double-click"),
         Entry(title: "Unarchive a session", keys: "double-click"),
     ])

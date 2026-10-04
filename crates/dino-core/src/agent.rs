@@ -9,7 +9,7 @@ use crate::controls::Controls;
 use crate::found::FoundSession;
 use crate::history::Turn;
 use crate::models::Catalog;
-use crate::providers::Format;
+use crate::providers::{Format, ProviderModel};
 
 pub(crate) mod amp;
 mod claude;
@@ -63,6 +63,9 @@ pub enum ServerEvent {
     Answered(String),
     /// An answer in `session` read `used` tokens of `model`'s context.
     Context { session: String, model: String, used: u64 },
+    /// Tool call `call` (tool `name`, as the agent names it) is out, or has ended (`done`). Said
+    /// again as it goes: only its first word and its end count.
+    Tool { call: String, name: String, done: bool },
     Other,
 }
 
@@ -158,6 +161,11 @@ pub trait Agent: Sync {
     /// `format`, one of its `provider_formats`. Its own settings and login stay as they are.
     fn provider_wiring(&self, _url: &str, _format: Format, _model: &str) -> Option<Wiring> {
         None
+    }
+    /// `provider_wiring`, with what the provider says of the model when dino has its list: for an
+    /// agent that has to be told the model's context window, output limit or what it takes in.
+    fn provider_wiring_for(&self, url: &str, format: Format, model: &str, _info: Option<&ProviderModel>) -> Option<Wiring> {
+        self.provider_wiring(url, format, model)
     }
     /// It runs on dino's free tier, which picks the model for each turn and only runs on this Mac.
     fn free(&self) -> bool {

@@ -134,10 +134,11 @@ pub(crate) fn drop_flags(args: &[String], drop_with_value: &[&str], drop_alone: 
     out
 }
 
-/// Agent sessions running in other terminals.
+/// Agent sessions running in other terminals. Not another dinod's (a test build's, another
+/// copy of dino): that one runs them, and offering to take them over would fight it for them.
 pub fn running() -> Vec<FoundSession> {
     PROCS.lock().unwrap().get_or_insert_default().retain(|&pid, _| alive(pid));
-    crate::agent::all().into_iter().flat_map(|a| a.running()).collect()
+    crate::agent::all().into_iter().flat_map(|a| a.running()).filter(|f| !f.pid.is_some_and(crate::procinfo::under_another_dinod)).collect()
 }
 
 /// Cloud work of the agents `program` finds a CLI for: Claude Code web sessions (picked via
@@ -293,6 +294,10 @@ pub fn starting(roots: &[u32], known: &[u32]) -> Vec<FoundSession> {
         }
         // An agent process another one already lists (its native child) counts as listed.
         if table.iter().any(|(p, _, _, _)| known.contains(p) && ancestors(*p).contains(pid)) {
+            continue;
+        }
+        // Another dinod's session, starting (see `running`).
+        if crate::procinfo::under_another_dinod(*pid) {
             continue;
         }
         // Where it runs (an app, tmux) and with which flags, as for one with a conversation.

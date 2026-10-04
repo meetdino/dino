@@ -17,7 +17,7 @@ on the machine. This repository holds all of it, the account service included.
 | `dino-core` | Settings, the agent adapters, models and compatibility, discovery, dinod's IPC types. | nothing of ours |
 | `dino-sync` | The sync protocol, shared with dino-cloud, so what leaves the Mac is checkable. | `dino-core` |
 | `dino-term` | Terminal emulation behind each session. | nothing of ours |
-| `dino-router`, `dino-proxy` | The local proxy: per-session routes, metering, the free models pool. It runs inside dinod as a library, so there's no extra hop. | `dino-router` |
+| `dino-router`, `dino-proxy` | The local proxy: per-session routes, coding plans, metering, the free models pool, and noticing an agent's computer or browser use. It runs inside dinod as a library, so there's no extra hop. | `dino-router` |
 | `dino-daemon` | dinod, putting it together. | all of the above |
 | `dino` | The CLI. | all of the above |
 
@@ -34,7 +34,7 @@ links dino-core.
 flowchart LR
   T["dino terminal"] -- "calls (n windows → 1)" --> D["dinod"]
   CLI["dino CLI"] -- "calls" --> D
-  D -- "spawns, in its own pty" --> A["agents: Claude Code, Codex, Kimi, Qwen, Pi, Hermes, CodeWhale, OpenCode, shells"]
+  D -- "spawns, in its own pty" --> A["agents: Claude Code, Codex, Kimi, Qwen, Pi, Hermes, CodeWhale, OpenCode, Copilot CLI, Cursor Agent, Amp, shells"]
   A -- "model traffic" --> P["proxy (inside dinod)"]
   P --> M["the provider each agent talks to"]
   D -- "account, sync" --> C["dino-cloud"]
@@ -45,6 +45,10 @@ with its proxy route, controls and `DINO_SESSION`, and the terminal shows it thr
 `dino attach`. The terminal never spawns an agent itself. An agent typed by hand into a dino shell
 is a process in that shell, which dinod notices; it can report to dino from the start, or dinod can
 take it over. Agents running elsewhere on the Mac (other terminals, tmux) are found the same way.
+
+Each agent has an adapter in `dino-core/src/agent/` that reads its status from the agent's own
+signals: its hooks, its session record or its server. The tool calls dinod reads there also tell it
+when an agent is using the computer or a browser.
 
 ## One machine, one dinod
 

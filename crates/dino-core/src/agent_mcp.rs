@@ -13,7 +13,10 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 /// The agents dino can add an MCP server to.
-pub const AGENTS: &[&str] = &["claude", "codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode"];
+/// Not Cursor Agent: it reads `mcp.json` but has no command that adds a server (`agent mcp` only
+/// lists, logs in, enables and disables). Not Amp: it has no record on this Mac of the tools it
+/// calls, so dino couldn't show it using the Mac.
+pub const AGENTS: &[&str] = &["claude", "codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode", "copilot"];
 
 /// A stdio MCP server: the program and its arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +56,7 @@ pub fn config_file(agent: &str) -> Option<PathBuf> {
         "pi" => env_dir("PI_CODING_AGENT_DIR", ".pi/agent").join("mcp.json"),
         "hermes" => env_dir("HERMES_HOME", ".hermes").join("config.yaml"),
         "codewhale" => env_dir("CODEWHALE_HOME", ".codewhale").join("mcp.json"),
+        "copilot" => env_dir("COPILOT_HOME", ".copilot").join("mcp-config.json"),
         "opencode" => match std::env::var_os("OPENCODE_CONFIG_DIR").filter(|v| !v.is_empty()) {
             Some(dir) => PathBuf::from(dir).join("opencode.json"),
             None => env_dir("XDG_CONFIG_HOME", ".config").join("opencode/opencode.json"),
@@ -128,7 +132,7 @@ fn hermes_entry(text: &str, name: &str) -> Option<Server> {
 pub fn adding(agent: &str, name: &str, server: &Server) -> Option<Change> {
     let mut args: Vec<String> = match agent {
         "claude" => ["mcp", "add", "-s", "user", name, "--"].map(String::from).to_vec(),
-        "codex" => ["mcp", "add", name, "--"].map(String::from).to_vec(),
+        "codex" | "copilot" => ["mcp", "add", name, "--"].map(String::from).to_vec(),
         "qwen" => ["mcp", "add", "-s", "user", name].map(String::from).to_vec(),
         // Declared to the model as tools of their own, not reached through its code mode: they're
         // few, and their names then say what it's doing.
@@ -163,7 +167,7 @@ pub fn removing(agent: &str, name: &str) -> Option<Change> {
     let args: Vec<&str> = match agent {
         "claude" => vec!["mcp", "remove", "-s", "user", name],
         "qwen" => vec!["mcp", "remove", "-s", "user", name],
-        "codex" | "pi" | "codewhale" => vec!["mcp", "remove", name],
+        "codex" | "pi" | "codewhale" | "copilot" => vec!["mcp", "remove", name],
         // It asks to be sure.
         "hermes" => return Some(Change::Run { args: vec!["mcp".into(), "remove".into(), name.into()], stdin: Some("y\n") }),
         "kimi" | "opencode" => return Some(Change::Edit { file: config_file(agent)? }),
@@ -306,6 +310,8 @@ mod tests {
         assert_eq!(shown_for("pi"), "pi mcp add open-computer-use --exposure direct -- '/d/Open Computer Use.app/Contents/MacOS/OpenComputerUse' mcp");
         assert_eq!(shown_for("hermes"), "hermes mcp add open-computer-use --command '/d/Open Computer Use.app/Contents/MacOS/OpenComputerUse' --args mcp");
         assert_eq!(shown_for("codewhale"), "codewhale mcp add open-computer-use --command '/d/Open Computer Use.app/Contents/MacOS/OpenComputerUse' --arg mcp");
+        assert_eq!(shown_for("copilot"), "copilot mcp add open-computer-use -- '/d/Open Computer Use.app/Contents/MacOS/OpenComputerUse' mcp");
+        assert_eq!(removing("copilot", "open-computer-use"), Some(Change::Run { args: ["mcp", "remove", "open-computer-use"].map(String::from).to_vec(), stdin: None }));
         assert!(matches!(adding("kimi", "x", &s), Some(Change::Edit { .. })));
         assert_eq!(removing("claude", "open-computer-use"), Some(Change::Run { args: ["mcp", "remove", "-s", "user", "open-computer-use"].map(String::from).to_vec(), stdin: None }));
         assert!(adding("aider", "x", &s).is_none());
@@ -321,6 +327,9 @@ mod tests {
         assert_eq!(find_in("codex", "open-computer-use", codex), Some(s.clone()));
         let codewhale = r#"{"servers": {"open-computer-use": {"command": "/d/Open Computer Use.app/Contents/MacOS/OpenComputerUse", "args": ["mcp"], "env": {}, "enabled": true}}}"#;
         assert_eq!(find_in("codewhale", "open-computer-use", codewhale), Some(s.clone()));
+        // As `copilot mcp add` 1.0.91 wrote it.
+        let copilot = r#"{"mcpServers": {"open-computer-use": {"tools": ["*"], "type": "local", "command": "/d/Open Computer Use.app/Contents/MacOS/OpenComputerUse", "args": ["mcp"]}}}"#;
+        assert_eq!(find_in("copilot", "open-computer-use", copilot), Some(s.clone()));
         // As `hermes mcp add` 0.19 wrote it.
         let hermes = "model:\n  default: x\nmcp_servers:\n  other:\n    command: npx\n  open-computer-use:\n    command: /d/Open Computer Use.app/Contents/MacOS/OpenComputerUse\n    args:\n      - mcp\n    enabled: true\n\n# ── Security\n";
         assert_eq!(find_in("hermes", "open-computer-use", hermes), Some(s.clone()));
