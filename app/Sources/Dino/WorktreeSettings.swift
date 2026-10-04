@@ -13,7 +13,8 @@ extension DinoSettings {
     }
 }
 
-/// Settings → Workspaces → Worktrees: where they go, and the ones on disk.
+/// Settings → Workspaces → Worktrees: where they go, trust for fan-outs, archiving after a PR,
+/// and the ones on disk.
 struct WorktreesPane: View {
     @EnvironmentObject var store: SettingsStore
     @State private var location = ""
@@ -53,6 +54,28 @@ struct WorktreesPane: View {
                 .orgLocked("worktrees.branch_prefix")
             } footer: {
                 Footnote("A relative location is inside each repo, and dino keeps it out of git status. An absolute one gets a folder per repo. Both apply to worktrees dino makes from now on: sessions, fan-outs and scheduled tasks. Branches are named like \(prefixShown)claude-3f2a, or after the task for a scheduled run.")
+            }
+            Section {
+                Toggle("Trust fan-out worktrees when the repo is trusted", isOn: Binding(
+                    get: { store.settings?.policies.worktree_trust ?? true },
+                    set: { on in store.update { $0.policies.worktree_trust = on } }
+                ))
+                .orgLocked("policies.worktree_trust")
+            } header: {
+                Text("Fan-out")
+            } footer: {
+                Footnote("Claude asks whether to trust each new folder, and every fan-out worktree is one. When you've trusted the repo, dino tells Claude its worktrees are trusted too, and forgets them when the fan-out closes. Codex does this on its own.")
+            }
+            Section {
+                Toggle("Archive sessions after their PR merges or closes", isOn: Binding(
+                    get: { store.settings?.policies.close_merged ?? false },
+                    set: { on in store.update { $0.policies.close_merged = on } }
+                ))
+                .orgLocked("policies.close_merged")
+            } header: {
+                Text("Pull Requests")
+            } footer: {
+                Footnote("When a session's PR merges or is closed, dino archives it once its agent is idle, so the conversation can be picked up again. After a merge, the worktree dino made for it is removed too if nothing in it would be lost; after a close it stays (see Storage below), since the work never landed. Unarchive it to pick up where it left off, worktree and all. Sessions outside a dino worktree stay open.")
             }
             Section {
                 if let stored {

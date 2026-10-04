@@ -216,7 +216,7 @@ private struct SignedOut: View {
             .padding(.bottom, 6)
         }
         Section("What syncs") {
-            Text("Agent defaults, policies, worktree and terminal settings, SSH hosts, and repository variables (matched by git remote).")
+            Text("Agent defaults, which agents you use and their limits, worktree and terminal settings, SSH hosts, and repository variables (matched by git remote).")
                 .foregroundStyle(.secondary)
         }
         Section("What never leaves this Mac") {

@@ -232,7 +232,7 @@ pub(crate) fn check_trust(l: &LauncherInfo, dir: &Path, worktree: bool) -> anyho
         );
         anyhow::ensure!(
             !worktree || Settings::load().policies.worktree_trust,
-            "Claude would ask to trust the new worktree. Turn on worktree trust in Settings → Policies, or run without a worktree"
+            "Claude would ask to trust the new worktree. Turn on worktree trust in Settings → Workspaces → Worktrees, or run without a worktree"
         );
     }
     Ok(())
