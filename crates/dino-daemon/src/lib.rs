@@ -1972,6 +1972,20 @@ fn setup_prompt(screen: &str) -> Option<&'static str> {
     }
 }
 
+/// What an agent whose questions are only on its screen (see `Agent::asking`) asks there:
+/// before its record says anything, or while it says the turn is going (a permission dialog
+/// mid-turn). Otherwise `activity`, as its record has it. One whose store is polled has its screen
+/// read there instead (see `agentlog`), and what it asks is already in `activity`.
+fn on_screen(s: &Session, activity: Option<String>) -> Option<String> {
+    if activity.as_deref().is_some_and(|a| a != "working") {
+        return activity;
+    }
+    let asked = agent(&s.agent_id)
+        .filter(|a| a.asks_on_screen() && a.status_source() != StatusSource::Polled && s.host.is_none() && !s.pane.is_exited())
+        .and_then(|a| a.asking(&s.pane.text(0)));
+    asked.map(|what| format!("needs:{what}")).or(activity)
+}
+
 /// Pi brings no models: until it has a provider it says so and waits. Its sign-in dialog, or that
 /// warning with nothing after it (a sign-in prints its result below), is a question for the user.
 fn pi_setup_prompt(screen: &str) -> Option<&'static str> {
@@ -2094,7 +2108,7 @@ fn state(d: &Daemon) -> Response {
                 output_tokens: st.usage.output,
                 last_model: st.last_model,
                 tier: st.tier,
-                activity: st.activity.map(|a| match a {
+                activity: on_screen(s, st.activity.map(|a| match a {
                     Activity::Working => "working".into(),
                     Activity::Done => match (waiting.0, waiting.1.saturating_sub(serving_waited)) {
                         (0, 0) if serving_waited > 0 => format!("server:{}", ports(&serving)),
@@ -2106,7 +2120,7 @@ fn state(d: &Daemon) -> Response {
                 // Before its first hook, Claude can already be waiting on you: its folder trust
                 // prompt, its login, its first-run setup. Shown, so a first session isn't "idle".
                 .or_else(|| (s.agent_id == "claude" && !s.pane.is_exited()).then(|| setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}")))
-                .or_else(|| (s.agent_id == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))),
+                .or_else(|| (s.agent_id == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}")))),
                 group: group_of(&s.id),
                 error: st.last_error,
                 cwd: if s.host.is_some() { s.cwd.display().to_string() } else { real(&s.cwd) },
@@ -2604,7 +2618,7 @@ fn watch_shells(d: &Daemon) {
         let Some(fg) = fg.filter(|_| due) else { continue };
         let mut found = found::inside(fg);
         // Asking the user (a permission or trust dialog): its own status only says busy.
-        if let Some(f) = found.as_mut().filter(|f| ["claude", "codex", "codewhale"].contains(&f.agent.as_str())) {
+        if let Some(f) = found.as_mut().filter(|f| ["claude", "codex"].contains(&f.agent.as_str()) || agent(&f.agent).is_some_and(|a| a.asks_on_screen())) {
             if found::asking(&f.agent, &s.pane.text(0)) {
                 f.status = Some("needs".into());
             }

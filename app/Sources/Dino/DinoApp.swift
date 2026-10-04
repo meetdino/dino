@@ -1384,7 +1384,7 @@ struct AgentBadge: View {
     let agent: String
 
     var body: some View {
-        Text(["codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode"].contains(base) ? base : "claude")
+        Text(AgentNames.short[base] != nil ? base : "claude")
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
             .padding(.horizontal, 4).padding(.vertical, 1)
             .background(RoundedRectangle(cornerRadius: 3).fill(color.opacity(0.18)))
@@ -1407,6 +1407,9 @@ struct AgentBadge: View {
         case "hermes": .indigo
         case "codewhale": .cyan
         case "opencode": .gray
+        case "copilot": .green
+        case "cursor": .brown
+        case "amp": .pink
         default: Brand.spike
         }
     }
