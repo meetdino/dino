@@ -741,7 +741,13 @@ struct Sidebar: View {
                 } else if tag.hasPrefix("move:") {
                     model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
                 } else if tag.hasPrefix("task:") {
-                    model.editingTask = model.scheduled.first { "task:\($0.id)" == tag }
+                    // A task's row shows what it did: its runs open under it. Edit is in its menu.
+                    // After the table's own selection callback: rows coming and going from inside it
+                    // is a reentrant update NSTableView can crash on.
+                    let task = String(tag.dropFirst(5))
+                    DispatchQueue.main.async { model.toggleRuns(task) }
+                } else if tag.hasPrefix("run:") {
+                    model.openRun(String(tag.dropFirst(4)))
                 } else if tag.hasPrefix("repo:") {
                     // A repo's row: its folder, as its main checkout's row.
                     model.select("dir:" + tag.dropFirst(5))
@@ -805,6 +811,9 @@ struct Sidebar: View {
                         }
                         ForEach(model.scheduled) { t in
                             ScheduledRow(task: t).tag("task:\(t.id)")
+                            if model.openTasks.contains(t.id) {
+                                TaskRuns(task: t)
+                            }
                         }
                         if model.scheduled.isEmpty {
                             Button { model.newTask() } label: {
