@@ -57,6 +57,7 @@ enum GhosttyConfig {
         let scheme = scheme
         applied = scheme
         defer { controller.setColorScheme(scheme) }
+        defer { readPaneChrome(controller) }
         var read: [String] = []
         let all = files.flatMap { expand($0, depth: 0, read: &read) }.compactMap { resolvingTheme($0, for: scheme) }
         var lines = all

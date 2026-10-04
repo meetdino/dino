@@ -56,6 +56,10 @@ struct DinoApp: App {
                 Button("Open File…") { model.chooseFile() }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
             }
+            // The terminal's own: Clear, Reset Terminal, Find.
+            CommandGroup(after: .pasteboard) {
+                TerminalEditItems(model: model)
+            }
             CommandMenu("Session") {
                 Button(CommandPalette.paletteTitle) { model.showPalette = true }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
