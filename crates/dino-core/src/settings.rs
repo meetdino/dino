@@ -304,7 +304,7 @@ impl Worktrees {
 pub struct Machine {
     /// Onboarding finished; skip the welcome scan.
     pub onboarded: bool,
-    /// Keep the Mac from idle-sleeping while tasks are scheduled, so they run on time. Closing the lid still sleeps it.
+    /// Keep the Mac from idle-sleeping while automations are scheduled, so they run on time. Closing the lid still sleeps it.
     pub keep_awake: bool,
     /// Shells dino starts mark their prompts and report their folder, as in Ghostty (new shells only).
     pub shell_integration: bool,

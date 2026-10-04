@@ -1,5 +1,6 @@
 mod account;
 mod ai;
+mod automations;
 mod client;
 mod mcp;
 mod out;
@@ -817,6 +818,10 @@ Fan-out: one prompt to several agents, a git worktree each
   dino fan [--agents claude,codex,...] <prompt>
   dino groups | diff <id> | keep <id> | discard <group>
 
+Automations: dino does something by itself when something happens
+  dino automations [show|add|edit|run|pause|resume|rm] …
+                                    on a schedule, a PR, failed CI, changed files, …
+
 Setup
   dino login [--email | --device] | logout | sync [status|now|resolve|undo]
   dino login openrouter|chatgpt     connect a provider in your browser
@@ -831,7 +836,7 @@ Setup
   dino mcp [--read-only]            an MCP server on stdio, for agents
   dino ping | stop | daemon | --version
 
-`dino <command> --help` says more about ls, rm, found, stats, login and fan.";
+`dino <command> --help` says more about ls, rm, found, stats, login, fan and automations.";
 
 fn main() {
     // Piped into `head`, stop quietly when it has enough, as other commands do; Rust otherwise
@@ -890,6 +895,7 @@ fn dino() -> anyhow::Result<()> {
         }
         Some("sync") => return account::sync(&cli[1..]),
         Some("fan") => return cmd_fan(&cli[1..]),
+        Some("automations" | "automation") => return automations::run(&cli[1..]),
         Some("groups") => return cmd_groups(),
         Some("diff") => {
             let session = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino diff <id>\n`dino groups` lists fan-outs and their sessions."))?.clone();

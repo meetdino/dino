@@ -31,6 +31,8 @@ mod cloud;
 mod codex;
 mod computer_use;
 mod fallbacks;
+mod fsevents;
+mod github;
 mod lid;
 mod lifecycle;
 mod peers;
@@ -44,6 +46,7 @@ mod subtoken;
 mod sync;
 mod tmux;
 mod tmux_mirror;
+mod triggers;
 mod update;
 
 /// The line between a resumed session's screen from before dinod restarted and what follows.
@@ -1236,7 +1239,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::Fanout { prompt, launchers, cwd } => match fanout(d, &prompt, &launchers, cwd) {
+            Request::Fanout { prompt, launchers, cwd } => match fanout(d, &prompt, &launchers, cwd, None) {
                 Ok(group) => {
                     save(d);
                     Response::Created { id: group }
@@ -3100,7 +3103,8 @@ fn save_groups(groups: &[Group]) {
     let _ = write_private(&groups_path(), &serde_json::to_vec_pretty(groups).unwrap_or_default());
 }
 
-fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -> anyhow::Result<String> {
+/// `route`: run the agents that can on a provider's model (an automation's), the rest on their own accounts.
+fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>, route: Option<&ProviderRoute>) -> anyhow::Result<String> {
     let prompt = prompt.trim();
     anyhow::ensure!(!prompt.is_empty(), "fan-out needs a prompt");
     // Refused before any worktree is made, rather than by the first `spawn`.
@@ -3130,6 +3134,7 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>) -
         let session = spawn(d, Launch {
             name: Some(format!("{}·{}", l.short, &id[id.len() - 4..])),
             prompt: Some(prompt.into()),
+            route: route.filter(|r| provider_route(&l, (*r).clone()).is_ok()).cloned(),
             ..Launch::new(&l.short, vec![], Some(cwd.display().to_string()))
         })?;
         group.members.push(Member { session, launcher: l.short.clone(), branch, worktree: wt });

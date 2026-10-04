@@ -80,7 +80,7 @@ struct DinoApp: App {
                     .keyboardShortcut("n", modifiers: [.command, .control])
                 Button("Fan Out…") { model.showFanout = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("New Scheduled Task…") { model.newTask() }
+                Button("New Automation…") { model.newTask() }
                 Button("Continue a Session…") {
                     model.loadFound()
                     model.showContinue = true
@@ -830,12 +830,12 @@ struct Sidebar: View {
                     }
                 }
                 if filter == .all, !narrowed {
-                    SidebarHeading(title: "Scheduled") {
+                    SidebarHeading(title: "Automations") {
                         if !model.scheduled.isEmpty {
                             Button { model.newTask() } label: { Image(systemName: "plus") }
                                 .buttonStyle(.plain)
-                                .help("New Scheduled Task")
-                                .accessibilityLabel("New Scheduled Task")
+                                .help("New Automation")
+                                .accessibilityLabel("New Automation")
                         }
                     }
                     ForEach(model.scheduled) { t in
@@ -846,7 +846,7 @@ struct Sidebar: View {
                     }
                     if model.scheduled.isEmpty {
                         Button { model.newTask() } label: {
-                            Label("Run a prompt on a schedule…", systemImage: "clock")
+                            Label("Automate something…", systemImage: "bolt")
                         }
                         .buttonStyle(.plain)
                         .font(.callout)
@@ -1019,10 +1019,10 @@ struct SessionRow: View {
                         .help("Branch \(branch)\(root.map { "\n\($0)" } ?? "")")
                 }
                 if let task = session.scheduled {
-                    Image(systemName: "clock")
+                    Image(systemName: "bolt")
                         .font(.caption).foregroundStyle(.tertiary)
-                        .help("Started by the scheduled task “\(task)”")
-                        .accessibilityLabel("Scheduled by \(task)")
+                        .help("Started by the automation “\(task)”")
+                        .accessibilityLabel("Started by the automation \(task)")
                 }
                 if let reach = session.reach { UsingMark(session: session, reach: reach) }
                 if let why = session.instead_of {
