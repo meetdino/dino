@@ -172,7 +172,7 @@ impl Daemon {
     /// A launcher to start something new with: known, and allowed by the policies.
     fn allowed_launcher(&self, short: &str) -> anyhow::Result<LauncherInfo> {
         let l = self.launcher(short).ok_or_else(|| anyhow::anyhow!("unknown agent {short}"))?;
-        anyhow::ensure!(Settings::load().policies.allows(short), "{} isn't allowed by your policies (Settings → Policies)", l.label);
+        anyhow::ensure!(Settings::load().policies.allows(short), "{} is turned off (Settings → Agents)", l.label);
         Ok(l)
     }
 
@@ -927,9 +927,11 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: format!("{e:#}") },
             },
             Request::Settings => {
+                let managed = dino_core::settings::Managed::load();
                 Response::Settings {
                     settings: Settings::load(),
-                    locked: dino_core::settings::Managed::load().locked_paths(),
+                    locked: managed.locked_paths(),
+                    locked_from: managed.locked_from(),
                     ssh_config_hosts: ssh::config_hosts(),
                 }
             }
@@ -1879,7 +1881,7 @@ fn provider_route(l: &LauncherInfo, r: ProviderRoute) -> anyhow::Result<Provider
 
 /// The mode that never asks is refused unless the policies allow it.
 fn check_bypass(c: &Controls, settings: &Settings) -> anyhow::Result<()> {
-    anyhow::ensure!(c.mode.as_deref() != Some("bypass") || settings.policies.allow_bypass, "bypass mode isn't allowed by your policies (Settings → Policies)");
+    anyhow::ensure!(c.mode.as_deref() != Some("bypass") || settings.policies.allow_bypass, "bypass mode isn't allowed (Settings → Agents)");
     Ok(())
 }
 

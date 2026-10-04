@@ -158,6 +158,8 @@ private struct SettingsResponse: Decodable {
     let settings: DinoSettings
     /// Key paths an organization sets, like "policies.allow_bypass"; nil from an older dinod.
     let locked: [String]?
+    /// The managed file each locked path comes from; nil from an older dinod.
+    let locked_from: [String: String]?
     /// Hosts in ~/.ssh/config, to suggest; nil from an older dinod.
     let ssh_config_hosts: [String]?
 }
@@ -233,6 +235,8 @@ final class SettingsStore: ObservableObject {
     @Published var settings: DinoSettings?
     /// What the organization sets (managed-settings.json), by key path.
     @Published var locked: [String] = []
+    /// The managed file each locked path comes from.
+    @Published var lockedFrom: [String: String] = [:]
     @Published var keys: [KeyInfo] = []
     @Published var agents: [LauncherInfo] = []
     /// Every known agent, installed or not; nil until first asked.
@@ -246,7 +250,10 @@ final class SettingsStore: ObservableObject {
     func load() {
         run { c in (try c.settingsAndLocks(), try c.keys(), try c.allLaunchers()) } done: {
             self.settings = $0.0.settings
-            self.locked = $0.0.locked ?? []
+            let locked = $0.0.locked ?? []
+            if self.locked != locked { self.locked = locked }
+            let from = $0.0.locked_from ?? [:]
+            if self.lockedFrom != from { self.lockedFrom = from }
             self.configHosts = $0.0.ssh_config_hosts ?? []
             self.keys = $0.1
             self.agents = $0.2
@@ -314,11 +321,23 @@ final class SettingsStore: ObservableObject {
 
 /// Settings' sections, in sidebar order: the app and the Mac first, then what agents do.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case account, general, terminal, tmux, power, agents, models, workspaces, policies, experimental
+    case account, general, terminal, tmux, power, agents, models, workspaces, experimental, managed
     var id: String { rawValue }
 
-    /// The sidebar's groups, under the account row.
-    static let groups: [[SettingsPane]] = [[.general, .terminal, .tmux, .power], [.agents, .models, .workspaces, .policies], [.experimental]]
+    /// A pane remembered from before: Policies was split up, most of it into Agents.
+    init?(rawValue: String) {
+        if rawValue == "policies" {
+            self = .agents
+            return
+        }
+        guard let pane = Self.allCases.first(where: { $0.rawValue == rawValue }) else { return nil }
+        self = pane
+    }
+
+    /// The sidebar's groups, under the account row; what the organization manages only when it does.
+    static func groups(managed: Bool) -> [[SettingsPane]] {
+        [[.general, .terminal, .tmux, .power], [.agents, .models, .workspaces], [.experimental]] + (managed ? [[.managed]] : [])
+    }
 
     var title: String {
         switch self {
@@ -330,8 +349,8 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .agents: "Agents"
         case .models: "Models & Providers"
         case .workspaces: "Workspaces"
-        case .policies: "Policies"
         case .experimental: "Experimental"
+        case .managed: "Managed by your organization"
         }
     }
 
@@ -345,8 +364,8 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .agents: "cpu.fill"
         case .models: "cube.fill"
         case .workspaces: "folder.fill"
-        case .policies: "checkmark.shield.fill"
         case .experimental: "flask.fill"
+        case .managed: "building.2.fill"
         }
     }
 
@@ -360,8 +379,8 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .agents: .purple
         case .models: .pink
         case .workspaces: .teal
-        case .policies: .indigo
         case .experimental: .brown
+        case .managed: .indigo
         }
     }
 
@@ -421,12 +440,17 @@ struct SettingsView: View {
     /// Settings reopens on the pane you left it at, like the system's.
     @AppStorage("settingsTab") private var pane: SettingsPane = .general
 
+    /// The pane to show: what the organization manages only while it manages something.
+    private var shown: SettingsPane {
+        pane == .managed && store.settings != nil && store.locked.isEmpty ? .general : pane
+    }
+
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
-            List(selection: Binding(get: { pane }, set: { if let p = $0 { pane = p } })) {
+            List(selection: Binding(get: { shown }, set: { if let p = $0 { pane = p } })) {
                 AccountRow().tag(SettingsPane.account)
                     .padding(.vertical, 4)
-                ForEach(SettingsPane.groups, id: \.self) { group in
+                ForEach(SettingsPane.groups(managed: !store.locked.isEmpty), id: \.self) { group in
                     Section {
                         ForEach(group) { p in
                             HStack(spacing: 8) {
@@ -443,7 +467,7 @@ struct SettingsView: View {
             .toolbar(removing: .sidebarToggle)
         } detail: {
             VStack(spacing: 0) {
-                switch pane {
+                switch shown {
                 case .account: AccountPane()
                 case .general: GeneralPane()
                 case .terminal: TerminalSettingsPane()
@@ -451,12 +475,12 @@ struct SettingsView: View {
                 case .power: PowerPane()
                 case .agents: AgentsPane()
                 case .models, .workspaces: PartedPane(pane: pane)
-                case .policies: PoliciesPane()
                 case .experimental: ExperimentalPane()
+                case .managed: ManagedPane()
                 }
                 StoreError()
             }
-            .navigationTitle(pane.title)
+            .navigationTitle(shown.title)
         }
         .modifier(TerminalChoicesSync())
         .environmentObject(store)
@@ -838,10 +862,9 @@ private struct TmuxSection: View {
     }
 }
 
-private struct PoliciesPane: View {
+/// Settings → Agents: which agents you use, and the one ⌘N starts.
+private struct AgentChoiceSection: View {
     @EnvironmentObject var store: SettingsStore
-
-    private static let budgets: [UInt64] = [0, 1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]
 
     private var policies: DinoSettings.Policies? { store.settings?.policies }
     private var agents: [LauncherInfo] { store.agents.filter { $0.short != "shell" } }
@@ -863,113 +886,94 @@ private struct PoliciesPane: View {
     }
 
     var body: some View {
-        Form {
-            Section {
-                ForEach(agents) { l in
-                    Toggle(l.label, isOn: allowed(l))
-                        .orgLocked("policies.allowed_agents")
+        Section {
+            Picker("⌘N starts", selection: Binding(
+                get: {
+                    // What dinod falls back to when the chosen one is off or missing: the first allowed.
+                    let want = policies?.default_agent ?? "claude"
+                    return startable.contains { $0.short == want } ? want : startable.first?.short ?? ""
+                },
+                set: { d in store.update { $0.policies.default_agent = d == "claude" ? nil : d } }
+            )) {
+                ForEach(startable) { l in
+                    Text(l.label).tag(l.short)
                 }
-                Picker("⌘N starts", selection: Binding(
-                    get: {
-                        // What dinod falls back to when the chosen one is off or missing: the first allowed.
-                        let want = policies?.default_agent ?? "claude"
-                        return startable.contains { $0.short == want } ? want : startable.first?.short ?? ""
-                    },
-                    set: { d in store.update { $0.policies.default_agent = d == "claude" ? nil : d } }
-                )) {
-                    ForEach(startable) { l in
-                        Text(l.label).tag(l.short)
-                    }
-                }
-                .orgLocked("policies.default_agent")
-            } header: {
-                Text("Agents")
-            } footer: {
-                Footnote("Agents you turn off leave the menus and fan-out, and dino won't start them. Ones already running keep going. The shell is always there.")
             }
-            Section {
-                Toggle("Trust fan-out worktrees when the repo is trusted", isOn: Binding(
-                    get: { policies?.worktree_trust ?? true },
-                    set: { on in store.update { $0.policies.worktree_trust = on } }
-                ))
-                .orgLocked("policies.worktree_trust")
-            } header: {
-                Text("Fan-out")
-            } footer: {
-                Footnote("Claude asks whether to trust each new folder, and every fan-out worktree is one. When you've trusted the repo, dino tells Claude its worktrees are trusted too, and forgets them when the fan-out closes. Codex does this on its own.")
+            .orgLocked("policies.default_agent")
+            ForEach(agents) { l in
+                Toggle(l.label, isOn: allowed(l))
+                    .orgLocked("policies.allowed_agents")
             }
-            Section {
-                Toggle("Archive sessions after their PR merges or closes", isOn: Binding(
-                    get: { policies?.close_merged ?? false },
-                    set: { on in store.update { $0.policies.close_merged = on } }
-                ))
-                .orgLocked("policies.close_merged")
-            } header: {
-                Text("Pull requests")
-            } footer: {
-                Footnote("When a session's PR merges or is closed, dino archives it once its agent is idle, so the conversation can be picked up again. After a merge, the worktree dino made for it is removed too if nothing in it would be lost; after a close it stays (see Workspaces → Worktrees), since the work never landed. Unarchive it to pick up where it left off, worktree and all. Sessions outside a dino worktree stay open.")
-            }
-            Section {
-                Toggle("Allow bypass permissions mode", isOn: Binding(
-                    get: { policies?.allow_bypass ?? true },
-                    set: { on in
-                        store.update {
-                            $0.policies.allow_bypass = on
-                            // Defaults that bypass go back to the agent's own mode.
-                            if !on, let agents = $0.agents {
-                                $0.agents = agents.mapValues { c in
-                                    var c = c
-                                    if c.mode == "bypass" { c.mode = nil }
-                                    return c
-                                }
+        } header: {
+            Text("Agents You Use")
+        } footer: {
+            Footnote("Agents you turn off leave the menus and fan-out, and dino won't start them. Ones already running keep going. The shell is always there.")
+        }
+    }
+}
+
+/// Settings → Agents: whether any agent may run in the mode that never asks.
+private struct BypassSection: View {
+    @EnvironmentObject var store: SettingsStore
+
+    var body: some View {
+        Section {
+            Toggle("Allow bypass permissions mode", isOn: Binding(
+                get: { store.settings?.policies.allow_bypass ?? true },
+                set: { on in
+                    store.update {
+                        $0.policies.allow_bypass = on
+                        // Defaults that bypass go back to the agent's own mode.
+                        if !on, let agents = $0.agents {
+                            $0.agents = agents.mapValues { c in
+                                var c = c
+                                if c.mode == "bypass" { c.mode = nil }
+                                return c
                             }
                         }
                     }
-                ))
-                .orgLocked("policies.allow_bypass")
-            } header: {
-                Text("Permissions")
-            } footer: {
-                Footnote("Bypass lets an agent edit files and run any command without asking. Turn it off and dino hides it and won't start or switch a session into it. Sessions already in it keep running.")
-            }
-            Section {
-                Toggle("Cross-session communication", isOn: Binding(
-                    get: { policies?.session_tools ?? false },
-                    set: { on in store.update { $0.policies.session_tools = on } }
-                ))
-                .orgLocked("policies.session_tools")
-            } header: {
-                Text("Sessions")
-            } footer: {
-                Footnote("Gives Claude sessions dino's tools to list and read every session in dino, whatever the agent, and, when you allow it, to message an idle one or start a new one. Applies to new sessions. For other agents, add “dino mcp” as an MCP server in their own settings.")
-            }
-            Section {
-                Picker("Tokens per session", selection: Binding(
-                    get: { policies?.session_token_budget ?? 0 },
-                    set: { n in store.update { $0.policies.session_token_budget = n } }
-                )) {
-                    ForEach(budgetChoices, id: \.self) { n in
-                        Text(n == 0 ? "No limit" : Self.format(n)).tag(n)
-                    }
                 }
-                .orgLocked("policies.session_token_budget")
-            } header: {
-                Text("Budget")
-            } footer: {
-                Footnote("Counts input, cached and output tokens, like the sidebar. A session over its budget gets an error on its next model call. Only sessions routed through dino (see Models & Providers → Providers); applies to running ones too.")
-            }
+            ))
+            .orgLocked("policies.allow_bypass")
+        } header: {
+            Text("Permissions")
+        } footer: {
+            Footnote("Bypass lets an agent edit files and run any command without asking. Turn it off and dino hides it and won't start or switch a session into it. Sessions already in it keep running.")
         }
-        .formStyle(.grouped)
-        .disabled(store.settings == nil)
+    }
+}
+
+/// Settings → Agents → Limits: how much a session may use.
+private struct LimitsSection: View {
+    @EnvironmentObject var store: SettingsStore
+
+    private static let budgets: [UInt64] = [0, 1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]
+
+    var body: some View {
+        Section {
+            Picker("Tokens per session", selection: Binding(
+                get: { store.settings?.policies.session_token_budget ?? 0 },
+                set: { n in store.update { $0.policies.session_token_budget = n } }
+            )) {
+                ForEach(budgetChoices, id: \.self) { n in
+                    Text(n == 0 ? "No limit" : Self.format(n)).tag(n)
+                }
+            }
+            .orgLocked("policies.session_token_budget")
+        } header: {
+            Text("Limits")
+        } footer: {
+            Footnote("Counts input, cached and output tokens, like the sidebar. A session over its budget gets an error on its next model call. Only sessions routed through dino (see Models & Providers → Providers); applies to running ones too.")
+        }
     }
 
     /// The presets, plus a value set by hand in settings.toml.
     private var budgetChoices: [UInt64] {
-        let current = policies?.session_token_budget ?? 0
+        let current = store.settings?.policies.session_token_budget ?? 0
         return Self.budgets.contains(current) ? Self.budgets : (Self.budgets + [current]).sorted()
     }
 
-    private static func format(_ n: UInt64) -> String {
+    static func format(_ n: UInt64) -> String {
         n >= 1_000_000 && n % 100_000 == 0
             ? "\((Double(n) / 1_000_000).formatted()) million"
             : "\(n.formatted()) tokens"
@@ -997,9 +1001,9 @@ struct RoutingSections: View {
     }
 }
 
-/// A feature being tried out: off until turned on, and for this Mac only.
+/// A feature being tried out: off until turned on.
 private struct ExperimentalFeature: Identifiable {
-    /// Its name in settings.toml's [experimental].
+    /// Its name in settings.toml's [experimental], or under [policies] for one that predates it.
     let id: String
     let title: String
     /// What it does, and what leaves this Mac when it's on.
@@ -1016,15 +1020,33 @@ private struct ExperimentalFeature: Identifiable {
             title: "Computer use for more agents",
             summary: "For agents with no computer use of their own: they can see your screen and click and type in your apps, through open-computer-use (open source). Anything on screen can steer an agent: a web page or a message could tell it to do something you didn't ask. dino installs it in its own folder and adds it only to the agents you pick. Off, dino removes what it added."
         ),
+        ExperimentalFeature(
+            id: "session_tools",
+            title: "Cross-session communication",
+            summary: "Gives Claude sessions dino's tools to list and read every session in dino, whatever the agent, and, when you allow it, to message an idle one or start a new one. Applies to new sessions. For other agents, add “dino mcp” as an MCP server in their own settings."
+        ),
     ]
+
+    /// Kept under [policies], so it follows your account to your other Macs like other agent settings.
+    var isPolicy: Bool { id == "session_tools" }
+
+    /// Its key path in settings.toml, as the organization would lock it.
+    var path: String { isPolicy ? "policies.\(id)" : "experimental.\(id)" }
 }
 
 /// Settings → Experimental: one switch per feature being tried out.
 private struct ExperimentalPane: View {
     @EnvironmentObject var store: SettingsStore
 
-    private func on(_ id: String) -> Binding<Bool> {
-        Binding(
+    private func on(_ f: ExperimentalFeature) -> Binding<Bool> {
+        let id = f.id
+        if f.isPolicy {
+            return Binding(
+                get: { store.settings?.policies.session_tools ?? false },
+                set: { on in store.update { $0.policies.session_tools = on } }
+            )
+        }
+        return Binding(
             get: { store.settings?.experimental?[id] ?? false },
             set: { on in
                 guard (store.settings?.experimental?[id] ?? false) != on else { return }
@@ -1039,15 +1061,15 @@ private struct ExperimentalPane: View {
         Form {
             Section {
                 ForEach(ExperimentalFeature.all) { f in
-                    Toggle(isOn: on(f.id)) {
+                    Toggle(isOn: on(f)) {
                         Text(f.title)
                         Text(f.summary)
                     }
-                    .orgLocked("experimental.\(f.id)")
-                    if f.id == "computer_use", on(f.id).wrappedValue {
+                    .orgLocked(f.path)
+                    if f.id == "computer_use", on(f).wrappedValue {
                         ComputerUseOptions()
                     }
-                    if f.id == "free_models", on(f.id).wrappedValue {
+                    if f.id == "free_models", on(f).wrappedValue {
                         LabeledContent("Models") {
                             Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (see Models & Providers → API Keys)")
                                 .foregroundStyle(has("NVIDIA_API_KEY") ? .primary : .secondary)
@@ -1058,11 +1080,168 @@ private struct ExperimentalPane: View {
                     }
                 }
             } footer: {
-                Footnote("Features still being tried out. Each is off until you turn it on, and only on this Mac.")
+                Footnote("Features still being tried out. Each is off until you turn it on, and only on this Mac, except Cross-session communication, which syncs with your other agent settings.")
             }
         }
         .formStyle(.grouped)
         .disabled(store.settings == nil)
+    }
+}
+
+/// Settings → Managed by your organization: every setting the organization sets, what it's set
+/// to, where it shows in Settings and which file sets it. Read-only: the organization's files
+/// change them. Only in the sidebar while something is managed.
+private struct ManagedPane: View {
+    @EnvironmentObject var store: SettingsStore
+
+    /// A locked setting as people know it: its name, and where it shows in Settings.
+    private struct Item: Identifiable {
+        let id: String
+        let title: String
+        let place: String
+        /// Where "Show" goes.
+        let pane: SettingsPane?
+        let part: SettingsPart?
+    }
+
+    private var items: [Item] { store.locked.map(item) }
+
+    var body: some View {
+        Form {
+            Section {
+                if items.isEmpty {
+                    Text("Your organization doesn't set anything in dino.").foregroundStyle(.secondary)
+                }
+                ForEach(items) { row($0) }
+            } footer: {
+                Footnote("Your organization sets these, and they win over your own choices; dino shows them locked wherever they are. Your own values stay in settings.toml, and come back if your organization stops setting them.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func row(_ i: Item) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                OrgLock()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(i.title)
+                    if let pane = i.pane {
+                        Button("Settings → \(i.place)") { open(pane, i.part) }
+                            .buttonStyle(.link)
+                            .font(.callout)
+                            .help("Show it in Settings")
+                    } else {
+                        Text(i.place).font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Text(value(i.id))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .textSelection(.enabled)
+            }
+            if let file = store.lockedFrom[i.id] {
+                Text("\(i.id) in \(NSString(string: file).abbreviatingWithTildeInPath)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func open(_ pane: SettingsPane, _ part: SettingsPart?) {
+        if let part { part.select() } else { pane.select() }
+    }
+
+    private func agentName(_ id: String) -> String {
+        store.agents.first { $0.agent_id == id }?.label ?? store.setup?.first { $0.id == id }?.name ?? id
+    }
+
+    /// The path, read like the control it locks; a path dino doesn't show is listed as it is.
+    private func item(_ path: String) -> Item {
+        let parts = path.split(separator: ".", maxSplits: 1).map(String.init)
+        let head = parts[0]
+        let rest = parts.count > 1 ? parts[1] : ""
+        func make(_ title: String, _ place: String, _ pane: SettingsPane?, _ part: SettingsPart? = nil) -> Item {
+            Item(id: path, title: title, place: place, pane: pane, part: part)
+        }
+        switch (head, rest) {
+        case ("policies", "default_agent"): return make("⌘N starts", "Agents", .agents)
+        case ("policies", "allowed_agents"): return make("Agents you use", "Agents", .agents)
+        case ("policies", "allow_bypass"): return make("Allow bypass permissions mode", "Agents → Permissions", .agents)
+        case ("policies", "session_token_budget"): return make("Tokens per session", "Agents → Limits", .agents)
+        case ("policies", "session_tools"): return make("Cross-session communication", "Experimental", .experimental)
+        case ("policies", "worktree_trust"): return make("Trust fan-out worktrees when the repo is trusted", "Workspaces → Worktrees", .workspaces, .worktrees)
+        case ("policies", "close_merged"): return make("Archive sessions after their PR merges or closes", "Workspaces → Worktrees", .workspaces, .worktrees)
+        case ("routing", "proxy"): return make("Route agent traffic through dino", "Models & Providers → Providers", .models, .providers)
+        case ("machine", "shell_integration"): return make("Shell integration", "Terminal", .terminal)
+        case ("machine", "shell_agents"): return make("Claude typed into a dino shell reports to dino", "Agents", .agents)
+        case ("machine", "keep_awake"): return make("Keep your Mac awake while tasks are scheduled", "Power", .power)
+        case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", "Power", .power)
+        case ("worktrees", "location"): return make("Worktree location", "Workspaces → Worktrees", .workspaces, .worktrees)
+        case ("worktrees", "branch_prefix"): return make("Branch prefix", "Workspaces → Worktrees", .workspaces, .worktrees)
+        case ("experimental", let id):
+            let title = ExperimentalFeature.all.first { $0.id == id }?.title ?? id
+            return make(title, "Experimental", .experimental)
+        case ("agents", let r):
+            let p = r.split(separator: ".").map(String.init)
+            let agent = agentName(p[0])
+            let control = p.count > 1 ? ControlKind(rawValue: p[1])?.title ?? p[1] : "Defaults"
+            return make("\(agent): \(control)", "Agents → New \(agent) Sessions", .agents)
+        case ("repos", let r):
+            // The repo's path has dots of its own: the variable is what follows its last ".env.".
+            if let env = r.range(of: ".env.", options: .backwards) {
+                let repo = (String(r[..<env.lowerBound]) as NSString).lastPathComponent
+                return make("\(r[env.upperBound...]) in \(repo)", "Workspaces → Repositories", .workspaces, .repos)
+            }
+            return make((r as NSString).lastPathComponent, "Workspaces → Repositories", .workspaces, .repos)
+        case ("ssh", let r):
+            return make(r.split(separator: ".").first.map(String.init) ?? r, "Workspaces → SSH Hosts", .workspaces, .ssh)
+        case ("tmux", _): return make(rest, "tmux", .tmux)
+        default: return make(path, "Not shown in Settings: it's in settings.toml", nil)
+        }
+    }
+
+    /// What it's set to, from the settings in effect (which the organization's values win in).
+    private func value(_ path: String) -> String {
+        guard let settings = store.settings,
+              let data = try? JSONEncoder().encode(settings),
+              let root = try? JSONSerialization.jsonObject(with: data)
+        else { return "" }
+        guard let v = Self.lookup(root, path.split(separator: ".").map(String.init)) else { return "" }
+        switch (path, v) {
+        case ("policies.session_token_budget", let n as NSNumber): return n.uint64Value == 0 ? "No limit" : LimitsSection.format(n.uint64Value)
+        case ("policies.allowed_agents", let a as [String]) where a.isEmpty: return "All"
+        case ("policies.allowed_agents", let a as [String]):
+            return a.map { s in store.agents.first { $0.short == s }?.label ?? s }.joined(separator: ", ")
+        case ("policies.default_agent", let s as String): return store.agents.first { $0.short == s }?.label ?? s
+        default: return Self.format(v)
+        }
+    }
+
+    private static func format(_ v: Any) -> String {
+        switch v {
+        case let n as NSNumber where CFGetTypeID(n) == CFBooleanGetTypeID(): n.boolValue ? "On" : "Off"
+        case let n as NSNumber: n.stringValue
+        case let s as String: s.isEmpty ? "None" : s
+        case let a as [Any]: a.isEmpty ? "None" : a.map(format).joined(separator: ", ")
+        case is NSNull: "Not set"
+        default: "Set"
+        }
+    }
+
+    /// `segments` in `json`, where a key may itself hold dots (a repo's path, a host).
+    private static func lookup(_ json: Any, _ segments: [String]) -> Any? {
+        guard !segments.isEmpty else { return json }
+        guard let dict = json as? [String: Any] else { return nil }
+        for n in 1...segments.count {
+            if let next = dict[segments[..<n].joined(separator: ".")], let found = lookup(next, Array(segments[n...])) {
+                return found
+            }
+        }
+        return nil
     }
 }
 
@@ -1153,8 +1332,9 @@ private struct KeysPane: View {
     }
 }
 
-/// Every agent dino knows: get it, sign in to it, and what its new sessions start with. Installing
-/// and signing in run the agent's own commands in a shell, where you see them and answer them.
+/// Every agent dino knows: get it, sign in to it, which ones you use, what their new sessions
+/// start with, and how much a session may use. Installing and signing in run the agent's own
+/// commands in a shell, where you see them and answer them.
 private struct AgentsPane: View {
     @EnvironmentObject var store: SettingsStore
     @EnvironmentObject var model: DinoModel
@@ -1206,6 +1386,7 @@ private struct AgentsPane: View {
             } footer: {
                 Footnote("Install and Sign In run the agent's own commands in a new shell, where you can see them and answer their questions. dino never sees your logins.")
             }
+            AgentChoiceSection()
             Section {
                 Toggle("Claude typed into a dino shell reports to dino", isOn: Binding(
                     get: { store.settings?.machine.shell_agents ?? true },
@@ -1219,6 +1400,7 @@ private struct AgentsPane: View {
             if store.setup?.contains(where: { $0.id == "claude" && $0.installed }) == true {
                 ClaudeTokenSection(act: openShell)
             }
+            BypassSection()
             if agents.isEmpty {
                 Section {
                     Text("No agent dino can start has a mode, model or effort to choose.").foregroundStyle(.secondary)
@@ -1233,6 +1415,7 @@ private struct AgentsPane: View {
             Section {} footer: {
                 Footnote("New sessions start with these unless you choose otherwise in New Session…. Default is whatever the agent's own settings say. Change a running session from its toolbar: ⇧⌘M mode, ⇧⌘I model, ⇧⌘E effort.")
             }
+            LimitsSection()
         }
         .formStyle(.grouped)
         .disabled(store.settings == nil)
