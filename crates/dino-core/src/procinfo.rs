@@ -278,12 +278,6 @@ pub fn tree(root: u32) -> Vec<(u32, u32)> {
     out
 }
 
-/// A process's name as the kernel keeps it (cut at 32 bytes), like `ps -o comm`'s last part.
-pub fn name(pid: u32) -> Option<String> {
-    let mut buf = [0u8; 64];
-    name_of(pid as libc::c_int, &mut buf).map(|n| String::from_utf8_lossy(n).into_owned())
-}
-
 /// A process's working directory, like lsof's `cwd` entry.
 pub fn cwd_of(pid: u32) -> Option<String> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };

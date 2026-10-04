@@ -302,13 +302,16 @@ pub(crate) fn retry_at(t: &Trigger) -> u64 {
 
 /// The request starts a turn: the person wrote, rather than a tool answered. A session goes back
 /// to its first route (or up its chain) only then, so one turn isn't answered by two models.
+/// Notes the agent adds after the conversation (Claude Code 2.1 ends each call with a system
+/// message of the tokens left) aren't anyone writing: the message before them says.
 pub fn turn_start(api: Api, body: &[u8]) -> bool {
     let Ok(v) = serde_json::from_slice::<Value>(body) else { return false };
+    let last_said = |messages: &Value| messages.as_array().and_then(|m| m.iter().rev().find(|m| !matches!(m["role"].as_str(), Some("system" | "developer")))).cloned();
     match api {
-        Api::Anthropic => v["messages"].as_array().and_then(|m| m.last()).is_some_and(|m| {
+        Api::Anthropic => last_said(&v["messages"]).is_some_and(|m| {
             m["role"] == "user" && (m["content"].is_string() || m["content"].as_array().is_some_and(|c| !c.iter().any(|b| b["type"] == "tool_result")))
         }),
-        Api::Chat => v["messages"].as_array().and_then(|m| m.last()).is_some_and(|m| m["role"] == "user"),
+        Api::Chat => last_said(&v["messages"]).is_some_and(|m| m["role"] == "user"),
         Api::Responses => match &v["input"] {
             Value::String(_) => true,
             Value::Array(items) => items.last().is_some_and(|i| i["role"] == "user" && i["type"].as_str().is_none_or(|t| t == "message")),
@@ -496,6 +499,12 @@ mod tests {
         assert!(!turn_start(Api::Responses, &r(json!([{"type": "function_call_output", "call_id": "c", "output": "ok"}]))));
         assert!(turn_start(Api::Responses, &r(json!("hi"))));
         assert!(!turn_start(Api::Anthropic, b"not json"));
+        // Claude Code 2.1 ends every call with a note of the tokens left, as a system message.
+        let left = json!({"role": "system", "content": [{"type": "text", "text": "<total_tokens>15000000 tokens left</total_tokens>"}]});
+        assert!(turn_start(Api::Anthropic, &a(json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}, left]))));
+        assert!(!turn_start(Api::Anthropic, &a(json!([{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}, left]))));
+        assert!(!turn_start(Api::Anthropic, &a(json!([left]))));
+        assert!(!turn_start(Api::Chat, &a(json!([{"role": "tool", "content": "ok"}, {"role": "system", "content": "note"}]))));
     }
 
     #[test]
