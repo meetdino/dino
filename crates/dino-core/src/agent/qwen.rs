@@ -267,6 +267,11 @@ impl Agent for Qwen {
         vec!["-i".into(), prompt]
     }
 
+    // The option `prompt_args` gives it with.
+    fn launch_prompt(&self, args: &[String]) -> Option<(Vec<String>, String)> {
+        super::option_prompt(args, &["-i", "--prompt-interactive"])
+    }
+
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>) {
         let id = session.get_or_insert_with(crate::new_uuid).clone();
         // A conversation is only saved once it has a prompt; resuming one that isn't fails.

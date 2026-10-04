@@ -1502,7 +1502,19 @@ impl Launch {
 }
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    let Launch { launcher, mut args, cwd, cols, rows, restore, name, prompt, mut controls, scheduled, started_by, host, route, stay } = launch;
+    let Launch { launcher, mut args, cwd, cols, rows, restore, name, mut prompt, mut controls, scheduled, started_by, host, route, stay } = launch;
+    // A prompt typed among the agent's arguments (`dino new claude … "fix it"`) is given once, as
+    // the session starts, and kept apart from them: a session resuming its conversation (dinod
+    // restarted, unarchived, taken over) would otherwise be asked it again. One saved with it in
+    // them, or found on a command line the user typed, loses it as it resumes.
+    if let Some((rest, p)) = d.launcher(launcher.as_str()).and_then(|l| agent(&l.agent_id)).and_then(|a| a.launch_prompt(&args)) {
+        if restore.is_none() && prompt.is_none() {
+            prompt = Some(p);
+            args = rest;
+        } else if restore.is_some() {
+            args = rest;
+        }
+    }
     // The prompt goes on the agent's command line, here or over SSH: it mustn't pass for a flag.
     if let Some(p) = &prompt {
         dino_core::agent::check_prompt(p)?;
@@ -2394,8 +2406,15 @@ fn state(d: &Daemon) -> Response {
 }
 
 /// Save and stop every session, ready to exit: the next dinod resumes them (`dino stop`).
+/// Set once dinod is stopping, its sessions saved: nothing saves them again (see `save`).
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
 fn stop_all(d: &Daemon) {
     save(d);
+    // The sessions go from the list below while their agents are stopped, which takes seconds:
+    // a save meanwhile (the save loop, a session ending) would write an empty list, and the next
+    // dinod would start with none.
+    STOPPING.store(true, Ordering::SeqCst);
     save_live_screens(d, true);
     let _ = std::fs::write(stopped_mark(), b"");
     lid::stop(d);
@@ -2572,6 +2591,9 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Write the sessions to disk: running ones, and ended ones with their last screen, which stay
 /// until the user resumes or removes them.
 fn save(d: &Daemon) {
+    if STOPPING.load(Ordering::SeqCst) {
+        return;
+    }
     let sessions = d.sessions.lock().unwrap().clone();
     let saved: Vec<SavedSession> = sessions.iter().map(|s| snapshot(s)).collect();
     let dir = screens_dir();

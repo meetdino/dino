@@ -269,6 +269,11 @@ impl Agent for Copilot {
         vec!["-i".into(), prompt]
     }
 
+    // The option `prompt_args` gives it with.
+    fn launch_prompt(&self, args: &[String]) -> Option<(Vec<String>, String)> {
+        super::option_prompt(args, &["-i", "--interactive"])
+    }
+
     // Its exact id, created if missing: the same flag starts it and continues it.
     fn session_args(&self, session: &mut Option<String>, _restoring: bool) -> (Vec<String>, Vec<String>) {
         let id = session.get_or_insert_with(crate::new_uuid).clone();
