@@ -30,6 +30,7 @@ mod chatgpt;
 mod cloud;
 mod codex;
 mod computer_use;
+mod fallbacks;
 mod lid;
 mod lifecycle;
 mod peers;
@@ -122,6 +123,8 @@ struct Session {
     servers: Mutex<Vec<servers::Server>>,
     /// The provider and model it runs on instead of its agent's own account.
     route: Option<ProviderRoute>,
+    /// Started with this agent because the one asked for was at its limit.
+    instead_of: Option<ipc::InsteadOf>,
 }
 
 /// What a shell is running in the foreground, as last looked at.
@@ -183,6 +186,7 @@ impl Daemon {
         for l in &mut out {
             l.knobs = self.knobs(&l.agent_id, allow_bypass);
             l.answers_once = agent(&l.agent_id).is_some_and(|a| a.answers_once());
+            l.formats = agent(&l.agent_id).map(|a| a.provider_formats().to_vec()).unwrap_or_default();
         }
         out
     }
@@ -248,6 +252,8 @@ struct Daemon {
     asked: Arc<(Mutex<u64>, std::sync::Condvar)>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
+    /// The routes each agent's sessions use, to know when an agent is at its limit.
+    fallback_seen: Mutex<fallbacks::Seen>,
 }
 
 /// `dino lid-watchdog <pid>`: see [`lid`].
@@ -629,6 +635,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         asked: Default::default(),
         next_id: AtomicU64::new(1),
         next_sub: AtomicU64::new(1),
+        fallback_seen: Mutex::default(),
     });
     // Archived ids stay theirs, so a new session never takes one.
     let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
@@ -684,25 +691,25 @@ fn launchers_from(free_tier: bool, agents: Vec<dino_core::Detected>) -> Vec<Laun
     for d in agents {
         let program: String = d.path.to_string_lossy().into();
         if d.kind.id == "claude" && free_tier {
-            out.push(LauncherInfo { short: "free".into(), agent_id: "claude-free".into(), label: "Claude Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
+            out.push(LauncherInfo { short: "free".into(), agent_id: "claude-free".into(), label: "Claude Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![] });
         }
         if d.kind.id == "qwen" && free_tier {
-            out.push(LauncherInfo { short: "qwen-free".into(), agent_id: "qwen-free".into(), label: "Qwen Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
+            out.push(LauncherInfo { short: "qwen-free".into(), agent_id: "qwen-free".into(), label: "Qwen Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![] });
         }
         if d.kind.id == "kimi" && free_tier {
-            out.push(LauncherInfo { short: "kimi-free".into(), agent_id: "kimi-free".into(), label: "Kimi Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
+            out.push(LauncherInfo { short: "kimi-free".into(), agent_id: "kimi-free".into(), label: "Kimi Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![] });
         }
         if d.kind.id == "pi" && free_tier {
-            out.push(LauncherInfo { short: "pi-free".into(), agent_id: "pi-free".into(), label: "Pi · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
+            out.push(LauncherInfo { short: "pi-free".into(), agent_id: "pi-free".into(), label: "Pi · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![] });
         }
         if d.kind.id == "hermes" && free_tier {
-            out.push(LauncherInfo { short: "hermes-free".into(), agent_id: "hermes-free".into(), label: "Hermes Agent · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
+            out.push(LauncherInfo { short: "hermes-free".into(), agent_id: "hermes-free".into(), label: "Hermes Agent · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![] });
         }
-        out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program, knobs: Default::default(), answers_once: false });
+        out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program, knobs: Default::default(), answers_once: false, formats: vec![] });
     }
     let shell = user_shell();
     let shell_name = shell.rsplit('/').next().unwrap_or("shell").to_string();
-    out.push(LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell, knobs: Default::default(), answers_once: false });
+    out.push(LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell, knobs: Default::default(), answers_once: false, formats: vec![] });
     out
 }
 
@@ -732,7 +739,7 @@ fn launcher_for(d: &Daemon, id: &str, pid: Option<u32>) -> anyhow::Result<()> {
     let Some(kind) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id) else { anyhow::bail!("dino doesn't know how to run {id}, so it's left running where it is") };
     if let Some(program) = pid.and_then(|p| dino_core::program_of(kind, p)) {
         let program = program.display().to_string();
-        d.launchers.write().unwrap().push(LauncherInfo { short: id.into(), agent_id: id.into(), label: kind.name.into(), program, knobs: Default::default(), answers_once: agent(id).is_some_and(|a| a.answers_once()) });
+        d.launchers.write().unwrap().push(LauncherInfo { short: id.into(), agent_id: id.into(), label: kind.name.into(), program, knobs: Default::default(), answers_once: agent(id).is_some_and(|a| a.answers_once()), formats: vec![] });
         return Ok(());
     }
     anyhow::bail!(
@@ -966,6 +973,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::SetSettings { settings } => match settings.save() {
                 Ok(()) => {
                     d.proxy.set_budget(Settings::load().policies.session_token_budget);
+                    fallbacks::sync(d);
                     free_models_changed(d);
                     schedule::keep_awake(d);
                     sync_all_shell_agents(d);
@@ -1104,13 +1112,13 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 let (models, loading, error) = providers::rows(&provider);
                 Response::Models { provider, models, loading, error }
             }
-            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by, route, reveal, tmux } => {
+            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by, route, reveal, tmux, stay } => {
                 // A shell's "prompt" is a line typed at its prompt (a script opened with dino, a
                 // man page), not an argument; a tmux session to attach to takes its place.
                 let shell = launcher == "shell";
                 let tmux = tmux.filter(|t| shell && host.is_none() && dino_core::settings::Tmux::valid_name(t));
                 let (prompt, line) = if shell { (None, prompt.filter(|_| tmux.is_none())) } else { (prompt, None) };
-                let launch = Launch { cols, rows, controls, host, prompt, started_by: by, route, ..Launch::new(&launcher, args, cwd) };
+                let launch = Launch { cols, rows, controls, host, prompt, started_by: by, route, stay, ..Launch::new(&launcher, args, cwd) };
                 match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {
                     Ok(id) => {
                         let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
@@ -1451,6 +1459,8 @@ struct Launch {
     host: Option<String>,
     /// On a provider's model instead of the agent's own account; a restored session keeps its own.
     route: Option<ProviderRoute>,
+    /// Start this agent even while it's at its limit, not the one its fallback names.
+    stay: bool,
 }
 
 impl Launch {
@@ -1460,7 +1470,7 @@ impl Launch {
 }
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    let Launch { launcher, args, cwd, cols, rows, restore, name, prompt, controls, scheduled, started_by, host, route } = launch;
+    let Launch { launcher, mut args, cwd, cols, rows, restore, name, prompt, mut controls, scheduled, started_by, host, route, stay } = launch;
     // The prompt goes on the agent's command line, here or over SSH: it mustn't pass for a flag.
     if let Some(p) = &prompt {
         dino_core::agent::check_prompt(p)?;
@@ -1468,11 +1478,24 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let host = restore.as_ref().map_or(host, |r| r.host.clone());
     let launcher = launcher.as_str();
     // Sessions already running come back even if the policies changed since; new ones must be allowed.
-    let l = match restore {
+    let mut l = match restore {
         Some(_) => d.launcher(launcher).ok_or_else(|| anyhow::anyhow!("unknown agent {launcher}"))?,
         None => d.allowed_launcher(launcher)?,
     };
     let settings = Settings::load();
+    // The agent is at its limit: a new session on its own account starts with the agent its
+    // fallback names (Settings → Agents), unless asked to stay. Its arguments were the other
+    // agent's; its mode carries over.
+    let mut instead_of = restore.as_ref().and_then(|r| r.instead_of.clone());
+    if restore.is_none() && host.is_none() && route.is_none() && !stay
+        && let Some((other, switch, why)) = fallbacks::instead(d, &settings, &l.agent_id)
+    {
+        eprintln!("{} dinod: {} is at its limit ({}): starting {} instead", stamp(), l.label, why.name, other.label);
+        l = other;
+        args.clear();
+        controls = Controls { model: switch.model, effort: None, ..controls };
+        instead_of = Some(why);
+    }
     // Control flags typed into the args count as the session's controls, and give way to one
     // chosen later: a session started with --dangerously-skip-permissions is in bypass.
     let in_args = controls::from_args(&l.agent_id, &args);
@@ -1639,10 +1662,12 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         live_saved: Mutex::default(),
         servers: Mutex::new(vec![]),
         route,
+        instead_of,
     }));
     let session = sessions.last().cloned();
     drop(sessions);
     if let Some(s) = session {
+        fallbacks::set(d, &settings, &s);
         sync_shell_agents(d, &s, &Settings::load());
         if s.server.is_some() && !s.pane.is_exited() {
             agentserver::follow(d.proxy.stats.clone(), s);
@@ -2238,6 +2263,7 @@ fn state(d: &Daemon) -> Response {
         .iter()
         .map(|s| {
             let st = stats(d, s);
+            fallbacks::note(d, s, &st);
             let (context_tokens, context_limit) = context_use(s, &st);
             let label = s.label.lock().unwrap().clone();
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
@@ -2255,6 +2281,7 @@ fn state(d: &Daemon) -> Response {
             let serving = s.servers.lock().unwrap().clone();
             // A server isn't work to wait on: once it's all that runs, the turn is over.
             let serving_waited = serving.iter().filter(|x| st.waits_on(&x.task)).count();
+            let (fallback, usage_by_route) = (fallbacks::info(&st), fallbacks::usage(&st));
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -2313,6 +2340,9 @@ fn state(d: &Daemon) -> Response {
                 // With the model it runs on now.
                 route: s.route.clone().map(|r| ProviderRoute { model: s.controls.model.clone().unwrap_or(r.model), ..r }),
                 using: st.computer.as_ref().filter(|c| c.active() && !s.pane.is_exited()).map(|c| c.reach.word().into()),
+                fallback,
+                usage_by_route,
+                instead_of: s.instead_of.clone(),
             }
         })
         .collect();
@@ -2325,7 +2355,8 @@ fn state(d: &Daemon) -> Response {
             })
         })
         .collect();
-    Response::State { sessions, quotas, power: Some(d.lid.info()), version: None }
+    let limits = fallbacks::limits(d);
+    Response::State { sessions, quotas, power: Some(d.lid.info()), limits, version: None }
 }
 
 /// Save and stop every session, ready to exit: the next dinod resumes them (`dino stop`).
@@ -2429,6 +2460,8 @@ struct SavedSession {
     exit_code: Option<u32>,
     #[serde(default)]
     route: Option<ProviderRoute>,
+    #[serde(default)]
+    instead_of: Option<ipc::InsteadOf>,
 }
 
 fn saved_path() -> PathBuf {
@@ -2566,6 +2599,7 @@ fn snapshot(s: &Session) -> SavedSession {
         ended: s.pane.is_exited(),
         exit_code: s.pane.exit_code(),
         route: s.route.clone(),
+        instead_of: s.instead_of.clone(),
     }
 }
 
@@ -2743,6 +2777,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         ended: false,
         exit_code: None,
         route: None,
+        instead_of: None,
     };
     let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {
@@ -2887,6 +2922,7 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
         ended: false,
         exit_code: None,
         route: None,
+        instead_of: None,
     };
     let (cols, rows) = s.pane.size();
     spawn(d, Launch { cols, rows, restore: Some(restore.clone()), ..Launch::new(&restore.launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
@@ -3934,7 +3970,7 @@ mod tests {
 
     fn shell_daemon() -> Arc<Daemon> {
         test_home();
-        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false };
+        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![] };
         new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![shell])
     }
 
@@ -4042,8 +4078,8 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "one\n").unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false };
-        let agent = LauncherInfo { short: "agent".into(), agent_id: "agent".into(), label: "Agent".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false };
+        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![] };
+        let agent = LauncherInfo { short: "agent".into(), agent_id: "agent".into(), label: "Agent".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![] };
         let d = new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![shell, agent]);
         let start = || spawn_in_worktree(&d, Launch::new("agent", vec![], Some(repo.display().to_string()))).unwrap();
         let wt_of = |id: &str| d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == real(&session(&d, id).cwd)).cloned().unwrap();
@@ -4138,6 +4174,75 @@ mod tests {
         assert!(git(&repo, &["branch", "--list", "fix"]).is_empty(), "nothing on it but main's commits: it goes");
         assert!(lifecycle::clean_up(&d, &repo.display().to_string(), true).is_err(), "never the main checkout");
         assert!(repo.join("a.txt").exists());
+    }
+
+    /// An agent's fallbacks as the proxy gets them: only routes that serve the API it talks in,
+    /// that the policies allow and that are on. While its own account is spent, a new session
+    /// starts with the agent its fallback names, saying why, unless asked to stay.
+    #[test]
+    fn an_agent_at_its_limit_falls_back_and_starts_new_sessions_elsewhere() {
+        use dino_core::settings::{AgentSwitch, Fallback, FallbackStep};
+        test_home();
+        let before = Settings::load_user();
+        let mut settings = before.clone();
+        let step = |provider: &str, model: &str| FallbackStep { provider: provider.into(), model: model.into(), ..Default::default() };
+        settings.policies.fallback_providers = vec!["plan-zai".into(), "ollama".into(), "free".into()];
+        settings.fallbacks.insert(
+            "claude".into(),
+            Fallback {
+                steps: vec![step("plan-zai", "glm-5.3"), step("openrouter", "x/y"), step("free", "auto"), step("ollama", " qwen3:4b "), step("ollama", "")],
+                on_outage: true,
+                new_sessions: Some(AgentSwitch { agent: "codex".into(), model: Some("gpt-5.5".into()), ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        settings.fallbacks.insert("codex".into(), Fallback { steps: vec![step("plan-zai", "glm-5.3"), step("ollama", "q")], ..Default::default() });
+        settings.save().unwrap();
+
+        let routes = |c: Option<dino_proxy::fallback::Chain>| c.map(|c| (c.steps.iter().map(|s| format!("{} {}", s.route, s.model)).collect::<Vec<_>>(), c.on_outage));
+        let own = fallbacks::chain(&settings, "claude", None, None);
+        assert_eq!(routes(own), Some((vec!["plan/zai glm-5.3".into(), "local/ollama qwen3:4b".into()], true)), "OpenRouter not allowed, free models off, no model: left out");
+        let mut free_on = settings.clone();
+        free_on.experimental.free_models = true;
+        assert_eq!(routes(fallbacks::chain(&free_on, "claude", None, None)).unwrap().0.len(), 3);
+        let on_zai = ProviderRoute { provider: "plan-zai".into(), model: "glm-5.3".into(), format: Some(dino_core::providers::Format::Anthropic), name: "GLM".into() };
+        assert_eq!(routes(fallbacks::chain(&settings, "claude", Some(&on_zai), None)).unwrap().0, ["local/ollama qwen3:4b"], "not the route it's on");
+        assert!(fallbacks::chain(&settings, "claude", None, Some("devbox")).is_none(), "over SSH its traffic isn't dino's");
+        assert!(fallbacks::chain(&settings, "shell", None, None).is_none());
+
+        let sh = |agent: &str| LauncherInfo { short: agent.into(), agent_id: agent.into(), label: agent.into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![] };
+        let d = new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![sh("shell"), sh("claude"), sh("codex")]);
+        let start = |stay: bool| spawn(&d, Launch { stay, ..Launch::new("claude", vec!["--verbose".into()], Some(test_home().display().to_string())) }).unwrap();
+        let first = session(&d, &start(false));
+        assert_eq!((first.agent_id.as_str(), first.instead_of.is_none()), ("claude", true), "not at its limit: as asked");
+
+        // Its own account turns out spent.
+        d.fallback_seen.lock().unwrap().add("claude", "anthropic#1");
+        let resets = now_secs() + 3600;
+        let t = dino_proxy::fallback::Trigger { kind: dino_proxy::fallback::Kind::Quota, resets_at: Some(resets), said: "would exceed your account's rate limit".into() };
+        let mut limited = d.proxy.stats.limited.lock().unwrap();
+        limited.insert("anthropic#1".into(), dino_proxy::fallback::Limited { name: "Claude".into(), kind: t.kind, said: t.said, resets_at: t.resets_at, retry_at: resets });
+        drop(limited);
+        let limits = fallbacks::limits(&d);
+        assert_eq!(limits.len(), 1);
+        assert_eq!((limits[0].agent_id.as_str(), limits[0].instead.as_deref(), limits[0].instead_model.as_deref()), ("claude", Some("codex"), Some("gpt-5.5")));
+
+        let s = session(&d, &start(false));
+        assert_eq!((s.agent_id.as_str(), s.controls.model.as_deref()), ("codex", Some("gpt-5.5")));
+        assert!(s.args.is_empty(), "Claude's arguments aren't Codex's");
+        assert_eq!(s.instead_of, Some(ipc::InsteadOf { agent_id: "claude".into(), name: "Claude".into(), resets_at: Some(resets) }));
+        assert_eq!(session(&d, &start(true)).agent_id, "claude", "asked to stay");
+        let saved = snapshot(&s);
+        assert_eq!(saved.instead_of, s.instead_of, "it says so after a restart too");
+
+        // A spent route that's merely down isn't a limit.
+        d.proxy.stats.limited.lock().unwrap().get_mut("anthropic#1").unwrap().kind = dino_proxy::fallback::Kind::Outage;
+        assert!(fallbacks::limits(&d).is_empty());
+        assert_eq!(session(&d, &start(false)).agent_id, "claude");
+        for s in d.sessions.lock().unwrap().iter() {
+            s.pane.kill();
+        }
+        before.save().unwrap();
     }
 
     /// A running session's screen is kept on disk, and a dinod that starts it again (after a

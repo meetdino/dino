@@ -58,6 +58,8 @@ enum Brand {
 final class DinoModel: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     @Published var quotas: [QuotaInfo] = []
+    /// Agents at their limit, and what new sessions start with meanwhile (Settings → Agents).
+    @Published var limits: [AgentLimit] = []
     /// Kept awake with the lid closed, and why sleep came back last; nil from an older dinod.
     @Published var power: PowerInfo?
     @Published var launchers: [LauncherInfo] = []
@@ -288,6 +290,8 @@ final class DinoModel: ObservableObject {
                 } else if let resp {
                     self.apply(resp.sessions ?? [], resp.quotas ?? [])
                     self.applyPower(resp.power)
+                    let limits = resp.limits ?? []
+                    if limits != self.limits { self.limits = limits }
                     self.stateSeen = resp.version
                     if wait != nil {
                         self.poll()
@@ -390,7 +394,18 @@ final class DinoModel: ObservableObject {
         let tmuxNeeds = noteTmux(next) { appActive && $0.id == self.selected }
         if !Set(tmuxNeeds).isSubset(of: attention) { attention.formUnion(tmuxNeeds) }
         for s in next {
+            // Started with another agent, its own at its limit: said once, as it appears (a
+            // scheduled task, ⌘N, an agent that started it, as well as New Session).
+            if let why = s.instead_of, !sessions.isEmpty, !sessions.contains(where: { $0.id == s.id }) {
+                let asked = launchers.first { $0.agent_id == why.agent_id }?.label ?? why.agent_id
+                let until = why.resets_at.map { " until \(Clock.short($0))" } ?? ""
+                Notifier.post(session: s, title: "Started \(s.display) instead of \(asked)", body: "\(why.name) is at its limit\(until) (Settings → Agents)")
+            }
             guard let prev = sessions.first(where: { $0.id == s.id }) else { continue }
+            // Its route is spent and a fallback took over: said once, as it does.
+            if let f = s.fallback, prev.fallback == nil {
+                Notifier.post(session: s, title: "\(s.display) is on a fallback: \(f.name)", body: "\(f.why). \(f.name) answers with \(f.model) until then.")
+            }
             let looking = appActive && s.id == selected
             // Working again: a bell it rang before isn't asking for you any more.
             let resumed = (s.activity == "working" && prev.activity != "working") || (s.inside?.status == "busy" && prev.inside?.status != "busy")
@@ -689,7 +704,8 @@ final class DinoModel: ObservableObject {
     /// `route`: on a provider's model (Settings → Models & Providers) instead of the agent's own account.
     /// `tmux`: for a shell, the tmux session it attaches to at its prompt (dinod types it, and keeps
     /// a plain shell when tmux doesn't answer); `line` is that for a dinod that doesn't know it.
-    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "", in dir: String? = nil, line: String? = nil, tmux: String? = nil, label: String? = nil, route: ProviderRoute? = nil) {
+    /// `stay`: start this agent even while it's at its limit, not the one Settings → Agents names.
+    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "", in dir: String? = nil, line: String? = nil, tmux: String? = nil, label: String? = nil, route: ProviderRoute? = nil, stay: Bool = false) {
         guard let conn = connection else { return }
         var body: [String: Any] = [
             "type": "new", "launcher": launcher.short, "args": [], "cwd": dir ?? folder.path, "cols": 120, "rows": 40,
@@ -698,6 +714,7 @@ final class DinoModel: ObservableObject {
         if let line { body["prompt"] = line }
         if let tmux { body["tmux"] = tmux }
         if let route { body["route"] = ["provider": route.provider, "model": route.model] }
+        if stay { body["stay"] = true }
         if let host {
             body["host"] = host
             body["cwd"] = remoteFolder.isEmpty ? nil : remoteFolder

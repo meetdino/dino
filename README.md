@@ -16,6 +16,9 @@ Pi, Hermes, CodeWhale and OpenCode, plus your shells.
   one prompt to several agents, and pull requests from the app.
 - **Any model in any agent.** A local proxy routes an agent to another provider's model, and
   counts what each session uses. Traffic goes from your Mac to the provider, nowhere else.
+- **Keeps going at a limit.** When an agent's subscription or plan hits its limit, its calls can go
+  on to the routes you list for it (another plan, OpenRouter, a model on your Mac) until the limit
+  resets, and new sessions can start with another agent meanwhile. The session says so throughout.
 - **No account needed.** Sign in only to sync settings between Macs. API keys never leave the Mac.
 
 ## Install

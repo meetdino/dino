@@ -1018,6 +1018,13 @@ struct SessionRow: View {
                         .accessibilityLabel("Scheduled by \(task)")
                 }
                 if let reach = session.reach { UsingMark(session: session, reach: reach) }
+                if let why = session.instead_of {
+                    let asked = model.launchers.first { $0.agent_id == why.agent_id }?.label ?? why.agent_id
+                    Image(systemName: "arrow.uturn.right")
+                        .font(.caption).foregroundStyle(.tertiary)
+                        .help("Started instead of \(asked): \(why.name) was at its limit\(why.resets_at.map { " until \(Clock.short($0))" } ?? "")")
+                        .accessibilityLabel("Started instead of \(asked)")
+                }
                 if let pr = model.pr(of: session) { PRChip(pr: pr, auto: session.auto) }
                 if let split = model.splits.first(where: { $0.contains(session.id) }) {
                     let other = model.sessions.first { $0.id == split.other(session.id) }?.display ?? "another session"
@@ -1066,6 +1073,9 @@ struct SessionRow: View {
                     }
                 }
                 .help(usageHelp)
+            }
+            if let f = session.fallback {
+                FallbackLine(fallback: f).help(FallbackChip.detail(f, session.usage_by_route ?? []))
             }
             if let error = session.error {
                 ErrorLine(message: error)
@@ -1127,6 +1137,10 @@ struct SessionRow: View {
         }
         if let ctx = session.contextUse {
             lines.append("Context \(tokens(ctx.used)) of \(tokens(ctx.limit))")
+        }
+        // Answered by more than one route: what each one did.
+        if let routes = session.usage_by_route, routes.count > 1 {
+            lines += routes.map { "\($0.name): ↑\(tokens($0.input_tokens)) in · ↓\(tokens($0.output_tokens)) out" }
         }
         return lines.joined(separator: "\n")
     }

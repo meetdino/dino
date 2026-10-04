@@ -3,7 +3,8 @@
 //! Anthropic base (`{anthropic}/v1/messages`), the OpenAI APIs to its OpenAI base, version
 //! included (`v1/chat/completions` → `{openai}/chat/completions`). The agent's own credentials
 //! (a claude.ai login among them) are dropped for the plan's key. When the plan's limit is
-//! reached the answer says so; nothing falls back to other billing.
+//! reached the answer says so; other billing takes over only where the user listed it as the
+//! agent's fallback (see `fallback`).
 
 use std::collections::HashMap;
 
@@ -70,9 +71,9 @@ pub(crate) fn headers(plan: &Plan, rest: &str) -> Result<Vec<(&'static str, Stri
 pub(crate) fn refused(name: &str, status: u16, message: &str) -> String {
     let said = if message.is_empty() { String::new() } else { format!(": {message}") };
     match limited(status, message) {
-        Some(Limit::Usage) => format!("{name}'s usage limit was reached ({status}{said}). dino doesn't switch to other billing: the plan works again once its window resets"),
-        Some(Limit::Rate) => format!("{name} is rate limiting ({status}{said}). dino doesn't switch to other billing"),
-        Some(Limit::Balance) => format!("{name} is out of balance ({status}{said}). Top it up with {name}; dino doesn't switch to other billing"),
+        Some(Limit::Usage) => format!("{name}'s usage limit was reached ({status}{said}). dino doesn't switch to other billing unless you set a fallback (Settings → Agents): the plan works again once its window resets"),
+        Some(Limit::Rate) => format!("{name} is rate limiting ({status}{said})"),
+        Some(Limit::Balance) => format!("{name} is out of balance ({status}{said}). Top it up with {name}; dino doesn't switch to other billing unless you set a fallback (Settings → Agents)"),
         None if matches!(status, 401 | 403) => format!("{name} turned the call down ({status}{said}). Check the plan's key and the model in dino's Settings → Models & Providers"),
         None => format!("{name}: {status}{said}"),
     }

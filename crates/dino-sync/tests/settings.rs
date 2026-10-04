@@ -1,7 +1,7 @@
 //! dino's settings through sync records and back, as two Macs with different folders see them.
 
 use dino_core::controls::Controls;
-use dino_core::settings::{Repo, Settings, SshHost};
+use dino_core::settings::{AgentSwitch, Fallback, FallbackStep, Repo, Settings, SshHost};
 use dino_sync::record::RecordId;
 use dino_sync::settings::{Entries, describe, diff, flatten, syncable_env, unflatten};
 use serde_json::json;
@@ -31,6 +31,17 @@ fn realistic() -> Settings {
     s.machine.onboarded = true;
     s.machine.keep_awake = true;
     s.machine.shell_integration = false;
+    s.policies.fallback_providers = vec!["plan-zai".into(), "ollama".into()];
+    let step = |provider: &str, model: &str| FallbackStep { provider: provider.into(), model: model.into(), ..Default::default() };
+    s.fallbacks.insert(
+        "claude".into(),
+        Fallback {
+            steps: vec![step("plan-zai", "glm-x"), step("ollama", "qwen3:4b")],
+            on_outage: true,
+            new_sessions: Some(AgentSwitch { agent: "codex".into(), model: Some("gpt-5.5".into()), ..Default::default() }),
+            ..Default::default()
+        },
+    );
     s
 }
 
@@ -61,6 +72,8 @@ fn settings_cross_to_another_mac() {
     assert_eq!(s.worktrees, a.worktrees);
     assert_eq!(s.agents, a.agents);
     assert_eq!(s.ssh, a.ssh);
+    assert_eq!(s.fallbacks, a.fallbacks, "fallback chains travel: providers and models, never keys");
+    assert_eq!(entries[&RecordId::new("fallbacks", "claude")]["steps"][0], json!({"provider": "plan-zai", "model": "glm-x"}));
     assert!(!s.machine.shell_integration, "shell integration travels");
     assert!(!s.machine.onboarded && !s.machine.keep_awake, "the rest of machine stays per Mac");
     assert_eq!(s.repos["/Users/b/w/api"].env, [("AWS_PROFILE".to_string(), "client-x".to_string())].into(), "synced repos come from the records");
@@ -90,7 +103,7 @@ fn what_is_synced_reads_as_settings() {
     s.terminal.appearance = "dark".into();
     assert_eq!(
         describe(&flatten(&s, &r)),
-        ["Claude Code and Codex defaults", "2 terminal settings", "1 SSH host", "1 repo variable", "5 policies", "1 worktree setting", "1 routing setting"]
+        ["Claude Code and Codex defaults", "2 terminal settings", "1 SSH host", "1 repo variable", "6 policies", "1 worktree setting", "1 routing setting", "1 fallback chain"]
     );
     s.agents.insert("pi".into(), Controls { model: Some("x".into()), ..Controls::default() });
     s.agents.insert("someday".into(), Controls { mode: Some("y".into()), ..Controls::default() });

@@ -11,6 +11,7 @@
 mod catalog;
 mod codex;
 pub mod computer;
+pub mod fallback;
 mod free;
 pub mod local;
 mod openrouter;
@@ -45,6 +46,23 @@ pub struct Usage {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+}
+
+/// What one route answered for a session: the agent's own account, or a route it fell back to.
+#[derive(Clone, Debug, Default)]
+pub struct RouteUsage {
+    /// Where the proxy serves it: `anthropic`, `plan/zai`, `local/ollama`.
+    pub route: String,
+    /// As people know it: "Claude", "GLM Coding Plan".
+    pub name: String,
+    pub usage: Usage,
+}
+
+/// The route a call went to, for metering: its path and its name.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RouteTag {
+    pub path: String,
+    pub name: String,
 }
 
 impl Usage {
@@ -118,6 +136,17 @@ pub struct SessionStats {
     pub(crate) waiting_on: Vec<String>,
     /// Its use of the Mac or a browser, from the tools it calls (see `computer`).
     pub computer: Option<computer::ComputerUse>,
+    /// Answered by a route it fell back to, while the one it uses is spent (see `fallback`).
+    pub fallback: Option<fallback::OnFallback>,
+    /// What each route answered, the agent's own account and the routes it fell back to.
+    pub by_route: Vec<RouteUsage>,
+    /// The route its model calls go to, by key (see `fallback::route_key`), and its name.
+    pub primary: Option<(String, String)>,
+    /// Server errors from it in a row, and when the last came (Unix seconds).
+    pub(crate) outages: (u32, u64),
+    /// A fallback answered part of the conversation: what it thought stays behind when the first
+    /// route takes over again (see `fallback::for_primary`).
+    pub(crate) mixed: bool,
 }
 
 impl SessionStats {
@@ -158,6 +187,16 @@ impl SessionStats {
                 self.last_error = self.call_error.clone().or(said).or_else(|| Some("The turn failed".into()));
             }
             _ => {}
+        }
+    }
+
+    /// Count `u` toward the session, and toward the route that answered it.
+    pub(crate) fn metered(&mut self, route: Option<&RouteTag>, u: &Usage) {
+        self.usage.add(u);
+        let Some(r) = route else { return };
+        match self.by_route.iter_mut().find(|x| x.route == r.path) {
+            Some(x) => x.usage.add(u),
+            None => self.by_route.push(RouteUsage { route: r.path.clone(), name: r.name.clone(), usage: u.clone() }),
         }
     }
 
@@ -235,6 +274,9 @@ pub struct Stats {
     /// A coding plan's last refusal (its key, its balance, its limit), by plan id, until a call
     /// to it goes through again: shown with the plan in Settings → Models & Providers.
     pub plan_errors: Mutex<HashMap<String, String>>,
+    /// Routes found spent (a window, a balance) or down, by key (see `fallback::route_key`),
+    /// until they're tried again.
+    pub limited: Mutex<fallback::LimitedRoutes>,
 }
 
 impl Stats {
@@ -301,6 +343,50 @@ impl Stats {
         });
     }
 
+    /// A fallback answered part of session `id`'s conversation.
+    pub(crate) fn mixed(&self, id: &str) -> bool {
+        self.sessions.lock().unwrap().get(id).is_some_and(|s| s.mixed)
+    }
+
+    /// Route `key` is spent or down, and isn't tried again yet.
+    pub fn limited(&self, key: &str) -> Option<fallback::Limited> {
+        let now = fallback::now();
+        self.limited.lock().unwrap().get(key).filter(|l| l.retry_at > now).cloned()
+    }
+
+    /// Every route found spent or down, whether or not it's time to try it again.
+    pub fn limited_routes(&self) -> Vec<(String, fallback::Limited)> {
+        self.limited.lock().unwrap().iter().map(|(k, l)| (k.clone(), l.clone())).collect()
+    }
+
+    /// Route `key` (`name`) said it's spent.
+    pub(crate) fn mark_limited(&self, key: &str, name: &str, t: &fallback::Trigger) -> fallback::Limited {
+        let l = fallback::Limited { name: name.into(), kind: t.kind, said: t.said.clone(), resets_at: t.resets_at, retry_at: fallback::retry_at(t) };
+        log(format_args!("{key} ({name}) is spent ({}) until {}: {}", t.kind.word(), l.retry_at, t.said));
+        self.limited.lock().unwrap().insert(key.to_string(), l.clone());
+        l
+    }
+
+    /// Route `key` answered: it's neither spent nor down.
+    pub(crate) fn not_limited(&self, key: &str) {
+        let mut limited = self.limited.lock().unwrap();
+        if limited.remove(key).is_some() {
+            log(format_args!("{key} answers again"));
+        }
+    }
+
+    /// Another server error from session `id`'s route `key`: down, once they come in a row.
+    pub(crate) fn outage(&self, id: &str, key: &str, name: &str, said: String) -> Option<fallback::Limited> {
+        let now = fallback::now();
+        let mut n = 0;
+        self.update(id, |s| {
+            let (count, last) = s.outages;
+            s.outages = (if now.saturating_sub(last) <= fallback::OUTAGE_WINDOW { count + 1 } else { 1 }, now);
+            n = s.outages.0;
+        });
+        (n >= fallback::OUTAGE_AFTER).then(|| self.mark_limited(key, name, &fallback::Trigger { kind: fallback::Kind::Outage, resets_at: None, said }))
+    }
+
     /// Why plan `id` last turned a call down, if it still does.
     pub fn plan_error(&self, id: &str) -> Option<String> {
         self.plan_errors.lock().unwrap().get(id).cloned()
@@ -331,6 +417,8 @@ impl Stats {
         s.background.clear();
         s.waiting_on.clear();
         s.computer = None;
+        s.fallback = None;
+        s.outages = (0, 0);
     }
 
     pub(crate) fn update(&self, id: &str, f: impl FnOnce(&mut SessionStats)) {
@@ -386,6 +474,7 @@ impl Proxy {
             router: Arc::default(),
             keys: keys.clone(),
             plans: Arc::default(),
+            chains: Arc::default(),
             budget: budget.clone(),
             substitutes: Arc::default(),
             port,
@@ -441,6 +530,20 @@ impl Proxy {
         let old = self.state.plans.read().unwrap().clone();
         errors.retain(|id, _| old.get(id).zip(plans.get(id)).is_some_and(|(a, b)| a == b));
         *self.state.plans.write().unwrap() = plans;
+    }
+
+    /// What session `session` falls back to when its route is spent, from its next call on; `None`
+    /// (or no steps) for nothing.
+    pub fn set_fallback(&self, session: &str, chain: Option<fallback::Chain>) {
+        let mut chains = self.state.chains.write().unwrap();
+        match chain.filter(|c| !c.steps.is_empty()) {
+            Some(c) => {
+                chains.insert(session.to_string(), Arc::new(c));
+            }
+            None => {
+                chains.remove(session);
+            }
+        }
     }
 
     /// Serve the free tier (Settings → Experimental). Off, its requests are refused before anything
@@ -540,6 +643,8 @@ pub(crate) struct AppState {
     keys: Arc<RwLock<HashMap<String, String>>>,
     /// Coding plans, by id (see `plan`).
     plans: Arc<RwLock<plan::Plans>>,
+    /// What each session falls back to, by session id (see `fallback`).
+    chains: Arc<RwLock<HashMap<String, Arc<fallback::Chain>>>>,
     /// The session token budget; 0 means none.
     budget: Arc<AtomicU64>,
     /// Codex models the backend rejected, and the model that answered instead.
@@ -677,6 +782,15 @@ async fn forward(
         }
     }
 
+    // The route this model call is for, as fallbacks know it (see `fallback`).
+    let primary = is_model_call.then(|| {
+        let (path, name) = match (&coding_plan, &runtime) {
+            (Some((id, p)), _) => (format!("plan/{id}"), p.name.clone()),
+            (_, Some((id, name, _))) => (format!("local/{id}"), name.to_string()),
+            _ => (provider.clone(), fallback::primary_name(&provider, &parts.headers)),
+        };
+        Primary { key: fallback::route_key(&path, &parts.headers), tag: RouteTag { path, name } }
+    });
     if is_model_call {
         st.stats.update(&session, |s| {
             s.requests += 1;
@@ -685,9 +799,38 @@ async fn forward(
             if let Some(m) = model {
                 s.last_model = Some(m);
             }
+            if let Some(p) = &primary
+                && s.primary.as_ref().is_none_or(|(k, _)| *k != p.key)
+            {
+                s.primary = Some((p.key.clone(), p.tag.name.clone()));
+            }
         });
     }
-    let guard = is_model_call.then(|| InFlight { stats: st.stats.clone(), session: session.clone() });
+    let mut guard = is_model_call.then(|| InFlight { stats: st.stats.clone(), session: session.clone() });
+
+    // What the session falls back to, if anything: only for the APIs that answer a turn, and not
+    // for an agent that wanted the ChatGPT plan's stream put together.
+    let api = if is_model_call && !collect { fallback::Api::of(&rest) } else { None };
+    let chain = api.and_then(|_| st.chains.read().unwrap().get(&session).cloned());
+    let query_ref = query.as_str();
+    // The chain was asked already, and nothing in it answered: not again for the same call.
+    let mut tried = false;
+    if let (Some(chain), Some(api), Some(p)) = (&chain, api, &primary) {
+        // Spent (or down, when that counts), or back from a fallback but in the middle of a turn:
+        // the chain answers, without asking the route that can't.
+        if let Some(why) = skip_primary(&st.stats, &session, &p.key, chain.on_outage, api, &body) {
+            if let Some(r) = steps(&st, &session, chain, api, &body, &parts.headers, &parts.method, query_ref, p, &why, &mut guard).await {
+                return r;
+            }
+            tried = true;
+        }
+        // What a fallback thought can't be checked here: it stays behind.
+        if st.stats.mixed(&session)
+            && let Some(b) = fallback::for_primary(&body, api)
+        {
+            body = b;
+        }
+    }
 
     let method = parts.method.clone();
     let on_mac = runtime.is_some();
@@ -723,7 +866,16 @@ async fn forward(
     };
     let mut resp = match send(body.clone()).await {
         Ok(r) => r,
-        Err(e) => return upstream_error(e),
+        Err(e) => {
+            // Unreachable: down, if it goes on and the chain counts outages.
+            if let (Some(chain), Some(api), Some(p)) = (chain.as_ref().filter(|c| c.on_outage && !tried), api, &primary)
+                && let Some(why) = st.stats.outage(&session, &p.key, &p.tag.name, format!("couldn't reach it ({})", reason(&e)))
+                && let Some(r) = steps(&st, &session, chain, api, &body, &parts.headers, &parts.method, query_ref, p, &why, &mut guard).await
+            {
+                return r;
+            }
+            return upstream_error(e);
+        }
     };
 
     // A failed model call is a small JSON body: read it to say why, and for Codex maybe retry another model.
@@ -755,6 +907,28 @@ async fn forward(
             }
             log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
             record_quota(&st.stats, &provider, &headers);
+            // Spent: known as such (for new sessions, and the other sessions on it), and with a
+            // chain, answered by it. Down, for a chain that counts outages, once it goes on.
+            if let Some(p) = &primary {
+                let why = match fallback::classify(status.as_u16(), &headers, &text) {
+                    Some(t) => {
+                        // A plan's spent window is the plan's state, whoever answers instead.
+                        if let Some((id, plan)) = &coding_plan {
+                            st.stats.plan_errors.lock().unwrap().insert(id.clone(), plan::refused(&plan.name, status.as_u16(), &codex::error_message(&text)));
+                        }
+                        Some(st.stats.mark_limited(&p.key, &p.tag.name, &t))
+                    }
+                    None if fallback::is_outage(status.as_u16()) && chain.as_ref().is_some_and(|c| c.on_outage) => {
+                        st.stats.outage(&session, &p.key, &p.tag.name, format!("{} {}", status.as_u16(), codex::error_message(&text)))
+                    }
+                    None => None,
+                };
+                if let (Some(why), Some(chain), Some(api)) = (why, chain.as_ref().filter(|_| !tried), api)
+                    && let Some(r) = steps(&st, &session, chain, api, &body, &parts.headers, &parts.method, query_ref, p, &why, &mut guard).await
+                {
+                    return r;
+                }
+            }
             let msg = match provider.as_str() {
                 siwc::PROVIDER => siwc::refused(status.as_u16(), &codex::error_message(&text)),
                 local::PROVIDER => runtime.as_ref().map_or_else(String::new, |(id, name, _)| local::refused(id, name, status.as_u16(), &codex::error_message(&text), requested.as_deref())),
@@ -795,11 +969,18 @@ async fn forward(
         if let Some((id, _)) = &coding_plan {
             st.stats.plan_errors.lock().unwrap().remove(id);
         }
+        if let Some(p) = &primary {
+            st.stats.not_limited(&p.key);
+        }
         st.stats.update(&session, |s| {
             s.call_error = None;
             s.limit_error = None;
             if !s.hooked {
                 s.last_error = None;
+            }
+            s.outages = (0, 0);
+            if let Some(f) = s.fallback.take() {
+                log(format_args!("{session} back on {} from {}", f.from_name, f.name));
             }
         });
     }
@@ -815,21 +996,213 @@ async fn forward(
             Ok(w) => w,
             Err(e) => return upstream_error(e),
         };
-        let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, _in_flight: guard };
+        let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, route: primary.map(|p| p.tag), _in_flight: guard };
         tap.meter.feed(&whole);
         let answer = siwc::collect(&whole).unwrap_or_else(|| whole.to_vec());
         return builder.header("content-type", "application/json").body(Body::from(answer)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()));
     }
 
     // Tee the body: pass every chunk through immediately, scan a copy for usage.
-    let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, _in_flight: guard };
-    let stream = resp.bytes_stream().map(move |chunk| {
+    let tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, route: primary.map(|p| p.tag), _in_flight: guard };
+    builder.body(tapped(resp, tap)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()))
+}
+
+/// An answer passed on as it comes, every chunk through at once, a copy read for usage.
+fn tapped(resp: reqwest::Response, mut tap: Tap) -> Body {
+    Body::from_stream(resp.bytes_stream().map(move |chunk| {
         if let Ok(bytes) = &chunk {
             tap.meter.feed(bytes);
         }
         chunk
+    }))
+}
+
+/// The route a model call is for: its key (see `fallback::route_key`), its path and name.
+pub(crate) struct Primary {
+    key: String,
+    tag: RouteTag,
+}
+
+/// Whether a call skips its route for the chain: the route is spent (or down, for a chain that
+/// counts outages), or the session is back from a fallback but mid-turn. Why, if so.
+fn skip_primary(stats: &Stats, session: &str, key: &str, on_outage: bool, api: fallback::Api, body: &[u8]) -> Option<fallback::Limited> {
+    if let Some(l) = stats.limited(key).filter(|l| l.kind != fallback::Kind::Outage || on_outage) {
+        return Some(l);
+    }
+    let mut on = None;
+    stats.update(session, |s| {
+        on = s.fallback.as_ref().filter(|f| f.from == key).map(|f| fallback::Limited {
+            name: f.from_name.clone(),
+            kind: f.kind,
+            said: f.said.clone(),
+            resets_at: f.resets_at,
+            retry_at: f.retry_at,
+        })
     });
-    builder.body(Body::from_stream(stream)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()))
+    // Its time is up, but one turn isn't answered by two models: back at the next.
+    on.filter(|_| !fallback::turn_start(api, body))
+}
+
+/// Send the call down `chain`, each route in turn, until one answers; that answer goes to the
+/// agent as if its own route had given it. `None` when none did: the agent gets its own route's
+/// answer. The agent's credentials never go along, and a Claude subscription never leaves for
+/// another route.
+#[allow(clippy::too_many_arguments)]
+async fn steps(
+    st: &AppState,
+    session: &str,
+    chain: &fallback::Chain,
+    api: fallback::Api,
+    body: &Bytes,
+    headers: &HeaderMap,
+    method: &axum::http::Method,
+    query: &str,
+    primary: &Primary,
+    why: &fallback::Limited,
+    guard: &mut Option<InFlight>,
+) -> Option<Response<Body>> {
+    // Mid-turn, a session stays where it is in the chain; it moves up only as a turn starts.
+    let mut current = None;
+    st.stats.update(session, |s| current = s.fallback.as_ref().filter(|f| f.from == primary.key).map(|f| f.step));
+    let start = current.filter(|_| !fallback::turn_start(api, body)).unwrap_or(0);
+    for (i, step) in chain.steps.iter().enumerate().skip(start) {
+        if step.route == primary.tag.path {
+            continue;
+        }
+        if let Some(l) = st.stats.limited(&step.route).filter(|l| l.kind != fallback::Kind::Outage || chain.on_outage) {
+            log(format_args!("{session} fallback {}: spent too ({})", step.route, l.said));
+            continue;
+        }
+        let out = fallback::for_step(body, api, &step.model)?;
+        let answered = |guard: &mut Option<InFlight>| {
+            log(format_args!("{session} {} spent ({}): {} answers with {}", primary.tag.name, why.kind.word(), step.name, step.model));
+            st.stats.update(session, |s| {
+                let since = s.fallback.as_ref().filter(|f| f.from == primary.key).map_or_else(fallback::now, |f| f.since);
+                s.fallback = Some(fallback::OnFallback {
+                    route: step.route.clone(),
+                    name: step.name.clone(),
+                    model: step.model.clone(),
+                    from: primary.key.clone(),
+                    from_name: primary.tag.name.clone(),
+                    kind: why.kind,
+                    said: why.said.clone(),
+                    resets_at: why.resets_at,
+                    retry_at: why.retry_at,
+                    since,
+                    step: i,
+                });
+                s.mixed = true;
+                s.call_error = None;
+                s.limit_error = None;
+                if !s.hooked {
+                    s.last_error = None;
+                }
+                s.last_model = Some(step.model.clone());
+            });
+            guard.take()
+        };
+        // dino's free models: dino picks the model, and answers in the agent's API itself.
+        if step.route == "free" {
+            let r = free::handle(st.clone(), session.to_string(), api.path(), out).await;
+            if r.status().is_success() {
+                drop(answered(guard));
+                return Some(r);
+            }
+            log(format_args!("{session} fallback free -> {}", r.status()));
+            continue;
+        }
+        let target = match step_target(st, &step.route, api, &out) {
+            Ok(t) => t,
+            Err(why) => {
+                log(format_args!("{session} fallback {}: {why}", step.route));
+                continue;
+            }
+        };
+        // The subscription rule, whatever the key store holds: it never goes to another route.
+        if target.headers.iter().any(|(_, v)| fallback::is_claude_subscription(v)) {
+            log(format_args!("{session} fallback {}: refused, that's a Claude subscription token", step.route));
+            continue;
+        }
+        let url = format!("{}{query}", target.url);
+        let sent = st
+            .upstream
+            .send(target.local, |client| {
+                let mut up = client.request(method.clone(), &url).body(target.body.clone());
+                for (name, value) in headers.iter().filter(|(n, _)| !hop_by_hop(n) && !fallback::is_credential(n.as_str())) {
+                    up = up.header(name, value);
+                }
+                for (name, value) in &target.headers {
+                    up = up.header(*name, value);
+                }
+                up
+            })
+            .await;
+        let resp = match sent {
+            Ok(r) => r,
+            Err(e) => {
+                log(format_args!("{session} fallback {}: {}", step.route, reason(&e)));
+                st.stats.mark_limited(&step.route, &step.name, &fallback::Trigger { kind: fallback::Kind::Outage, resets_at: None, said: reason(&e) });
+                continue;
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let h = resp.headers().clone();
+            let text = read_capped(resp, 1 << 20).await.unwrap_or_default();
+            if let Some(t) = fallback::classify(status.as_u16(), &h, &text) {
+                st.stats.mark_limited(&step.route, &step.name, &t);
+            }
+            log(format_args!("{session} fallback {} -> {status}: {}", step.route, codex::error_message(&text)));
+            continue;
+        }
+        record_quota(&st.stats, &step.route, resp.headers());
+        st.stats.not_limited(&step.route);
+        let in_flight = answered(guard);
+        let mut builder = Response::builder().status(status.as_u16());
+        for (name, value) in resp.headers().iter().filter(|(n, _)| !hop_by_hop(n)) {
+            builder = builder.header(name, value);
+        }
+        let route = Some(RouteTag { path: step.route.clone(), name: step.name.clone() });
+        let tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session: session.to_string(), route, _in_flight: in_flight };
+        return Some(builder.body(tapped(resp, tap)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into())));
+    }
+    log(format_args!("{session} {} spent, and no fallback answered", primary.tag.name));
+    None
+}
+
+/// Where a fallback route takes a call, with what credentials, and the body as it takes it.
+struct Target {
+    url: String,
+    headers: Vec<(&'static str, String)>,
+    body: Bytes,
+    /// A model server on this Mac.
+    local: bool,
+}
+
+fn step_target(st: &AppState, route: &str, api: fallback::Api, body: &Bytes) -> Result<Target, String> {
+    let path = api.path();
+    let keys = st.keys.read().unwrap();
+    if route == openrouter::PROVIDER {
+        let h = openrouter::headers(&keys).ok_or("OpenRouter isn't connected")?;
+        return Ok(Target { url: format!("{}/{path}", openrouter::upstream()), headers: h.to_vec(), body: body.clone(), local: false });
+    }
+    if route == siwc::PROVIDER {
+        if api != fallback::Api::Responses || !siwc::wants_stream(body) {
+            return Err("the ChatGPT plan only takes streamed Responses calls".into());
+        }
+        let h = siwc::headers(&keys)?;
+        let shaped = siwc::shape(body).map(Bytes::from).ok_or("unreadable request")?;
+        return Ok(Target { url: format!("{}/{path}", siwc::upstream()), headers: h.to_vec(), body: shaped, local: false });
+    }
+    if let Some(id) = route.strip_prefix("plan/") {
+        let p = st.plans.read().unwrap().get(id).cloned().ok_or_else(|| format!("the coding plan {id} isn't connected"))?;
+        return Ok(Target { url: plan::url(&p, path)?, headers: plan::headers(&p, path)?, body: body.clone(), local: false });
+    }
+    if let Some(id) = route.strip_prefix("local/") {
+        let (_, base) = local::runtime(id).ok_or_else(|| format!("dino doesn't know a model server called {id}"))?;
+        return Ok(Target { url: format!("{base}/{path}"), headers: vec![], body: body.clone(), local: true });
+    }
+    Err(format!("{route} isn't a route dino falls back to"))
 }
 
 /// The model a request names. Read without building the rest of it: an agent's request carries its
@@ -859,6 +1232,8 @@ struct Tap {
     meter: Meter,
     stats: Arc<Stats>,
     session: String,
+    /// The route answering, to count what it answered toward.
+    route: Option<RouteTag>,
     _in_flight: Option<InFlight>,
 }
 
@@ -878,7 +1253,7 @@ impl Drop for Tap {
                 s.call_failed(e);
             }
             if let Some(u) = self.meter.seen.take() {
-                s.usage.add(&u);
+                s.metered(self.route.as_ref(), &u);
                 // Probes (Claude checks its quota with a one-word call) say nothing about the conversation.
                 let probe = u.total_input() < 100;
                 if let Some(model) = self.meter.model.take().or_else(|| s.last_model.clone()).filter(|_| !probe) {
@@ -1415,6 +1790,194 @@ mod tests {
         assert_eq!(proxy.stats.plan_error("zai"), None);
     }
 
+    /// A provider stand-in on a real port: `answer` gets each request (lowercased head, then the
+    /// body) and says what to send back. What came is passed on.
+    fn stand_in(answer: impl Fn(&str) -> String + Send + Sync + 'static) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}/api/anthropic", listener.local_addr().unwrap().port());
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let answer = Arc::new(answer);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut s) = conn else { continue };
+                let (tx, answer) = (tx.clone(), answer.clone());
+                std::thread::spawn(move || {
+                    let mut buf = vec![];
+                    let mut chunk = [0u8; 65536];
+                    let head_end = loop {
+                        let n = s.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(i) = memchr::memmem::find(&buf, b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                    let len: usize = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    while buf.len() < head_end + len {
+                        let n = s.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let request = format!("{head}{}", String::from_utf8_lossy(&buf[head_end..]));
+                    let reply = answer(&request);
+                    let _ = tx.send(request);
+                    let _ = s.write_all(reply.as_bytes());
+                });
+            }
+        });
+        (base, rx)
+    }
+
+    fn reply(status: &str, headers: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    /// Anthropic's stream, as a route that answers sends it.
+    fn streamed(model: &str, text: &str) -> String {
+        let body = format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"model\":\"{model}\",\"usage\":{{\"input_tokens\":120,\"output_tokens\":1}}}}}}\n\n\
+             event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{text}\"}}}}\n\n\
+             event: message_delta\ndata: {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":9}}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    /// Over real connections, the whole way: a plan's spent window is answered by the next route
+    /// in the chain, with that route's key and model and never the agent's credentials; the
+    /// session says so and stays there mid-turn; after the reset it goes back as a turn starts,
+    /// without the thinking the fallback did. Each route's usage is its own.
+    #[test]
+    fn a_spent_route_falls_back_and_comes_back() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicBool;
+        let reset = Arc::new(AtomicBool::new(false));
+        let r = reset.clone();
+        let (a, from_a) = stand_in(move |_| {
+            if r.load(Ordering::Relaxed) {
+                streamed("glm-a", "BACK")
+            } else {
+                reply("429 Too Many Requests", "", r#"{"error":{"code":"1308","message":"Usage limit reached for 5 hour. Your limit will reset at 2026-10-04 02:00:00"}}"#)
+            }
+        });
+        let (b, from_b) = stand_in(|_| streamed("glm-b", "PELICAN"));
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        let plan = |name: &str, base: &str, key: &str| plan::Plan { name: name.into(), anthropic: Some(base.into()), openai: None, key: key.into() };
+        proxy.set_plans(HashMap::from([
+            ("a".to_string(), plan("Plan A", &a, "key-a")),
+            ("b".to_string(), plan("Plan B", &b, "key-b")),
+            ("stolen".to_string(), plan("Not a plan", &b, "sk-ant-oat01-a-claude-login")),
+        ]));
+        let step = |route: &str, model: &str, name: &str| fallback::Step { route: route.into(), model: model.into(), name: name.into() };
+        proxy.set_fallback("7", Some(fallback::Chain { steps: vec![step("plan/stolen", "x", "Not a plan"), step("plan/b", "glm-b", "Plan B")], on_outage: false }));
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let send = |messages: serde_json::Value| {
+            let path = proxy.base_url("7", "plan/a").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+            let body = json!({"model": "claude-opus-5-5", "max_tokens": 10, "stream": true, "messages": messages}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-the-users-claude-login\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        let wait = || std::time::Duration::from_secs(5);
+        let user = |text: &str| json!({"role": "user", "content": text});
+        let tool = json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]});
+
+        // The window is spent: Plan B answers, the agent sees only its answer.
+        let out = send(json!([user("hi")]));
+        assert!(out.starts_with("HTTP/1.1 200") && out.contains("PELICAN"), "{out}");
+        assert!(from_a.recv_timeout(wait()).is_ok());
+        let got = from_b.recv_timeout(wait()).unwrap();
+        assert!(got.starts_with("post /api/anthropic/v1/messages?beta=true "), "{got}");
+        assert!(got.contains("x-api-key: key-b\r\n") && got.contains("\"model\":\"glm-b\""), "its key, its model: {got}");
+        assert!(!got.contains("sk-ant-oat") && !got.contains("key-a"), "nobody else's credentials: {got}");
+        let s = proxy.stats.session("7");
+        let f = s.fallback.clone().expect("on fallback");
+        assert_eq!((f.route.as_str(), f.name.as_str(), f.model.as_str(), f.from_name.as_str(), f.kind), ("plan/b", "Plan B", "glm-b", "Plan A", fallback::Kind::Quota));
+        assert!(f.said.contains("reset at 2026-10-04 02:00:00"));
+        assert_eq!((s.last_error, s.limit_error), (None, None), "the agent's turn didn't fail");
+        assert!(proxy.stats.limited("plan/a").is_some(), "known spent, for new sessions");
+        assert!(proxy.stats.plan_error("a").is_some_and(|e| e.contains("usage limit was reached")), "and Settings says so");
+
+        // Mid-turn: the spent route isn't asked again.
+        assert!(send(json!([user("hi"), {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}, tool])).contains("PELICAN"));
+        assert!(from_a.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "Plan A not asked while it's spent");
+        from_b.recv_timeout(wait()).unwrap();
+
+        // Its window resets. Mid-turn it stays put; as the next turn starts it goes back, and the
+        // fallback's thinking stays behind.
+        reset.store(true, Ordering::Relaxed);
+        proxy.stats.limited.lock().unwrap().get_mut("plan/a").unwrap().retry_at = 0;
+        proxy.stats.update("7", |s| s.fallback.as_mut().unwrap().retry_at = 0);
+        assert!(send(json!([user("hi"), tool])).contains("PELICAN"));
+        assert!(from_a.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "not back mid-turn");
+        from_b.recv_timeout(wait()).unwrap();
+        let thought = json!({"role": "assistant", "content": [{"type": "thinking", "thinking": "hmm", "signature": "from-b"}, {"type": "text", "text": "PELICAN"}]});
+        let out = send(json!([user("hi"), thought, user("again")]));
+        assert!(out.contains("BACK"), "{out}");
+        let got = from_a.recv_timeout(wait()).unwrap();
+        assert!(!got.contains("from-b") && got.contains("\"model\":\"claude-opus-5-5\""), "{got}");
+        let s = proxy.stats.session("7");
+        assert!(s.fallback.is_none() && proxy.stats.limited("plan/a").is_none());
+        let used: Vec<(&str, u64, u64)> = s.by_route.iter().map(|r| (r.route.as_str(), r.usage.input, r.usage.output)).collect();
+        assert_eq!(used, [("plan/b", 360, 27), ("plan/a", 120, 9)]);
+        assert_eq!(s.usage.output, 36);
+    }
+
+    /// What isn't a spent route doesn't move a session: a short rate limit the agent waits out,
+    /// an overload unless the chain counts outages. With it, three in a row do. With every route
+    /// spent, the agent gets its own route's answer.
+    #[test]
+    fn only_a_spent_or_down_route_moves_a_session() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicUsize;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let (a, _from_a) = stand_in(move |_| match c.fetch_add(1, Ordering::Relaxed) {
+            0 => reply("429 Too Many Requests", "Retry-After: 20\r\n", r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit reached for requests"}}"#),
+            _ => reply("529 Overloaded", "", r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#),
+        });
+        let (b, from_b) = stand_in(|_| streamed("b", "FROM-B"));
+        let (c2, _) = stand_in(|_| reply("402 Payment Required", "", r#"{"error":{"message":"Insufficient credits","code":402}}"#));
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        let plan = |base: &str| plan::Plan { name: base.into(), anthropic: Some(base.into()), openai: None, key: "k".into() };
+        proxy.set_plans(HashMap::from([("a".to_string(), plan(&a)), ("b".to_string(), plan(&b)), ("c".to_string(), plan(&c2))]));
+        let step = |route: &str| fallback::Step { route: route.into(), model: "m".into(), name: route.into() };
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let send = |session: &str| {
+            let path = proxy.base_url(session, "plan/a").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages";
+            let body = r#"{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        proxy.set_fallback("1", Some(fallback::Chain { steps: vec![step("plan/b")], on_outage: false }));
+        assert!(send("1").starts_with("HTTP/1.1 429"), "a short rate limit is the agent's to wait out");
+        assert!(send("1").starts_with("HTTP/1.1 529"), "an overload, when outages don't count");
+        assert!(from_b.try_recv().is_err() && proxy.stats.limited("plan/a").is_none());
+
+        proxy.set_fallback("2", Some(fallback::Chain { steps: vec![step("plan/b")], on_outage: true }));
+        assert!(send("2").starts_with("HTTP/1.1 529") && send("2").starts_with("HTTP/1.1 529"), "the agent's own retries first");
+        assert!(send("2").contains("FROM-B"), "then the next route");
+        assert_eq!(proxy.stats.session("2").fallback.map(|f| f.kind), Some(fallback::Kind::Outage));
+        assert!(send("1").starts_with("HTTP/1.1 529"), "down only counts for a chain that counts it");
+
+        proxy.set_fallback("3", Some(fallback::Chain { steps: vec![step("plan/c")], on_outage: true }));
+        let out = send("3");
+        assert!(out.starts_with("HTTP/1.1 529") && out.contains("Overloaded"), "every route spent: its own answer: {out}");
+        assert_eq!(proxy.stats.limited("plan/c").map(|l| l.kind), Some(fallback::Kind::Balance));
+        assert!(proxy.stats.session("3").fallback.is_none());
+    }
+
     #[test]
     fn only_dinos_agents_get_in() {
         let h = |pairs: &[(&'static str, &str)]| {
@@ -1548,7 +2111,7 @@ mod tests {
     fn a_json_answer_in_pieces_is_read_once_it_is_all_there() {
         let stats = Arc::new(Stats::default());
         {
-            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), _in_flight: None };
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), route: None, _in_flight: None };
             tap.meter.feed(&Bytes::from_static(br#"{"model":"m","usage":{"prompt"#));
             assert!(tap.meter.seen.is_none());
             tap.meter.feed(&Bytes::from_static(br#"_tokens":500,"completion_tokens":7}}"#));
@@ -1590,7 +2153,7 @@ mod tests {
     fn a_200_that_is_an_error_counts_as_one() {
         let stats = Arc::new(Stats::default());
         let call = |body: &str| {
-            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), _in_flight: None };
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), route: None, _in_flight: None };
             tap.meter.feed(&Bytes::from(body.to_string()));
         };
         // OpenRouter, as it answered for real: HTTP 200, and an upstream 503 in the body.
@@ -1617,7 +2180,7 @@ mod tests {
     fn context_from_the_last_call_per_model() {
         let stats = Arc::new(Stats::default());
         let call = |events: String| {
-            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), _in_flight: None };
+            let mut tap = Tap { meter: Meter::default(), stats: stats.clone(), session: "1".into(), route: None, _in_flight: None };
             tap.meter.feed(&Bytes::from(events));
         };
         let start = |model: &str, input: u64, cached: u64| {

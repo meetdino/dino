@@ -355,6 +355,9 @@ struct SessionControlsBar: View {
             if ControlKind.effort.offered(by: knobs), !knobs.efforts(for: c.model).isEmpty {
                 chip(.effort, knobs, icon: "gauge.with.dots.needle.50percent", text: c.effort?.capitalized ?? "Default")
             }
+            if let f = session.fallback {
+                FallbackChip(fallback: f, usage: session.usage_by_route ?? [])
+            }
             if session.pending != nil {
                 Image(systemName: "clock")
                     .font(.caption)
@@ -672,6 +675,8 @@ struct NewSessionSheet: View {
     @State private var providerModels: [ProviderModel] = []
     @State private var providerModel = ""
     @State private var choosingProviderModel = false
+    /// Start the chosen agent even while it's at its limit.
+    @State private var stay = false
 
     private static let addHost = "\u{0}add"
 
@@ -696,6 +701,10 @@ struct NewSessionSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             Text("New Session").font(.title3.weight(.semibold)).padding([.horizontal, .top], 20)
             Form {
+                // The agent is at its limit: what starts instead, and the choice to start it anyway.
+                if host.isEmpty, provider.isEmpty, let l = launcher, let limit = model.limits.first(where: { $0.agent_id == l.agent_id }) {
+                    LimitNotice(limit: limit, label: l.label, insteadLabel: limit.instead.flatMap { a in model.launchers.first { $0.agent_id == a }?.label }, stay: $stay)
+                }
                 Section {
                     Picker("Agent", selection: Binding(get: { launcher?.short ?? "" }, set: { agent = $0 })) {
                         ForEach(launchers) { l in Text(l.label).tag(l.short) }
@@ -821,7 +830,7 @@ struct NewSessionSheet: View {
                     if let l = launcher {
                         if host.isEmpty {
                             let route = provider.isEmpty ? nil : ProviderRoute(provider: provider, model: providerModel)
-                            model.newSession(l, worktree: worktree, controls: controls, route: route)
+                            model.newSession(l, worktree: worktree, controls: controls, route: route, stay: stay)
                         } else {
                             model.newSession(l, controls: controls, host: host, remoteFolder: remoteFolder.trimmingCharacters(in: .whitespaces))
                         }
@@ -834,7 +843,10 @@ struct NewSessionSheet: View {
             .padding([.horizontal, .bottom], 20)
         }
         .frame(width: 460)
-        .onChange(of: launcher?.agent_id) { controls = Controls() }
+        .onChange(of: launcher?.agent_id) {
+            controls = Controls()
+            stay = false
+        }
         .onChange(of: provider) { loadModels() }
         // A model picked: its recommended agent, when it's here.
         .onChange(of: providerModel) {

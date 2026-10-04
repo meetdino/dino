@@ -29,6 +29,78 @@ pub struct Settings {
     pub terminal: Terminal,
     pub tmux: Tmux,
     pub experimental: Experimental,
+    /// What each agent falls back to when the route it uses hits a limit, by agent id ("claude",
+    /// "codex"). Only routes are named here; their keys stay in the key store.
+    pub fallbacks: BTreeMap<String, Fallback>,
+}
+
+/// When an agent's route is spent (its plan's window, its subscription's limit, its balance): the
+/// routes dinod's proxy sends its calls to instead, in order, and the agent new sessions start
+/// with meanwhile. A running conversation stays with its agent; only routes change under it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct Fallback {
+    /// Tried in order. Each must serve the API the agent speaks; the free models only while
+    /// they're turned on (Settings → Experimental).
+    pub steps: Vec<FallbackStep>,
+    /// Also when a route is down (server errors several times in a row, or unreachable), not
+    /// only at its limit.
+    pub on_outage: bool,
+    /// While the agent is at its limit, new sessions and scheduled tasks start with this agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_sessions: Option<AgentSwitch>,
+    /// Fields from a newer dino, kept as they are.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// One route to fall back to: a provider (as Settings → Models & Providers lists it:
+/// "plan-zai", "openrouter", "ollama", "chatgpt", or "free") and its model.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct FallbackStep {
+    pub provider: String,
+    pub model: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// Another agent to start new sessions with, and its model (none: its own default).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct AgentSwitch {
+    pub agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// Fields a newer dino wrote that this one doesn't know: kept, and written back as they came.
+/// Nulls go (TOML has none).
+#[derive(Serialize, Debug, Clone, PartialEq, Default)]
+pub struct Extra(pub BTreeMap<String, serde_json::Value>);
+
+impl<'de> Deserialize<'de> for Extra {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        fn strip(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    o.retain(|_, x| !x.is_null());
+                    o.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(a) => {
+                    a.retain(|x| !x.is_null());
+                    a.iter_mut().for_each(strip);
+                }
+                _ => {}
+            }
+        }
+        let mut m = BTreeMap::<String, serde_json::Value>::deserialize(d)?;
+        m.retain(|_, v| !v.is_null());
+        m.values_mut().for_each(strip);
+        Ok(Self(m))
+    }
 }
 
 /// Features still being tried out, each off until turned on, and for this Mac only (it never
@@ -162,17 +234,34 @@ pub struct Policies {
     pub allow_bypass: bool,
     /// Opt-in: give Claude sessions dino's tools (`dino mcp`) to list, read, message and start other sessions.
     pub session_tools: bool,
+    /// The providers agents may fall back to when theirs is spent (Settings → Agents), by id;
+    /// empty means any. An organization narrows it here.
+    pub fallback_providers: Vec<String>,
 }
 
 impl Default for Policies {
     fn default() -> Self {
-        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0, close_merged: false, allow_bypass: true, session_tools: false }
+        Self {
+            allowed_agents: vec![],
+            default_agent: None,
+            worktree_trust: true,
+            session_token_budget: 0,
+            close_merged: false,
+            allow_bypass: true,
+            session_tools: false,
+            fallback_providers: vec![],
+        }
     }
 }
 
 impl Policies {
     pub fn allows(&self, short: &str) -> bool {
         short == "shell" || self.allowed_agents.is_empty() || self.allowed_agents.iter().any(|a| a == short)
+    }
+
+    /// Whether agents may fall back to provider `id`.
+    pub fn allows_fallback(&self, id: &str) -> bool {
+        self.fallback_providers.is_empty() || self.fallback_providers.iter().any(|p| p == id)
     }
 }
 
@@ -654,6 +743,33 @@ mod tests {
         assert!(set_key("bad name", Some("x")).is_err());
         assert!(set_key("DINO_TEST_A_KEY", Some("a\nb")).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A fallback chain saves and loads; what a newer dino added to it comes back as it went.
+    #[test]
+    fn fallbacks_keep_what_a_newer_dino_wrote() {
+        let json = serde_json::json!({
+            "steps": [{"provider": "plan-zai", "model": "glm-x", "weight": 2}, {"provider": "ollama", "model": "qwen3:4b"}],
+            "on_outage": true,
+            "new_sessions": {"agent": "codex", "model": null, "note": {"a": null, "b": [1, null]}},
+            "max_spend": 5,
+            "nothing": null,
+        });
+        let f: Fallback = serde_json::from_value(json).unwrap();
+        assert_eq!(f.steps[0].extra.0.get("weight"), Some(&serde_json::json!(2)));
+        assert_eq!(f.new_sessions.as_ref().map(|n| (n.agent.as_str(), n.model.clone())), Some(("codex", None)));
+        assert_eq!(f.extra.0.keys().collect::<Vec<_>>(), ["max_spend"], "nulls go");
+        let mut s = Settings::default();
+        s.fallbacks.insert("claude".into(), f.clone());
+        let text = toml::to_string(&s).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.fallbacks["claude"], f, "{text}");
+        let again: Fallback = serde_json::from_value(serde_json::to_value(&f).unwrap()).unwrap();
+        assert_eq!(again, f);
+        assert_eq!(serde_json::to_value(&f).unwrap()["new_sessions"]["note"], serde_json::json!({"b": [1]}));
+        assert!(Settings::default().fallbacks.is_empty(), "nothing falls back unless set");
+        let p = Policies { fallback_providers: vec!["ollama".into()], ..Policies::default() };
+        assert!(p.allows_fallback("ollama") && !p.allows_fallback("openrouter") && Policies::default().allows_fallback("openrouter"));
     }
 
     #[test]
