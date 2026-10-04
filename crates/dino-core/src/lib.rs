@@ -13,6 +13,7 @@ pub mod history;
 pub mod ipc;
 pub mod mcp;
 pub mod models;
+pub mod plans;
 pub mod power;
 pub mod pr;
 pub mod preview;

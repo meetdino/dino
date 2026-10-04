@@ -280,7 +280,9 @@ pub fn run() -> anyhow::Result<()> {
 
     let keys = load_keys();
     let free_tier = free_tier(&keys);
+    let plans = providers::plan_routes(&keys);
     let proxy = Proxy::start(keys)?;
+    proxy.set_plans(plans);
     proxy.set_budget(Settings::load().policies.session_token_budget);
     proxy.set_free_models(Settings::load().experimental.free_models);
     proxy.keep_free_models(dino_core::config_dir().join("free-models.json"));
@@ -647,6 +649,7 @@ fn save_chatgpt(d: &Daemon, t: &chatgpt::Tokens) -> anyhow::Result<()> {
 fn keys_changed(d: &Daemon) {
     let keys = load_keys();
     *d.launchers.write().unwrap() = launchers(free_tier(&keys));
+    d.proxy.set_plans(providers::plan_routes(&keys));
     d.proxy.set_keys(keys);
     std::thread::spawn(|| providers::refresh(true));
 }
@@ -920,10 +923,36 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     Err(e) => Response::Error { message: e.to_string() },
                 }
             }
+            Request::ConnectPlan { plan, key, base } => match providers::connect_plan(&plan, &key, base.as_deref(), settings::set_key) {
+                Ok(()) => {
+                    keys_changed(d);
+                    Response::Ok
+                }
+                Err(message) => Response::Error { message },
+            },
+            Request::DisconnectProvider { provider } if provider.starts_with(dino_core::plans::PREFIX) => match providers::disconnect_plan(&provider, settings::set_key) {
+                Ok(()) => {
+                    keys_changed(d);
+                    Response::Ok
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ConnectProvider { provider } if provider.starts_with(dino_core::plans::PREFIX) => {
+                Response::Error { message: "a coding plan connects with its key: paste it in Settings → Models & Providers, or `dino login <plan>`".into() }
+            }
             Request::ConnectProvider { provider } | Request::DisconnectProvider { provider } => {
                 Response::Error { message: format!("{provider} doesn't sign in: dino finds it on this Mac") }
             }
-            Request::Providers => Response::Providers { providers: providers::list() },
+            Request::Providers => {
+                let mut list = providers::list();
+                // A plan's last refusal (key, balance, limit), as the proxy saw it.
+                for p in list.iter_mut().filter(|p| p.connected) {
+                    if let Some(e) = p.id.strip_prefix(dino_core::plans::PREFIX).and_then(|id| d.proxy.stats.plan_error(id)) {
+                        p.error = Some(e);
+                    }
+                }
+                Response::Providers { providers: list }
+            }
             Request::Models { provider } => {
                 let (models, loading, error) = providers::rows(&provider);
                 Response::Models { provider, models, loading, error }
@@ -1693,6 +1722,7 @@ fn provider_route(l: &LauncherInfo, r: ProviderRoute) -> anyhow::Result<Provider
         id => {
             let p = providers::find(id).ok_or_else(|| anyhow::anyhow!("dino doesn't know a provider called {id}"))?;
             anyhow::ensure!(!p.local || p.connected, "{} isn't running on this Mac", p.name);
+            anyhow::ensure!(p.plan.is_none() || p.connected, "{} isn't connected: add its key in Settings → Models & Providers", p.name);
             anyhow::ensure!(!p.formats.is_empty(), "dino hasn't asked {} which APIs it serves yet: try again in a moment", p.name);
             (p.name, p.formats)
         }

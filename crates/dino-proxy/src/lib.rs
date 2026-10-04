@@ -5,13 +5,15 @@
 //! user on the Mac, and to web pages through DNS rebinding.
 //! The `free` provider is different: dino itself picks a free model and translates (see `free`).
 //! `or` is OpenRouter with the key dino holds for it (see `openrouter`), `siwc` the ChatGPT plan
-//! through Sign in with ChatGPT (see `siwc`), `local/<runtime>` a model server on this Mac (see `local`).
+//! through Sign in with ChatGPT (see `siwc`), `local/<runtime>` a model server on this Mac (see `local`),
+//! `plan/<id>` a coding plan with the key the user pasted (see `plan`).
 
 mod catalog;
 mod codex;
 mod free;
 pub mod local;
 mod openrouter;
+pub mod plan;
 mod siwc;
 pub mod tasks;
 mod upstream;
@@ -82,6 +84,10 @@ pub struct SessionStats {
     pub last_error: Option<String>,
     /// The last model call's failure, whether or not it's shown.
     pub call_error: Option<String>,
+    /// A coding plan's limit (its window spent, its balance gone) turned the last model call
+    /// down: shown even when the agent ends its turn as if it went fine (Claude Code's turn ends
+    /// with Stop after it shows the API error), until a call goes through again.
+    pub limit_error: Option<String>,
     /// The agent reports its turns through hooks (Claude).
     pub hooked: bool,
     /// The agent's own record says where its turns are (Codex's rollout): no guessing from quiet.
@@ -141,7 +147,8 @@ impl SessionStats {
             self.agent_mode = Some(m.into());
         }
         match event {
-            "UserPromptSubmit" | "Stop" => self.last_error = None,
+            "UserPromptSubmit" => self.last_error = None,
+            "Stop" => self.last_error = self.limit_error.clone(),
             // What the failed call said; the hook's own words when dino didn't see it.
             "StopFailure" => {
                 let said = v["error_details"].as_str().or(v["error"].as_str()).map(String::from);
@@ -222,6 +229,9 @@ pub struct Quota {
 pub struct Stats {
     pub sessions: Mutex<HashMap<String, SessionStats>>,
     pub quotas: Mutex<HashMap<String, Quota>>,
+    /// A coding plan's last refusal (its key, its balance, its limit), by plan id, until a call
+    /// to it goes through again: shown with the plan in Settings → Models & Providers.
+    pub plan_errors: Mutex<HashMap<String, String>>,
 }
 
 impl Stats {
@@ -278,6 +288,11 @@ impl Stats {
         });
     }
 
+    /// Why plan `id` last turned a call down, if it still does.
+    pub fn plan_error(&self, id: &str) -> Option<String> {
+        self.plan_errors.lock().unwrap().get(id).cloned()
+    }
+
     pub fn quota(&self, provider: &str) -> Option<Quota> {
         self.quotas.lock().unwrap().get(provider).cloned()
     }
@@ -295,6 +310,7 @@ impl Stats {
         s.agent_mode = None;
         s.last_error = None;
         s.call_error = None;
+        s.limit_error = None;
         s.reported_context = None;
         s.subagents.clear();
         s.pending_agents.clear();
@@ -355,6 +371,7 @@ impl Proxy {
             upstream: Arc::default(),
             router: Arc::default(),
             keys: keys.clone(),
+            plans: Arc::default(),
             budget: budget.clone(),
             substitutes: Arc::default(),
             port,
@@ -401,6 +418,15 @@ impl Proxy {
     /// Use these keys from the next request on.
     pub fn set_keys(&self, keys: HashMap<String, String>) {
         *self.keys.write().unwrap() = keys;
+    }
+
+    /// The coding plans to serve at `plan/<id>`, from the next request on.
+    pub fn set_plans(&self, plans: HashMap<String, plan::Plan>) {
+        let mut errors = self.stats.plan_errors.lock().unwrap();
+        // A key changed: what the old one was told no longer holds.
+        let old = self.state.plans.read().unwrap().clone();
+        errors.retain(|id, _| old.get(id).zip(plans.get(id)).is_some_and(|(a, b)| a == b));
+        *self.state.plans.write().unwrap() = plans;
     }
 
     /// Serve the free tier (Settings → Experimental). Off, its requests are refused before anything
@@ -498,6 +524,8 @@ pub(crate) struct AppState {
     upstream: Arc<upstream::Upstream>,
     router: Arc<dino_router::Router>,
     keys: Arc<RwLock<HashMap<String, String>>>,
+    /// Coding plans, by id (see `plan`).
+    plans: Arc<RwLock<plan::Plans>>,
     /// The session token budget; 0 means none.
     budget: Arc<AtomicU64>,
     /// Codex models the backend rejected, and the model that answered instead.
@@ -554,6 +582,18 @@ async fn forward(
         rest = r;
         runtime = Some((id, name, base));
     }
+    // A coding plan: `plan/<id>/…`.
+    let mut coding_plan = None;
+    if provider == plan::PROVIDER {
+        let Some((id, r)) = rest.split_once('/').map(|(i, r)| (i.to_string(), r.to_string())) else {
+            return error(StatusCode::NOT_FOUND, "which coding plan? plan/<id>/…".into());
+        };
+        let Some(p) = st.plans.read().unwrap().get(&id).cloned() else {
+            return error(StatusCode::UNAUTHORIZED, format!("the coding plan {id} isn't connected: add its key in dino's Settings → Models & Providers"));
+        };
+        rest = r;
+        coding_plan = Some((id, p));
+    }
     // Only model calls count toward activity; ignore e.g. token counting and telemetry.
     let is_model_call = rest.ends_with("messages") || rest.ends_with("chat/completions") || rest.ends_with("responses");
     if is_model_call && let Some(resp) = over_budget(&st, &session, &provider) {
@@ -567,30 +607,39 @@ async fn forward(
     }
     // Providers dino signs in to (OpenRouter, the ChatGPT plan) go out with dino's credentials,
     // not the agent's: (what to add, which of the agent's to drop, where).
-    type Hosted = (Vec<(&'static str, String)>, fn(&str) -> bool, &'static str);
+    type Hosted = (Vec<(&'static str, String)>, fn(&str) -> bool, String);
     let hosted: Option<Hosted> = {
         let keys = st.keys.read().unwrap();
         match provider.as_str() {
             openrouter::PROVIDER => match openrouter::headers(&keys) {
-                Some(h) => Some((h.to_vec(), openrouter::is_credential, openrouter::upstream())),
+                Some(h) => Some((h.to_vec(), openrouter::is_credential, openrouter::upstream().into())),
                 None => return error(StatusCode::UNAUTHORIZED, "OpenRouter isn't connected: connect it in dino's Settings → Providers".into()),
             },
             siwc::PROVIDER if !siwc::allowed(&rest) => return error(StatusCode::NOT_FOUND, "the ChatGPT plan only takes the Responses API (v1/responses)".into()),
             siwc::PROVIDER => match siwc::headers(&keys) {
-                Ok(h) => Some((h.to_vec(), siwc::is_credential, siwc::upstream())),
+                Ok(h) => Some((h.to_vec(), siwc::is_credential, siwc::upstream().into())),
                 Err(why) => return error(StatusCode::UNAUTHORIZED, why.into()),
             },
-            local::PROVIDER => runtime.as_ref().map(|r| (vec![], local::is_credential as fn(&str) -> bool, r.2)),
+            local::PROVIDER => runtime.as_ref().map(|r| (vec![], local::is_credential as fn(&str) -> bool, r.2.to_string())),
+            // The plan's base for this API: the path that goes out is the whole URL.
+            plan::PROVIDER => {
+                let (_, p) = coding_plan.as_ref().expect("a plan");
+                let (url, headers) = match plan::url(p, &rest).and_then(|u| plan::headers(p, &rest).map(|h| (u, h))) {
+                    Ok(x) => x,
+                    Err(why) => return error(StatusCode::NOT_FOUND, why),
+                };
+                Some((headers, plan::is_credential, url))
+            }
             _ => None,
         }
     };
     let upstream = match PROVIDERS.iter().find(|(p, _)| *p == provider) {
         Some(&(_, upstream)) => upstream,
-        None if hosted.is_some() => hosted.as_ref().map(|h| h.2).unwrap_or_default(),
+        None if hosted.is_some() => hosted.as_ref().map(|h| h.2.as_str()).unwrap_or_default(),
         None => return error(StatusCode::NOT_FOUND, format!("unknown provider {provider}")),
     };
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
-    let url = format!("{upstream}/{rest}{query}");
+    let url = if coding_plan.is_some() { format!("{upstream}{query}") } else { format!("{upstream}/{rest}{query}") };
     let (parts, body) = req.into_parts();
     let Ok(mut body) = axum::body::to_bytes(body, MAX_BODY).await else {
         return error(StatusCode::BAD_REQUEST, "unreadable body, or over 64 MiB".into());
@@ -695,10 +744,19 @@ async fn forward(
             let msg = match provider.as_str() {
                 siwc::PROVIDER => siwc::refused(status.as_u16(), &codex::error_message(&text)),
                 local::PROVIDER => runtime.as_ref().map_or_else(String::new, |(id, name, _)| local::refused(id, name, status.as_u16(), &codex::error_message(&text), requested.as_deref())),
+                plan::PROVIDER => coding_plan.as_ref().map_or_else(String::new, |(_, p)| plan::refused(&p.name, status.as_u16(), &codex::error_message(&text))),
                 _ => format!("{} {}", status.as_u16(), codex::error_message(&text)),
             };
+            // The plan's key, balance or limit: the plan's state, not just this call's.
+            let limit = coding_plan.is_some() && plan::limited(status.as_u16(), &codex::error_message(&text)).is_some();
+            if let Some((id, _)) = coding_plan.as_ref().filter(|_| limit || matches!(status.as_u16(), 401 | 403)) {
+                st.stats.plan_errors.lock().unwrap().insert(id.clone(), msg.clone());
+            }
             st.stats.update(&session, |s| {
                 s.errors += 1;
+                if limit {
+                    s.limit_error = Some(msg.clone());
+                }
                 s.call_failed(msg);
             });
             drop(guard);
@@ -720,8 +778,12 @@ async fn forward(
     if !status.is_success() && is_model_call {
         st.stats.update(&session, |s| s.errors += 1);
     } else if is_model_call {
+        if let Some((id, _)) = &coding_plan {
+            st.stats.plan_errors.lock().unwrap().remove(id);
+        }
         st.stats.update(&session, |s| {
             s.call_error = None;
+            s.limit_error = None;
             if !s.hooked {
                 s.last_error = None;
             }
@@ -1268,6 +1330,63 @@ mod tests {
             s.turn_hook("StopFailure", &json!({}));
         });
         assert_eq!(stats.session("1").last_error.as_deref(), Some("429 Error"));
+
+        // A coding plan's spent window shows though the agent ends its turn with Stop, until a
+        // call goes through again.
+        let mut s = SessionStats::default();
+        s.turn_hook("UserPromptSubmit", &json!({}));
+        s.limit_error = Some("GLM Coding Plan's usage limit was reached".into());
+        s.call_failed("GLM Coding Plan's usage limit was reached".into());
+        s.turn_hook("Stop", &json!({}));
+        assert_eq!(s.last_error.as_deref(), Some("GLM Coding Plan's usage limit was reached"));
+        s.limit_error = None;
+        s.turn_hook("Stop", &json!({}));
+        assert_eq!(s.last_error, None);
+    }
+
+    /// Over real connections: a coding plan gets its own key and never the agent's credentials (a
+    /// claude.ai login among them), at its base for the API asked; its spent window is said as such.
+    #[test]
+    fn a_coding_plan_gets_its_key_and_its_limit_is_said() {
+        use std::io::{Read, Write};
+        let plan_side = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}/api/anthropic", plan_side.local_addr().unwrap().port());
+        let (tx, seen) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let (mut s, _) = plan_side.accept().unwrap();
+            let mut buf = vec![0; 65536];
+            let n = s.read(&mut buf).unwrap();
+            tx.send(String::from_utf8_lossy(&buf[..n]).to_lowercase()).unwrap();
+            let body = r#"{"error":{"code":"1308","message":"Usage limit reached for 5 hour. Your limit will reset at 2026-10-04 02:00:00"}}"#;
+            write!(s, "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        let p = plan::Plan { name: "GLM Coding Plan".into(), anthropic: Some(base), openai: None, key: "plan-key-1".into() };
+        proxy.set_plans(HashMap::from([("zai".to_string(), p)]));
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let send = |provider: &str, rest: &str| {
+            let path = proxy.base_url("7", provider).strip_prefix(&format!("http://{here}")).unwrap().to_string() + rest;
+            let body = r#"{"model":"glm-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-the-users-claude-login\r\nx-api-key: agents-own\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        assert!(send("plan/kimi", "/v1/messages").starts_with("HTTP/1.1 401"), "a plan with no key isn't served");
+        assert!(send("plan/zai", "/v1/files").starts_with("HTTP/1.1 404"), "only model calls");
+        let out = send("plan/zai", "/v1/messages?beta=true");
+        assert!(out.starts_with("HTTP/1.1 429") && out.contains("1308"), "the plan's own answer reaches the agent: {out}");
+        let got = seen.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(got.starts_with("post /api/anthropic/v1/messages?beta=true "), "{got}");
+        assert!(got.contains("authorization: bearer plan-key-1\r\n") && got.contains("x-api-key: plan-key-1\r\n"), "{got}");
+        assert!(!got.contains("sk-ant-oat") && !got.contains("agents-own"), "the agent's credentials stay here: {got}");
+        let said = proxy.stats.plan_error("zai").unwrap();
+        assert!(said.contains("usage limit was reached") && said.contains("reset at 2026-10-04 02:00:00"), "{said}");
+        assert_eq!(proxy.stats.session("7").limit_error.as_deref(), Some(said.as_str()));
+        // Another key: what the old one was told no longer holds.
+        proxy.set_plans(HashMap::from([("zai".to_string(), plan::Plan { name: "GLM Coding Plan".into(), anthropic: None, openai: None, key: "plan-key-2".into() })]));
+        assert_eq!(proxy.stats.plan_error("zai"), None);
     }
 
     #[test]

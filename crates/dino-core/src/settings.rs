@@ -472,13 +472,19 @@ pub const ACCOUNT_TOKEN_PREFIX: &str = "DINO_CLOUD_";
 pub fn key_status() -> Vec<KeyInfo> {
     let stored = stored();
     let mut names: Vec<String> = KNOWN_KEYS.iter().map(|(k, _)| k.to_string()).collect();
-    // Sign in with ChatGPT's tokens are Settings → Providers' to keep, and the dino account's are
-    // Settings → Dino Account's: sign-ins, not keys to edit or count.
+    // Sign in with ChatGPT's tokens and coding plans' keys are Settings → Providers' to keep, and
+    // the dino account's are Settings → Dino Account's: not keys to edit or count here.
     names.extend(
         stored
             .iter()
             .map(|(k, _)| k.clone())
-            .filter(|k| !KNOWN_KEYS.iter().any(|(n, _)| n == k) && !k.starts_with("CHATGPT_") && !k.starts_with(ACCOUNT_TOKEN_PREFIX) && k != crate::claude_token::CREATED_KEY),
+            .filter(|k| {
+                !KNOWN_KEYS.iter().any(|(n, _)| n == k)
+                    && !k.starts_with("CHATGPT_")
+                    && !k.starts_with(ACCOUNT_TOKEN_PREFIX)
+                    && !k.starts_with(crate::plans::KEY_PREFIX)
+                    && k != crate::claude_token::CREATED_KEY
+            }),
     );
     names
         .into_iter()
