@@ -596,8 +596,9 @@ final class DinoModel: ObservableObject {
     /// Ghostty handles its own shortcuts before the menu sees them (⌘D splits, ⌘W closes, ⌘K
     /// clears, ⇧⌘P its command palette, ⇧⌘[ ] its tabs), so a focused pane would swallow dino's.
     /// Hand every dino shortcut back to the menu, over whatever the user's Ghostty config binds it
-    /// to. A shortcut added to a menu belongs here too.
-    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "j", "o", "n", "t", "shift+n", "alt+n", "ctrl+n", "alt+shift+n",
+    /// to. A shortcut added to a menu belongs here too (not Edit › Find's: those are Ghostty's own
+    /// keybinds for the same thing, and stay the user's to change). Ghostty's ⌘K (clear) is ⌥⌘K.
+    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "alt+k", "j", "o", "n", "t", "shift+n", "alt+n", "ctrl+n", "alt+shift+n",
                              "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t", "shift+p", "shift+bracket_left",
                              "shift+bracket_right", "shift+semicolon", "backslash", "shift+m", "shift+i", "shift+e"]
         + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })

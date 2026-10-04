@@ -1,5 +1,6 @@
 import AppKit
 import DinoGhostty
+import SwiftUI
 
 /// A session's terminal whose ⌘-clicked links open in dino: files in the file pane, local web
 /// pages in the preview. Any agent works: Ghostty finds the links (paths, URLs, OSC 8).
@@ -71,10 +72,308 @@ final class LinkTerminalView: TerminalView {
                 super.delegate = newValue
                 return
             }
-            let f = LinkForwarder(state: state, onOpen: onOpen)
+            let f = LinkForwarder(state: state, view: self, onOpen: onOpen)
             forwarder = f
             super.delegate = f
         }
+    }
+
+    /// The pane's terminal state, for Ghostty's binding actions.
+    var terminalState: TerminalViewState? { forwarder?.state }
+
+    /// The keyboard back in the terminal, from the find bar.
+    func focusTerminal() {
+        window?.makeFirstResponder(self)
+    }
+
+    // MARK: Find (Ghostty's start_search, search_total, search_selected, end_search)
+
+    private(set) var findBar: FindBar?
+
+    /// Opens the find bar, or puts the keyboard back in it; `needle` (⌘E's selection) replaces
+    /// what it searches for. A new bar starts with the Mac's find text.
+    func startSearch(_ needle: String?) {
+        if let findBar {
+            if let needle { findBar.state.needle = needle }
+            findBar.focusField()
+            return
+        }
+        let bar = FindBar(terminal: self, needle: needle ?? FindBar.findText ?? "")
+        findBar = bar
+        addSubview(bar)
+    }
+
+    /// Closes the find bar; `tellGhostty` when the bar closed it, rather than Ghostty (Esc in the
+    /// terminal, `end_search`). The keyboard goes back to the terminal if it was in the bar.
+    func endSearch(tellGhostty: Bool) {
+        guard let bar = findBar else { return }
+        findBar = nil
+        let hadKeyboard = (window?.firstResponder as? NSView)?.isDescendant(of: bar) == true
+        bar.removeFromSuperview()
+        if tellGhostty { terminalState?.performBindingAction("end_search") }
+        if hadKeyboard { focusTerminal() }
+    }
+
+    /// The terminal's own key handling doesn't look at its subviews: the find bar's keys first.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let findBar, findBar.performKeyEquivalent(with: event) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    func searchTotal(_ total: Int?) {
+        if let state = findBar?.state, state.total != total { state.total = total }
+    }
+
+    func searchSelected(_ selected: Int?) {
+        if let state = findBar?.state, state.selected != selected { state.selected = selected }
+    }
+
+    /// Edit › Find, as in Ghostty's menu. Its keys reach Ghostty first while the terminal has
+    /// the keyboard (⌘F, ⌘G, ⇧⌘G, ⌘E are Ghostty's keybinds); the menu does the same elsewhere.
+    func find(_ command: FindCommand) {
+        switch command {
+        case .find: terminalState?.performBindingAction("start_search")
+        case .next, .previous:
+            if let findBar {
+                findBar.navigate(next: command == .next)
+            } else {
+                terminalState?.performBindingAction(command == .next ? "navigate_search:next" : "navigate_search:previous")
+            }
+        case .hide: endSearch(tellGhostty: true)
+        case .useSelection: terminalState?.performBindingAction("search_selection")
+        case .jumpToSelection: terminalState?.performBindingAction("scroll_to_selection")
+        }
+    }
+
+    enum FindCommand { case find, next, previous, hide, useSelection, jumpToSelection }
+
+    /// The pane a menu command is for: the one with the keyboard (or its find bar), else the
+    /// selected session's.
+    static func current(_ model: DinoModel) -> LinkTerminalView? {
+        var responder = NSApp.keyWindow?.firstResponder as? NSView
+        while let view = responder {
+            if let pane = view as? LinkTerminalView { return pane }
+            responder = view.superview
+        }
+        // From the sidebar, say; not from Settings or another window.
+        let shown = model.selected.flatMap { model.terminals[$0]?.attachedPlatformView as? LinkTerminalView }
+        guard let shown, NSApp.keyWindow == nil || NSApp.keyWindow === shown.window else { return nil }
+        return shown
+    }
+
+    // MARK: Clear and reset (Edit menu, context menu)
+
+    /// Ghostty's `clear_screen`, its ⌘K: the screen and scrollback cleared, the prompt kept.
+    /// dino's ⌘K is Continue a Session, so it's ⌥⌘K here (Edit › Clear).
+    @objc func clearScreen(_: Any?) {
+        terminalState?.performBindingAction("clear_screen")
+    }
+
+    /// Ghostty's `reset`: the terminal back to its first state, as `reset` in a shell.
+    @objc func resetTerminal(_: Any?) {
+        terminalState?.performBindingAction("reset")
+    }
+
+    // MARK: Scrollbar (Ghostty's scrollbar action)
+
+    private var scroller: PaneScroller?
+
+    /// Ghostty's numbers for the scrollbar, with each change of the scrollback or the view.
+    func scrollbarChanged(_ bar: TerminalScrollbar) {
+        guard GhosttyConfig.showsScrollbar else {
+            scroller?.removeFromSuperview()
+            scroller = nil
+            return
+        }
+        if scroller == nil {
+            let s = PaneScroller(terminal: self) { [weak self] row in
+                self?.terminalState?.performBindingAction("scroll_to_row:\(row)")
+            }
+            let width = PaneScroller.width
+            s.frame = NSRect(x: bounds.width - width, y: 0, width: width, height: bounds.height)
+            // Below the find bar and the key indicator.
+            addSubview(s, positioned: .below, relativeTo: nil)
+            scroller = s
+        }
+        if scroller?.appearance !== GhosttyConfig.scrollerAppearance { scroller?.appearance = GhosttyConfig.scrollerAppearance }
+        scroller?.update(bar)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        guard let scroller else { return }
+        let x = convert(event.locationInWindow, from: nil).x
+        if x >= bounds.width - PaneScroller.width { scroller.pointerAtEdge() }
+    }
+
+    // MARK: Key sequences and tables (Ghostty's key_sequence, key_table)
+
+    private var keys = KeyState()
+    private var keyIndicator: NSHostingView<KeyIndicator>?
+
+    /// A key of a sequence pressed (more to come), or the sequence over (nil).
+    func keySequence(_ key: String?) {
+        if let key { keys.sequence.append(key) } else { keys.sequence = [] }
+        showKeys()
+    }
+
+    func keyTable(_ change: TerminalHostAction.KeyTable) {
+        switch change {
+        case .activate(let name): keys.tables.append(name)
+        case .deactivate: _ = keys.tables.popLast()
+        case .deactivateAll: keys.tables = []
+        }
+        showKeys()
+    }
+
+    private func showKeys() {
+        guard !keys.sequence.isEmpty || !keys.tables.isEmpty else {
+            keyIndicator?.removeFromSuperview()
+            keyIndicator = nil
+            return
+        }
+        let view = keyIndicator ?? NSHostingView(rootView: KeyIndicator(keys: keys))
+        view.rootView = KeyIndicator(keys: keys)
+        let size = view.fittingSize
+        view.frame = NSRect(x: (bounds.width - size.width) / 2, y: 8, width: size.width, height: size.height)
+        view.autoresizingMask = [.minXMargin, .maxXMargin, .maxYMargin]
+        if keyIndicator == nil {
+            addSubview(view)
+            keyIndicator = view
+        }
+    }
+
+    // MARK: Context menu (right-click-action = context-menu)
+
+    override func contextMenu() -> NSMenu? {
+        let menu = NSMenu()
+        let state = terminalState
+        let selection = state?.surface?.hasSelection() == true ? state?.surface?.readSelection() : nil
+        func add(_ title: String, _ symbol: String?, _ action: Selector, enabled: Bool = true) {
+            let item = NSMenuItem(title: title, action: enabled ? action : nil, keyEquivalent: "")
+            item.target = self
+            if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
+            menu.addItem(item)
+        }
+        // A link Ghostty selected under the pointer (or a selected path or URL): where ⌘-click goes.
+        if let selection, let link = linkTarget(selection) {
+            menuLink = selection
+            add(link, "arrow.up.forward.square", #selector(openSelectedLink))
+            menu.addItem(.separator())
+        }
+        if selection?.isEmpty == false { add("Copy", "doc.on.doc", #selector(copy(_:))) }
+        add("Paste", "doc.on.clipboard", #selector(pasteFromMenu))
+        add("Select All", "selection.pin.in.out", #selector(selectAll(_:)))
+        menu.addItem(.separator())
+        add("Find…", "magnifyingglass", #selector(findFromMenu))
+        add("Clear", "eraser", #selector(clearScreen(_:)))
+        add("Reset Terminal", "arrow.trianglehead.2.clockwise", #selector(resetTerminal(_:)))
+        // The session's own: splitting it, renaming it, asking about it. Not in the quick terminal.
+        if let state {
+            let right = GhosttyActions.work(.newSplit(.right), from: state)
+            let down = GhosttyActions.work(.newSplit(.down), from: state)
+            let renames = GhosttyActions.work(.promptTitle(.surface), from: state)
+            if right != nil || renames != nil { menu.addItem(.separator()) }
+            if right != nil { add("Split Right", "rectangle.righthalf.inset.filled", #selector(splitRight)) }
+            if down != nil { add("Split Down", "rectangle.bottomhalf.inset.filled", #selector(splitDown)) }
+            if renames != nil { add("Rename…", "pencil.line", #selector(rename)) }
+            if GhosttyActions.canAsk(from: state) { add("Ask About This Session…", "questionmark.bubble", #selector(askAbout)) }
+        }
+        return menu
+    }
+
+    private var menuLink: String?
+
+    /// What opening `text` as a link would do, as a menu title; nil when it isn't one.
+    private func linkTarget(_ text: String) -> String? {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !text.contains("\n") else { return nil }
+        switch LinkTarget.resolve(text, cwd: terminalState?.workingDirectory) {
+        case let .file(path, _):
+            // A path on an SSH host means nothing here.
+            guard local() else { return nil }
+            return "Open \((path as NSString).lastPathComponent)"
+        case .web, .elsewhere: return "Open Link"
+        case nil: return nil
+        }
+    }
+
+    @objc private func openSelectedLink() {
+        if let menuLink { onOpen(menuLink) }
+    }
+
+    /// As ⌘V: an image on its own goes in as its staged path.
+    @objc private func pasteFromMenu() {
+        guard !pasteClipboardImage() else { return }
+        terminalState?.performBindingAction("paste_from_clipboard")
+    }
+
+    @objc private func findFromMenu() {
+        terminalState?.performBindingAction("start_search")
+    }
+
+    @objc private func splitRight() { menuAction(.newSplit(.right)) }
+    @objc private func splitDown() { menuAction(.newSplit(.down)) }
+    @objc private func rename() { menuAction(.promptTitle(.surface)) }
+    @objc private func askAbout() {
+        if let state = terminalState { GhosttyActions.ask(from: state) }
+    }
+
+    private func menuAction(_ action: TerminalHostAction) {
+        guard let state = terminalState, let work = GhosttyActions.work(action, from: state) else { return }
+        work()
+    }
+}
+
+/// The keys of a sequence pressed so far, and the key tables in effect, innermost last.
+struct KeyState: Equatable {
+    var sequence: [String] = []
+    var tables: [String] = []
+}
+
+/// Ghostty's key state pill at the bottom of the pane: the key tables in effect and a key
+/// sequence waiting for its next key.
+struct KeyIndicator: View {
+    let keys: KeyState
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if !keys.tables.isEmpty {
+                HStack(spacing: 5) {
+                    Image(systemName: "keyboard.badge.ellipsis").font(.system(size: 13)).foregroundStyle(.secondary)
+                    ForEach(Array(keys.tables.enumerated()), id: \.offset) { i, table in
+                        if i > 0 {
+                            Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+                        }
+                        Text(verbatim: table).font(.system(size: 13, weight: .medium, design: .rounded))
+                    }
+                }
+            }
+            if !keys.tables.isEmpty, !keys.sequence.isEmpty { Divider().frame(height: 14) }
+            if !keys.sequence.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(Array(keys.sequence.enumerated()), id: \.offset) { _, key in
+                        Text(verbatim: key)
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.1)))
+                    }
+                    Text(verbatim: "…").foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background {
+            Capsule().fill(.regularMaterial)
+                .overlay { Capsule().strokeBorder(Color.primary.opacity(0.15), lineWidth: 1) }
+                .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
+        }
+        .padding(10)
+        .help(keys.tables.isEmpty
+            ? "A key sequence is waiting for its next key"
+            : "A key table is in effect: keys are read with its bindings until it's deactivated")
     }
 }
 
@@ -96,11 +395,13 @@ private final class LinkForwarder:
     TerminalSurfaceStateDelegate
 {
     weak var state: TerminalViewState?
+    weak var view: LinkTerminalView?
     var viewState: TerminalViewState? { state }
     let onOpen: (String) -> Void
 
-    init(state: TerminalViewState, onOpen: @escaping (String) -> Void) {
+    init(state: TerminalViewState, view: LinkTerminalView, onOpen: @escaping (String) -> Void) {
         self.state = state
+        self.view = view
         self.onOpen = onOpen
     }
 
@@ -113,9 +414,9 @@ private final class LinkForwarder:
     func terminalDidRingBell() { state?.terminalDidRingBell() }
     func terminalDidRequestDesktopNotification(title: String, body: String) { state?.terminalDidRequestDesktopNotification(title: title, body: body) }
     func terminalDidChangeWorkingDirectory(_ path: String) { state?.terminalDidChangeWorkingDirectory(path) }
-    // Not passed on: nothing here shows it, and as published state it changed with every line of
-    // output, making SwiftUI look at the pane again each time.
-    func terminalDidUpdateScrollbar(_: TerminalScrollbar) {}
+    // To the pane's own scroller, not the state: as published state it changed with every line
+    // of output, making SwiftUI look at the pane again each time.
+    func terminalDidUpdateScrollbar(_ bar: TerminalScrollbar) { view?.scrollbarChanged(bar) }
     func terminalDidFinishCommand(exitCode: Int?, durationNanos: UInt64) { state?.terminalDidFinishCommand(exitCode: exitCode, durationNanos: durationNanos) }
     func terminalDidRequestTextSelection(_ request: TerminalTextSelectionRequest) { state?.terminalDidRequestTextSelection(request) }
     func terminalDidRequestClipboardConfirmation(_ request: TerminalClipboardConfirmationRequest) { state?.terminalDidRequestClipboardConfirmation(request) }
