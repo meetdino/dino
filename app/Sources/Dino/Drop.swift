@@ -1,5 +1,5 @@
 import AppKit
-import GhosttyTerminal
+import DinoGhostty
 import UniformTypeIdentifiers
 
 /// What a drop on a session's terminal becomes: text pasted through the terminal's paste path,
