@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "dino"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "dino-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "libc",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "dino-daemon"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "dino-proxy"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "anyllm_translate",
@@ -658,14 +658,14 @@ dependencies = [
 
 [[package]]
 name = "dino-router"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "dino-sync"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "dino-core",
  "proptest",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "dino-term"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
