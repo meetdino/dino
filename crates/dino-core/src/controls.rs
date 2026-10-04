@@ -60,6 +60,9 @@ pub struct Knobs {
     pub restart: bool,
     /// Mode id → what the agent itself calls it, where that differs from dino's word.
     pub mode_labels: std::collections::BTreeMap<String, String>,
+    /// What a conversation it resumes keeps as it was, whatever dino asks: "model", or a mode id.
+    /// A running session's can't be changed; a new session's can.
+    pub resume_keeps: Vec<String>,
 }
 
 impl Knobs {
@@ -93,7 +96,8 @@ pub fn knobs(agent_id: &str, allow_bypass: bool, catalog: Option<&Catalog>) -> K
     let listed = catalog.filter(|_| a.picks_model()).map(|c| Knobs { models: c.models.clone(), default_model: c.default_model.clone(), ..Knobs::default() }).unwrap_or_default();
     let modes: Vec<String> = a.modes().iter().filter(|m| allow_bypass || **m != "bypass").map(|m| m.to_string()).collect();
     let mode_labels = modes.iter().filter_map(|m| a.mode_label(m).map(|l| (m.clone(), l.to_string()))).collect();
-    Knobs { modes, model: a.picks_model(), efforts: catalog.map(Catalog::efforts).unwrap_or_default(), restart: true, mode_labels, ..listed }
+    let resume_keeps = a.resume_keeps().iter().map(|k| k.to_string()).collect();
+    Knobs { modes, model: a.picks_model(), efforts: catalog.map(Catalog::efforts).unwrap_or_default(), restart: true, mode_labels, resume_keeps, ..listed }
 }
 
 /// Command-line arguments that apply `c` to an agent offering `k` (see `knobs`). Values it
@@ -259,7 +263,7 @@ mod tests {
     fn modes_in_the_agents_own_words() {
         assert_eq!(k("claude").mode_labels.get("ask").map(String::as_str), Some("Manual"));
         assert!(!knobs("claude", false, None).mode_labels.contains_key("bypass"), "only modes it offers");
-        for agent in ["claude", "codex", "kimi", "qwen", "hermes"] {
+        for agent in ["claude", "codex", "kimi", "qwen", "hermes", "codewhale"] {
             let k = k(agent);
             assert!(k.mode_labels.keys().all(|m| k.modes.contains(m)), "{agent}");
         }

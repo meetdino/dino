@@ -314,6 +314,7 @@ pub fn asking(agent: &str, screen: &str) -> bool {
             (screen.contains("Would you like to ") && screen.contains("No, and tell Codex what to do differently"))
                 || (screen.contains("Trust this folder?") && screen.contains("Trust and continue"))
         }
+        "codewhale" => crate::agent::agent("codewhale").and_then(|a| a.asking(screen)).is_some(),
         _ => false,
     }
 }

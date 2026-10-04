@@ -226,7 +226,7 @@ impl Agent for Hermes {
         StatusSource::Polled
     }
 
-    fn turn_now(&self, session: &str) -> Option<bool> {
+    fn turn_now(&self, session: &str, _since: u64) -> Option<bool> {
         turn_in(&store()?, session)
     }
 
@@ -239,7 +239,7 @@ impl Agent for Hermes {
 
     fn busy(&self, pid: u32) -> Option<bool> {
         let args = found::args_of(pid);
-        self.turn_now(&conversation_in(pid, args.get(1..).unwrap_or_default())?.id)
+        self.turn_now(&conversation_in(pid, args.get(1..).unwrap_or_default())?.id, 0)
     }
 
     fn portable_flags(&self, args: &[String]) -> Vec<String> {
@@ -272,7 +272,7 @@ impl Agent for Hermes {
             }
             s.title = r.title();
             s.updated_at = r.updated as u64;
-            s.status = self.turn_now(&r.id).map(|b| if b { "busy" } else { "idle" }.into());
+            s.status = self.turn_now(&r.id, 0).map(|b| if b { "busy" } else { "idle" }.into());
             s.session_id = r.id;
         }
         s.args = self.portable_flags(&args[1..]);

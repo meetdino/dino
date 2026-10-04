@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::{AgentKind, KNOWN_AGENTS, which};
+use crate::{AgentKind, KNOWN_AGENTS, which_agent};
 
 #[derive(Clone, Debug)]
 pub struct AgentInfo {
@@ -75,6 +75,7 @@ pub fn install_hint(id: &str) -> &'static str {
         "kimi" => "npm i -g @moonshot-ai/kimi-code",
         "pi" => "npm i -g --ignore-scripts @earendil-works/pi-coding-agent",
         "hermes" => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+        "codewhale" => "npm i -g codewhale",
         "opencode" => "curl -fsSL https://opencode.ai/install | bash",
         "crush" => "brew install charmbracelet/tap/crush",
         "aider" => "pip install aider-install && aider-install",
@@ -103,6 +104,7 @@ pub fn setup(id: &str) -> Setup {
         "qwen" => ("https://qwenlm.github.io/qwen-code-docs/", Some("qwen"), Some("/auth")),
         "pi" => ("https://pi.dev", Some("pi"), Some("/login")),
         "hermes" => ("https://hermes-agent.nousresearch.com/docs/", Some("hermes setup"), None),
+        "codewhale" => ("https://github.com/Hmbown/CodeWhale", Some("codewhale"), Some("/provider")),
         "opencode" => ("https://opencode.ai", None, None),
         "crush" => ("https://github.com/charmbracelet/crush", None, None),
         "aider" => ("https://aider.chat", None, None),
@@ -235,7 +237,7 @@ pub fn scan() -> Inventory {
 }
 
 fn agent_info(kind: &AgentKind) -> AgentInfo {
-    let path = which(kind.bin);
+    let path = which_agent(kind);
     let version = path.as_deref().and_then(version_of);
     let auth = path.as_ref().and_then(|_| crate::agent::agent(kind.id)?.login());
     AgentInfo {
