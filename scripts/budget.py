@@ -16,13 +16,16 @@ shells and two Claude Code sessions (haiku). Then it measures, and fails (exit 1
     Settings open, idle             <= 2 %
     keystroke echo through dinod    median <= plain pty + 1 ms, p95 <= plain pty + 2 ms
     100 MB `cat` through dinod      <= 2 s, and <= 2.5 dinod CPU-seconds
+    proxy, first byte added         median <= 1 ms, p95 <= 3 ms (a 420 kB request, to a stand-in API)
+    proxy, 500-event answer added   median <= 3 ms
+    100 MB streamed through proxy   <= 0.6 dinod CPU-seconds
 
 Never touches the real dinod, ~/.local/bin/dino or your Dino.app; kills only its own processes.
 The app window must stay visible (not minimized or hidden) while it runs: a hidden window doesn't
 render, and the streaming numbers would read low. It warns when the window wasn't visible.
 Claude's trust entry for its test folder is removed from ~/.claude.json afterwards (0600 kept).
 """
-import fcntl, glob, json, os, pty, select, shutil, socket, statistics, struct, subprocess, sys, termios, time
+import fcntl, glob, http.client, http.server, json, os, pty, select, shutil, socket, socketserver, statistics, struct, subprocess, sys, termios, threading, time
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 REPO = os.path.abspath(args[0]) if args else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,7 +38,8 @@ APP = "/tmp/dino-budget-app/BudgetDino.app"
 BUNDLE = "dev.dino.budget"
 SAFE = ["--model", "haiku", "--disallowedTools", "Artifact,Write,Edit,WebFetch,WebSearch"]
 
-BUDGET = {"idle": 1.0, "cat_s": 2.0, "cat_cpu": 2.5, "ws_delta": 5.0, "shell": 10.0, "claude": 10.0, "settings": 2.0, "lat_median": 1.0, "lat_p95": 2.0}
+BUDGET = {"idle": 1.0, "cat_s": 2.0, "cat_cpu": 2.5, "ws_delta": 5.0, "shell": 10.0, "claude": 10.0, "settings": 2.0, "lat_median": 1.0, "lat_p95": 2.0,
+          "proxy_ttfb_median": 1.0, "proxy_ttfb_p95": 3.0, "proxy_total": 3.0, "proxy_cpu": 0.6}
 results, failures, warnings = [], [], []
 
 
@@ -249,6 +253,158 @@ def throughput():
     check("100 MB `cat`, dinod CPU-seconds", cpu, BUDGET["cat_cpu"], " s")
 
 
+def sse(events, text):
+    """An Anthropic Messages stream of `events` text deltas of `text`, framed as the API frames it."""
+    ev = lambda kind, body: f"event: {kind}\ndata: {json.dumps(body, separators=(',', ':'))}\n\n".encode()
+    usage = {"input_tokens": 1200, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 1}
+    head = ev("message_start", {"type": "message_start", "message": {"id": "msg_budget", "type": "message", "role": "assistant", "model": "claude-budget",
+                                                                     "content": [], "stop_reason": None, "stop_sequence": None, "usage": usage}})
+    head += ev("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+    delta = ev("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}})
+    tail = ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    tail += ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": events}})
+    tail += ev("message_stop", {"type": "message_stop"})
+    return head, delta, tail
+
+
+def proxy():
+    """dino's proxy between an agent and its provider: what it adds to the first byte and to a
+    whole streamed answer, and dinod's CPU per 100 MB through it. The provider is a stand-in on
+    this Mac (never a real one), reached the way a model server on this Mac is (`local/ollama`,
+    at OLLAMA_HOST): the same forwarding, metering and streaming as any provider's."""
+    root = "/tmp/dino-budget-proxy"
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root + "/home")
+    os.makedirs(root + "/dino")
+    open(root + "/home/.zshrc", "w").write("PROMPT='%# '\n")
+    small = sse(500, "Pelicans glide low over the water. ")
+    big = sse(20_000, "x" * 230)  # ~5 MB of deltas, each about the size of a long one from the API
+
+    class Fake(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length", 0)))
+            if not self.path.endswith(("/budget/v1/messages", "/big/v1/messages")):
+                # dinod looking for a model server here: there's none.
+                self.send_response(404)
+                self.send_header("content-length", "0")
+                self.end_headers()
+                return
+            head, delta, tail = big if self.path.endswith("/big/v1/messages") else small
+            n = 20_000 if head is big[0] else 500
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("connection", "close")
+            self.end_headers()
+            self.wfile.write(head)
+            self.wfile.flush()
+            # As a provider sends: an event at a time, a few at once when they come quickly.
+            batch = 1 if n == 500 else 64
+            for i in range(0, n, batch):
+                self.wfile.write(delta * min(batch, n - i))
+                self.wfile.flush()
+            self.wfile.write(tail)
+            self.wfile.flush()
+            self.close_connection = True
+
+    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    fake = Server(("127.0.0.1", 0), Fake)
+    port = fake.server_address[1]
+    threading.Thread(target=fake.serve_forever, daemon=True).start()
+
+    # A conversation some turns in, as an agent sends it whole with every call: ~400 kB.
+    turns = [{"role": ("user", "assistant")[i % 2], "content": [{"type": "text", "text": f"Turn {i}: " + "the pelican's bill holds more than its belly. " * 90}]} for i in range(100)]
+    request = json.dumps({"model": "claude-budget", "max_tokens": 64000, "stream": True, "system": "You are terse.", "messages": turns + [{"role": "user", "content": "hi"}]})
+
+    def call(host, prefix, path="budget/v1/messages"):
+        """Time to the first byte of the answer, and to its end, in ms; and its size."""
+        c = http.client.HTTPConnection(host, timeout=30)
+        t0 = time.perf_counter()
+        c.request("POST", f"{prefix}/{path}", request, {"content-type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": "budget"})
+        r = c.getresponse()
+        first = r.read1(65536)
+        ttfb = time.perf_counter() - t0
+        size = len(first)
+        while True:
+            b = r.read1(1 << 16)
+            if not b:
+                break
+            size += len(b)
+        total = time.perf_counter() - t0
+        c.close()
+        return ttfb * 1000, total * 1000, size
+
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ZDOTDIR", "ANTHROPIC_"))}
+    env = dict(base, HOME=root + "/home", SHELL="/bin/zsh", DINO_HOME=root + "/dino", TERM="xterm-256color", OLLAMA_HOST=f"127.0.0.1:{port}")
+    d = subprocess.Popen([BIN, "daemon"], env=env, stdout=open(root + "/dinod.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        end = time.time() + 10
+        while not os.path.exists(root + "/dino/dinod.sock") and time.time() < end:
+            time.sleep(0.1)
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(root + "/dino/dinod.sock")
+        send(s, 0, json.dumps({"type": "new", "launcher": "shell", "args": [], "cwd": root + "/home", "cols": 100, "rows": 40}).encode())
+        sid = json.loads(rd(s, struct.unpack(">I", rd(s, 5)[1:])[0]))["id"]
+        s.close()
+        # The proxy's address and secret, from the hook URL dinod gives agents typed into that shell.
+        hooks = root + f"/dino/run/{sid}/claude-hooks.json"
+        end = time.time() + 10
+        while not os.path.exists(hooks) and time.time() < end:
+            time.sleep(0.1)
+        hook = json.load(open(hooks))["hooks"]["Stop"][0]["hooks"][0]["url"]
+        via_host = hook.split("/")[2]
+        route = "/" + "/".join(hook.split("/")[3:-1]) + "/local/ollama"
+        for _ in range(5):  # warm both paths: connections, the proxy's pool
+            call(f"127.0.0.1:{port}", "")
+            call(via_host, route)
+        direct, via = [], []
+        for _ in range(50):  # interleaved, so a busy moment on the Mac costs both alike
+            direct.append(call(f"127.0.0.1:{port}", ""))
+            via.append(call(via_host, route))
+        med = lambda xs: statistics.median(xs)
+        p95 = lambda xs: sorted(xs)[int(len(xs) * 0.95)]
+        ttfb_d, ttfb_v = [x[0] for x in direct], [x[0] for x in via]
+        tot_d, tot_v = [x[1] for x in direct], [x[1] for x in via]
+        # 100 MB through it, in answers of ~5 MB.
+        before = cpu_secs(d.pid)
+        t0 = time.perf_counter()
+        streamed = 0
+        while streamed < 100e6:
+            streamed += call(via_host, route, "big/v1/messages")[2]
+        secs = time.perf_counter() - t0
+        cpu = (cpu_secs(d.pid) - before) * 100e6 / streamed
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(root + "/dino/dinod.sock")
+        send(s, 0, json.dumps({"type": "state"}).encode())
+        state = json.loads(rd(s, struct.unpack(">I", rd(s, 5)[1:])[0]))
+        s.close()
+    finally:
+        d.kill(); d.wait()
+        fake.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+    me = next((x for x in state.get("sessions", []) if x.get("id") == sid), {})
+    log(f"     proxy: {len(request) // 1000} kB asked, {direct[-1][2] // 1000} kB answered · direct ttfb median {med(ttfb_d):.2f} p95 {p95(ttfb_d):.2f} total {med(tot_d):.2f} ms"
+        f" · via dino ttfb median {med(ttfb_v):.2f} p95 {p95(ttfb_v):.2f} total {med(tot_v):.2f} ms"
+        f" · 100 MB in {secs:.1f} s ({streamed / 1e6 / secs:.0f} MB/s), dinod {cpu:.2f} CPU-s")
+    # Measured through the proxy as agents use it: the answers arrived whole, and were metered.
+    if {x[2] for x in via} != {direct[0][2]} or not me.get("output_tokens"):
+        failures.append("proxy: answers didn't come through whole and metered")
+        log(f"FAIL proxy: answers {sorted({x[2] for x in via})} bytes vs {direct[0][2]}, metered {me.get('output_tokens')} output tokens")
+    # On an M-series Mac (2026-10-03): first byte +0.3-0.5 ms median quiet, up to +0.95 ms with a
+    # build running alongside; p95 +0.4-1.5 ms; a whole answer +0.4-1.5 ms; 0.16-0.32 CPU-s per
+    # 100 MB (it was 1.3-1.9 when every event was parsed for usage, which this limit catches).
+    check("proxy: first byte, added median", med(ttfb_v) - med(ttfb_d), BUDGET["proxy_ttfb_median"], " ms")
+    check("proxy: first byte, added p95", p95(ttfb_v) - p95(ttfb_d), BUDGET["proxy_ttfb_p95"], " ms")
+    check("proxy: whole 500-event answer, added median", med(tot_v) - med(tot_d), BUDGET["proxy_total"], " ms")
+    check("proxy: dinod CPU-seconds per 100 MB", cpu, BUDGET["proxy_cpu"], " s")
+
+
 def build():
     log("building dinod and the app…")
     subprocess.run(["cargo", "build", "--release", "-q"], cwd=REPO, check=True)
@@ -419,6 +575,7 @@ def main():
 
     latency()
     throughput()
+    proxy()
     shutil.rmtree(HOME, ignore_errors=True)
     shutil.rmtree(os.path.dirname(APP), ignore_errors=True)
     for w in warnings:

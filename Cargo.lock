@@ -651,7 +651,9 @@ dependencies = [
  "bytes",
  "dino-router",
  "futures-util",
+ "memchr",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
 ]

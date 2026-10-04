@@ -113,18 +113,28 @@ fn is_executable(p: &Path) -> bool {
 pub fn proxy_wiring(agent_id: &str, route: bool, base: &dyn Fn(&str) -> String, status_line: Option<String>) -> agent::Wiring {
     match agent::agent(agent_id) {
         Some(a) => a.wiring(route, base, status_line),
-        // So `claude` started inside a shell is metered too.
-        None if agent_id == "shell" && !user_set(route, "ANTHROPIC_BASE_URL") => (vec![("ANTHROPIC_BASE_URL".into(), base("anthropic"))], vec![]),
+        // So `claude` started inside a shell is metered too: for that agent alone, never the
+        // shell, where every program using the Anthropic SDK would come through dino.
+        None if agent_id == "shell" && !user_set(route, "ANTHROPIC_BASE_URL") => (vec![(SHELL_CLAUDE_BASE_URL.into(), base("anthropic"))], vec![]),
         None => (vec![], vec![]),
     }
 }
+
+/// The variable a dino shell's integration hands an agent typed there as its `ANTHROPIC_BASE_URL`
+/// (`dino-agents.*`), unless the user set one of their own.
+pub const SHELL_CLAUDE_BASE_URL: &str = "DINO_CLAUDE_BASE_URL";
 
 /// With routing off, only status hooks are wired; API traffic goes direct. Otherwise, whether the
 /// user pointed `var` elsewhere themselves. A dino proxy URL in our own environment was inherited
 /// from a dino pane (dinod started from one), not set by the user: it points at another session,
 /// or another dinod.
 pub(crate) fn user_set(route: bool, var: &str) -> bool {
-    !route || std::env::var(var).is_ok_and(|v| !(v.starts_with("http://127.0.0.1:") && v.contains("/s/")))
+    !route || std::env::var(var).is_ok_and(|v| !is_proxy_url(&v))
+}
+
+/// A base URL of a dino proxy's (`http://127.0.0.1:<port>/k/<secret>/s/<session>/<provider>`).
+pub fn is_proxy_url(v: &str) -> bool {
+    v.starts_with("http://127.0.0.1:") && v.contains("/s/")
 }
 
 /// Random v4 UUID, for an agent's conversation id picked up front.
