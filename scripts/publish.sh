@@ -10,7 +10,7 @@
 # Needs `gh` signed in as an account that can push to both.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DIST="$ROOT/dist"
+DIST="${DIST:-$ROOT/dist}"
 RELEASES_REPO="${RELEASES_REPO:-asdf9384/dino-releases}"
 TAP_REPO="${TAP_REPO:-asdf9384/homebrew-tap}"
 DRY=0
