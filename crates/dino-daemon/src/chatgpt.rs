@@ -291,10 +291,22 @@ mod tests {
         std::thread::spawn(move || {
             for (status, reply) in replies {
                 let (mut s, _) = l.accept().unwrap();
+                // The whole request, headers and body: they can come in separate reads, and
+                // replying before the body is in resets the connection under the client.
+                let mut text = String::new();
                 let mut buf = vec![0; 8192];
-                let n = s.read(&mut buf).unwrap();
-                let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                tx.send(text.split("\r\n\r\n").nth(1).unwrap_or("").to_string()).unwrap();
+                let body = loop {
+                    let n = s.read(&mut buf).unwrap();
+                    text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let len = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                        if body.len() >= len || n == 0 {
+                            break body.to_string();
+                        }
+                    }
+                    assert!(n > 0, "the request ended early");
+                };
+                tx.send(body).unwrap();
                 write!(s, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len()).unwrap();
             }
         });

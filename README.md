@@ -1,39 +1,48 @@
-# dino
+<p align="center">
+  <img src="docs/images/icon.png" width="128" height="128" alt="dino's icon: a green pixel dinosaur">
+</p>
 
-A terminal for the agent era, on Ghostty's core. dino finds every coding agent already on your
-Mac, and runs, watches and resumes them all in one place: Claude Code, Codex, Qwen Code, Kimi Code,
-Pi, Hermes, CodeWhale and OpenCode, plus your shells.
+<h1 align="center">dino</h1>
 
-- **Finds what's already running.** Agents you started in other terminals, in tmux or in a dino
-  shell show up in the sidebar with what they're doing, and you can pick any of them up in dino.
-- **Agents keep running.** A background daemon, `dinod`, owns every session. Close the window, quit
-  the app, even restart dinod: sessions come back where they were.
-- **Knows which one needs you.** Working, Needs you, Done and Idle, from each agent's own signals,
-  with notifications and a Dock badge.
-- **A real terminal.** Tabs, splits, your Ghostty config, themes and keybinds, and real tmux inside
-  it, untouched.
-- **Worktrees, reviews and PRs.** A session per git worktree, a diff view to comment on, fan-out of
-  one prompt to several agents, and pull requests from the app.
-- **Automations.** dino starts an agent (or continues a session, fans out, runs a command) when
-  something happens: on a schedule, when a PR opens or CI fails, when files change, when a branch
-  gets new commits, or after another run. Each run keeps its summary, its diff and its PR.
-- **Any model in any agent.** A local proxy routes an agent to another provider's model, and
-  counts what each session uses. Traffic goes from your Mac to the provider, nowhere else.
-- **Keeps going at a limit.** When an agent's subscription or plan hits its limit, its calls can go
-  on to the routes you list for it (another plan, OpenRouter, a model on your Mac) until the limit
-  resets, and new sessions can start with another agent meanwhile. The session says so throughout.
-- **No account needed.** Sign in only to sync settings between Macs. API keys never leave the Mac.
+<p align="center"><strong>Every agent, one terminal.</strong></p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <a href="https://github.com/asdf9384/dino-releases/releases/latest"><img src="https://img.shields.io/github/v/release/asdf9384/dino-releases?label=release" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/macOS-14%2B-lightgrey?logo=apple" alt="macOS 14 or later">
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#supported-agents">Agents</a> ·
+  <a href="#building-from-source">Build</a> ·
+  <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/screenshot-light.png">
+    <img src="docs/images/screenshot-light.png" width="900" alt="The dino window: agent sessions grouped by project in the sidebar, one of them needing you, and Qwen Code in the terminal asking to write a file">
+  </picture>
+</p>
+
+dino is a native Mac terminal on Ghostty's core. It finds Claude Code, Codex and the rest wherever
+they run on your Mac, keeps them going after you quit, and tells you when one needs you. Close the
+sidebar and it's a plain terminal. Free and open source, no account.
 
 ## Install
 
 macOS 14 or later, on Apple silicon.
 
 ```sh
-brew install asdf9384/tap/dino            # the app, with the dino command
+brew install asdf9384/tap/dino
 ```
 
-Or download the DMG from the [latest release](https://github.com/asdf9384/dino-releases/releases/latest).
-For just the command line:
+Or download [Dino.dmg](https://github.com/asdf9384/dino-releases/releases/latest/download/Dino.dmg).
+Both include the `dino` command. For just the command line:
 
 ```sh
 curl -fsSL https://meetdino.com/install.sh | sh
@@ -41,32 +50,57 @@ curl -fsSL https://meetdino.com/install.sh | sh
 
 dino updates itself.
 
-## Build from source
+## Features
 
-You need the Xcode Command Line Tools (`xcode-select --install`) and Rust
-([rustup](https://rustup.rs)). No Apple developer account or signing keys.
+- **Finds the agents you already have.** Agents running in iTerm2, Terminal, Ghostty or tmux show
+  up in the sidebar with what they're doing. *Continue in dino* brings one over, conversation
+  included.
+- **Agents outlive the window.** A background daemon, `dinod`, owns every session. Quit the app,
+  or restart dinod, and they're still there; `dino ls` lists them from any terminal.
+- **Knows which one needs you.** Working, needs you, done or idle, from each agent's own signals,
+  with a notification and a Dock badge when one is waiting on you.
+- **A real terminal.** Tabs, splits, your Ghostty config, themes and keybinds. Your own tmux runs
+  untouched, and *Show my agents in tmux* puts dino's agents in a tmux session as windows.
+- **An AI line in your shell.** <kbd>⌘I</kbd> turns plain English into a command you can check
+  before it runs. <kbd>⌘⏎</kbd> hands a bigger request to an agent in a split.
+- **A browser for every session.** When an agent starts a dev server, dino offers its page in a
+  preview beside the terminal, which keeps its page as you switch sessions.
+- **From diff to merged.** A session per git worktree. Comment on lines of its diff and send them
+  to the agent, then open the pull request with auto-fix (failed checks go back to the agent with
+  their logs) and auto-merge.
+- **Any agent, any model.** Use each agent's own login, or run it through dino's local proxy on
+  OpenRouter, your ChatGPT plan, a coding plan's key, or a model on your Mac with Ollama, LM
+  Studio, llama.cpp or vLLM. Every session shows its model, tokens and context.
+- **Keeps going at a limit.** When a subscription or plan runs out, the next call goes on to the
+  routes you list for that agent (another plan, OpenRouter, a model on your Mac) until the limit
+  resets, and the session says so.
+- **Automations.** Start or continue an agent on a schedule, when a PR opens or CI fails, when files
+  change, or after another run. Each run keeps its summary, its diff and its PR.
+- **Usage across every agent.** Tokens, models, streaks, speed per provider and what each session
+  costs your Mac, from dino's proxy and each agent's own records.
+- **Shows when an agent uses your Mac.** When an agent drives your apps or your browser through
+  computer use, its session says so, with a Stop button.
+- **Nothing leaves your Mac** except each agent's traffic to the provider it talks to. Signing in
+  is optional, only to sync settings between Macs, and API keys never sync.
 
-```sh
-git clone https://github.com/asdf9384/dino.git
-cd dino
-cargo build --release      # the dino command and dinod: target/release/dino
-./app/build.sh             # Dino.app, ad hoc signed: app/build/Dino.app
-```
+## Supported agents
 
-`./app/build.sh` builds the Rust workspace too, and prints where the app is. The app runs the
-`dino` command it finds on your `PATH` or in `~/.local/bin`, so put the one you built there:
+dino finds, starts, resumes and tracks the status of
+[Claude Code](https://github.com/anthropics/claude-code),
+[Codex](https://github.com/openai/codex),
+[GitHub Copilot CLI](https://github.com/github/copilot-cli),
+[Cursor Agent](https://cursor.com/docs/cli/overview),
+[Amp](https://ampcode.com),
+[OpenCode](https://opencode.ai),
+[Kimi Code](https://moonshotai.github.io/kimi-code/en/),
+[Qwen Code](https://github.com/QwenLM/qwen-code),
+[Pi](https://pi.dev),
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) and
+[CodeWhale](https://github.com/Hmbown/CodeWhale), and your shells.
 
-```sh
-mkdir -p ~/.local/bin && ln -sf "$PWD/target/release/dino" ~/.local/bin/dino
-open app/build/Dino.app
-```
-
-Try a build without touching the dino you use every day: give it its own home, and it runs its own
-`dinod` there.
-
-```sh
-DINO_HOME=/tmp/dino-dev ./target/release/dino new shell
-```
+It also starts [Crush](https://github.com/charmbracelet/crush) and [Aider](https://aider.chat),
+without status. Settings shows which agents are installed, and installs or signs in to the rest
+with each agent's own commands.
 
 ## Using the command line
 
@@ -84,23 +118,51 @@ dino --help               # the rest
 Settings live in `~/.config/dino/settings.toml`, which `dinod` reads and writes. The app's
 Settings window edits the same file.
 
+## Building from source
+
+You need the Xcode Command Line Tools (`xcode-select --install`) and Rust
+([rustup](https://rustup.rs), 1.85 or later). No Apple developer account or signing keys.
+
+```sh
+git clone https://github.com/asdf9384/dino.git
+cd dino
+cargo build --release      # the dino command and dinod: target/release/dino
+./app/build.sh             # Dino.app, ad hoc signed: app/build/Dino.app
+```
+
+The app runs the `dino` command it finds on your `PATH` or in `~/.local/bin`, so put the one you
+built there:
+
+```sh
+mkdir -p ~/.local/bin && ln -sf "$PWD/target/release/dino" ~/.local/bin/dino
+open app/build/Dino.app
+```
+
+To try a build without touching the dino you use every day, give it its own home, and it runs its
+own `dinod` there:
+
+```sh
+DINO_HOME=/tmp/dino-dev ./target/release/dino new shell
+```
+
 ## How it's built
 
 - `dinod` (Rust) owns sessions, the local proxy, settings and sign-in. Everything else is a client
   of it over a Unix socket.
 - The app (Swift, SwiftUI) draws terminals with [libghostty](https://github.com/Lakr233/libghostty-spm).
 - `dino` (Rust) is the command line, and `dinod` itself.
-- `cloud/` is the account server (Rust, Postgres) that signing in and settings sync use, at
-  cloud.meetdino.com. You can host your own: see [cloud/README.md](cloud/README.md).
+- `cloud/` is the optional account server (Rust, Postgres) for sign-in and settings sync. You can
+  host your own: see [cloud/README.md](cloud/README.md).
 
-[ARCHITECTURE.md](ARCHITECTURE.md) has the whole picture: crates, how they may depend on each
+[ARCHITECTURE.md](ARCHITECTURE.md) has the whole picture: the crates, how they may depend on each
 other, and the contracts other projects build on.
 
 ## Contributing
 
-Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, tests, the
-performance budget, and signing off your commits (DCO). Please report security issues privately:
-see [SECURITY.md](SECURITY.md).
+Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, testing
+without disturbing your own dino, the performance budget, and signing off your commits (DCO).
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md). Please report security
+issues privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 
