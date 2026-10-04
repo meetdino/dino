@@ -23,7 +23,9 @@ services:
 
   server:
     build:
-      context: .
+      # The repository root: the server builds on crates/dino-sync.
+      context: ..
+      dockerfile: cloud/Dockerfile
     depends_on:
       db:
         condition: service_healthy

@@ -1,15 +1,14 @@
 # Architecture
 
 dino is a native terminal on Ghostty's core that also runs, watches and resumes every coding agent
-on the machine. This repository holds all of it except the account service, which is its own
-repository, dino-cloud.
+on the machine. This repository holds all of it, the account service included.
 
 | Part | What it is | Where |
 |---|---|---|
 | **The terminal** | The macOS app: Swift, libghostty, tabs, sidebar and panes. A client of dinod over its socket, nothing else. It bundles the `dino` binary. | `app/` |
 | **dinod** | The daemon that owns sessions and agents, the local proxy, settings, the dino login and sync. | `crates/dino-daemon` |
 | **`dino`** | The command line, a client of dinod. The same binary runs dinod (`dino daemon`). | `crates/dino` |
-| **dino-cloud** | Account, sign-in, settings sync and the account page. Self-hostable. | separate repository |
+| **dino-cloud** | Account, sign-in, settings sync and the account page. Self-hostable. | `cloud/` |
 
 ## Crates
 
@@ -23,6 +22,11 @@ repository, dino-cloud.
 | `dino` | The CLI. | all of the above |
 
 `crates/boundaries` fails the build if a crate reaches across these lines.
+
+`cloud/` is a Cargo workspace of its own: it builds on Linux (dino-core doesn't), pins the Rust
+version its host builds with, and keeps the server's dependencies and Postgres tests out of the
+terminal's build. It uses `crates/dino-sync` by path, without the `settings` feature, so it never
+links dino-core.
 
 ## How they connect
 

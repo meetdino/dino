@@ -27,10 +27,11 @@ link the one you built: `ln -sf "$PWD/target/release/dino" ~/.local/bin/dino`.
 | `crates/dino-core` | Settings, the agent adapters, discovery, worktrees, PRs, and the IPC types |
 | `crates/dino-term` | Terminal emulation behind each session |
 | `crates/dino-proxy`, `crates/dino-router` | The local proxy: per-session routes, usage, the free models pool |
-| `crates/dino-sync` | The settings sync protocol, shared with dino-cloud |
+| `crates/dino-sync` | The settings sync protocol, shared with the account server |
 | `crates/boundaries` | A test that keeps crates within the dependencies they're allowed |
 | `app/` | Dino.app (Swift, SwiftUI, libghostty) |
 | `scripts/` | Checks, the performance budget, releases |
+| `cloud/` | The account server: sign-in, devices and settings sync (its own workspace, below) |
 
 [ARCHITECTURE.md](ARCHITECTURE.md) explains how they fit, which crate may use which, and which
 interfaces are public contracts (the IPC protocol, the settings schema, the sync protocol): change
@@ -76,6 +77,34 @@ pull request. Some guidelines that keep dino fast:
   dictionary still redraws whatever watches it.
 - No timers or polling where an event exists.
 - Measure before and after when a change could cost something.
+
+## The account server (`cloud/`)
+
+`cloud/` is a Cargo workspace of its own, on Linux or macOS: Rust through rustup
+(`cloud/rust-toolchain.toml` picks the version) and Postgres, from Docker or Homebrew.
+`scripts/check.sh` doesn't build it; its own CI job does, whenever `cloud/` or `crates/dino-sync`
+changes. In `cloud/`:
+
+```sh
+scripts/dev.sh start       # Postgres, migrations, the server on http://127.0.0.1:8787
+cargo test                 # needs Postgres; see cloud/README.md for DINO_TEST_DATABASE_URL
+```
+
+To try it with dino, point a test dinod at it, as above:
+`DINO_HOME=/tmp/dino-dev DINO_CLOUD_URL=http://127.0.0.1:8787 dino daemon`, then
+`DINO_HOME=/tmp/dino-dev dino login`.
+
+| Path | What it is |
+| --- | --- |
+| `cloud/crates/server` | The server: OAuth, sign-in pages, the account API, sync, operations |
+| `cloud/crates/server/migrations` | Postgres migrations, run at start |
+| `cloud/crates/server/tests` | End-to-end tests against a real server and database, with GitHub, Google and mail faked |
+
+The sync protocol (`crates/dino-sync`) and the account API are contracts with every dino out there:
+change them compatibly, and when a change can't be, raise the protocol version so older clients
+are told to upgrade. A change to `crates/dino-sync` reaches dinod and the server together, so run
+both test suites. Never log tokens, codes, request bodies or query strings; the tests check the
+logs for this.
 
 ## Commits and pull requests
 

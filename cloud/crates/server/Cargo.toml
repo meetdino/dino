@@ -16,8 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-# The sync protocol shared with dinod (private repo: see the README for fetching it).
-dino-sync = { path = "../dino-sync" }
+# The sync protocol shared with dinod, from this repository's crates/ (without its `settings`
+# feature, which only dinod uses and which would pull in dino-core).
+dino-sync = { path = "../../../crates/dino-sync", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 base64 = "0.22"
