@@ -2,9 +2,82 @@
 //! `tmux` on PATH or edits a config. It asks the tmux client's own server, with read-only format
 //! queries, what the client is showing, so the tab can follow the active pane: its folder, what
 //! runs in it, a name. Closing the tab detaches the client and leaves the server as it was.
+//!
+//! Every question to a server goes through [`ask`], which gives up after [`ANSWER`]: a server that
+//! is stopped, stuck in its config or otherwise not answering never holds dinod up, and isn't asked
+//! again for [`QUIET`].
 
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long a server has to answer one command. tmux answers in milliseconds; one that hasn't by
+/// then is stopped, busy in its config (a `run-shell`), or on a socket nothing serves.
+pub const ANSWER: Duration = Duration::from_millis(1500);
+/// How long a server that didn't answer is left alone before it's asked again.
+const QUIET: Duration = Duration::from_secs(20);
+
+/// Servers that didn't answer, by socket, and when.
+static STUCK: Mutex<Option<HashMap<PathBuf, Instant>>> = Mutex::new(None);
+
+/// `bin -S socket args`: its output when it succeeded in time. `None` when it failed, didn't
+/// answer within [`ANSWER`] (it's stopped then, and the server is left alone for [`QUIET`]), or the
+/// server is one that recently didn't.
+pub fn ask(bin: &Path, socket: &Path, args: &[&str]) -> Option<String> {
+    if stuck(socket) {
+        return None;
+    }
+    let mut cmd = Command::new(bin);
+    // `-S` names the server; TMUX (dinod started from inside tmux) would only add confusion.
+    cmd.arg("-S").arg(socket).args(args).env_remove("TMUX");
+    match timed(&mut cmd, ANSWER) {
+        Some((ok, out)) => ok.then_some(out),
+        None => {
+            STUCK.lock().unwrap().get_or_insert_default().insert(socket.to_path_buf(), Instant::now());
+            None
+        }
+    }
+}
+
+/// The server on `socket` didn't answer within the last [`QUIET`].
+pub fn stuck(socket: &Path) -> bool {
+    let mut stuck = STUCK.lock().unwrap();
+    let map = stuck.get_or_insert_default();
+    map.retain(|_, at| at.elapsed() < QUIET);
+    map.contains_key(socket)
+}
+
+/// Run `cmd` (stdin empty, stderr dropped) for at most `most`: whether it succeeded and its output,
+/// or `None` when it couldn't start or had to be stopped.
+fn timed(cmd: &mut Command, most: Duration) -> Option<(bool, String)> {
+    let deadline = Instant::now() + most;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    // Read on the side, so a long answer can't fill the pipe while this waits.
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut out = vec![];
+        let _ = stdout.read_to_end(&mut out);
+        let _ = tx.send(out);
+    });
+    let out = rx.recv_timeout(most).ok();
+    loop {
+        match child.try_wait() {
+            // Done, though something it started may still hold its output (none then).
+            Ok(Some(status)) => return Some((status.success(), out.map(|o| String::from_utf8_lossy(&o).into_owned()).unwrap_or_default())),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            // Still running (never reaped, so the pid is still its own): stop it.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
 
 /// What a tmux client in the foreground of a dino shell is showing.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +99,12 @@ pub struct View {
     pub busy: bool,
 }
 
+/// Whether process `pid` is a tmux (in a shell's foreground: a client, attached or on its way).
+pub fn is_tmux_process(pid: u32) -> bool {
+    let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output();
+    out.is_ok_and(|o| is_tmux(String::from_utf8_lossy(&o.stdout).trim()))
+}
+
 /// The tmux and the server socket of `fg`, when it's a tmux client. Its arguments don't change, so
 /// this is looked up once per client; [`view`] then asks the server.
 pub fn client(fg: u32) -> Option<(PathBuf, PathBuf)> {
@@ -42,8 +121,7 @@ pub fn client(fg: u32) -> Option<(PathBuf, PathBuf)> {
 pub fn view(fg: u32, bin: &Path, socket: &Path) -> Option<View> {
     // The server's answer for the client with this pid: what its session shows.
     const FMT: &str = "#{client_pid}\t#{client_tty}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{window_name}\t#{?pane_current_path,#{pane_current_path},#{pane_path}}\t#{pane_current_command}";
-    let out = Command::new(bin).arg("-S").arg(socket).args(["list-clients", "-F", FMT]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = ask(bin, socket, &["list-clients", "-F", FMT])?;
     let line = text.lines().find(|l| l.split('\t').next() == Some(&fg.to_string()))?;
     parse(line).map(|(tty, target, label, path, busy)| View { bin: bin.into(), socket: socket.into(), tty, target, label, path, busy })
 }
@@ -89,18 +167,13 @@ impl View {
 /// `session:index name`. tmux passes every window's bell on to its client, but not which window.
 pub fn rang(v: &View) -> Vec<String> {
     let session = v.target.split(':').next().unwrap_or_default();
-    let out = Command::new(&v.bin)
-        .arg("-S")
-        .arg(&v.socket)
-        .args(["list-windows", "-t", session, "-F", "#{window_bell_flag}\t#{session_name}:#{window_index} #{window_name}"])
-        .output();
-    let Ok(out) = out else { return vec![] };
-    String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.strip_prefix("1\t")).map(String::from).collect()
+    let Some(out) = ask(&v.bin, &v.socket, &["list-windows", "-t", session, "-F", "#{window_bell_flag}\t#{session_name}:#{window_index} #{window_name}"]) else { return vec![] };
+    out.lines().filter_map(|l| l.strip_prefix("1\t")).map(String::from).collect()
 }
 
 /// Detach the client: its server and everything in it keep running.
 pub fn detach(v: &View) {
-    let _ = Command::new(&v.bin).arg("-S").arg(&v.socket).args(["detach-client", "-t", &v.tty]).output();
+    ask(&v.bin, &v.socket, &["detach-client", "-t", &v.tty]);
 }
 
 // ---- Agents started by hand in tmux panes (any server on this Mac, dino's or not) ----
@@ -139,42 +212,50 @@ pub fn place(found: &mut [dino_core::found::FoundSession]) {
     }
     let table = processes();
     let parent = |p: u32| table.get(&p).map(|(pp, _)| *pp);
-    let mut servers = SERVERS.lock().unwrap();
-    let servers = servers.get_or_insert_default();
-    let mut seen = std::collections::HashSet::new();
+    // Each agent's ancestors, and the nearest that is a tmux: the server its pane belongs to.
+    let mut placed = vec![];
     for i in tmuxed {
         let mut chain = vec![found[i].pid.unwrap()];
         while let Some(pp) = parent(*chain.last().unwrap()).filter(|&pp| pp > 1 && chain.len() < 32) {
             chain.push(pp);
         }
-        // The nearest ancestor that is a tmux: the server the pane belongs to.
-        let Some(&server) = chain.iter().find(|p| table.get(p).is_some_and(|(_, c)| is_tmux(c))) else { continue };
-        seen.insert(server);
-        if servers.get(&server).is_none_or(|s| s.at.elapsed() >= FRESH) {
-            let known = servers.remove(&server).map(|s| (s.bin, s.socket));
-            let Some((bin, socket)) = known.or_else(|| locate(server)) else { continue };
-            let panes = panes(&bin, &socket).unwrap_or_default();
-            servers.insert(server, Server { bin, socket, panes, at: std::time::Instant::now() });
-        }
-        let srv = &servers[&server];
-        if let Some(p) = chain.iter().find_map(|c| srv.panes.iter().find(|p| p.pid == *c)) {
-            found[i].tmux = Some(dino_core::found::TmuxPlace {
-                socket: srv.socket.display().to_string(),
-                pane: p.id.clone(),
-                target: p.target.clone(),
-                label: named(&p.label, &found[i].agent),
-                attached: p.attached,
-            });
-            found[i].terminal = Some(format!("tmux {}", named(&p.label, &found[i].agent)));
-            // An agent's own status says busy, not that it's asking: its dialog on screen does.
-            if ["claude", "codex"].contains(&found[i].agent.as_str())
-                && capture(&srv.bin, &srv.socket, &p.id).is_some_and(|t| dino_core::found::asking(&found[i].agent, &t))
-            {
-                found[i].status = Some("needs".into());
-            }
+        if let Some(&server) = chain.iter().find(|p| table.get(p).is_some_and(|(_, c)| is_tmux(c))) {
+            placed.push((i, chain, server));
         }
     }
-    servers.retain(|pid, _| seen.contains(pid));
+    let wanted: std::collections::HashSet<u32> = placed.iter().map(|(_, _, s)| *s).collect();
+    // Servers not asked lately are asked again, without holding the list: one may be slow to answer.
+    let stale: Vec<(u32, Option<(PathBuf, PathBuf)>)> = {
+        let mut servers = SERVERS.lock().unwrap();
+        let servers = servers.get_or_insert_default();
+        servers.retain(|pid, _| wanted.contains(pid));
+        wanted.iter().filter(|p| servers.get(p).is_none_or(|s| s.at.elapsed() >= FRESH)).map(|p| (*p, servers.get(p).map(|s| (s.bin.clone(), s.socket.clone())))).collect()
+    };
+    for (server, known) in stale {
+        let Some((bin, socket)) = known.or_else(|| locate(server)) else { continue };
+        let panes = panes(&bin, &socket).unwrap_or_default();
+        SERVERS.lock().unwrap().get_or_insert_default().insert(server, Server { bin, socket, panes, at: std::time::Instant::now() });
+    }
+    for (i, chain, server) in placed {
+        let pane = {
+            let servers = SERVERS.lock().unwrap();
+            let Some(srv) = servers.as_ref().and_then(|s| s.get(&server)) else { continue };
+            chain.iter().find_map(|c| srv.panes.iter().find(|p| p.pid == *c)).map(|p| (p.clone(), srv.bin.clone(), srv.socket.clone()))
+        };
+        let Some((p, bin, socket)) = pane else { continue };
+        found[i].tmux = Some(dino_core::found::TmuxPlace {
+            socket: socket.display().to_string(),
+            pane: p.id.clone(),
+            target: p.target.clone(),
+            label: named(&p.label, &found[i].agent),
+            attached: p.attached,
+        });
+        found[i].terminal = Some(format!("tmux {}", named(&p.label, &found[i].agent)));
+        // An agent's own status says busy, not that it's asking: its dialog on screen does.
+        if ["claude", "codex"].contains(&found[i].agent.as_str()) && capture(&bin, &socket, &p.id).is_some_and(|t| dino_core::found::asking(&found[i].agent, &t)) {
+            found[i].status = Some("needs".into());
+        }
+    }
 }
 
 /// The tmux and socket of server `pid`: from the arguments it was started with, else (a socket
@@ -198,14 +279,12 @@ fn locate(pid: u32) -> Option<(PathBuf, PathBuf)> {
 }
 
 fn server_pid(bin: &Path, socket: &Path) -> Option<u32> {
-    let out = Command::new(bin).arg("-S").arg(socket).args(["display-message", "-p", "#{pid}"]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().parse().ok()).flatten()
+    ask(bin, socket, &["display-message", "-p", "#{pid}"])?.trim().parse().ok()
 }
 
 fn panes(bin: &Path, socket: &Path) -> Option<Vec<Pane>> {
     const FMT: &str = "#{pane_pid}\t#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_name}:#{window_name}\t#{session_attached}";
-    let out = Command::new(bin).arg("-S").arg(socket).args(["list-panes", "-a", "-F", FMT]).output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).lines().filter_map(parse_pane).collect())
+    Some(ask(bin, socket, &["list-panes", "-a", "-F", FMT])?.lines().filter_map(parse_pane).collect())
 }
 
 fn parse_pane(line: &str) -> Option<Pane> {
@@ -216,8 +295,7 @@ fn parse_pane(line: &str) -> Option<Pane> {
 
 /// What pane `pane` shows now, as text.
 fn capture(bin: &Path, socket: &Path, pane: &str) -> Option<String> {
-    let out = Command::new(bin).arg("-S").arg(socket).args(["capture-pane", "-p", "-J", "-t", pane]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    ask(bin, socket, &["capture-pane", "-p", "-J", "-t", pane])
 }
 
 /// The tmux of the server on `socket`, as last seen by [`place`].
@@ -235,9 +313,10 @@ pub fn screen(socket: &str, pane: &str) -> Option<String> {
 /// when nobody is attached (nothing changes then).
 pub fn show(socket: &str, pane: &str) -> Option<String> {
     let bin = bin_for(socket)?;
-    let tmux = |args: &[&str]| Command::new(&bin).arg("-S").arg(socket).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-    let session = tmux(&["display-message", "-p", "-t", pane, "#{session_name}"])?.trim().to_string();
-    let clients = tmux(&["list-clients", "-F", "#{client_activity}\t#{client_tty}\t#{client_session}"])?;
+    let tmux = |args: &[&str]| ask(&bin, Path::new(socket), args);
+    // Sessions by id: a name can hold anything, `:` and `.` too, which a target would misread.
+    let session = tmux(&["display-message", "-p", "-t", pane, "#{session_id}"])?.trim().to_string();
+    let clients = tmux(&["list-clients", "-F", "#{client_activity}\t#{client_tty}\t#{session_id}"])?;
     let mut clients: Vec<(u64, String, String)> = clients
         .lines()
         .filter_map(|l| {
@@ -318,6 +397,44 @@ fn socket(args: &[String]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_that_hangs_is_stopped() {
+        let t = Instant::now();
+        assert_eq!(timed(Command::new("/bin/sleep").arg("10"), Duration::from_millis(200)), None);
+        assert!(t.elapsed() < Duration::from_secs(2));
+        assert_eq!(timed(Command::new("/bin/echo").arg("hi"), Duration::from_secs(5)), Some((true, "hi\n".into())));
+        assert_eq!(timed(&mut Command::new("/usr/bin/false"), Duration::from_secs(5)), Some((false, String::new())));
+        // More than a pipe holds: read while it runs, not after.
+        let big = timed(Command::new("/bin/sh").args(["-c", "yes | head -c 300000"]), Duration::from_secs(5)).unwrap();
+        assert_eq!(big.1.len(), 300000);
+        assert_eq!(timed(&mut Command::new("/nonexistent/tmux"), Duration::from_secs(1)), None);
+        // Done, with something it left behind still holding its output: not a command that hangs.
+        let t = Instant::now();
+        assert_eq!(timed(Command::new("/bin/sh").args(["-c", "sleep 3 & echo started"]), Duration::from_millis(300)), Some((true, String::new())));
+        assert!(t.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_server_that_doesnt_answer_is_left_alone() {
+        // A "tmux" whose server never answers, as a stopped one doesn't.
+        let dir = std::env::temp_dir().join(format!("dino-tmux-stuck-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("tmux");
+        std::fs::write(&bin, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let socket = dir.join("default");
+        let t = Instant::now();
+        assert_eq!(ask(&bin, &socket, &["list-clients"]), None);
+        assert!(t.elapsed() >= ANSWER && t.elapsed() < ANSWER + Duration::from_secs(1));
+        assert!(stuck(&socket));
+        // Not asked again for a while: an answer that won't come costs nothing more.
+        let t = Instant::now();
+        assert_eq!(ask(&bin, &socket, &["list-panes", "-a"]), None);
+        assert!(t.elapsed() < Duration::from_millis(100));
+        assert!(!stuck(&dir.join("other")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn finds_the_server_a_client_talks_to() {

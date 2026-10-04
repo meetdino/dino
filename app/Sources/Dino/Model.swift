@@ -685,13 +685,16 @@ final class DinoModel: ObservableObject {
     /// `dir`: where on this Mac, instead of the current folder.
     /// `line`: for a shell, a line typed at its prompt once it's up; `label`: its name in the sidebar.
     /// `route`: on a provider's model (Settings → Models & Providers) instead of the agent's own account.
-    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "", in dir: String? = nil, line: String? = nil, label: String? = nil, route: ProviderRoute? = nil) {
+    /// `tmux`: for a shell, the tmux session it attaches to at its prompt (dinod types it, and keeps
+    /// a plain shell when tmux doesn't answer); `line` is that for a dinod that doesn't know it.
+    func newSession(_ launcher: LauncherInfo, worktree: Bool = false, controls: Controls = Controls(), host: String? = nil, remoteFolder: String = "", in dir: String? = nil, line: String? = nil, tmux: String? = nil, label: String? = nil, route: ProviderRoute? = nil) {
         guard let conn = connection else { return }
         var body: [String: Any] = [
             "type": "new", "launcher": launcher.short, "args": [], "cwd": dir ?? folder.path, "cols": 120, "rows": 40,
             "worktree": worktree, "controls": controls.json,
         ]
         if let line { body["prompt"] = line }
+        if let tmux { body["tmux"] = tmux }
         if let route { body["route"] = ["provider": route.provider, "model": route.model] }
         if let host {
             body["host"] = host
@@ -732,8 +735,8 @@ final class DinoModel: ObservableObject {
         // Settings → tmux: a new tab goes straight into that tmux session (kept here
         // too, so the first tab at launch does, before dinod has answered).
         let tabs = UserDefaults.standard.string(forKey: Self.tmuxTabsKey) ?? ""
-        let line = DinoSettings.Tmux.valid(tabs) ? "tmux new -A -s \(tabs)" : nil
-        newSession(l, in: selectedSession.flatMap { $0.host == nil ? $0.shell_cwd : nil }, line: line)
+        let tmux = DinoSettings.Tmux.valid(tabs) ? tabs : nil
+        newSession(l, in: selectedSession.flatMap { $0.host == nil ? $0.shell_cwd : nil }, line: tmux.map { "tmux new -A -s \($0)" }, tmux: tmux)
         return true
     }
 

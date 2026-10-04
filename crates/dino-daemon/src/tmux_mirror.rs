@@ -6,8 +6,7 @@
 //! config, and only adds, renames and removes the windows it made, which carry its
 //! `@dino-session` window option; it tells its windows apart by that, never by name.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -104,10 +103,10 @@ impl Server {
         Some(t)
     }
 
-    /// `tmux -S <socket> args`: its output when it succeeded.
+    /// `tmux -S <socket> args`: its output when it succeeded, given up on when the server doesn't
+    /// answer (see [`crate::tmux::ask`]).
     fn run(&self, args: &[&str]) -> Option<String> {
-        let out = Command::new(&self.bin).arg("-S").arg(&self.socket).args(args).env_remove("TMUX").output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        crate::tmux::ask(&self.bin, &self.socket, args)
     }
 
     /// dino's windows, wherever the user moved them.
@@ -161,18 +160,19 @@ impl Server {
     }
 
     fn add(&self, target: &Target, w: &Want) {
-        let command = attach_command(&w.id);
-        let home = std::env::var("DINO_HOME").ok().map(|h| format!("DINO_HOME={h}"));
-        let mut args: Vec<&str> = match target {
-            Target::Existing(s) => vec!["new-window", "-d", "-P", "-F", "#{window_id}", "-t", s, "-n", &w.name],
+        let command = attach_command(&w.id, std::env::var("DINO_HOME").ok().as_deref());
+        let exact;
+        let args: Vec<&str> = match target {
+            Target::Existing(s) => vec!["new-window", "-d", "-P", "-F", "#{window_id}", "-t", s, "-n", &w.name, &command],
 
-            // Its first window is this one; the session goes when its last window does.
-            Target::New(s) => vec!["new-session", "-d", "-P", "-F", "#{window_id}", "-s", s, "-n", &w.name],
+            // Its first window is this one; the session goes when its last window does. Nobody may
+            // be attached to it: a config's `destroy-unattached` would end it as this command
+            // returns (and it would be made again every look), so in the same command, it's off.
+            Target::New(s) => {
+                exact = format!("={s}:");
+                vec!["new-session", "-d", "-P", "-F", "#{window_id}", "-s", s, "-n", &w.name, &command, ";", "set-option", "-t", &exact, "destroy-unattached", "off"]
+            }
         };
-        if let Some(h) = &home {
-            args.extend(["-e", h]);
-        }
-        args.push(&command);
         let Some(window) = self.run(&args).map(|o| o.trim().to_string()).filter(|w| !w.is_empty()) else { return };
         self.run(&["set-option", "-w", "-t", &window, MARK, &w.id]);
         // Its name follows the agent, from dino: not from what runs in it, nor its title.
@@ -195,14 +195,17 @@ fn tmux_bin() -> Option<PathBuf> {
     path.into_iter().chain(["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map(PathBuf::from)).map(|d| d.join("tmux")).find(|p| p.is_file())
 }
 
-/// The command a window runs: this dino, attached to the session, from a clean screen.
-fn attach_command(id: &str) -> String {
+/// The command a window runs: this dino, attached to the session, from a clean screen; with this
+/// dinod's own folder when it isn't the usual one. Through `env`, which any tmux and any
+/// `default-shell` (fish too) runs the same way.
+fn attach_command(id: &str, home: Option<&str>) -> String {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dino"));
-    format!("{} attach --fresh {id}", quote(&exe))
+    let home = home.map(|h| format!("env {} ", quote(&format!("DINO_HOME={h}")))).unwrap_or_default();
+    format!("{home}{} attach --fresh {id}", quote(&exe.display().to_string()))
 }
 
-fn quote(p: &Path) -> String {
-    format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// The agents to show: every session of dino's that runs an agent (shells are tabs, not agents).
@@ -300,6 +303,13 @@ mod tests {
         assert_eq!(window_name(None, "codex"), "codex");
         assert_eq!(window_name(Some("a very long title that goes on and on and on"), "x"), "a very long title that goes on…");
         assert_eq!(window_name(Some("two\nlines"), "x"), "two lines");
+    }
+
+    #[test]
+    fn windows_run_this_dino() {
+        let exe = std::env::current_exe().unwrap().display().to_string();
+        assert_eq!(attach_command("7", None), format!("'{exe}' attach --fresh 7"));
+        assert_eq!(attach_command("7", Some("/tmp/it's here")), format!("env 'DINO_HOME=/tmp/it'\\''s here' '{exe}' attach --fresh 7"));
     }
 
     #[test]

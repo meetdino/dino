@@ -797,6 +797,78 @@ fn type_at_prompt(s: Arc<Session>, line: String) {
     });
 }
 
+/// Settings → tmux's "New tabs open in tmux": `tmux new -A -s <name>` typed at the new shell's
+/// prompt, as if by hand, so leaving tmux leaves the shell. Not when the shell's own startup
+/// already went into tmux. Then watched until the client is in: when its server doesn't answer
+/// (stopped, stuck in its config), the client is stopped and the tab says it's a plain shell.
+fn tmux_tab(s: Arc<Session>, name: String) {
+    std::thread::spawn(move || {
+        let shell = s.pane.pid();
+        let at_prompt = || s.pane.foreground().is_none_or(|fg| Some(fg) == shell);
+        let started = Instant::now();
+        while (s.pane.text(0).trim().is_empty() || !at_prompt()) && started.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Already a tmux client: started by the shell's startup, or the shell itself (`exec tmux`).
+        if s.pane.is_exited() || s.pane.foreground().is_some_and(tmux::is_tmux_process) {
+            return;
+        }
+        send_input(&s, &format!("tmux new -A -s {name}"), true);
+        // Until the client is attached, back at the prompt, or given up on.
+        let typed = Instant::now();
+        let mut client = None;
+        while typed.elapsed() < std::time::Duration::from_secs(10) && !s.pane.is_exited() {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let Some(fg) = s.pane.foreground().filter(|fg| Some(*fg) != shell) else {
+                // Not started yet (the line still being typed), or tmux has exited, having said why.
+                if typed.elapsed() > std::time::Duration::from_secs(3) {
+                    return;
+                }
+                continue;
+            };
+            // Its server's socket shows up once the server is running.
+            if client.as_ref().is_none_or(|(pid, _)| *pid != fg) {
+                client = tmux::client(fg).map(|c| (fg, c));
+            }
+            let Some((_, (bin, socket))) = &client else { continue };
+            match tmux::ask(bin, socket, &["list-clients", "-F", "#{client_pid}"]) {
+                Some(out) if out.lines().any(|l| l.trim() == fg.to_string()) => return,
+                Some(_) => {}
+                None if tmux::stuck(socket) => {
+                    say_in(&s, "tmux isn't answering, so this is a plain shell (Settings → tmux)");
+                    stop_quickly(fg);
+                    return;
+                }
+                None => {}
+            }
+        }
+    });
+}
+
+/// SIGTERM, then SIGKILL if it's still there a second later.
+fn stop_quickly(pid: u32) {
+    let alive = || unsafe { libc::kill(pid as i32, 0) == 0 };
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    let deadline = Instant::now() + std::time::Duration::from_secs(1);
+    while alive() && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if alive() {
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    }
+}
+
+/// A line from dino in session `s`'s terminal, as its output: `▲▲ dino  text`.
+fn say_in(s: &Session, text: &str) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(tty) = s.pane.pid().and_then(tty_of) else { return };
+    let note = format!("\r\n\x1b[38;2;117;179;64m▲▲ dino\x1b[0m  {text}\r\n");
+    // Never as dinod's own controlling terminal.
+    let file = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOCTTY).open(&tty);
+    let _ = file.and_then(|mut t| io::Write::write_all(&mut t, note.as_bytes()));
+}
+
 fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
     loop {
         let (kind, payload) = ipc::read_frame(&mut stream)?;
@@ -1002,10 +1074,12 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 let (models, loading, error) = providers::rows(&provider);
                 Response::Models { provider, models, loading, error }
             }
-            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by, route, reveal } => {
+            Request::New { launcher, args, cwd, cols, rows, worktree, controls, host, prompt, by, route, reveal, tmux } => {
                 // A shell's "prompt" is a line typed at its prompt (a script opened with dino, a
-                // man page), not an argument.
-                let (prompt, line) = if launcher == "shell" { (None, prompt) } else { (prompt, None) };
+                // man page), not an argument; a tmux session to attach to takes its place.
+                let shell = launcher == "shell";
+                let tmux = tmux.filter(|t| shell && host.is_none() && dino_core::settings::Tmux::valid_name(t));
+                let (prompt, line) = if shell { (None, prompt.filter(|_| tmux.is_none())) } else { (prompt, None) };
                 let launch = Launch { cols, rows, controls, host, prompt, started_by: by, route, ..Launch::new(&launcher, args, cwd) };
                 match if worktree { spawn_in_worktree(d, launch) } else { spawn(d, launch) } {
                     Ok(id) => {
@@ -1017,6 +1091,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                             }
                             if let Some(line) = line {
                                 type_at_prompt(s, line);
+                            } else if let Some(name) = tmux {
+                                tmux_tab(s, name);
                             }
                         }
                         save(d);
@@ -2702,6 +2778,12 @@ fn follow_tmux(s: &Session, fg: u32) -> bool {
     }
     let bells = s.pane.shared.bells.load(Ordering::Relaxed);
     let notices = s.pane.shared.notices.load(Ordering::Relaxed);
+    // Which windows rang, asked before the session's state is locked: tmux may be slow to answer.
+    let rang = {
+        let i = s.inside.lock().unwrap();
+        let counted = if i.fg == Some(fg) { i.alerts.bells } else { bells };
+        view.as_ref().filter(|_| bells > counted).map(tmux::rang)
+    };
     let mut i = s.inside.lock().unwrap();
     if i.fg != Some(fg) {
         let before = i.before.take().or_else(|| Some(s.pane.title()));
@@ -2713,7 +2795,7 @@ fn follow_tmux(s: &Session, fg: u32) -> bool {
         // A bell: tmux says which windows rang. A notification only comes through from the pane
         // showing (passthrough is for visible panes), so it's that one's.
         if bells > i.alerts.bells {
-            let rang = tmux::rang(v);
+            let rang = rang.unwrap_or_default();
             // Only other windows keep the flag: none set means the one showing rang.
             let text = format!("Bell in tmux {}", if rang.is_empty() { v.window() } else { rang.join(", ") });
             i.alerts.push(text);
@@ -2830,12 +2912,16 @@ fn session_name(title: &str) -> String {
 
 fn kill(d: &Daemon, id: &str) -> bool {
     d.proxy.forget_remote(id);
-    let mut sessions = d.sessions.lock().unwrap();
-    match sessions.iter().position(|s| s.id == id) {
-        Some(i) => {
-            let s = sessions.remove(i);
-            // A tmux client in it: detach it first, so its server only sees a client leave.
-            if let Some(v) = s.inside.lock().unwrap().tmux.as_ref().and_then(|t| t.1.clone()) {
+    let s = {
+        let mut sessions = d.sessions.lock().unwrap();
+        sessions.iter().position(|s| s.id == id).map(|i| sessions.remove(i))
+    };
+    match s {
+        Some(s) => {
+            // A tmux client in it: detach it first, so its server only sees a client leave. Asked
+            // with no lock held, and given up on if its server doesn't answer.
+            let view = s.inside.lock().unwrap().tmux.as_ref().and_then(|t| t.1.clone());
+            if let Some(v) = view {
                 tmux::detach(&v);
             }
             s.pane.kill();

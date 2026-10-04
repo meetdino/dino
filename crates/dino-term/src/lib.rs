@@ -27,9 +27,11 @@ use terminput::{Encoding, KittyFlags};
 const DEFAULT_FG: Rgb = Rgb { r: 0xd8, g: 0xd8, b: 0xd8 };
 const DEFAULT_BG: Rgb = Rgb { r: 0x16, g: 0x16, b: 0x1a };
 
-/// Env markers from a parent agent session that would confuse a child agent, and the Claude
-/// subscription token, which only a Claude Code dino means it for gets (in its own `env`).
-const STRIP_ENV: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_OAUTH_TOKEN"];
+/// Env markers from a parent agent session that would confuse a child agent, the Claude
+/// subscription token, which only a Claude Code dino means it for gets (in its own `env`), and the
+/// tmux pane dinod may have been started from: a dino pane isn't in it (a shell would skip the
+/// user's tmux autostart, and a `tmux` typed there would refuse to nest or act on that pane).
+const STRIP_ENV: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_OAUTH_TOKEN", "TMUX", "TMUX_PANE"];
 
 /// The ways a program switches back from the alternate screen (DECRST 1049, 1047, 47).
 const ALT_OFF: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"];

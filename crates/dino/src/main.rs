@@ -161,6 +161,7 @@ impl App {
             by: None,
             route: None,
             reveal: false,
+            tmux: None,
         };
         match client::request(&req) {
             Ok(Response::Created { id }) => {
@@ -918,7 +919,7 @@ fn dino() -> anyhow::Result<()> {
                 [on, provider, model, args @ ..] if on == "--on" => (Some(ProviderRoute { provider: provider.clone(), model: model.clone(), format: None, name: String::new() }), args.to_vec()),
                 args => (None, args.to_vec()),
             };
-            let req = Request::New { launcher: agent.clone(), args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route, reveal: false };
+            let req = Request::New { launcher: agent.clone(), args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route, reveal: false, tmux: None };
             let id = created(client::request(&req)?)?;
             // Piped, only the id, for `id=$(dino new claude)`.
             if out::tty() {
@@ -1077,6 +1078,7 @@ fn cmd_open(folder: &str, rest: &[String]) -> anyhow::Result<()> {
         by: None,
         route: None,
         reveal: true,
+        tmux: None,
     };
     let id = match client::request(&req)? {
         Response::Created { id } => id,

@@ -827,10 +827,12 @@ private struct TmuxSection: View {
         }
     }
 
+    /// A name typed into a field that's showing. Focus leaving a field also commits it, and a
+    /// field goes away when its switch is turned off: that must not turn the switch back on.
     private func commit(_ field: Field) {
         switch field {
-        case .session where DinoSettings.Tmux.valid(session): change { $0.session = session }
-        case .tabs where DinoSettings.Tmux.valid(tabs): change { $0.new_tabs = tabs }
+        case .session where tmux.show_agents && !tmux.session.isEmpty && DinoSettings.Tmux.valid(session): change { $0.session = session }
+        case .tabs where !tmux.new_tabs.isEmpty && DinoSettings.Tmux.valid(tabs): change { $0.new_tabs = tabs }
         default: break
         }
     }

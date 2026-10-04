@@ -111,6 +111,10 @@ pub enum Request {
         /// Clients should show it now (`dino <folder>`): see `SessionInfo::revealed`.
         #[serde(default)]
         reveal: bool,
+        /// For a shell: attach to this tmux session at its prompt (`tmux new -A -s`, Settings →
+        /// tmux), in place of `prompt`; it stays a plain shell, saying so, when tmux doesn't answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tmux: Option<String>,
     },
     Kill { id: String },
     /// "Keep as terminal" for shell `id`: agents typed into it stay plain processes (`on`), or
