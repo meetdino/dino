@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build a dino release into dist/: Dino.app (with the dino CLI and dinod inside), a DMG, a CLI
+# Build a dino release into dist/ ($DIST to build elsewhere): Dino.app (with the dino CLI and dinod inside), a DMG, a CLI
 # tarball, SHA-256 sums, Homebrew cask/formula files, and a download/ tree laid out the way
 # scripts/install.sh fetches it. Nothing is uploaded.
 #
@@ -29,7 +29,7 @@ VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Car
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 RELEASES_REPO="${RELEASES_REPO:-asdf9384/dino-releases}"
 ARCHS="${ARCHS:-$(uname -m)}"
-DIST="$ROOT/dist"
+DIST="${DIST:-$ROOT/dist}"
 APP="$DIST/Dino.app"
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 
