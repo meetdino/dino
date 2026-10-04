@@ -57,6 +57,12 @@ terminal and the CLI are its clients. A client that needs dinod and doesn't find
 the background (the ssh-agent pattern). Agents live in dinod, not in the app: closing or quitting
 the app leaves them running, and dinod resumes them after a restart.
 
+With the app installed, launchd runs dinod from the app's launch agent (SMAppService), so dinod and
+everything it starts count as the app for macOS privacy permissions (Screen Recording,
+Accessibility…), whoever asked for it to start. A client starts it with `launchctl kickstart`
+(crates/dino/src/launchd.rs, app/Sources/Dino/LaunchAgent.swift). Without the app it is forked as
+before.
+
 Agent traffic goes through the proxy inside dinod and never leaves the machine except to the
 provider the agent talks to. dino-cloud sees only synced settings (over TLS, readable by the
 service so the account page can show them); API keys and tokens never leave the Mac.

@@ -274,6 +274,7 @@ pub fn lid_watchdog(pid: i32) {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    under_launchd();
     // Nothing dinod starts is a child of the agent session that may have started dinod.
     for var in dino_core::PARENT_AGENT_ENV {
         // SAFETY: first thing, before dinod starts any thread.
@@ -434,7 +435,8 @@ pub fn run() -> anyhow::Result<()> {
         });
     }
     log_exits();
-    eprintln!("{} dinod {} listening on {} (pid {})", stamp(), env!("CARGO_PKG_VERSION"), path.display(), std::process::id());
+    let by = LAUNCHD_LABEL.get().map(|l| format!(", launchd's {l}")).unwrap_or_default();
+    eprintln!("{} dinod {} listening on {} (pid {}{by})", stamp(), env!("CARGO_PKG_VERSION"), path.display(), std::process::id());
     for stream in listener.incoming().flatten() {
         // Another user's process is hung up on, whatever the socket's permissions let through.
         if !same_user(&stream) {
@@ -446,6 +448,41 @@ pub fn run() -> anyhow::Result<()> {
         });
     }
     Ok(())
+}
+
+/// The launch agent that started this dinod (see crates/dino/src/launchd.rs), if one did.
+static LAUNCHD_LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Started by launchd: what a client that starts dinod gives it, made here. Its output goes to
+/// dinod.log, and `PATH` is the one of whoever asked launchd to start it (the login shell's, from
+/// the app), else the login shell's: launchd's is /usr/bin:/bin:/usr/sbin:/sbin. The label is kept
+/// out of what dinod starts.
+fn under_launchd() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let Some(label) = std::env::var(dino_core::LAUNCHD_ENV).ok() else { return };
+    // SAFETY: first thing in dinod, before it starts any thread.
+    unsafe { std::env::remove_var(dino_core::LAUNCHD_ENV) };
+    let _ = LAUNCHD_LABEL.set(label);
+    let dir = dino_core::config_dir();
+    let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
+    if let Ok(log) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dir.join("dinod.log")) {
+        // SAFETY: live descriptors; stdout and stderr become the log.
+        unsafe {
+            libc::dup2(log.as_raw_fd(), 1);
+            libc::dup2(log.as_raw_fd(), 2);
+        }
+    }
+    let asked = std::fs::read(dino_core::launchd_path_file()).ok().filter(|p| !p.is_empty());
+    let asked = asked.map(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec);
+    if let Some(mut path) = asked.or_else(dino_core::discover::login_path) {
+        if let Some(own) = std::env::var_os("PATH") {
+            path.push(":");
+            path.push(own);
+        }
+        // SAFETY: as above; the login shell has exited, and no thread has started.
+        unsafe { std::env::set_var("PATH", path) };
+    }
 }
 
 /// Get the socket at `path` ready to bind: its directory made private (0700), and refused if
@@ -1461,7 +1498,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 stop_all(d);
                 std::process::exit(0);
             }
-            Request::Version => Response::Version { dino: env!("CARGO_PKG_VERSION").into(), installed: update::installed() },
+            Request::Version => Response::Version { dino: env!("CARGO_PKG_VERSION").into(), installed: update::installed(), launchd: LAUNCHD_LABEL.get().cloned() },
         };
         if reshapes {
             reshaped(d);

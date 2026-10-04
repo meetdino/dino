@@ -21,6 +21,10 @@
 #                      signed; without it the build doesn't update itself, and there's no appcast.
 #   DINO_FEED_URL      where builds look for the appcast (default: the newest release's, in RELEASES_REPO)
 #   DINO_UPDATE_BASE   where the appcast says the files are (default: this release's downloads)
+#
+# A second, isolated dino (testing a release build beside the real one):
+#   DINO_BUNDLE_ID     the app's bundle identifier (default dev.dino.app), which names its launch agent
+#   DINO_AGENT_HOME    the $DINO_HOME its dinod runs with (default: the user's own, ~/.config/dino)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -28,6 +32,7 @@ cd "$ROOT"
 VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 RELEASES_REPO="${RELEASES_REPO:-asdf9384/dino-releases}"
+BUNDLE_ID="${DINO_BUNDLE_ID:-dev.dino.app}"
 ARCHS="${ARCHS:-$(uname -m)}"
 DIST="${DIST:-$ROOT/dist}"
 APP="$DIST/Dino.app"
@@ -85,6 +90,40 @@ cp "$DIST/dino" "$APP/Contents/Helpers/dino"
 cp app/Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :SUFeedURL $FEED_URL" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP/Contents/Info.plist"
+
+# dinod as the app's launch agent, registered with SMAppService (app/Sources/Dino/LaunchAgent.swift):
+# what it runs then has the permissions given to the app. Restarted by launchd if it crashes, not
+# otherwise (`dino stop` stays stopped), and not started at login: dino starts it when used, as before.
+# Started again 2 s after it last started at the soonest, not launchd's 10: `dino stop` then a start.
+LABEL_AGENT="$BUNDLE_ID.dinod"
+AGENT_ENV=""
+if [ -n "${DINO_AGENT_HOME:-}" ]; then
+    LABEL_AGENT="$LABEL_AGENT.$(printf %s "$DINO_AGENT_HOME" | shasum -a 256 | cut -c1-8)"
+    AGENT_ENV="<key>DINO_HOME</key><string>$DINO_AGENT_HOME</string>"
+fi
+mkdir -p "$APP/Contents/Library/LaunchAgents"
+cat > "$APP/Contents/Library/LaunchAgents/$LABEL_AGENT.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$LABEL_AGENT</string>
+    <key>BundleProgram</key><string>Contents/Helpers/dino</string>
+    <key>ProgramArguments</key><array><string>dino</string><string>daemon</string></array>
+    <key>AssociatedBundleIdentifiers</key><array><string>$BUNDLE_ID</string></array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DINO_LAUNCHD</key><string>$LABEL_AGENT</string>$AGENT_ENV
+    </dict>
+    <key>KeepAlive</key><dict><key>Crashed</key><true/></dict>
+    <key>ThrottleInterval</key><integer>2</integer>
+    <key>ProcessType</key><string>Interactive</string>
+    <key>AbandonProcessGroup</key><true/>
+</dict>
+</plist>
+PLIST
+plutil -lint -s "$APP/Contents/Library/LaunchAgents/$LABEL_AGENT.plist"
 if [ -n "$PUBKEY" ]; then
     /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $PUBKEY" "$APP/Contents/Info.plist"
 else

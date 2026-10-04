@@ -215,6 +215,8 @@ final class DinoModel: ObservableObject {
         started = true
         Task.detached {
             do {
+                // Before dinod starts: `dino ping` starts it through the agent, once registered.
+                DinodAgent.setUp()
                 try DinoEnvironment.ensureDaemon()
                 let conn = try DinoConnection(path: DinoEnvironment.socketPath)
                 let launchers = try conn.request(["type": "launchers"]).launchers ?? []
@@ -229,6 +231,7 @@ final class DinoModel: ObservableObject {
                     self.watchTree()
                     self.watchGhosttyConfig()
                     self.watchTerminalSettings()
+                    DinodAgent.askForApproval()
                 }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
@@ -256,6 +259,10 @@ final class DinoModel: ObservableObject {
     /// dinod isn't the dino this app carries (it's from before an update); see Updates.swift.
     @Published var daemonOutdated = false
     @Published var daemonVersion: String?
+    /// dinod isn't run by this app's launch agent, though it's registered: it was started before
+    /// the agent was (or allowed), so what it runs lacks dino's permissions; or an update changed
+    /// the agent. Restarted like an outdated one (LaunchAgent.swift).
+    @Published var daemonUnmanaged = false
     @Published var restartingDaemon = false
     /// The automatic restart into a new dino happens once a launch at most.
     private var restartedForUpdate = false
@@ -507,7 +514,7 @@ final class DinoModel: ObservableObject {
             select(shownOne ? open : last ?? recent?.id ?? next.first?.id)
         }
         // After an update: into the new dinod once nothing would be cut off.
-        if daemonOutdated, !restartedForUpdate, restartIsQuiet {
+        if daemonOutdated || daemonUnmanaged, !restartedForUpdate, restartIsQuiet {
             restartedForUpdate = true
             restartDaemon()
         }

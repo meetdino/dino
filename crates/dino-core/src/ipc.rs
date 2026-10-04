@@ -422,8 +422,14 @@ pub enum Response {
     Ok,
     Error { message: String },
     /// `installed`: a newer `dino` this dinod put in place of its own binary; it restarts into it
-    /// once no agent is working and no shell is running a command.
-    Version { dino: String, installed: Option<String> },
+    /// once no agent is working and no shell is running a command. `launchd`: the launch agent
+    /// running this dinod (its label), if launchd started it.
+    Version {
+        dino: String,
+        installed: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launchd: Option<String>,
+    },
 }
 
 /// What deleting a session does (`Request::Delete`): the worktree that goes with it and what's in
