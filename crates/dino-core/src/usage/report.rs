@@ -185,9 +185,10 @@ pub struct AgentUse {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Project {
-    /// The folder's name (a worktree's counts for its repo).
+    /// The repo's (or folder's) name, with where it is when another project has the same name:
+    /// "proj · dino-tabs-test/work".
     pub name: String,
-    /// The folder most of it ran in.
+    /// Its repo's root, or the folder when it isn't in one: a worktree's counts for its repo.
     pub path: String,
     pub tokens: Tokens,
     pub requests: u64,
@@ -342,20 +343,82 @@ fn date(day: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// A folder's project: the repo a worktree belongs to, by its name.
-fn project_of(cwd: &str) -> (String, bool) {
-    for marker in ["/.claude/worktrees/", "/.codex/worktrees/", "/.dino/worktrees/"] {
+/// A folder's project: the root of the repo it's in (a worktree's counts for the repo it was made
+/// from), else the folder itself. Looked up once per folder.
+fn project_of(cwd: &str, seen: &mut HashMap<String, String>) -> String {
+    if let Some(p) = seen.get(cwd) {
+        return p.clone();
+    }
+    let p = find_project(cwd);
+    seen.insert(cwd.to_string(), p.clone());
+    p
+}
+
+fn find_project(cwd: &str) -> String {
+    let cwd = cwd.trim_end_matches('/');
+    for marker in ["/.claude/worktrees/", "/.codex/worktrees/"] {
         if let Some(i) = cwd.find(marker) {
-            let before = &cwd[..i];
-            // dino's default home for worktrees, `~/.dino/worktrees/<repo>/<name>`: the repo's name follows.
-            if marker == "/.dino/worktrees/" && std::env::var_os("HOME").is_some_and(|h| before == h.to_string_lossy()) {
-                let repo = cwd[i + marker.len()..].split('/').next().unwrap_or_default();
-                return (repo.to_string(), true);
-            }
-            return (name_of(before), true);
+            return cwd[..i].to_string();
         }
     }
-    (name_of(cwd), false)
+    let home = std::env::var("HOME").unwrap_or_default();
+    // Up to the repo's root; never the home folder for a folder in it (a dotfiles repo there
+    // isn't every folder's project).
+    let mut dir = std::path::Path::new(cwd);
+    loop {
+        let git = dir.join(".git");
+        if git.is_dir() {
+            return dir.display().to_string();
+        }
+        if git.is_file() {
+            // A worktree: `gitdir: <repo>/.git/worktrees/<name>`.
+            let made_from = std::fs::read_to_string(&git).ok().and_then(|t| {
+                let gitdir = t.trim().strip_prefix("gitdir:")?.trim().to_string();
+                gitdir.find("/.git/worktrees/").map(|i| gitdir[..i].to_string())
+            });
+            return made_from.unwrap_or_else(|| dir.display().to_string());
+        }
+        match dir.parent() {
+            Some(up) if !up.as_os_str().is_empty() && up.to_str() != Some(home.as_str()) && up != std::path::Path::new("/") => dir = up,
+            _ => break,
+        }
+    }
+    // Not on this Mac any more: dino's own worktree folder still says the repo's name.
+    let dino = format!("{home}/.dino/worktrees/");
+    if !home.is_empty()
+        && let Some(rest) = cwd.strip_prefix(&dino)
+    {
+        let repo = rest.split('/').next().unwrap_or_default();
+        return format!("{dino}{repo}");
+    }
+    if let Some(i) = cwd.find("/.dino/worktrees/") {
+        return cwd[..i].to_string();
+    }
+    cwd.to_string()
+}
+
+/// Names for `roots`, by folder name, with the folders above it where two would read the same.
+fn project_names(roots: &[String]) -> HashMap<String, String> {
+    let parent_tail = |root: &str, n: usize| {
+        let parts: Vec<&str> = root.trim_end_matches('/').split('/').filter(|p| !p.is_empty()).collect();
+        let above = &parts[..parts.len().saturating_sub(1)];
+        above[above.len().saturating_sub(n)..].join("/")
+    };
+    let mut names = HashMap::new();
+    for root in roots {
+        let name = name_of(root);
+        let same: Vec<&String> = roots.iter().filter(|r| name_of(r) == name).collect();
+        if same.len() == 1 {
+            names.insert(root.clone(), name);
+            continue;
+        }
+        // The two folders above it, else all of them, when that still doesn't tell them apart.
+        let short = parent_tail(root, 2);
+        let clash = same.iter().filter(|r| parent_tail(r, 2) == short).count() > 1;
+        let tail = if clash || short.is_empty() { parent_tail(root, usize::MAX) } else { short };
+        names.insert(root.clone(), if tail.is_empty() { name } else { format!("{name} · {tail}") });
+    }
+    names
 }
 
 fn name_of(path: &str) -> String {
@@ -412,9 +475,9 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
     // With each: its sessions, its days, its tokens per model.
     type AgentAcc = (AgentUse, HashSet<String>, HashSet<i64>, HashMap<String, u64>);
     let mut agents: HashMap<String, AgentAcc> = HashMap::new();
-    // With each: its sessions, and how much ran in each of its folders.
-    type ProjectAcc = (Project, HashSet<String>, HashMap<String, u64>);
-    let mut projects: HashMap<String, ProjectAcc> = HashMap::new();
+    // By root, with its sessions.
+    let mut projects: HashMap<String, (Project, HashSet<String>)> = HashMap::new();
+    let mut folders: HashMap<String, String> = HashMap::new();
     let mut routes: HashMap<String, (RouteUse, HashSet<String>)> = HashMap::new();
     let mut speed: HashMap<(String, String), (Vec<u32>, Vec<f64>)> = HashMap::new();
     /// A session so far: agent, conversation, folder, first and last call, time in it.
@@ -523,8 +586,8 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
         }
         *a.3.entry(model.clone()).or_default() += tokens;
         if let Some(cwd) = r.cwd.as_deref().filter(|c| !c.is_empty()) {
-            let (name, worktree) = project_of(cwd);
-            let p = projects.entry(name.clone()).or_insert_with(|| (Project { name, ..Default::default() }, HashSet::new(), HashMap::new()));
+            let root = project_of(cwd, &mut folders);
+            let p = projects.entry(root.clone()).or_insert_with(|| (Project { path: root, ..Default::default() }, HashSet::new()));
             p.0.tokens.add(&r);
             p.0.requests += 1;
             p.0.last_ms = p.0.last_ms.max(r.ts);
@@ -534,8 +597,6 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
             if !p.1.contains(&key) {
                 p.1.insert(key.clone());
             }
-            // The repo's own folder is where it is; a worktree only counts when nothing else does.
-            *p.2.entry(cwd.to_string()).or_default() += if worktree { 1 } else { 1 << 20 };
         }
         if let Some(route) = &r.route {
             let e = routes.entry(route.clone()).or_insert_with(|| {
@@ -662,11 +723,12 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
         })
         .collect();
     agents.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total).then(a.agent.cmp(&b.agent)));
+    let names = project_names(&projects.keys().cloned().collect::<Vec<_>>());
     let mut projects: Vec<Project> = projects
         .into_values()
-        .map(|(mut p, s, paths)| {
+        .map(|(mut p, s)| {
             p.sessions = s.len() as u64;
-            p.path = paths.into_iter().max_by_key(|(_, n)| *n).map(|(p, _)| p).unwrap_or_default();
+            p.name = names.get(&p.path).cloned().unwrap_or_else(|| name_of(&p.path));
             p.agents.sort();
             p
         })
@@ -800,6 +862,30 @@ mod tests {
         assert_eq!(r.speed[0].ttft_p50_ms, Some(400));
         assert_eq!(r.speed[0].tps_p50, None, "too few tokens to say");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn projects_are_their_repos_named_apart_when_names_clash() {
+        let dir = std::env::temp_dir().join(format!("dino-usage-projects-{}", std::process::id()));
+        let repo = dir.join("work/app");
+        std::fs::create_dir_all(repo.join(".git/worktrees/fix")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let wt = dir.join("elsewhere/app-fix");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}/.git/worktrees/fix\n", repo.display())).unwrap();
+        let root = repo.display().to_string();
+        assert_eq!(find_project(&format!("{root}/src")), root, "a folder in a repo is the repo");
+        assert_eq!(find_project(&wt.display().to_string()), root, "a worktree is the repo it was made from");
+        assert_eq!(find_project(&format!("{root}/.claude/worktrees/x")), root);
+        assert_eq!(find_project("/gone/tmp/proj"), "/gone/tmp/proj", "not there: the folder itself");
+        let names = project_names(&["/private/tmp/dino-tabs-test/work/proj".into(), "/private/tmp/dino-e2e4/work/proj".into(), "/src/app".into(), "/a/x/y/proj".into()]);
+        assert_eq!(names["/private/tmp/dino-tabs-test/work/proj"], "proj · dino-tabs-test/work");
+        assert_eq!(names["/private/tmp/dino-e2e4/work/proj"], "proj · dino-e2e4/work");
+        assert_eq!(names["/src/app"], "app", "only one app");
+        let names = project_names(&["/one/work/proj".into(), "/two/work/proj".into(), "/x/two/work/proj".into()]);
+        assert_eq!(names["/two/work/proj"], "proj · two/work", "told apart by two folders");
+        assert_eq!(names["/x/two/work/proj"], "proj · x/two/work", "the whole path where two aren't enough");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

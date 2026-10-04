@@ -502,6 +502,11 @@ impl Agent for OpenCode {
         vec!["--prompt".into(), prompt]
     }
 
+    // The option `prompt_args` gives it with.
+    fn launch_prompt(&self, args: &[String]) -> Option<(Vec<String>, String)> {
+        super::option_prompt(args, &["--prompt"])
+    }
+
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>) {
         match session {
             Some(id) if restoring => (vec![], vec!["-s".into(), id.clone()]),

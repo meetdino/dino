@@ -186,6 +186,13 @@ pub trait Agent: Sync {
     fn prompt_args(&self, prompt: String) -> Vec<String> {
         vec![prompt]
     }
+    /// The prompt typed among its arguments (`dino new claude --model haiku "fix it"`), and the
+    /// arguments without it: dinod gives it once, as the session starts, and never again as the
+    /// session resumes its conversation. `None`: no prompt there, or no telling (an agent dino
+    /// doesn't know the command line of, an option it doesn't know).
+    fn launch_prompt(&self, _args: &[String]) -> Option<(Vec<String>, String)> {
+        None
+    }
     /// It can answer one request headless and leave: no tools, no questions, nothing kept, and
     /// its answer as plain text (see `one_shot`). The shell's ⌘I asks it for a command this way.
     /// Not yet: Qwen Code keeps tools however it's started (and runs a memory subagent with write
@@ -433,6 +440,86 @@ pub struct OneShot<'a> {
     pub answer: &'a Path,
 }
 
+/// An agent's command line as far as finding its prompt goes (see `positional_prompt`).
+pub(crate) struct Cli {
+    /// Options that take the next word as their value (or `--option=value`).
+    pub value: &'static [&'static str],
+    /// Options that take the next word as their value when it isn't an option itself.
+    pub optional: &'static [&'static str],
+    /// Options that take every word up to the next option.
+    pub variadic: &'static [&'static str],
+    /// Options that take no value.
+    pub flags: &'static [&'static str],
+    /// Its subcommands: a command line naming one has no prompt.
+    pub commands: &'static [&'static str],
+}
+
+/// The prompt in `args` for an agent that takes it as its one positional argument, read as its
+/// own parser would; `None` when there's none, more than one, a subcommand, or a word after an
+/// option `cli` doesn't know (it may be that option's value).
+pub(crate) fn positional_prompt(args: &[String], cli: &Cli) -> Option<(Vec<String>, String)> {
+    let mut positional = vec![];
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            positional.extend(i + 1..args.len());
+            break;
+        }
+        if a.len() > 1 && a.starts_with('-') {
+            // `--option=value` holds its value; otherwise the words after it may be its.
+            let next_is_word = args.get(i + 1).is_some_and(|n| !n.starts_with('-'));
+            if a.contains('=') {
+                // Its value is in it.
+            } else if cli.value.contains(&a) {
+                i += 1;
+            } else if cli.optional.contains(&a) {
+                i += usize::from(next_is_word);
+            } else if cli.variadic.contains(&a) {
+                while args.get(i + 1).is_some_and(|n| !n.starts_with('-')) {
+                    i += 1;
+                }
+            } else if !cli.flags.contains(&a) && next_is_word {
+                return None;
+            }
+        } else {
+            positional.push(i);
+        }
+        i += 1;
+    }
+    let [at] = positional[..] else { return None };
+    if cli.commands.contains(&args[at].as_str()) || args[at].trim().is_empty() {
+        return None;
+    }
+    let mut rest = args.to_vec();
+    let prompt = rest.remove(at);
+    // A `--` left with nothing after it.
+    if rest.last().is_some_and(|l| l == "--") {
+        rest.pop();
+    }
+    Some((rest, prompt))
+}
+
+/// The prompt given with option `flags` (`-i "fix it"`, `--prompt=fix it`), and `args` without it.
+pub(crate) fn option_prompt(args: &[String], flags: &[&str]) -> Option<(Vec<String>, String)> {
+    for (i, a) in args.iter().enumerate() {
+        if let Some((name, value)) = a.split_once('=')
+            && flags.contains(&name)
+        {
+            let mut rest = args.to_vec();
+            rest.remove(i);
+            return Some((rest, value.to_string()));
+        }
+        if flags.contains(&a.as_str()) {
+            let value = args.get(i + 1).filter(|v| !v.starts_with('-'))?.clone();
+            let mut rest = args.to_vec();
+            rest.drain(i..=i + 1);
+            return Some((rest, value));
+        }
+    }
+    None
+}
+
 /// A prompt an agent is started on goes on its command line (see `Agent::prompt_args`), where one
 /// starting with `-` would be read as a flag (`--dangerously-skip-permissions`, `--settings=...`):
 /// refuse it, since not every agent's command line honours `--`.
@@ -464,6 +551,37 @@ pub(crate) fn control_args(a: &dyn Agent, mode: Option<&str>, model: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_prompt_among_an_agents_arguments_is_found_as_its_parser_would() {
+        let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        let claude = agent("claude").unwrap();
+        let split = |a: &dyn Agent, args: &[&str]| a.launch_prompt(&w(args));
+        assert_eq!(split(claude, &["--model", "haiku", "fix the bug"]), Some((w(&["--model", "haiku"]), "fix the bug".into())));
+        assert_eq!(split(claude, &["fix it", "--model=haiku", "--verbose"]), Some((w(&["--model=haiku", "--verbose"]), "fix it".into())));
+        assert_eq!(split(claude, &["--tools", "", "-p", "hi"]), Some((w(&["--tools", "", "-p"]), "hi".into())));
+        assert_eq!(split(claude, &["--", "fix it"]), Some((vec![], "fix it".into())));
+        // Values, not prompts: a model, tools a variadic option takes, a debug filter.
+        assert_eq!(split(claude, &["--model", "haiku"]), None);
+        assert_eq!(split(claude, &["--allowedTools", "Bash", "fix it"]), None, "Claude reads it as a tool too");
+        assert_eq!(split(claude, &["--allowedTools=Bash", "fix it"]), Some((w(&["--allowedTools=Bash"]), "fix it".into())));
+        assert_eq!(split(claude, &["--debug", "api"]), None);
+        assert_eq!(split(claude, &["mcp", "list"]), None, "a subcommand");
+        assert_eq!(split(claude, &["one", "two"]), None, "two words: not one prompt");
+        assert_eq!(split(claude, &["--some-new-option", "value"]), None, "maybe that option's value");
+        assert_eq!(split(claude, &[]), None);
+        let codex = agent("codex").unwrap();
+        assert_eq!(split(codex, &["-m", "gpt-5.5", "-c", "x=1", "add tests"]), Some((w(&["-m", "gpt-5.5", "-c", "x=1"]), "add tests".into())));
+        assert_eq!(split(codex, &["resume", "--last"]), None);
+        assert_eq!(split(codex, &["-i", "a.png", "b.png"]), None, "images");
+        // Given with an option.
+        let qwen = agent("qwen").unwrap();
+        assert_eq!(split(qwen, &["-m", "q", "-i", "fix it"]), Some((w(&["-m", "q"]), "fix it".into())));
+        assert_eq!(split(qwen, &["--prompt-interactive=fix it"]), Some((vec![], "fix it".into())));
+        assert_eq!(split(agent("opencode").unwrap(), &["--prompt", "fix it", "--model", "x"]), Some((w(&["--model", "x"]), "fix it".into())));
+        assert_eq!(split(agent("copilot").unwrap(), &["--model", "gpt-5.5"]), None);
+        assert_eq!(split(agent("pi").unwrap(), &["fix it"]), None, "a command line dino doesn't know");
+    }
 
     #[test]
     fn headless_runs_by_flag_or_command() {

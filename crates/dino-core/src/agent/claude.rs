@@ -25,6 +25,29 @@ fn live(pid: u32) -> Option<Value> {
     (v["pid"].as_u64() == Some(pid as u64) && v["kind"].as_str().is_none_or(|k| k == "interactive")).then_some(v)
 }
 
+/// Claude Code's command line (`claude --help`, 2.1), for finding a prompt in it.
+const CLI: super::Cli = super::Cli {
+    value: &[
+        "--agent", "--agents", "--append-system-prompt", "--append-system-prompt-file", "--autocompact", "--debug-file", "--effort", "--environment",
+        "--fallback-model", "--input-format", "--json-schema", "--max-budget-usd", "--max-turns", "--model", "-n", "--name", "--output-format",
+        "--permission-mode", "--permission-prompts", "--permission-prompt-tool", "--plugin-dir", "--plugin-url", "--remote-control-session-name-prefix",
+        "--session-id", "--setting-sources", "--settings", "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot",
+    ],
+    optional: &["--cloud", "-d", "--debug", "--from-pr", "--prompt-suggestions", "--remote-control", "-r", "--resume", "--teleport", "-w", "--worktree"],
+    variadic: &["--add-dir", "--allowedTools", "--allowed-tools", "--betas", "--disallowedTools", "--disallowed-tools", "--file", "--mcp-config", "--tools"],
+    flags: &[
+        "--allow-dangerously-skip-permissions", "--ax-screen-reader", "--bg", "--background", "--bare", "--brief", "--chrome", "-c", "--continue",
+        "--dangerously-skip-permissions", "--desktop", "--disable-slash-commands", "--exclude-dynamic-system-prompt-sections", "--fork-session",
+        "--forward-subagent-text", "-h", "--help", "--ide", "--include-hook-events", "--include-partial-messages", "--no-chrome",
+        "--no-session-persistence", "-p", "--print", "--replay-user-messages", "--restricted", "--safe-mode", "--strict-mcp-config", "--tmux",
+        "--verbose", "-v", "--version",
+    ],
+    commands: &[
+        "agents", "attach", "auth", "auto-mode", "config", "doctor", "gateway", "import", "install", "logs", "mcp", "migrate-installer", "plugin",
+        "plugins", "purge", "respawn", "rm", "setup-token", "stop", "kill", "ultrareview", "update", "upgrade",
+    ],
+};
+
 impl Agent for Claude {
     fn id(&self) -> &'static str {
         if self.free { "claude-free" } else { "claude" }
@@ -55,6 +78,11 @@ impl Agent for Claude {
 
     fn free(&self) -> bool {
         self.free
+    }
+
+    // `claude [options] [prompt]`, as Claude Code 2.1's own help lists its options.
+    fn launch_prompt(&self, args: &[String]) -> Option<(Vec<String>, String)> {
+        super::positional_prompt(args, &CLI)
     }
 
     // Claude's own words, as its footer shows them.
