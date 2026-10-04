@@ -375,8 +375,13 @@ pub struct SyncStatus {
     pub last_sync: Option<u64>,
     /// Changes made here, not yet taken by the server.
     pub pending: usize,
-    /// Synced settings on this Mac.
+    /// Synced settings on this Mac: the ones set to something other than their default (a default
+    /// isn't stored), as the account page lists them.
     pub synced: usize,
+    /// The same, in a person's terms ("Claude Code defaults", "2 terminal settings"); empty when
+    /// every setting is at its default.
+    #[serde(default)]
+    pub synced_what: Vec<String>,
     /// For `login_email`: the address the sign-in link went to, while it waits to be opened.
     #[serde(default)]
     pub email_sent_to: Option<String>,

@@ -137,7 +137,12 @@ fn print(s: &SyncStatus) {
         "conflict" => conflict(s),
         _ => {
             println!("Signed in as {} at {}", s.email.as_deref().unwrap_or("?"), s.server);
-            println!("  {} settings synced, {} waiting to send, last sync {}", s.synced, s.pending, s.last_sync.map(ago).unwrap_or_else(|| "never".into()));
+            println!("  last sync {}, {} waiting to send", s.last_sync.map(ago).unwrap_or_else(|| "never".into()), s.pending);
+            if s.synced_what.is_empty() {
+                println!("  nothing to sync yet: every setting is at its default");
+            } else {
+                println!("  synced: {}", s.synced_what.join(", "));
+            }
             if let Some(u) = &s.account_url {
                 println!("  devices and data: {u}");
             }

@@ -454,11 +454,20 @@ pub fn stored() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The start of every key the dino account's sign-in keeps in the key store (dinod's `cloud`).
+pub const ACCOUNT_TOKEN_PREFIX: &str = "DINO_CLOUD_";
+
 pub fn key_status() -> Vec<KeyInfo> {
     let stored = stored();
     let mut names: Vec<String> = KNOWN_KEYS.iter().map(|(k, _)| k.to_string()).collect();
-    // Sign in with ChatGPT's tokens are Settings → Providers' to keep, not keys to edit.
-    names.extend(stored.iter().map(|(k, _)| k.clone()).filter(|k| !KNOWN_KEYS.iter().any(|(n, _)| n == k) && !k.starts_with("CHATGPT_") && k != crate::claude_token::CREATED_KEY));
+    // Sign in with ChatGPT's tokens are Settings → Providers' to keep, and the dino account's are
+    // Settings → Dino Account's: sign-ins, not keys to edit or count.
+    names.extend(
+        stored
+            .iter()
+            .map(|(k, _)| k.clone())
+            .filter(|k| !KNOWN_KEYS.iter().any(|(n, _)| n == k) && !k.starts_with("CHATGPT_") && !k.starts_with(ACCOUNT_TOKEN_PREFIX) && k != crate::claude_token::CREATED_KEY),
+    );
     names
         .into_iter()
         .map(|name| {
@@ -577,8 +586,10 @@ mod tests {
         set_key("DINO_TEST_A_KEY", None).unwrap();
         assert_eq!(std::fs::read_to_string(keys_file()).unwrap(), "DINO_TEST_B_KEY=def\n");
         assert_eq!(std::fs::metadata(keys_file()).unwrap().permissions().mode() & 0o777, 0o600);
+        set_key("DINO_CLOUD_REFRESH_TOKEN", Some("rt")).unwrap();
         let status = key_status();
         assert!(status.iter().any(|k| k.name == "DINO_TEST_B_KEY" && k.source.as_deref() == Some("dino")));
+        assert!(!status.iter().any(|k| k.name.starts_with(ACCOUNT_TOKEN_PREFIX)), "the dino account's sign-in isn't a key");
         assert!(set_key("bad name", Some("x")).is_err());
         assert!(set_key("DINO_TEST_A_KEY", Some("a\nb")).is_err());
         std::fs::remove_dir_all(dir).unwrap();

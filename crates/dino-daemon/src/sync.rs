@@ -627,6 +627,8 @@ pub fn status() -> SyncStatus {
     let phase = if l.signing_in || matches!(s.phase.as_str(), "joining" | "upgrade") { "signing_in".to_string() } else if s.phase.is_empty() { "signed_out".into() } else { s.phase.clone() };
     let server = if s.server.is_empty() { cloud::default_server() } else { s.server.clone() };
     let local: Entries = s.conflict_local.iter().cloned().collect();
+    // Every setting the account holds, a newer dino's too, as the account page counts them.
+    let live: Entries = s.records.iter().filter(|r| !r.is_tombstone()).map(|r| (r.id.clone(), r.value.clone())).collect();
     let conflict = (s.phase == "conflict").then(|| {
         let cloud_entries: Entries = s.baseline.iter().cloned().collect();
         let only_here = local.keys().filter(|k| !cloud_entries.contains_key(*k)).count();
@@ -641,7 +643,8 @@ pub fn status() -> SyncStatus {
         email: s.email.clone(),
         last_sync: s.last_sync,
         pending: s.pending.len(),
-        synced: s.records.iter().filter(|r| !r.is_tombstone()).count(),
+        synced: live.len(),
+        synced_what: dino_sync::settings::describe(&live),
         email_sent_to: l.email_sent_to.clone(),
         device_code: l.device_code.as_ref().map(|d| d.0.clone()),
         device_url: l.device_code.as_ref().map(|d| d.1.clone()),
