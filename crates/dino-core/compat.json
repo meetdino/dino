@@ -39,6 +39,13 @@
       "needs": ["tools"],
       "notes": "Hermes refuses models under 64k context.",
       "source": "https://hermes-agent.nousresearch.com/docs/integrations/providers"
+    },
+    "codewhale": {
+      "formats": ["chat", "anthropic"],
+      "min_context": 32000,
+      "needs": ["tools"],
+      "notes": "Speaks OpenAI's chat API or Anthropic's Messages; its Responses route is only for a ChatGPT sign-in.",
+      "source": "https://github.com/Hmbown/CodeWhale/blob/main/docs/PROVIDERS.md"
     }
   },
   "models": [

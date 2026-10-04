@@ -318,7 +318,19 @@ struct SessionControlsBar: View {
                 chip(.mode, knobs, icon: ControlKind.icon(mode: c.mode), text: knobs.modeLabel(c.mode),
                      tint: c.mode == "bypass" ? .red : nil)
             }
-            if let route = session.route {
+            if knobs.keeps("model"), session.route != nil || ControlKind.model.offered(by: knobs) {
+                // It keeps its conversation's model: shown, not offered.
+                let text = session.route?.label ?? c.model.map(knobs.label) ?? knobs.default_model.map(knobs.label) ?? "Default"
+                HStack(spacing: 4) {
+                    Image(systemName: session.route == nil ? "cpu" : "desktopcomputer").font(.caption)
+                    Text(text).lineLimit(1)
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .help(Self.keptModel(session))
+            } else if let route = session.route {
                 // On a provider's model: that provider's models, not the agent's own.
                 Button { model.controlPicker = .model } label: {
                     HStack(spacing: 4) {
@@ -375,6 +387,11 @@ struct SessionControlsBar: View {
         }
     }
 
+    /// Why a session's model can't be changed from here.
+    static func keptModel(_ s: SessionInfo) -> String {
+        "\(FoundSession.name(s.agent_id)) keeps a conversation's model; start a new session to change it"
+    }
+
     private func help(_ kind: ControlKind) -> String {
         let key = "⇧⌘\(kind.shortcut.character.uppercased())"
         switch kind {
@@ -420,6 +437,8 @@ struct ControlPopover: View {
 
     var body: some View {
         let listed = kind.options(knobs, seen: model.seenModels(session.agent_id), current: current, model: session.shownControls.model)
+            .filter { kind != .mode || !knobs.keeps($0.value) || $0.value == current }
+        let dropped = kind == .mode ? knobs.modes.filter { knobs.keeps($0) && $0 != current } : []
         // Ungrouped first, so the numbers follow what's shown; older models fold away unless
         // one of them is chosen.
         let main = listed.filter { $0.group == nil }
@@ -463,6 +482,13 @@ struct ControlPopover: View {
                     }
             }
             Divider().padding(.vertical, 6)
+            if !dropped.isEmpty {
+                Text("\(FoundSession.name(session.agent_id)) drops \(dropped.map(knobs.modeLabel).joined(separator: ", ")) when it resumes a conversation; start a new session in it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 4)
+            }
             Text(model.busy(session)
                 ? "Applies once the agent is idle and its subagents and background commands are done. It restarts with it and keeps its conversation."
                 : "The agent restarts with it and keeps its conversation.")
@@ -619,7 +645,7 @@ struct ControlMenuItems: View {
             // A model without effort levels (Haiku) has none to pick.
             let none = kind == .effort && (knobs?.efforts(for: session?.shownControls.model).isEmpty ?? true)
             // On a provider's model, its provider's models.
-            let offered = (knobs.map(kind.offered) ?? false) || (kind == .model && session?.route != nil)
+            let offered = ((knobs.map(kind.offered) ?? false) || (kind == .model && session?.route != nil)) && !(kind == .model && (knobs?.keeps("model") ?? false))
             Button("\(kind.title)…") { model.controlPicker = kind }
                 .keyboardShortcut(kind.shortcut, modifiers: [.command, .shift])
                 .disabled(!offered || none)

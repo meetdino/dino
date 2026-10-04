@@ -1132,7 +1132,7 @@ fn hinted(message: String) -> anyhow::Error {
 /// can. `command`: it was the first word, so it could have been meant as a command.
 fn unknown_agent(name: &str, command: bool) -> anyhow::Error {
     let name = printable(name);
-    if let Some(k) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == name || k.bin == name) {
+    if let Some(k) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == name || k.bin == name || k.was.contains(&&*name)) {
         let hint = discover::install_hint(k.id);
         return anyhow::anyhow!("{} isn't installed (no `{}` on the PATH). Install it with\n\n    {hint}\n\nthen run this again.", k.name, k.bin);
     }

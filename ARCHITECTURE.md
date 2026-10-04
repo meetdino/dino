@@ -34,7 +34,7 @@ links dino-core.
 flowchart LR
   T["dino terminal"] -- "calls (n windows → 1)" --> D["dinod"]
   CLI["dino CLI"] -- "calls" --> D
-  D -- "spawns, in its own pty" --> A["agents: Claude Code, Codex, Kimi, Qwen, Pi, Hermes, shells"]
+  D -- "spawns, in its own pty" --> A["agents: Claude Code, Codex, Kimi, Qwen, Pi, Hermes, CodeWhale, shells"]
   A -- "model traffic" --> P["proxy (inside dinod)"]
   P --> M["the provider each agent talks to"]
   D -- "account, sync" --> C["dino-cloud"]

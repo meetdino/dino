@@ -1327,6 +1327,12 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
     };
     let mut agent_session = restore.as_ref().and_then(|r| r.agent_session.clone());
+    // Resuming its conversation, an agent may keep some of it as it was (CodeWhale its model):
+    // the session shows what will run, not what was asked.
+    let controls = match (&restore, agent(&l.agent_id), agent_session.as_deref()) {
+        (Some(_), Some(a), Some(conversation)) => a.resumed(conversation, controls),
+        _ => controls,
+    };
     // Ended before dinod stopped: it comes back as it was, not running, until resumed.
     let ended = restore.as_ref().filter(|r| r.ended);
     let (spec, cwd) = match &host {
@@ -1729,6 +1735,7 @@ fn set_controls(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> 
     if s.controls.mode != controls.mode {
         check_bypass(&controls, &settings)?;
     }
+    kept_on_resume(&s, &controls)?;
     // Switched in the agent itself (Claude's Shift+Tab): choosing the mode dino has on file still restarts it into that mode.
     let agent_mode = d.proxy.stats.session(id).agent_mode.as_deref().and_then(|m| controls::reported_mode(&s.agent_id, m));
     let switched = controls.mode.is_some() && agent_mode.is_some() && agent_mode != controls.mode;
@@ -1744,6 +1751,23 @@ fn set_controls(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> 
         *s.pending.lock().unwrap() = Some(controls);
         Ok(())
     }
+}
+
+/// A change session `s`'s agent would ignore on resuming its conversation (see
+/// `Agent::resume_keeps`) is refused, rather than shown as if it applied.
+fn kept_on_resume(s: &Session, controls: &Controls) -> anyhow::Result<()> {
+    let Some(a) = agent(&s.agent_id) else { return Ok(()) };
+    if s.agent_session.lock().unwrap().is_none() {
+        return Ok(());
+    }
+    let name = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == s.agent_id).map_or(s.agent_id.as_str(), |k| k.name);
+    let keeps = a.resume_keeps();
+    anyhow::ensure!(!keeps.contains(&"model") || controls.model == s.controls.model, "{name} keeps a conversation's model; start a new session to change it");
+    if let Some(m) = controls.mode.as_deref().filter(|m| keeps.contains(m) && s.controls.mode.as_deref() != Some(*m)) {
+        let label = a.mode_label(m).unwrap_or(m);
+        anyhow::bail!("{name} drops {label} when it resumes a conversation; start a new session in {label}");
+    }
+    Ok(())
 }
 
 /// See `state`: how long a working agent can be silent before its turn counts as over.
@@ -2534,7 +2558,7 @@ fn watch_shells(d: &Daemon) {
         let Some(fg) = fg.filter(|_| due) else { continue };
         let mut found = found::inside(fg);
         // Asking the user (a permission or trust dialog): its own status only says busy.
-        if let Some(f) = found.as_mut().filter(|f| ["claude", "codex"].contains(&f.agent.as_str())) {
+        if let Some(f) = found.as_mut().filter(|f| ["claude", "codex", "codewhale"].contains(&f.agent.as_str())) {
             if found::asking(&f.agent, &s.pane.text(0)) {
                 f.status = Some("needs".into());
             }

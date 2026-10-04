@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::controls::Controls;
 use crate::found::FoundSession;
 use crate::history::Turn;
 use crate::models::Catalog;
@@ -12,6 +13,7 @@ use crate::providers::Format;
 
 mod claude;
 pub mod codex;
+mod codewhale;
 mod hermes;
 mod kimi;
 mod pi;
@@ -150,6 +152,16 @@ pub trait Agent: Sync {
     /// Arguments that start conversation `session` (set when dino picks the id up front), or
     /// resume it when `restoring`: those before dino's other arguments, and those after.
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>);
+    /// What a conversation it resumes keeps as it was saved, whatever its flags say: "model", or a
+    /// mode id. Those can't be changed for a session that has one.
+    fn resume_keeps(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// `c`, as it will run when it resumes conversation `session`: what that keeps, and the mode
+    /// it falls back to.
+    fn resumed(&self, _session: &str, c: Controls) -> Controls {
+        c
+    }
     /// It reports its context window to a `statusLine` dino can wrap.
     fn statusline(&self) -> bool {
         false
@@ -195,8 +207,14 @@ pub trait Agent: Sync {
     fn new_conversation(&self, _cwd: &Path, _since: u64, _claimed: &[String]) -> Option<String> {
         None
     }
-    /// With `StatusSource::Polled`: whether conversation `session` is on a turn, as its store says now.
-    fn turn_now(&self, _session: &str) -> Option<bool> {
+    /// With `StatusSource::Polled`: whether conversation `session` is on a turn, as its store says
+    /// now, in a process of it started at `since` (seconds).
+    fn turn_now(&self, _session: &str, _since: u64) -> Option<bool> {
+        None
+    }
+    /// With `StatusSource::Polled`, for agents whose store can't say they wait on the user: what
+    /// its own dialog on `screen` asks of them, while it's on a turn.
+    fn asking(&self, _screen: &str) -> Option<String> {
         None
     }
     /// For agents whose conversations aren't files: a page of `session_id`'s turns ending before
@@ -254,10 +272,11 @@ static PI: pi::Pi = pi::Pi { free: false };
 static PI_FREE: pi::Pi = pi::Pi { free: true };
 static HERMES: hermes::Hermes = hermes::Hermes { free: false };
 static HERMES_FREE: hermes::Hermes = hermes::Hermes { free: true };
+static CODEWHALE: codewhale::CodeWhale = codewhale::CodeWhale;
 
 /// The agents dino works with, in the order they're listed and looked for.
-pub fn all() -> [&'static dyn Agent; 6] {
-    [&CLAUDE, &CODEX, &QWEN, &KIMI, &PI, &HERMES]
+pub fn all() -> [&'static dyn Agent; 7] {
+    [&CLAUDE, &CODEX, &QWEN, &KIMI, &PI, &HERMES, &CODEWHALE]
 }
 
 /// The adapter for launcher agent id `id` (the free-tier ones, "<agent>-free", too); `None` for
@@ -339,6 +358,12 @@ mod tests {
         let hermes = agent("hermes").unwrap();
         assert_eq!(hermes.provider_formats(), [Format::Chat]);
         assert!(hermes.provider_wiring(URL, Format::Anthropic, "m").is_none());
+
+        let codewhale = agent("codewhale").unwrap();
+        assert_eq!(codewhale.provider_formats(), [Format::Chat, Format::Anthropic]);
+        let chat = codewhale.provider_wiring(URL, Format::Chat, "qwen3:4b").unwrap();
+        assert_eq!(env(&chat, "OPENAI_BASE_URL"), Some(format!("{URL}/v1").as_str()));
+        assert!(!chat.1.iter().any(|a| a.contains(URL)), "the URL stays off its command line: {:?}", chat.1);
     }
 
     /// A dino shell isn't routed itself (every program there using the Anthropic SDK would be);
