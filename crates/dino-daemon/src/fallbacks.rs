@@ -146,7 +146,7 @@ pub(crate) fn limits(d: &Daemon) -> Vec<AgentLimit> {
 
 /// The agent new sessions of `agent_id` start with while it's at its limit, if one is set and
 /// allowed, with its launcher.
-fn switch_to(d: &Daemon, settings: &Settings, agent_id: &str) -> Option<(LauncherInfo, AgentSwitch)> {
+pub(crate) fn switch_to(d: &Daemon, settings: &Settings, agent_id: &str) -> Option<(LauncherInfo, AgentSwitch)> {
     let s = settings.fallbacks.get(agent_id)?.new_sessions.clone().filter(|s| s.agent != agent_id)?;
     let l = d.offered().into_iter().find(|l| l.agent_id == s.agent)?;
     Some((l, s))

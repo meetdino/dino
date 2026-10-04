@@ -1065,6 +1065,7 @@ struct ScheduleSheet: View {
                         }
                         .labelsHidden()
                         .fixedSize()
+                        .help("Its fallback agent is the one new sessions start with while it's at its limit, in Settings → Agents.")
                     }
                 }
                 HStack {
