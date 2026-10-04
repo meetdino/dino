@@ -22,6 +22,7 @@ enum GhosttyActions {
         // A title, a bell, a frame: the wrapper's, and the most frequent by far.
         if event.wrapperHandles { return false }
         let action = event.action
+        if let done = pane(action, event.state) { return done }
         guard supports(action) else {
             if logged.insert(event.tag.rawValue).inserted {
                 NSLog("dino: Ghostty action \(event.name) isn't supported in dino yet; ignored")
@@ -35,12 +36,50 @@ enum GhosttyActions {
         return true
     }
 
-    /// Undo and redo of closed tabs and splits, search, the inspector, secure input, more than one
-    /// window: not in dino yet. The rest of `.other` are the engine's notices dino has no use for.
+    /// What the pane shows over its terminal: the find bar, the pointer hidden while you type, a
+    /// key sequence waiting for its next key. Nil for an action that isn't one of those.
+    private static func pane(_ action: TerminalHostAction, _ state: TerminalViewState?) -> Bool? {
+        let view = state?.attachedPlatformView as? LinkTerminalView
+        switch action {
+        case .startSearch(let needle):
+            guard let view else { return false }
+            // A turn later: this comes from inside Ghostty's key handling, and the bar takes the
+            // keyboard.
+            DispatchQueue.main.async {
+                view.startSearch(needle)
+                if let needle { FindBar.findText = needle }
+            }
+            return true
+        case .endSearch:
+            guard let view else { return false }
+            DispatchQueue.main.async { view.endSearch(tellGhostty: false) }
+            return true
+        case .searchTotal(let total):
+            view?.searchTotal(total)
+            return view != nil
+        case .searchSelected(let selected):
+            view?.searchSelected(selected)
+            return view != nil
+        case .mouseVisibility(let visible):
+            NSCursor.setHiddenUntilMouseMoves(!visible)
+            return true
+        case .keySequence(let key):
+            view?.keySequence(key)
+            return view != nil
+        case .keyTable(let change):
+            view?.keyTable(change)
+            return view != nil
+        default:
+            return nil
+        }
+    }
+
+    /// Undo and redo of closed tabs and splits, the inspector, secure input, more than one window:
+    /// not in dino yet. The rest of `.other` are the engine's notices dino has no use for.
     private static func supports(_ action: TerminalHostAction) -> Bool {
         switch action {
         case .newWindow, .closeAllWindows, .toggleSplitZoom, .moveTab, .secureInput, .undo, .redo,
-             .startSearch, .endSearch, .inspector, .presentTerminal, .other:
+             .inspector, .presentTerminal, .other:
             false
         default:
             true
@@ -149,9 +188,28 @@ enum GhosttyActions {
                 window.level = on ? .floating : .normal
             }
         case .newWindow, .closeAllWindows, .toggleSplitZoom, .moveTab, .secureInput, .undo, .redo,
-             .startSearch, .endSearch, .inspector, .presentTerminal, .other:
+             .startSearch, .endSearch, .searchTotal, .searchSelected, .mouseVisibility, .keySequence,
+             .keyTable, .inspector, .presentTerminal, .other:
             return nil
         }
+    }
+
+    /// What `action` would do from the pane `state`, for its context menu: nil when nothing.
+    static func work(_ action: TerminalHostAction, from state: TerminalViewState) -> (() -> Void)? {
+        guard let model else { return nil }
+        return perform(action, from: state, model: model)
+    }
+
+    /// Ask About This Session…, from the pane `state`: not the quick terminal's own shell.
+    static func canAsk(from state: TerminalViewState) -> Bool {
+        state !== QuickTerminal.shared.surfaceState && model?.session(showing: state) != nil
+    }
+
+    static func ask(from state: TerminalViewState) {
+        guard let model, canAsk(from: state), let id = model.session(showing: state),
+              let session = model.sessions.first(where: { $0.id == id }) else { return }
+        if model.selected != id { model.select(id) }
+        model.askingAbout = session
     }
 }
 
