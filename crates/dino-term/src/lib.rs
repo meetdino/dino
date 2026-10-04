@@ -319,7 +319,10 @@ impl Pane {
                 if n == 0 {
                     break;
                 }
-                let Some(pane) = weak.upgrade() else { break };
+                // Closed (deleted, killed): still read to the end, unseen. Output nobody reads
+                // while the terminal is open keeps the program from exiting: macOS waits for it
+                // to drain as the program closes its terminal, and it never would.
+                let Some(pane) = weak.upgrade() else { continue };
                 let mut term = pane.term.lock();
                 pane.advance(&mut term, &buf[..n]);
                 pane.shared.dirty.store(true, Ordering::Relaxed);
@@ -1054,6 +1057,29 @@ mod tests {
         assert!(session_members(session).is_empty(), "all of it, SIGKILLed");
         assert!(started.elapsed() >= HANGUP_GRACE + TERM_GRACE - Duration::from_millis(100), "each was given its time");
         assert!(pane.kill().is_none(), "once");
+    }
+
+    #[test]
+    fn a_closed_terminals_output_is_still_read_so_its_program_can_leave_on_the_hangup() {
+        // Writes more than a terminal holds as it's hung up on, as Claude Code does as it leaves:
+        // unread, it waits to write until SIGTERM ends it, its own way out (cleaning up what it
+        // started) cut short.
+        let script = "trap '/usr/bin/head -c 400000 /dev/zero | /usr/bin/tr \"\\0\" x; exit 0' HUP; while :; do /bin/sleep 0.1; done";
+        let spec = SpawnSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: None, env: Default::default() };
+        let pane = Pane::spawn(spec, 80, 24, |_| {}).unwrap();
+        let session = pane.pid().unwrap();
+        let since = Instant::now();
+        while session_members(session).is_empty() && since.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        drop(pane);
+        let since = Instant::now();
+        while !session_members(session).is_empty() && since.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(session_members(session).is_empty());
+        assert!(since.elapsed() < HANGUP_GRACE, "it wrote everything and left on the hangup, before SIGTERM: {:?}", since.elapsed());
     }
 
     fn pane() -> Pane {

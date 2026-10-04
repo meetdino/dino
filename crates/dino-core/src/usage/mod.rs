@@ -150,7 +150,14 @@ impl Seen {
             left -= n as u64;
             carry.extend_from_slice(&chunk[..n]);
             // Only whole lines: a line being written is read next time.
-            let Some(end) = memchr_last(&carry) else { continue };
+            let Some(end) = memchr_last(&carry) else {
+                // One line longer than a piece (an image in a transcript): read on to its end,
+                // or every look would start at it again and never get past it.
+                if left == 0 && read_to == from {
+                    left = (size - from - carry.len() as u64).min(CHUNK as u64);
+                }
+                continue;
+            };
             for line in carry[..end].split(|b| *b == b'\n') {
                 if finder.as_ref().is_none_or(|f| f.find(line).is_some()) {
                     kept.extend_from_slice(line);
@@ -160,8 +167,9 @@ impl Seen {
             read_to += end as u64 + 1;
             carry.drain(..=end);
         }
-        // Not all read: no mtime, so the next look goes on from here.
-        let partial = read_to < size && size - from > PIECE;
+        // Not all read: no mtime, so the next look goes on from here. Nothing whole to the end
+        // (a last line without its newline yet) isn't that: it's read when the file changes.
+        let partial = read_to > from && read_to < size && size - from > PIECE;
         self.more |= partial;
         self.files.insert(key, (if partial { u64::MAX } else { mtime }, size, read_to));
         let buf = kept;
@@ -316,6 +324,42 @@ mod tests {
         }
         assert_eq!((read, looks), (lines, 3), "every line once, over three looks");
         assert_eq!(seen.new_lines(&p, b""), None, "all read");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A line longer than a piece (a Codex rollout's screenshot) is read whole: looks that stopped
+    /// inside it would start at it again forever, and the scan would never end.
+    #[test]
+    fn a_line_longer_than_a_piece_is_read_past() {
+        let dir = std::env::temp_dir().join(format!("dino-usage-longline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("image.jsonl");
+        let small = "{\"usage\":1}\n";
+        let huge = format!("{{\"usage\":2,\"image\":\"{}\"}}\n", "x".repeat(PIECE as usize + CHUNK + 5));
+        std::fs::write(&p, [small, huge.as_str(), small].concat()).unwrap();
+        let mut seen = Seen::default();
+        let (mut read, mut looks) = (0, 0);
+        loop {
+            seen.more = false;
+            let Some((text, _)) = seen.new_lines(&p, b"\"usage\"") else { break };
+            read += text.lines().count();
+            looks += 1;
+            assert!(looks < 10, "the scan doesn't end");
+            if !seen.more {
+                break;
+            }
+        }
+        assert_eq!(read, 3, "every line once");
+        assert_eq!(seen.new_lines(&p, b""), None, "all read");
+        // Still being written, with no newline yet: nothing to read, and no look after look.
+        let q = dir.join("writing.jsonl");
+        std::fs::write(&q, &huge[..huge.len() - 1]).unwrap();
+        seen.more = false;
+        let (text, _) = seen.new_lines(&q, b"").unwrap();
+        assert!(text.is_empty() && !seen.more);
+        assert_eq!(seen.new_lines(&q, b""), None, "unchanged");
+        std::fs::write(&q, &huge).unwrap();
+        assert_eq!(seen.new_lines(&q, b"").unwrap().0.lines().count(), 1, "read once it ends");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
