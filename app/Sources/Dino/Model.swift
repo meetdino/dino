@@ -106,6 +106,8 @@ final class DinoModel: ObservableObject {
 
     /// Stopped sessions kept to start again, the name being edited, and the ⌘/ sheet.
     @Published var archived: [ArchivedInfo] = []
+    /// A session the user is about to delete, and what goes with it (the confirmation).
+    @Published var deleting: DeletePlan?
     @Published var renaming: Renaming?
     @Published var showShortcuts = false
     /// Help → Show Welcome: the first-open card, again.

@@ -275,7 +275,7 @@ extension DinoModel {
         if let a = archived.first(where: { $0.id == id }) {
             return RunState(label: "Archived", color: .secondary, title: a.display, help: "Started\(when) as \(a.display), now archived: click to read it", reachable: true)
         }
-        return RunState(label: "Gone", color: .secondary, title: nil, help: "Started\(when); its session has since been closed", reachable: false)
+        return RunState(label: "Gone", color: .secondary, title: nil, help: "Started\(when); its session has since been closed or deleted", reachable: false)
     }
 
     /// A run's session, selected and its tab opened, while it's around. An archived one opens
