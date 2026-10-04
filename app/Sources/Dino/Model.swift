@@ -98,6 +98,8 @@ final class DinoModel: ObservableObject {
     /// Prompts dinod runs on a schedule, the one open in the editor and the one about to go.
     @Published var scheduled: [ScheduledTask] = []
     @Published var editingTask: ScheduledTask?
+    /// Scheduled tasks opened in the sidebar to show their runs.
+    @Published var openTasks: Set<String> = []
     @Published var deletingTask: ScheduledTask?
     /// Scheduled runs that have been working, to say when they go quiet.
     private var scheduledBusy: Set<String> = []
