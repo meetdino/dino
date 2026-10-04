@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-const FILES: [(&str, &str); 11] = [
+const FILES: [(&str, &str); 13] = [
     ("bash/ghostty.bash", include_str!("../shell-integration/bash/ghostty.bash")),
     ("bash/bash-preexec.sh", include_str!("../shell-integration/bash/bash-preexec.sh")),
     ("bash/dino.bash", include_str!("../shell-integration/bash/dino.bash")),
@@ -19,6 +19,8 @@ const FILES: [(&str, &str); 11] = [
     ("zsh/dino-tmux.zsh", include_str!("../shell-integration/zsh/dino-tmux.zsh")),
     ("zsh/dino-term.zsh", include_str!("../shell-integration/zsh/dino-term.zsh")),
     ("bash/dino-term.bash", include_str!("../shell-integration/bash/dino-term.bash")),
+    ("zsh/dino-agents.zsh", include_str!("../shell-integration/zsh/dino-agents.zsh")),
+    ("bash/dino-agents.bash", include_str!("../shell-integration/bash/dino-agents.bash")),
 ];
 
 /// Ghostty's terminfo entries (from libghostty-spm, which draws dino's panes), as ncurses keeps

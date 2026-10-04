@@ -86,6 +86,8 @@ final class DinoModel: ObservableObject {
     /// The New Session sheet: agent, place, mode, model and effort.
     @Published var showNewSession = false
     @Published var showNewProject = false
+    /// The new-session picker that's open (StartSession.swift): where, then which agent.
+    @Published var startRequest: StartRequest?
     /// The toolbar's mode, model or effort picker that's open (⇧⌘M, ⇧⌘I, ⇧⌘E).
     @Published var controlPicker: ControlKind?
     /// A member whose changes the user is about to keep.
@@ -487,8 +489,9 @@ final class DinoModel: ObservableObject {
     func status(of s: SessionInfo) -> SessionStatus {
         if s.exited { return (s.exit_code ?? 0) == 0 ? .ended : .exited }
         if attention.contains(s.id) || s.needs != nil { return .needsYou }
-        // An agent run by hand in a shell says whether it's busy; its shell has no hooks.
-        if let f = s.inside, let st = f.status {
+        // An agent run by hand in a shell says whether it's busy, unless its hooks report to dino
+        // (typed into a dino shell, see dino-agents.zsh): those say more, as for dino's sessions.
+        if s.activity == nil, let f = s.inside, let st = f.status {
             if st == "needs" { return .needsYou }
             if st == "busy" { return s.in_flight > 0 ? .thinking : .working }
             return unseenDone.contains(s.id) ? .done : .idle
@@ -693,6 +696,9 @@ final class DinoModel: ObservableObject {
     func recentFolders(on host: String) -> [String] {
         UserDefaults.standard.stringArray(forKey: "recentFolders.\(host)") ?? []
     }
+
+    /// A folder on this Mac a session was started in, first among the picker's recent places.
+    func rememberLocalFolder(_ folder: String) { rememberFolder(folder, on: "local") }
 
     private func rememberFolder(_ folder: String, on host: String) {
         let list = [folder] + recentFolders(on: host).filter { $0 != folder }
