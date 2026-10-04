@@ -1078,7 +1078,7 @@ fn over_budget(st: &AppState, session: &str, provider: &str) -> Option<Response<
     if budget == 0 || used < budget {
         return None;
     }
-    let msg = format!("dino: this session used {used} tokens, over its budget of {budget}. Start a new session, or raise the budget in Settings → Policies.");
+    let msg = format!("dino: this session used {used} tokens, over its budget of {budget}. Start a new session, or raise the budget in Settings → Agents → Limits.");
     st.stats.update(session, |s| {
         s.errors += 1;
         // dino's own refusal: shown whether or not the agent reports its turns.

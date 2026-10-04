@@ -195,7 +195,7 @@ pub trait Agent: Sync {
     fn statusline(&self) -> bool {
         false
     }
-    /// It can be given dino's session tools (Settings → Policies).
+    /// It can be given dino's session tools (Settings → Experimental).
     fn session_tools(&self) -> bool {
         false
     }

@@ -1,5 +1,5 @@
 //! `dino mcp`: an MCP server on stdio that lets an agent see and drive the other dino sessions.
-//! dinod passes it to Claude sessions by itself (Settings → Policies); for other agents, add
+//! dinod passes it to Claude sessions by itself (Settings → Experimental → Cross-session communication); for other agents, add
 //! `dino mcp` as a stdio MCP server in their config, e.g. Codex's `~/.codex/config.toml`:
 //!
 //! ```toml

@@ -363,6 +363,9 @@ pub enum Response {
         settings: crate::settings::Settings,
         #[serde(default)]
         locked: Vec<String>,
+        /// The managed file each locked path comes from, by path.
+        #[serde(default)]
+        locked_from: std::collections::BTreeMap<String, String>,
         /// Hosts in `~/.ssh/config`, to suggest in Settings → Environments.
         #[serde(default)]
         ssh_config_hosts: Vec<String>,

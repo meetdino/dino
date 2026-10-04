@@ -356,6 +356,8 @@ pub struct Managed {
     doc: serde_json::Value,
     /// Key paths it sets, like `["policies", "allow_bypass"]`.
     pub locked: Vec<Vec<String>>,
+    /// The file each locked path's value comes from, by dotted path: the last to set it.
+    pub from: std::collections::BTreeMap<String, PathBuf>,
 }
 
 impl Managed {
@@ -375,21 +377,35 @@ impl Managed {
             files.extend(more);
         }
         let mut doc = serde_json::Value::Object(Default::default());
+        let mut from = std::collections::BTreeMap::new();
         for f in files {
             let Ok(text) = std::fs::read_to_string(&f) else { continue };
             match serde_json::from_str(&text) {
-                Ok(v @ serde_json::Value::Object(_)) => merge(&mut doc, v),
+                Ok(v @ serde_json::Value::Object(_)) => {
+                    let mut set = vec![];
+                    leaves(&v, &mut vec![], &mut set);
+                    from.extend(set.into_iter().map(|p| (p.join("."), f.clone())));
+                    merge(&mut doc, v);
+                }
                 _ => eprintln!("dino: ignoring {}: not a JSON object", f.display()),
             }
         }
         let mut locked = vec![];
         leaves(&doc, &mut vec![], &mut locked);
-        Self { doc, locked }
+        Self { doc, locked, from }
     }
 
     /// Locked key paths joined with dots, as clients get them.
     pub fn locked_paths(&self) -> Vec<String> {
         self.locked.iter().map(|p| p.join(".")).collect()
+    }
+
+    /// Each locked path's file, as clients get them.
+    pub fn locked_from(&self) -> std::collections::BTreeMap<String, String> {
+        self.locked_paths().into_iter().map(|p| {
+            let f = self.from.get(&p).cloned().unwrap_or_else(Self::path);
+            (p, f.display().to_string())
+        }).collect()
     }
 }
 
@@ -586,6 +602,9 @@ mod tests {
         std::fs::write(dir.join("managed-settings.d/20-broken.json"), "{nope").unwrap();
         let m = Managed::load();
         assert_eq!(m.locked_paths(), ["policies.allow_bypass", "policies.allowed_agents", "policies.session_token_budget", "routing.proxy"]);
+        let from = m.locked_from();
+        assert_eq!(from["policies.allow_bypass"], managed.display().to_string());
+        assert_eq!(from["policies.session_token_budget"], dir.join("managed-settings.d/10-budget.json").display().to_string());
         let s = Settings::load();
         assert!(!s.policies.allow_bypass && s.policies.allowed_agents == ["claude"] && s.policies.session_token_budget == 1_000_000);
         assert!(Settings::load_user().policies.allow_bypass);
