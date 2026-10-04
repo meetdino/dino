@@ -815,6 +815,7 @@ Fan-out: one prompt to several agents, a git worktree each
 Setup
   dino login [--email | --device] | logout | sync [status|now|resolve|undo]
   dino login openrouter|chatgpt     connect a provider in your browser
+  dino login <plan> [--base <url>]  connect a coding plan with its key, read from stdin
   dino claude-token [status|create|set|remove]
   dino power [status|setup|remove]  keep agents running with the lid closed
   dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]
@@ -869,9 +870,11 @@ fn dino() -> anyhow::Result<()> {
         Some("init") => return shell::init(cli.get(1).map(String::as_str)),
         Some("shell") => return shell::run(&cli[1..]),
         Some("login") if matches!(cli.get(1).map(String::as_str), Some("openrouter" | "chatgpt")) => return cmd_login(cli.get(1).map(String::as_str)),
+        Some("login") if cli.get(1).is_some_and(|p| plan_id(p).is_some()) => return cmd_login_plan(&cli[1..]),
         Some("login") => return account::login(&cli[1..]),
         Some("logout") => {
             let Some(provider) = cli.get(1).cloned() else { return account::logout() };
+            let provider = plan_id(&provider).unwrap_or(provider);
             done(client::request(&Request::DisconnectProvider { provider: provider.clone() })?)?;
             say(&format!("Disconnected {}.", printable(&provider)));
             return Ok(());
@@ -1660,6 +1663,33 @@ fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
         }
     }
     anyhow::bail!("gave up waiting for the browser")
+}
+
+/// The provider id of coding plan `name` (`zai` or `plan-zai`), if it is one.
+fn plan_id(name: &str) -> Option<String> {
+    let id = if name.starts_with(dino_core::plans::PREFIX) { name.to_string() } else { format!("{}{name}", dino_core::plans::PREFIX) };
+    dino_core::plans::preset(&id).map(|_| id)
+}
+
+/// Connect a coding plan with its key, read from stdin so it's never on a command line; the
+/// generic entry takes `--base <url>` too.
+fn cmd_login_plan(args: &[String]) -> anyhow::Result<()> {
+    let id = plan_id(&args[0]).ok_or_else(unexpected)?;
+    let base = match &args[1..] {
+        [flag, url] if flag == "--base" => Some(url.clone()),
+        [] => None,
+        _ => anyhow::bail!("usage: dino login {} [--base <url>] < key", args[0]),
+    };
+    let preset = dino_core::plans::preset(&id).ok_or_else(unexpected)?;
+    anyhow::ensure!(base.is_some() || preset.id != dino_core::plans::OTHER, "the generic entry needs its base URL: dino login other --base <url> < key");
+    if out::tty() {
+        eprintln!("Paste {}'s API key, then press Return and Ctrl-D:", preset.name);
+    }
+    let mut key = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut key)?;
+    done(client::request(&Request::ConnectPlan { plan: id, key, base })?)?;
+    say(&format!("Connected {}. dino keeps its key on this Mac and never shows it.", preset.name));
+    Ok(())
 }
 
 /// Fan-outs: each group's prompt, then how each of its agents is doing and what it changed.

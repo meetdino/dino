@@ -1,5 +1,5 @@
-//! Where models come from besides the agents' own accounts: OpenRouter, and model servers running
-//! on this Mac (Ollama, LM Studio, llama.cpp, vLLM). What each one serves and what each model can
+//! Where models come from besides the agents' own accounts: OpenRouter, model servers running
+//! on this Mac (Ollama, LM Studio, llama.cpp, vLLM), and coding plans (`crate::plans`). What each one serves and what each model can
 //! do is read from the provider itself; dino keeps no list of its own. This is the pure half:
 //! shapes and parsers. dinod fetches.
 
@@ -43,7 +43,7 @@ impl Format {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(default)]
 pub struct ProviderInfo {
-    /// "openrouter", "ollama", "lmstudio", "llamacpp", "vllm".
+    /// "openrouter", "ollama", "lmstudio", "llamacpp", "vllm", "plan-zai".
     pub id: String,
     pub name: String,
     /// Under which the formats' paths are served, e.g. `https://openrouter.ai/api`.
@@ -62,6 +62,22 @@ pub struct ProviderInfo {
     pub account: Option<Account>,
     /// Why it isn't usable, when it isn't.
     pub error: Option<String>,
+    /// A coding plan: connected with a pasted key.
+    pub plan: Option<PlanInfo>,
+}
+
+/// What Settings shows for a coding plan, from its preset (`crate::plans::Preset`).
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct PlanInfo {
+    pub blurb: Option<String>,
+    /// Where its URLs come from.
+    pub docs: String,
+    pub keys_page: Option<String>,
+    pub terms: Option<String>,
+    /// The generic entry: it takes a base URL too.
+    pub custom: bool,
+    pub models_note: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -260,12 +276,14 @@ pub struct ProviderRoute {
 }
 
 /// Where dino's proxy serves `provider`, under `/s/<session>/`: OpenRouter at `or`, the ChatGPT
-/// plan at `siwc`, the free tier at `free`, a model server on this Mac at `local/<id>`.
+/// plan at `siwc`, the free tier at `free`, a coding plan at `plan/<id>`, a model server on this
+/// Mac at `local/<id>`.
 pub fn route_path(provider: &str) -> String {
     match provider {
         "openrouter" => "or".into(),
         "chatgpt" => "siwc".into(),
         "free" => "free".into(),
+        p if p.starts_with(crate::plans::PREFIX) => format!("plan/{}", &p[crate::plans::PREFIX.len()..]),
         local => format!("local/{local}"),
     }
 }
@@ -334,6 +352,7 @@ mod tests {
         assert_eq!(route_path("openrouter"), "or");
         assert_eq!(route_path("chatgpt"), "siwc");
         assert_eq!(route_path("ollama"), "local/ollama");
+        assert_eq!(route_path("plan-zai"), "plan/zai");
         use Format::*;
         assert_eq!(pick_format(&[Anthropic, Chat], &[Chat, Responses]), Some(Chat));
         assert_eq!(pick_format(&[Responses], &[Anthropic, Chat]), None);

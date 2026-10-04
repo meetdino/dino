@@ -1,4 +1,5 @@
-//! Where models come from, as dinod last looked: OpenRouter and model servers on this Mac. Asked
+//! Where models come from, as dinod last looked: OpenRouter, model servers on this Mac and coding
+//! plans. Asked
 //! in the background and kept; an IPC request only ever reads what's kept, and at most starts a
 //! fetch. Everything about a model is what its provider says (`dino_core::providers`).
 
@@ -9,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use dino_core::compat::Compat;
 use dino_core::ipc::ModelRow;
-use dino_core::providers::{self, Format, ProviderInfo, ProviderModel};
+use dino_core::plans::{self, Preset};
+use dino_core::providers::{self, Format, PlanInfo, ProviderInfo, ProviderModel};
 use serde_json::Value;
 
 pub const OPENROUTER_KEY: &str = "OPENROUTER_API_KEY";
@@ -64,9 +66,16 @@ pub fn start() {
 /// Every provider, local ones whether or not they run.
 pub fn list() -> Vec<ProviderInfo> {
     let c = cache().lock().unwrap();
-    let mut out: Vec<ProviderInfo> = ["openrouter", "chatgpt"].into_iter().chain(LOCAL.iter().map(|l| l.0)).filter_map(|id| c.providers.get(id).map(|(_, p)| p.clone())).collect();
+    let plans: Vec<String> = plans::presets().iter().map(Preset::provider_id).collect();
+    let ids = ["openrouter", "chatgpt"].into_iter().chain(LOCAL.iter().map(|l| l.0)).chain(plans.iter().map(String::as_str));
+    let mut out: Vec<ProviderInfo> = ids.filter_map(|id| c.providers.get(id).map(|(_, p)| p.clone())).collect();
     if out.is_empty() {
-        out = [openrouter_bare(), chatgpt_bare()].into_iter().chain(LOCAL.iter().filter_map(|(id, _, _)| dino_proxy::local::runtime(id).map(|(name, base)| local_bare(id, name, base)))).collect();
+        let keys = dino_core::load_keys();
+        out = [openrouter_bare(), chatgpt_bare()]
+            .into_iter()
+            .chain(LOCAL.iter().filter_map(|(id, _, _)| dino_proxy::local::runtime(id).map(|(name, base)| local_bare(id, name, base))))
+            .chain(plans::presets().iter().map(|p| plan_bare(p, &keys)))
+            .collect();
     }
     out
 }
@@ -91,7 +100,7 @@ pub fn rows(id: &str) -> (Vec<ModelRow>, bool, Option<String>) {
 
 /// What `id` serves as last fetched; a stale or missing list is asked for again, off this thread.
 fn models(id: &str) -> (Vec<ProviderModel>, bool, Option<String>) {
-    let every = if matches!(id, "openrouter" | "chatgpt") { HOSTED_EVERY } else { LOCAL_EVERY };
+    let every = if matches!(id, "openrouter" | "chatgpt") || id.starts_with(plans::PREFIX) { HOSTED_EVERY } else { LOCAL_EVERY };
     let mut c = cache().lock().unwrap();
     let (models, error, stale) = match c.models.get(id) {
         Some(f) => (f.models.clone(), f.error.clone(), f.at.elapsed() >= every),
@@ -185,6 +194,193 @@ pub fn refresh(now: bool) {
             cache().lock().unwrap().models.remove(*id);
         }
     }
+
+    // Coding plans: connected while the key store has a key for them. What they serve is what
+    // their docs say; the generic entry is asked, once per URL and key.
+    for preset in plans::presets() {
+        let mut p = plan_bare(preset, &keys);
+        let id = p.id.clone();
+        let old = cache().lock().unwrap().providers.get(&id).map(|(_, p)| p.clone());
+        p.error = old.as_ref().filter(|o| o.connected == p.connected).and_then(|o| o.error.clone());
+        if preset.id == plans::OTHER && p.connected {
+            let asked = old.filter(|o| o.connected && o.base == p.base && !o.formats.is_empty() && !now);
+            p.formats = match asked {
+                Some(o) => o.formats,
+                None => plan_route(preset, &keys).map(|r| probe_plan(&r)).unwrap_or_default(),
+            };
+            if p.formats.is_empty() && p.error.is_none() {
+                p.error = Some(format!("Nothing at {} answered as Anthropic Messages or the OpenAI API", p.base));
+            }
+        }
+        if !p.connected {
+            cache().lock().unwrap().models.remove(&id);
+        }
+        store(p);
+    }
+}
+
+/// A coding plan as Settings shows it, before anything is asked of it.
+fn plan_bare(preset: &Preset, keys: &HashMap<String, String>) -> ProviderInfo {
+    let other = preset.id == plans::OTHER;
+    let url = keys.get(plans::OTHER_URL_KEY).filter(|u| !u.is_empty());
+    let resolved = if other { url.map(|u| Preset::other(u)) } else { Some(preset.clone()) };
+    let connected = keys.get(&preset.key_name()).is_some_and(|k| !k.is_empty()) && resolved.is_some();
+    ProviderInfo {
+        id: preset.provider_id(),
+        name: resolved.filter(|_| connected).map_or_else(|| preset.name.clone(), |p| p.name),
+        base: if other { url.cloned().unwrap_or_default() } else { preset.anthropic.clone().or(preset.openai.clone()).unwrap_or_default() },
+        formats: if other { vec![] } else { preset.formats() },
+        connected,
+        key: Some(preset.key_name()),
+        plan: Some(PlanInfo {
+            blurb: preset.blurb.clone(),
+            docs: preset.docs.clone(),
+            keys_page: preset.keys_page.clone(),
+            terms: preset.terms.clone(),
+            custom: other,
+            models_note: preset.models_note.clone(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// Coding plan `preset` as dino's proxy serves it, with its key, if it has one.
+fn plan_route(preset: &Preset, keys: &HashMap<String, String>) -> Option<dino_proxy::plan::Plan> {
+    let key = keys.get(&preset.key_name()).filter(|k| !k.is_empty() && !plans::is_subscription_token(k))?;
+    let p = if preset.id == plans::OTHER { Preset::other(keys.get(plans::OTHER_URL_KEY).filter(|u| !u.is_empty())?) } else { preset.clone() };
+    Some(dino_proxy::plan::Plan { name: p.name, anthropic: p.anthropic, openai: p.openai, key: key.clone() })
+}
+
+/// Every connected coding plan, by preset id, for the proxy's `plan/<id>` routes.
+pub fn plan_routes(keys: &HashMap<String, String>) -> HashMap<String, dino_proxy::plan::Plan> {
+    plans::presets().iter().filter_map(|p| Some((p.id.clone(), plan_route(p, keys)?))).collect()
+}
+
+/// Where each format would be on `plan`, and the headers its key goes in.
+fn plan_request(plan: &dino_proxy::plan::Plan, f: Format) -> Option<(String, reqwest::header::HeaderMap)> {
+    let url = match f {
+        Format::Anthropic => format!("{}/v1/messages", plan.anthropic.as_deref()?),
+        Format::Chat => format!("{}/chat/completions", plan.openai.as_deref()?),
+        Format::Responses => format!("{}/responses", plan.openai.as_deref()?),
+    };
+    Some((url, plan_headers(plan, f == Format::Anthropic)))
+}
+
+fn plan_headers(plan: &dino_proxy::plan::Plan, anthropic: bool) -> reqwest::header::HeaderMap {
+    let mut h = reqwest::header::HeaderMap::new();
+    if let Ok(v) = format!("Bearer {}", plan.key).parse() {
+        h.insert(reqwest::header::AUTHORIZATION, v);
+    }
+    if anthropic {
+        if let Ok(v) = plan.key.parse() {
+            h.insert("x-api-key", v);
+        }
+        h.insert("anthropic-version", reqwest::header::HeaderValue::from_static("2023-06-01"));
+    }
+    h
+}
+
+/// Which formats the generic entry serves: each asked once with an empty body, with its key (so
+/// a server that checks keys first answers for the route, not the key).
+fn probe_plan(plan: &dino_proxy::plan::Plan) -> Vec<Format> {
+    Format::ALL
+        .into_iter()
+        .filter(|f| {
+            let Some((url, headers)) = plan_request(plan, *f) else { return false };
+            let status = http().post(url).headers(headers).header("content-type", "application/json").body("{}").timeout(Duration::from_secs(5)).send().map(|r| r.status().as_u16()).unwrap_or(0);
+            providers::serves(status)
+        })
+        .collect()
+}
+
+/// Coding plan `id`'s models: its own list when it has one, else the ones its docs name, saying
+/// so. A key it turns down is an error.
+fn plan_models(id: &str) -> Result<(Vec<ProviderModel>, Option<String>), String> {
+    let preset = plans::preset(id).ok_or_else(|| format!("no provider {id}"))?;
+    let keys = dino_core::load_keys();
+    let plan = plan_route(preset, &keys).ok_or_else(|| format!("{} has no key", preset.name))?;
+    let listed = match preset.list.as_deref() {
+        Some(kind) => list_plan(&plan, kind),
+        None => Err(None),
+    };
+    let documented = plans::documented_models(preset);
+    match listed {
+        Ok(v) => {
+            let models = plans::listed_models(&v, id, preset.tools);
+            if models.is_empty() && !documented.is_empty() {
+                return Ok((documented, Some(format!("{} listed no models: these are the ones its docs name", preset.name))));
+            }
+            Ok((models, None))
+        }
+        Err(Some(refused)) => Err(refused),
+        Err(None) if !documented.is_empty() => Ok((documented, Some(format!("{} has no model list dino can read: these are the ones its docs name", preset.name)))),
+        Err(None) => Err(format!("{} has no model list dino can read", preset.name)),
+    }
+}
+
+/// `plan`'s model list (`kind`: "openai" or "anthropic"). `Err(Some(why))`: it turned the key
+/// down; `Err(None)`: there's no list to be had.
+fn list_plan(plan: &dino_proxy::plan::Plan, kind: &str) -> Result<Value, Option<String>> {
+    let (url, anthropic) = match (kind, &plan.openai, &plan.anthropic) {
+        ("openai", Some(base), _) => (format!("{base}/models"), false),
+        (_, _, Some(base)) => (format!("{base}/v1/models"), true),
+        _ => return Err(None),
+    };
+    let r = http().get(url).headers(plan_headers(plan, anthropic)).timeout(Duration::from_secs(10)).send().map_err(|_| None)?;
+    let status = r.status().as_u16();
+    let text = r.text().unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    // Z.ai answers some failures with a 200 whose body says so.
+    let failed = v["success"] == Value::Bool(false);
+    let said = v["error"]["message"].as_str().or(v["msg"].as_str()).or(v["message"].as_str()).map(String::from).unwrap_or_else(|| text.trim().chars().take(200).collect());
+    if matches!(status, 401 | 403) || (failed && said.to_lowercase().contains("authenticat")) {
+        return Err(Some(format!("{} didn't take this key ({status}: {said}). Add it again", plan.name)));
+    }
+    if !(200..300).contains(&status) || failed || !v["data"].is_array() {
+        return Err(None);
+    }
+    Ok(v)
+}
+
+/// Connect coding plan `id` (`plan-zai`) with `key`, and `base` for the generic entry: checked
+/// with the plan when it has a list to ask, then kept in the key store. `save` stores one key.
+pub fn connect_plan(id: &str, key: &str, base: Option<&str>, save: impl Fn(&str, Option<&str>) -> anyhow::Result<()>) -> Result<(), String> {
+    let preset = plans::preset(id).ok_or_else(|| format!("dino doesn't know a coding plan called {id}"))?;
+    let key = plans::check_key(key)?;
+    let other = preset.id == plans::OTHER;
+    let base = if other { Some(plans::check_base(base.unwrap_or_default())?) } else { None };
+    let mut keys = HashMap::from([(preset.key_name(), key.clone())]);
+    if let Some(b) = &base {
+        keys.insert(plans::OTHER_URL_KEY.into(), b.clone());
+    }
+    let plan = plan_route(preset, &keys).ok_or("That key can't be used")?;
+    if let Some(kind) = preset.list.as_deref()
+        && let Err(Some(refused)) = list_plan(&plan, kind)
+    {
+        return Err(refused);
+    }
+    if let Some(b) = &base {
+        save(plans::OTHER_URL_KEY, Some(b)).map_err(|e| e.to_string())?;
+    }
+    save(&preset.key_name(), Some(&key)).map_err(|e| e.to_string())?;
+    let mut c = cache().lock().unwrap();
+    c.models.remove(id);
+    if let Some((_, p)) = c.providers.get_mut(id) {
+        p.error = None;
+    }
+    Ok(())
+}
+
+/// Disconnect coding plan `id`: its key (and the generic entry's URL) leave the key store.
+pub fn disconnect_plan(id: &str, save: impl Fn(&str, Option<&str>) -> anyhow::Result<()>) -> anyhow::Result<()> {
+    let preset = plans::preset(id).ok_or_else(|| anyhow::anyhow!("dino doesn't know a coding plan called {id}"))?;
+    save(&preset.key_name(), None)?;
+    if preset.id == plans::OTHER {
+        save(plans::OTHER_URL_KEY, None)?;
+    }
+    forget(id);
+    cache().lock().unwrap().models.remove(id);
+    Ok(())
 }
 
 fn store(p: ProviderInfo) {
@@ -427,6 +623,15 @@ fn fetch_models(id: &str) {
         "lmstudio" => get(&format!("{base}/api/v0/models")).map(|v| providers::lmstudio_models(&v)),
         "llamacpp" => get(&format!("{base}/v1/models")).map(|m| providers::llamacpp_models(&m, &get(&format!("{base}/props")).unwrap_or(Value::Null))),
         "vllm" => get(&format!("{base}/v1/models")).map(|v| providers::vllm_models(&v)),
+        id if id.starts_with(plans::PREFIX) => match plan_models(id) {
+            Ok((models, note)) => {
+                let mut c = cache().lock().unwrap();
+                c.busy.remove(id);
+                c.models.insert(id.to_string(), Fetched { at: Instant::now(), models, error: note });
+                return;
+            }
+            Err(e) => Err(e),
+        },
         _ => Err(format!("no provider {id}")),
     };
     let mut c = cache().lock().unwrap();

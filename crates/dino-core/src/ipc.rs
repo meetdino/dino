@@ -197,6 +197,10 @@ pub enum Request {
     ConnectProvider { provider: String },
     /// Forget the key dino got for it.
     DisconnectProvider { provider: String },
+    /// Connect coding plan `plan` (`plan-zai`) with the key the user pasted, and for the generic
+    /// entry (`plan-other`) its base URL. dinod checks the key with the plan when it can, keeps
+    /// it in the key store (which never syncs) and never shows it again.
+    ConnectPlan { plan: String, key: String, base: Option<String> },
     /// Keeping agents running with the lid closed: `status`, `setup` (installs the one-time
     /// permission, asking for an administrator's password) or `remove`. Replies `Power`.
     Power { action: String },

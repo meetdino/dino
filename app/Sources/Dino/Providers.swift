@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Where models come from besides the agents' own accounts: OpenRouter and model servers on this
-/// Mac, as dinod last looked (see `crates/dino-core/src/providers.rs`).
+/// Where models come from besides the agents' own accounts: OpenRouter, model servers on this
+/// Mac and coding plans, as dinod last looked (see `crates/dino-core/src/providers.rs`).
 struct ProviderInfo: Codable, Identifiable, Equatable {
     let id: String
     let name: String
@@ -15,6 +15,20 @@ struct ProviderInfo: Codable, Identifiable, Equatable {
     let version: String?
     let account: ProviderAccount?
     let error: String?
+    /// A coding plan, connected with a pasted key; nil for the others (and from an older dinod).
+    let plan: PlanInfo?
+}
+
+/// A coding plan's preset, as dinod gives it (see `crates/dino-core/src/plans.rs`).
+struct PlanInfo: Codable, Equatable {
+    let blurb: String?
+    /// Where its URLs come from.
+    let docs: String
+    let keys_page: String?
+    let terms: String?
+    /// The generic entry: it takes a base URL too.
+    let custom: Bool
+    let models_note: String?
 }
 
 struct ProviderAccount: Codable, Equatable {
@@ -89,6 +103,12 @@ extension DinoConnection {
     fileprivate func disconnect(_ provider: String) throws {
         _ = try send(["type": "disconnect_provider", "provider": provider])
     }
+
+    /// Connect coding plan `plan` with `key` (and the generic entry's `base`): dinod checks it with
+    /// the plan when it can and keeps it; it's never sent back.
+    fileprivate func connectPlan(_ plan: String, key: String, base: String?) throws {
+        _ = try send(["type": "connect_plan", "plan": plan, "key": key, "base": base.map { $0 as Any } ?? NSNull()])
+    }
 }
 
 /// Settings → Models & Providers' view of dinod: asks now and then while the pane is open.
@@ -101,6 +121,36 @@ final class ProvidersStore: ObservableObject {
     @Published var error: String?
     /// Providers whose sign-in page is open in the browser.
     @Published var connecting: Set<String> = []
+    /// The coding plan whose key is being checked and saved.
+    @Published var savingPlan: String?
+    /// Why a coding plan's key wasn't taken, by plan.
+    @Published var planErrors: [String: String] = [:]
+
+    /// Connect coding plan `id`; `done` runs once it's connected.
+    func connectPlan(_ id: String, key: String, base: String?, done: @escaping @MainActor () -> Void) {
+        if savingPlan != id { savingPlan = id }
+        if planErrors[id] != nil { planErrors[id] = nil }
+        Task.detached {
+            let failure: String?
+            do {
+                try DinoConnection(path: DinoEnvironment.socketPath).connectPlan(id, key: key, base: base)
+                failure = nil
+            } catch DinoError.daemon(let message) {
+                failure = message
+            } catch {
+                failure = "\(error)"
+            }
+            await MainActor.run {
+                if self.savingPlan != nil { self.savingPlan = nil }
+                if let failure {
+                    self.planErrors[id] = failure
+                } else {
+                    done()
+                    self.load()
+                }
+            }
+        }
+    }
 
     func connect(_ id: String) {
         connecting.insert(id)
@@ -162,6 +212,8 @@ struct ProvidersPane: View {
     @State private var worksIn = ""
     @State private var freeOnly = false
     @State private var localOnly = false
+    /// The coding plan whose key is being pasted.
+    @State private var editingPlan: String?
 
     /// How many rows to draw before asking for a narrower search.
     private static let shown = 150
@@ -189,7 +241,7 @@ struct ProvidersPane: View {
         Form {
             RoutingSections()
             Section {
-                ForEach(store.providers) { p in
+                ForEach(store.providers.filter { $0.plan == nil }) { p in
                     ProviderRow(provider: p, count: store.models[p.id]?.count, loading: store.loading.contains(p.id), error: store.errors[p.id] ?? p.error,
                                 connecting: store.connecting.contains(p.id), connect: { store.connect(p.id) }, disconnect: { store.disconnect(p.id) })
                 }
@@ -198,6 +250,7 @@ struct ProvidersPane: View {
             } footer: {
                 Footnote("Connect opens OpenRouter's sign-in in your browser; the key it makes is yours (see openrouter.ai/keys), stays on this Mac, and dino never shows it. Sign in with ChatGPT lets agents in dino use your ChatGPT plan, up to the weekly cap you set for dino in ChatGPT; nothing is billed beyond it. dino reads model servers on this Mac at their usual ports, and asks every provider which APIs it serves and what its models can do: nothing here comes from a list dino keeps.")
             }
+            CodingPlans(store: store, editing: $editingPlan)
             Section {
                 HStack(spacing: 8) {
                     TextField("Search models", text: $search, prompt: Text("Search models"))
@@ -249,6 +302,8 @@ private struct ProviderRow: View {
     let connecting: Bool
     let connect: () -> Void
     let disconnect: () -> Void
+    /// A coding plan's: paste another key.
+    var changeKey: (() -> Void)?
     @State private var confirming = false
 
     var body: some View {
@@ -272,6 +327,9 @@ private struct ProviderRow: View {
                 if connecting {
                     ProgressView().controlSize(.small).help("Finish connecting in your browser")
                 } else if provider.connected {
+                    if let changeKey {
+                        Button("Change Key…", action: changeKey)
+                    }
                     if chatgpt, let cap = URL(string: "https://chatgpt.com/#settings/Usage") {
                         Link("Weekly cap…", destination: cap)
                             .help("Set how much of your ChatGPT plan dino may use each week, in ChatGPT → Settings → Usage")
@@ -287,7 +345,7 @@ private struct ProviderRow: View {
         .confirmationDialog(chatgpt ? "Sign out of ChatGPT?" : "Disconnect \(provider.name)?", isPresented: $confirming) {
             Button(chatgpt ? "Sign Out" : "Disconnect", role: .destructive, action: disconnect)
         } message: {
-            Text(chatgpt ? "dino forgets its sign-in. Agents stop using your ChatGPT plan through dino." : "dino forgets the key. It stays on your \(provider.name) account until you delete it there.")
+            Text(chatgpt ? "dino forgets its sign-in. Agents stop using your ChatGPT plan through dino." : "dino forgets the key. It stays on your \(provider.plan?.custom == true ? "provider's" : provider.name) account until you delete it there.")
         }
     }
 
@@ -308,6 +366,7 @@ private struct ProviderRow: View {
         if provider.local {
             parts.append(provider.connected ? URL(string: provider.base)?.host.map { "\($0):\(URL(string: provider.base)?.port ?? 0)" } ?? provider.base : "Looked for at \(provider.base.replacingOccurrences(of: "http://", with: ""))")
         }
+        if provider.plan?.custom == true, !provider.base.isEmpty { parts.append(provider.base) }
         if let v = provider.version { parts.append("Version \(v)") }
         if let count { parts.append("\(count) model\(count == 1 ? "" : "s")") }
         if !provider.formats.isEmpty {
@@ -318,6 +377,100 @@ private struct ProviderRow: View {
             parts.append(a.limit.map { String(format: "$%.2f of $%.2f used", usage, $0) } ?? String(format: "$%.2f used", usage))
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// Coding plans: the connected ones, each with its key to change or forget, and the others to add.
+private struct CodingPlans: View {
+    @ObservedObject var store: ProvidersStore
+    @Binding var editing: String?
+
+    var body: some View {
+        let plans = store.providers.filter { $0.plan != nil }
+        if !plans.isEmpty {
+            Section {
+                ForEach(plans.filter(\.connected)) { p in
+                    ProviderRow(provider: p, count: store.models[p.id]?.count, loading: store.loading.contains(p.id), error: store.errors[p.id] ?? p.error,
+                                connecting: false, connect: {}, disconnect: { store.disconnect(p.id) }, changeKey: { editing = p.id })
+                    if editing == p.id { PlanEditor(provider: p, store: store) { editing = nil } }
+                }
+                if let p = plans.first(where: { $0.id == editing && !$0.connected }) {
+                    PlanEditor(provider: p, store: store) { editing = nil }
+                }
+                let unconnected = plans.filter { !$0.connected }
+                if !unconnected.isEmpty && editing == nil {
+                    Menu("Add a Coding Plan") {
+                        ForEach(unconnected) { p in Button(p.name) { editing = p.id } }
+                    }
+                    .fixedSize()
+                    .help("Use a coding plan's key: any agent dino runs can then use the plan")
+                }
+            } header: {
+                Text("Coding plans")
+            } footer: {
+                Footnote("Paste a plan's key and any agent dino runs can use the plan, in the API it speaks: Claude Code over Anthropic Messages, Codex over the Responses API where the plan serves it. Keys stay in dino's key store on this Mac and never sync. When a plan's limit is reached, the agent gets the plan's own answer and dino says so; it never switches to other billing. A Claude subscription is for Claude Code alone, so it can't be added here.")
+            }
+        }
+    }
+}
+
+/// Pasting a coding plan's key (and the generic entry's base URL).
+private struct PlanEditor: View {
+    let provider: ProviderInfo
+    @ObservedObject var store: ProvidersStore
+    let close: () -> Void
+    @State private var key = ""
+    @State private var base = ""
+
+    private var plan: PlanInfo? { provider.plan }
+    private var saving: Bool { store.savingPlan == provider.id }
+    private var ready: Bool {
+        !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (plan?.custom != true || !base.trimmingCharacters(in: .whitespaces).isEmpty)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(provider.connected ? "A new key for \(provider.name)" : provider.name).font(.headline)
+            if let blurb = plan?.blurb { Text(blurb).font(.callout).foregroundStyle(.secondary) }
+            if let terms = plan?.terms { Text(terms).font(.callout).foregroundStyle(.secondary) }
+            HStack(spacing: 14) {
+                if let page = plan?.keys_page.flatMap(URL.init(string:)) { Link("Get a key…", destination: page) }
+                if let docs = plan.flatMap({ URL(string: $0.docs) }), !(plan?.docs.isEmpty ?? true) { Link("Its docs", destination: docs) }
+            }
+            .font(.callout)
+            if plan?.custom == true {
+                TextField("Base URL", text: $base, prompt: Text("https://api.example.com/anthropic, or http://127.0.0.1:11434"))
+                    .textFieldStyle(.roundedBorder)
+                    .onAppear { if base.isEmpty { base = provider.base } }
+            }
+            SecureField("API key", text: $key, prompt: Text("Paste the plan's API key"))
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(connect)
+            if let e = store.planErrors[provider.id] {
+                Text(e).font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                if saving { ProgressView().controlSize(.small).help("Checking the key with \(provider.name)") }
+                Button("Cancel") {
+                    if store.planErrors[provider.id] != nil { store.planErrors[provider.id] = nil }
+                    close()
+                }
+                Button(provider.connected ? "Save" : "Connect", action: connect)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!ready || saving)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func connect() {
+        guard ready, !saving else { return }
+        let base = plan?.custom == true ? self.base.trimmingCharacters(in: .whitespaces) : nil
+        store.connectPlan(provider.id, key: key.trimmingCharacters(in: .whitespacesAndNewlines), base: base) {
+            key = ""
+            close()
+        }
     }
 }
 
