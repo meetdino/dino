@@ -1,5 +1,5 @@
 import AppKit
-import GhosttyTerminal
+import DinoGhostty
 import SwiftUI
 
 /// Two sessions in one view: an agent and a shell next to it, or two agents. The pair belongs to
@@ -42,8 +42,9 @@ extension DinoModel {
     /// The session you're looking at, if it's a session (not a folder or a fan-out).
     var selectedSession: SessionInfo? { sessions.first { $0.id == selected } }
 
-    /// ⌘D: a shell in the selected session's folder, next to it.
-    func splitWithShell(vertical: Bool) {
+    /// ⌘D: a shell in the selected session's folder, next to it; `leading`: before it (left or
+    /// above), as Ghostty's `new_split:left` and `:up`.
+    func splitWithShell(vertical: Bool, leading: Bool = false) {
         guard let s = selectedSession else { return }
         let cwd = s.here ?? folder.path
         // A shell beside a session on an SSH host runs on that host too.
@@ -57,7 +58,7 @@ extension DinoModel {
                 }.value
                 guard let id = resp.id else { return }
                 awaited.insert(id)
-                pair(s.id, id, vertical: vertical, helper: id)
+                pair(leading ? id : s.id, leading ? s.id : id, vertical: vertical, helper: id)
                 pendingSelect = id
             } catch {
                 self.error = error.localizedDescription
@@ -108,9 +109,11 @@ extension DinoModel {
         splits.append(Split(first: a, second: b, vertical: vertical, helper: helper))
     }
 
-    /// ⌘W in a split: the pane goes, its session keeps running unless it was the split's own shell.
+    /// ⌘W in a split: the pane goes, its session keeps running unless it was the split's own shell,
+    /// which asks first when something runs in it.
     func closePane(_ id: String) {
         guard let s = splits.first(where: { $0.contains(id) }) else { return }
+        if s.helper == id, let shell = sessions.first(where: { $0.id == id }), !confirmEnding([shell], in: "pane") { return }
         splits.removeAll { $0 == s }
         if s.helper == id { kill(id) }
         select(s.other(id))
@@ -293,7 +296,7 @@ struct SessionMenu: View {
             Button("Archive") { model.archive(session.id) }
                 .help("Stop it and keep it in Archived, to pick up again later")
         }
-        Button("Close Session", role: .destructive) { model.kill(session.id) }
+        Button("Close Session", role: .destructive) { model.closeSession(session.id) }
         Divider()
         Button("Delete…", role: .destructive) { model.confirmDelete(session.id) }
             .help(session.agent_id == "shell" ? "Close it and remove it from dino" : "Stop it, remove it from dino, and remove the worktree dino made for it")
@@ -379,19 +382,15 @@ extension DinoModel {
         }
     }
 
-    /// ⌘W on a tab. A shell's tab ends the shell, asking first if something is running in it (an
-    /// agent typed into it included). An agent's tab only closes: the agent keeps running in the
-    /// sidebar, where archiving it is.
+    /// ⌘W on a tab. A shell's tab ends the shell (and a shell beside it in a split), asking first
+    /// when something runs in one, as Ghostty's `confirm-close-surface` says. An agent's tab only
+    /// closes: the agent keeps running in the sidebar, where archiving it is.
     func closeTab(_ s: SessionInfo) {
         let shell = s.agent_id == "shell"
-        if shell, !s.exited, s.running == true || s.inside != nil {
-            let what = s.inside.map { "\(launcherLabel($0.agent)) is running in it" } ?? "A command is still running in it"
-            let alert = NSAlert()
-            alert.messageText = "Close \(tabName(s))?"
-            alert.informativeText = "\(what), and closing the tab ends it."
-            alert.addButton(withTitle: "Close")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if shell {
+            let members = splits.first(where: { $0.contains(s.id) }).map { [$0.first, $0.second] } ?? [s.id]
+            let ending = members.compactMap { m in sessions.first { $0.id == m && $0.agent_id == "shell" } }
+            guard confirmEnding(ending, in: "tab") else { return }
         }
         dropTab(s.id, ending: shell)
     }

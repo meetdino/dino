@@ -1,5 +1,5 @@
 import AppKit
-import GhosttyTerminal
+import DinoGhostty
 import SwiftUI
 
 @main
@@ -145,7 +145,7 @@ struct DinoApp: App {
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                     .disabled(!model.canArchive(model.selectedSession?.id ?? ""))
                 Button("Show Archived") { model.showArchived() }
-                Button("Close Session") { if let id = model.selected { model.kill(id) } }
+                Button("Close Session") { if let id = model.selected { model.closeSession(id) } }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
                     .disabled(model.selected == nil)
                 // No key: ⌘⌫ is the terminal's (Ghostty deletes to the start of the line with it).

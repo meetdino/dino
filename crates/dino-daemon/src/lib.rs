@@ -136,6 +136,8 @@ struct Session {
 #[derive(Default)]
 struct Inside {
     fg: Option<u32>,
+    /// `fg`'s process name, as of `checked`.
+    fg_name: Option<String>,
     checked: Option<Instant>,
     found: Option<FoundSession>,
     /// The shell's own title from before the command started, put back when an agent leaves.
@@ -1322,6 +1324,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Some(_) => Response::Error { message: format!("{id} has exited") },
                 None => Response::Error { message: format!("no session {id}") },
             },
+            Request::Foreground { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                Some(s) => Response::Foreground { foreground: foreground_now(&s) },
+                None => Response::Error { message: format!("no session {id}") },
+            },
             Request::ShellOutput { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
                 Some(s) => Response::ShellOutput { output: s.pane.shared.last_output.lock().unwrap().clone(), exit: *s.pane.shared.last_exit.lock().unwrap() },
                 None => Response::Error { message: format!("no session {id}") },
@@ -2293,7 +2299,7 @@ fn state(d: &Daemon) -> Response {
             let (context_tokens, context_limit) = context_use(s, &st);
             let label = s.label.lock().unwrap().clone();
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
-            let (inside, running, tmux) = {
+            let (inside, running, tmux, foreground) = {
                 let i = s.inside.lock().unwrap();
                 let tmux = i.tmux.as_ref().and_then(|t| t.1.as_ref()).map(|v| ipc::TmuxPane {
                     target: v.target.clone(),
@@ -2301,7 +2307,8 @@ fn state(d: &Daemon) -> Response {
                     busy: v.busy,
                     alerts: i.alerts.list.iter().cloned().collect(),
                 });
-                (i.found.clone(), i.fg.is_some() && i.tmux.is_none(), tmux)
+                let foreground = i.fg.zip(i.fg_name.clone()).map(|(pid, name)| ipc::ForegroundProcess { pid, name });
+                (i.found.clone(), i.fg.is_some() && i.tmux.is_none(), tmux, foreground)
             };
             let waiting = st.waiting();
             let serving = s.servers.lock().unwrap().clone();
@@ -2359,6 +2366,7 @@ fn state(d: &Daemon) -> Response {
                 tasks,
                 inside,
                 running,
+                foreground,
                 tmux,
                 shell_cwd: s.pane.shared.cwd.lock().unwrap().clone(),
                 last_exit: *s.pane.shared.last_exit.lock().unwrap(),
@@ -2813,6 +2821,17 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
     Ok(id)
 }
 
+/// What has session `s`'s terminal right now, asked of its pty, when it isn't the session's own
+/// program: what closing it would stop. Nothing for a session on an SSH host, whose foreground is
+/// on the other side.
+fn foreground_now(s: &Session) -> Option<ipc::ForegroundProcess> {
+    if s.host.is_some() || s.pane.is_exited() {
+        return None;
+    }
+    let fg = s.pane.foreground().filter(|fg| Some(*fg) != s.pane.pid())?;
+    Some(ipc::ForegroundProcess { pid: fg, name: dino_core::procinfo::name(fg).unwrap_or_default() })
+}
+
 /// Notice agents started by hand in dino's shells, and when they exit back to the prompt.
 fn watch_shells(d: &Daemon) {
     // Calls from an agent typed in a shell are written down while dinod still knows it's there.
@@ -2855,7 +2874,10 @@ fn watch_shells(d: &Daemon) {
         }
         let mut i = s.inside.lock().unwrap();
         let before = i.before.take();
-        *i = Inside { fg: Some(fg), checked: Some(Instant::now()), found, before, ..Inside::default() };
+        // Asked again at each look: a child the shell has forked is named for the shell until it
+        // execs the command.
+        let fg_name = dino_core::procinfo::name(fg);
+        *i = Inside { fg: Some(fg), fg_name, checked: Some(Instant::now()), found, before, ..Inside::default() };
     }
 }
 
@@ -2896,7 +2918,7 @@ fn follow_tmux(s: &Session, fg: u32) -> bool {
         let before = i.before.take().or_else(|| Some(s.pane.title()));
         // From here on: what rang before the client started isn't tmux's.
         let alerts = TmuxAlerts { bells, notices, ..TmuxAlerts::default() };
-        *i = Inside { fg: Some(fg), checked: Some(Instant::now()), found: None, before, tmux: None, alerts };
+        *i = Inside { fg: Some(fg), fg_name: dino_core::procinfo::name(fg), checked: Some(Instant::now()), found: None, before, tmux: None, alerts };
     }
     if let Some(v) = &view {
         // A bell: tmux says which windows rang. A notification only comes through from the pane
