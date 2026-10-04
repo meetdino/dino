@@ -515,7 +515,10 @@ struct Terminals: View {
             Color(nsColor: .textBackgroundColor).ignoresSafeArea()
             if let ref = model.shownSubagent, !model.daemonDown {
                 SubagentPane(ref: ref).id(ref)
-            } else if model.sessions.isEmpty || model.daemonDown || model.selected?.hasPrefix("dir:") == true || model.selected == nil {
+            } else if let run = model.archivedRun {
+                ArchivedRunPane(session: run).id(run.id)
+            } else if model.sessions.isEmpty || model.daemonDown || model.selected == nil
+                        || DinoModel.folderPath(model.selected) != nil || model.selected?.hasPrefix("run:") == true {
                 EmptyState()
             }
             GeometryReader { geo in
@@ -641,10 +644,10 @@ struct TerminalPane: View {
                 state.isSurfaceVisible = visible
                 // A new session, or the app opening, selects it before its pane exists: the
                 // request waits until the pane is in the window.
-                if focused { state.requestFocus() }
+                if focused, !model.selectingFromSidebarKeys { state.requestFocus() }
             }
             .onChange(of: visible) { _, v in state.isSurfaceVisible = v }
-            .onChange(of: focused) { _, f in if f { state.requestFocus() } }
+            .onChange(of: focused) { _, f in if f, !model.selectingFromSidebarKeys { state.requestFocus() } }
             // Clicking into the other half of a split selects that session.
             .onChange(of: state.isFocused) { _, f in
                 if f {
@@ -739,118 +742,149 @@ struct Sidebar: View {
     private var collapsed: Binding<Set<String>> {
         Binding(
             get: { Set(collapsedIDs.split(separator: "\n").map(String.init)) },
-            set: { collapsedIDs = $0.sorted().joined(separator: "\n") }
+            // Only a real change: a write of the same value redraws the whole sidebar.
+            set: {
+                let ids = $0.sorted().joined(separator: "\n")
+                if ids != collapsedIDs { collapsedIDs = ids }
+            }
         )
+    }
+
+    private var list: some View {
+        List(selection: Binding(get: { model.selected }, set: { tag in
+            // Rows outside "Agents" carry a `move:` tag: ask before handing that session over.
+            // Anything else that isn't a session (or deselecting) leaves the selection alone.
+            guard let tag else { return }
+            // Arrowed onto: the keyboard stays in the list. Clicked: the terminal takes it.
+            let keys = NSApp.currentEvent?.type == .keyDown
+            if tag.hasPrefix("tmux:") || tag.hasPrefix("move:") {
+                // Another terminal's agent: a click acts on it; arrowing past it only highlights
+                // it (Return acts, see primaryAction below), so no question pops up on the way.
+                if !keys { actOnElsewhere(tag) }
+            } else if tag.hasPrefix("task:") {
+                // A task's row shows what it did: a click opens its runs under it; arrowed onto, it
+                // waits for Return (primaryAction below). Edit is in its menu. After the table's own
+                // selection callback: rows coming and going from inside it is a reentrant update
+                // NSTableView can crash on.
+                let task = String(tag.dropFirst(5))
+                if !keys { DispatchQueue.main.async { model.toggleRuns(task) } }
+            } else if tag.hasPrefix("run:") {
+                model.openRun(String(tag.dropFirst(4)), keepKeyboard: keys)
+            } else {
+                model.select(tag, keepKeyboard: keys)
+            }
+        })) {
+            if filter == .archived {
+                ArchivedSection()
+            } else {
+                let narrowed = model.sidebarNarrowed
+                let tree = filter == .all && !narrowed
+                    ? SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups)
+                    : SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups) {
+                        filter.passes(model.status(of: $0)) && model.sidebarShows($0)
+                    }
+                // Headings are plain rows, not List section headers: when the sidebar's height
+                // changed (the usage panel, the filter bar) while sections came and went, the table
+                // tied a header to a row of another section and threw, quitting the app.
+                SidebarHeading(title: "Workspaces")
+                Group {
+                    // Shells live in the tabs: a folder with only those (or nothing) left in it
+                    // would be a workspace row with nothing under it.
+                    ForEach(tree.repos.filter { $0.worthShowing(here: model.folder.path) }) { node in
+                        RepoRows(node: node, filter: filter, collapsed: collapsed)
+                    }
+                    let remote = Dictionary(grouping: tree.unfiled.filter { $0.host != nil }) { $0.host ?? "" }
+                    ForEach(remote.keys.sorted(), id: \.self) { host in
+                        HostRows(host: host, sessions: remote[host] ?? [], collapsed: collapsed)
+                    }
+                    ForEach(tree.unfiled.filter { $0.host == nil }) { s in
+                        SessionRow(session: s, index: 0)
+                            .tag(s.id)
+                            .contextMenu { SessionMenu(session: s) }
+                    }
+                    if filter != .all || narrowed, tree.repos.isEmpty, tree.unfiled.isEmpty {
+                        let q = model.sidebarQuery.trimmingCharacters(in: .whitespaces)
+                        Text(!q.isEmpty ? "No session matches “\(q)”"
+                            : narrowed ? "No sessions here"
+                            : filter == .needsYou ? "Nothing needs you"
+                            : filter == .done ? "Nothing new has finished" : "No \(filter.label.lowercased()) sessions")
+                            .font(.callout).foregroundStyle(.tertiary)
+                    }
+                }
+                // Other terminals' sessions aren't dino's to sort by status.
+                if !model.elsewhere.isEmpty, filter == .all, !narrowed {
+                    SidebarHeading(title: "On this Mac")
+                    ForEach(model.elsewhere) { f in
+                        // In a tmux pane: a click shows it there (tmux keeps it); elsewhere it moves to dino.
+                        ElsewhereRow(session: f).tag(f.tmux != nil ? "tmux:\(f.id)" : "move:\(f.id)")
+                    }
+                }
+                if filter == .all, !narrowed {
+                    SidebarHeading(title: "Scheduled") {
+                        if !model.scheduled.isEmpty {
+                            Button { model.newTask() } label: { Image(systemName: "plus") }
+                                .buttonStyle(.plain)
+                                .help("New Scheduled Task")
+                                .accessibilityLabel("New Scheduled Task")
+                        }
+                    }
+                    ForEach(model.scheduled) { t in
+                        ScheduledRow(task: t).tag("task:\(t.id)")
+                        if model.openTasks.contains(t.id) {
+                            TaskRuns(task: t)
+                        }
+                    }
+                    if model.scheduled.isEmpty {
+                        Button { model.newTask() } label: {
+                            Label("Run a prompt on a schedule…", systemImage: "clock")
+                        }
+                        .buttonStyle(.plain)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        // Double-clicking a session renames it. The list's own double-click, not a gesture on
+        // the name: that swallowed the single click meant to select the row. The rows keep their
+        // own menus; this adds none.
+        .contextMenu(forSelectionType: String.self, menu: { _ in EmptyView() }, primaryAction: { tags in
+            if tags.count == 1, let tag = tags.first, tag.hasPrefix("tmux:") || tag.hasPrefix("move:") {
+                actOnElsewhere(tag)
+            } else if tags.count == 1, let tag = tags.first, tag.hasPrefix("task:") {
+                // Return; a click already opened it (see the selection above).
+                let task = String(tag.dropFirst(5))
+                if NSApp.currentEvent?.type == .keyDown { DispatchQueue.main.async { model.toggleRuns(task) } }
+            } else if tags.count == 1, let id = tags.first, model.sessions.contains(where: { $0.id == id }) {
+                model.renaming = Renaming(id: id, place: .sidebar)
+            }
+        })
+        // Not rebuilt when rows come or go (that replaced every row, and froze the window for
+        // up to seconds while agents made worktrees): rows keep unique tags and stable
+        // identities instead, so the list's own diff stays right.
+        .listStyle(.sidebar)
+    }
+
+    /// An agent running in another terminal: shown where tmux keeps it, or offered to move to dino.
+    private func actOnElsewhere(_ tag: String) {
+        if tag.hasPrefix("tmux:") {
+            if let f = model.elsewhere.first(where: { "tmux:\($0.id)" == tag }) { model.showInTmux(f) }
+        } else {
+            model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
+        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            List(selection: Binding(get: { model.selected }, set: { tag in
-                // Rows outside "Agents" carry a `move:` tag: ask before handing that session over.
-                // Anything else that isn't a session (or deselecting) leaves the selection alone.
-                guard let tag else { return }
-                if tag.hasPrefix("tmux:") {
-                    if let f = model.elsewhere.first(where: { "tmux:\($0.id)" == tag }) { model.showInTmux(f) }
-                } else if tag.hasPrefix("move:") {
-                    model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
-                } else if tag.hasPrefix("task:") {
-                    // A task's row shows what it did: its runs open under it. Edit is in its menu.
-                    // After the table's own selection callback: rows coming and going from inside it
-                    // is a reentrant update NSTableView can crash on.
-                    let task = String(tag.dropFirst(5))
-                    DispatchQueue.main.async { model.toggleRuns(task) }
-                } else if tag.hasPrefix("run:") {
-                    model.openRun(String(tag.dropFirst(4)))
-                } else if tag.hasPrefix("repo:") {
-                    // A repo's row: its folder, as its main checkout's row.
-                    model.select("dir:" + tag.dropFirst(5))
-                } else {
-                    model.select(tag)
-                }
-            })) {
-                if filter == .archived {
-                    ArchivedSection()
-                } else {
-                    let narrowed = model.sidebarNarrowed
-                    let tree = filter == .all && !narrowed
-                        ? SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups)
-                        : SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups) {
-                            filter.passes(model.status(of: $0)) && model.sidebarShows($0)
-                        }
-                    // Headings are plain rows, not List section headers: when the sidebar's height
-                    // changed (the usage panel, the filter bar) while sections came and went, the table
-                    // tied a header to a row of another section and threw, quitting the app.
-                    SidebarHeading(title: "Workspaces")
-                    Group {
-                        // Shells live in the tabs: a folder with only those (or nothing) left in it
-                        // would be a workspace row with nothing under it.
-                        ForEach(tree.repos.filter { $0.worthShowing(here: model.folder.path) }) { node in
-                            RepoRows(node: node, filter: filter, collapsed: collapsed)
-                        }
-                        let remote = Dictionary(grouping: tree.unfiled.filter { $0.host != nil }) { $0.host ?? "" }
-                        ForEach(remote.keys.sorted(), id: \.self) { host in
-                            HostRows(host: host, sessions: remote[host] ?? [], collapsed: collapsed)
-                        }
-                        ForEach(tree.unfiled.filter { $0.host == nil }) { s in
-                            SessionRow(session: s, index: 0)
-                                .tag(s.id)
-                                .contextMenu { SessionMenu(session: s) }
-                        }
-                        if filter != .all || narrowed, tree.repos.isEmpty, tree.unfiled.isEmpty {
-                            let q = model.sidebarQuery.trimmingCharacters(in: .whitespaces)
-                            Text(!q.isEmpty ? "No session matches “\(q)”"
-                                : narrowed ? "No sessions here"
-                                : filter == .needsYou ? "Nothing needs you"
-                                : filter == .done ? "Nothing new has finished" : "No \(filter.label.lowercased()) sessions")
-                                .font(.callout).foregroundStyle(.tertiary)
-                        }
-                    }
-                    // Other terminals' sessions aren't dino's to sort by status.
-                    if !model.elsewhere.isEmpty, filter == .all, !narrowed {
-                        SidebarHeading(title: "On this Mac")
-                        ForEach(model.elsewhere) { f in
-                            // In a tmux pane: a click shows it there (tmux keeps it); elsewhere it moves to dino.
-                            ElsewhereRow(session: f).tag(f.tmux != nil ? "tmux:\(f.id)" : "move:\(f.id)")
-                        }
-                    }
-                    if filter == .all, !narrowed {
-                        SidebarHeading(title: "Scheduled") {
-                            if !model.scheduled.isEmpty {
-                                Button { model.newTask() } label: { Image(systemName: "plus") }
-                                    .buttonStyle(.plain)
-                                    .help("New Scheduled Task")
-                                    .accessibilityLabel("New Scheduled Task")
-                            }
-                        }
-                        ForEach(model.scheduled) { t in
-                            ScheduledRow(task: t).tag("task:\(t.id)")
-                            if model.openTasks.contains(t.id) {
-                                TaskRuns(task: t)
-                            }
-                        }
-                        if model.scheduled.isEmpty {
-                            Button { model.newTask() } label: {
-                                Label("Run a prompt on a schedule…", systemImage: "clock")
-                            }
-                            .buttonStyle(.plain)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        }
-                    }
-                }
+            // Built once dinod's first answers are in, whole: grown instead by two batches of rows
+            // at once (the sessions, and the scheduled tasks below them) while it was still laying
+            // out its first rows, the table re-entered its own row-height cache, which AppKit warns
+            // will become an assertion.
+            if model.sidebarReady || model.daemonDown {
+                list
+            } else {
+                Spacer()
             }
-            // Double-clicking a session renames it. The list's own double-click, not a gesture on
-            // the name: that swallowed the single click meant to select the row. The rows keep their
-            // own menus; this adds none.
-            .contextMenu(forSelectionType: String.self, menu: { _ in EmptyView() }, primaryAction: { tags in
-                if tags.count == 1, let id = tags.first, model.sessions.contains(where: { $0.id == id }) {
-                    model.renaming = Renaming(id: id, place: .sidebar)
-                }
-            })
-            // Not rebuilt when rows come or go (that replaced every row, and froze the window for
-            // up to seconds while agents made worktrees): rows keep unique tags and stable
-            // identities instead, so the list's own diff stays right.
-            .listStyle(.sidebar)
             UsagePanel()
         }
         .safeAreaInset(edge: .top) {
