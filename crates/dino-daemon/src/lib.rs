@@ -2334,11 +2334,15 @@ fn stop_all(d: &Daemon) {
     save_live_screens(d, true);
     let _ = std::fs::write(stopped_mark(), b"");
     lid::stop(d);
-    for s in d.sessions.lock().unwrap().drain(..) {
-        s.pane.kill();
-    }
+    // Each stopped for sure (see `Pane::kill`), all at once, outside the lock; dinod exits next,
+    // and an agent that outlived it would be left running unowned.
+    let sessions: Vec<_> = d.sessions.lock().unwrap().drain(..).collect();
+    let stopping: Vec<_> = sessions.iter().filter_map(|s| s.pane.kill()).collect();
     for s in d.previews.lock().unwrap().drain(..) {
         s.stop();
+    }
+    for h in stopping {
+        let _ = h.join();
     }
     let _ = std::fs::remove_file(ipc::socket_path());
 }
