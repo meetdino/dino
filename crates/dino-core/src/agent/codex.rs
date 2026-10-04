@@ -70,6 +70,20 @@ impl Agent for Codex {
         "codex"
     }
 
+    fn answers_once(&self) -> bool {
+        true
+    }
+
+    // Read-only sandbox, never asks, keeps no session: it can look but not act. Its last message
+    // goes to the file, apart from its progress.
+    fn one_shot(&self, ask: &super::OneShot) -> Vec<String> {
+        let mut out = strings(&["exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "--color", "never", "-o"]);
+        out.push(ask.answer.display().to_string());
+        out.extend(ask.controls.iter().cloned());
+        out.push(format!("{}\n\n{}", ask.instructions, ask.request));
+        out
+    }
+
     // Codex has no plan mode.
     fn modes(&self) -> &'static [&'static str] {
         &["ask", "edits", "auto", "bypass"]

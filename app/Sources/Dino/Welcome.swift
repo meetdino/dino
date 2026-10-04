@@ -111,7 +111,7 @@ struct WelcomeCard: View {
                 found
             }
             group("Try it") {
-                row("keyboard", "Press ⌘I in any shell to ask in plain English")
+                row("keyboard", "Press ⌘I in any shell to ask in plain English; Settings → Terminal chooses who answers")
                 startsPicker
             }
             group("Optional") {
