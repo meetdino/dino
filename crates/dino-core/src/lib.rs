@@ -235,6 +235,22 @@ pub const PARENT_AGENT_ENV: &[&str] = &[
     "AI_AGENT",
 ];
 
+/// Set by launchd for a dinod it runs (the job's label), in the launch agent property lists the app
+/// and the CLI install: see crates/dino/src/launchd.rs.
+pub const LAUNCHD_ENV: &str = "DINO_LAUNCHD";
+
+/// Where the app says which launch agent runs this dino's dinod, and whether macOS lets it
+/// (`label=`, `state=`, `app=`, `bundle=` lines): one per `$DINO_HOME`, so an isolated dino's app
+/// and CLI find its own agent and never the real one.
+pub fn launchd_record() -> PathBuf {
+    config_dir().join("dinod.launchd")
+}
+
+/// The `PATH` of whoever last asked launchd to start dinod, for that dinod.
+pub fn launchd_path_file() -> PathBuf {
+    config_dir().join("dinod.path")
+}
+
 /// `~/.config/dino`, or `$DINO_HOME` (a second, isolated dino: tests, development).
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("DINO_HOME") {

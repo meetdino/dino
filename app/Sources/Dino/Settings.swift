@@ -672,6 +672,7 @@ private struct GeneralPane: View {
                 Footnote("With no session to come back to, dino opens a shell; ⌘T opens another where you are. Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
             }
             UpdatesSection()
+            DinodAgentSection()
             Section {
                 LabeledContent("Settings and keys") {
                     HStack {

@@ -659,7 +659,7 @@ struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
 
-    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, limits, launchers, id, message, version, dino, installed }
+    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, limits, launchers, id, message, version, dino, installed, launchd }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -675,6 +675,7 @@ struct Response: Decodable {
         version = try c.decodeIfPresent(UInt64.self, forKey: .version)
         dino = try c.decodeIfPresent(String.self, forKey: .dino)
         installed = try c.decodeIfPresent(String.self, forKey: .installed)
+        launchd = try c.decodeIfPresent(String.self, forKey: .launchd)
     }
     var quotas: [QuotaInfo]?
     var power: PowerInfo?
@@ -688,6 +689,8 @@ struct Response: Decodable {
     /// A version reply: which dino the running dinod is, and a newer one it installed.
     var dino: String?
     var installed: String?
+    /// The launch agent running dinod (its label), if launchd started it; nil from an older dinod.
+    var launchd: String?
 }
 
 /// Keeping agents running with the lid closed, as dinod sees it.

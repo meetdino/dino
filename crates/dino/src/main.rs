@@ -2,6 +2,7 @@ mod account;
 mod ai;
 mod automations;
 mod client;
+mod launchd;
 mod mcp;
 mod out;
 mod search;

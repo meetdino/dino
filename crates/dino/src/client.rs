@@ -27,6 +27,15 @@ pub fn connect() -> io::Result<UnixStream> {
     let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dir.join("dinod.log"))?;
     // `mode` is only for a new one: an older log may be open to others.
     let _ = log.set_permissions(std::fs::Permissions::from_mode(0o600));
+    // Through launchd when there's a launch agent for it, so what dinod runs has the app's
+    // permissions (see launchd.rs). launchd may wait up to 2 s to start it again (ThrottleInterval).
+    if crate::launchd::start() {
+        if let Some(s) = wait_for(&path, Duration::from_secs(15)) {
+            return Ok(s);
+        }
+        // launchd couldn't run it (an app since deleted, say): as below, and the lock keeps a
+        // late one from launchd from being a second dinod.
+    }
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("daemon").stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
     // Own session, so it outlives this terminal.
@@ -37,11 +46,16 @@ pub fn connect() -> io::Result<UnixStream> {
         });
     }
     cmd.spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    wait_for(&path, Duration::from_secs(5)).map_or_else(|| UnixStream::connect(&path), Ok)
+}
+
+/// A connection to dinod once it's listening at `path`, within `wait`.
+fn wait_for(path: &std::path::Path, wait: Duration) -> Option<UnixStream> {
+    let deadline = Instant::now() + wait;
     loop {
-        match UnixStream::connect(&path) {
-            Ok(s) => return Ok(s),
-            Err(e) if Instant::now() > deadline => return Err(e),
+        match UnixStream::connect(path) {
+            Ok(s) => return Some(s),
+            Err(_) if Instant::now() > deadline => return None,
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
