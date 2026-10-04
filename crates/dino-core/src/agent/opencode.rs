@@ -633,14 +633,19 @@ impl Agent for OpenCode {
         )
     }
 
+    // `run`, `serve`, `acp`… anything but its TUI.
+    fn headless(&self, args: &[String]) -> bool {
+        !is_tui(args)
+    }
+
     fn may_be(&self, comm: &str) -> bool {
         comm.rsplit('/').next().is_some_and(|n| PROCESS_NAMES.contains(&n))
     }
 
-    fn running(&self) -> Vec<FoundSession> {
+    fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         let c = store();
         let mut out = vec![];
-        for pid in PROCESS_NAMES.iter().flat_map(|n| crate::procinfo::pids_named(n)) {
+        for pid in PROCESS_NAMES.iter().flat_map(|n| crate::procinfo::named_in(procs, n)) {
             let args = found::args_of(pid);
             if !is_tui(&args) {
                 continue;

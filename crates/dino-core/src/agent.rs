@@ -337,12 +337,19 @@ pub trait Agent: Sync {
     /// Launch flags worth carrying over when continuing a session, minus the ones that pick or
     /// create one.
     fn portable_flags(&self, args: &[String]) -> Vec<String>;
-    /// Its sessions running in other terminals.
-    fn running(&self) -> Vec<FoundSession>;
+    /// Its sessions running anywhere on this Mac, among `procs` (every process, listed once for
+    /// all agents: see `found::scan`, which picks those a person could take over).
+    fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession>;
     /// It, if process `pid` (`comm`, arguments from `args`) is it, run by hand in a dino shell.
     fn inside(&self, pid: u32, comm: &str, args: &dyn Fn() -> Vec<String>) -> Option<FoundSession>;
     /// Whether `comm` may be it, so its arguments are worth reading.
     fn may_be(&self, _comm: &str) -> bool {
+        false
+    }
+    /// Whether arguments `args` (after the program) run it headless: once and out (a print
+    /// mode), as a server for another program, or a command that isn't a conversation. Nothing a
+    /// person could take over, so never found running "on this Mac".
+    fn headless(&self, _args: &[String]) -> bool {
         false
     }
     /// Its conversations on disk, but those `running` says are running.
@@ -434,6 +441,13 @@ pub fn check_prompt(prompt: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `args` have one of `flags` (alone, or as `--flag=value`), or start with one of `commands`
+/// (after the script, for an agent Node runs: `node /…/bin/qwen serve`).
+pub(crate) fn runs_with(args: &[String], flags: &[&str], commands: &[&str]) -> bool {
+    let args = if args.first().is_some_and(|a| a.contains('/') && !a.starts_with('-')) { &args[1..] } else { args };
+    args.first().is_some_and(|a| commands.contains(&a.as_str())) || args.iter().any(|a| flags.contains(&a.split('=').next().unwrap_or(a)))
+}
+
 pub(crate) fn strings(s: &[&str]) -> Vec<String> {
     s.iter().map(|s| s.to_string()).collect()
 }
@@ -450,6 +464,33 @@ pub(crate) fn control_args(a: &dyn Agent, mode: Option<&str>, model: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_runs_by_flag_or_command() {
+        let a = |v: &[&str]| strings(v);
+        let claude = agent("claude").unwrap();
+        assert!(claude.headless(&a(&["-p", "hi"])) && claude.headless(&a(&["--print"])) && claude.headless(&a(&["--output-format=stream-json"])));
+        assert!(claude.headless(&a(&["mcp", "list"])));
+        assert!(!claude.headless(&a(&["--model", "opus"])) && !claude.headless(&a(&["--resume", "x"])) && !claude.headless(&a(&[])));
+        let codex = agent("codex").unwrap();
+        assert!(codex.headless(&a(&["exec", "hi"])) && codex.headless(&a(&["app-server"])) && codex.headless(&a(&["e", "x"])));
+        assert!(!codex.headless(&a(&["resume", "--last"])) && !codex.headless(&a(&["fix the build"])) && !codex.headless(&a(&["-m", "o3"])));
+        let qwen = agent("qwen").unwrap();
+        assert!(qwen.headless(&a(&["/opt/homebrew/bin/qwen", "serve"])) && qwen.headless(&a(&["/x/qwen", "-p", "hi"])) && qwen.headless(&a(&["--acp"])));
+        assert!(!qwen.headless(&a(&["/x/qwen", "-i", "hi"])));
+        let pi = agent("pi").unwrap();
+        assert!(pi.headless(&a(&["--mode", "rpc"])) && pi.headless(&a(&["--mode=json"])) && pi.headless(&a(&["-p", "x"])));
+        assert!(!pi.headless(&a(&["--mode", "text"])) && !pi.headless(&a(&["hello"])));
+        let copilot = agent("copilot").unwrap();
+        assert!(copilot.headless(&a(&["-p", "x"])) && copilot.headless(&a(&["--acp"])) && !copilot.headless(&a(&["-i", "x"])));
+        let opencode = agent("opencode").unwrap();
+        assert!(opencode.headless(&a(&["run", "x"])) && opencode.headless(&a(&["serve"])) && !opencode.headless(&a(&["--prompt", "x"])));
+        assert!(agent("cursor").unwrap().headless(&a(&["-p", "x"])) && !agent("cursor").unwrap().headless(&a(&["fix it"])));
+        assert!(agent("kimi").unwrap().headless(&a(&["--print"])) && !agent("kimi").unwrap().headless(&a(&["-c"])));
+        assert!(agent("amp").unwrap().headless(&a(&["-x", "hi"])) && !agent("amp").unwrap().headless(&a(&["threads", "continue"])));
+        assert!(agent("codewhale").unwrap().headless(&a(&["exec", "x"])) && !agent("codewhale").unwrap().headless(&a(&["resume"])));
+        assert!(agent("hermes").unwrap().headless(&a(&["-z", "x"])) && !agent("hermes").unwrap().headless(&a(&["chat", "-q", "x"])));
+    }
 
     const URL: &str = "http://127.0.0.1:5000/s/7/local/ollama";
 
