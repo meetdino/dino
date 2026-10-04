@@ -445,6 +445,7 @@ struct ContentView: View {
         } message: { plan in
             Text(plan.message)
         }
+        .modifier(ArchiveWhileWorking(model: model))
         .sheet(isPresented: $model.showCreatePR) {
             if let s = model.selectedSession { CreatePRSheet(session: s) }
         }
@@ -1495,6 +1496,24 @@ struct MovingOverlay: View {
             }
             .padding(28)
             .background(RoundedRectangle(cornerRadius: 14).fill(.regularMaterial))
+        }
+    }
+}
+
+/// Archiving a session in the middle of a turn stops its agent there, so it asks first.
+private struct ArchiveWhileWorking: ViewModifier {
+    @ObservedObject var model: DinoModel
+
+    func body(content: Content) -> some View {
+        content.alert(
+            "Archive “\(model.archiving.map { model.tabName($0) } ?? "")” while it's working?",
+            isPresented: Binding(get: { model.archiving != nil }, set: { if !$0, model.archiving != nil { model.archiving = nil } }),
+            presenting: model.archiving
+        ) { session in
+            Button("Archive") { model.archiveNow(session.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Its agent stops in the middle of what it's doing. You can pick it up again under Archived.")
         }
     }
 }
