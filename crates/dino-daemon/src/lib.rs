@@ -780,6 +780,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 | Request::CleanWorktree { .. }
                 | Request::Archive { .. }
                 | Request::Unarchive { .. }
+                | Request::Delete { dry_run: false, .. }
                 | Request::RemoveStored { .. }
                 | Request::FreeUpSpace
         );
@@ -1211,6 +1212,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             | Request::Archived
             | Request::Unarchive { .. }
             | Request::DeleteArchived { .. }
+            | Request::Delete { .. }
             | Request::Storage
             | Request::RemoveStored { .. }
             | Request::FreeUpSpace) => lifecycle::serve(d, req),
@@ -3598,8 +3600,12 @@ mod tests {
         HOME.get_or_init(|| {
             let home = std::env::temp_dir().join(format!("dino-daemon-test-{}", std::process::id()));
             std::fs::create_dir_all(&home).unwrap();
-            // SAFETY: set once, before this crate's tests start any thread that reads it.
-            unsafe { std::env::set_var("DINO_HOME", &home) };
+            // SAFETY: set once, before this crate's tests start any thread that reads them. Claude's
+            // config too: removing a worktree forgets its trust there.
+            unsafe {
+                std::env::set_var("DINO_HOME", &home);
+                std::env::set_var("CLAUDE_CONFIG_DIR", &home);
+            }
             home
         })
     }
@@ -3696,6 +3702,64 @@ mod tests {
         kill(&d2, &id);
         assert!(ended_note(&d2, &live).is_empty());
         kill(&d, &id);
+    }
+
+    /// Deleting a session takes the worktree dino made for it along, uncommitted work and all,
+    /// and its branch unless that has unmerged commits; a shell's folder stays.
+    #[test]
+    fn deleting_a_session_removes_its_worktree() {
+        let home = test_home().to_path_buf();
+        let repo = home.join("delete-repo");
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default() };
+        let agent = LauncherInfo { short: "agent".into(), agent_id: "agent".into(), label: "Agent".into(), program: "/bin/sh".into(), knobs: Default::default() };
+        let d = new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![shell, agent]);
+        let start = || spawn_in_worktree(&d, Launch::new("agent", vec![], Some(repo.display().to_string()))).unwrap();
+        let wt_of = |id: &str| d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == real(&session(&d, id).cwd)).cloned().unwrap();
+
+        // Uncommitted work, nothing committed: all of it goes, the branch too.
+        let id = start();
+        let w = wt_of(&id);
+        std::fs::write(w.path.join("a.txt"), "two\n").unwrap();
+        std::fs::write(w.path.join("new.txt"), "new\n").unwrap();
+        let plan = lifecycle::delete_session(&d, &id, true).unwrap();
+        assert_eq!((plan.uncommitted, plan.unpushed, plan.keeps_branch), (2, 0, false));
+        assert_eq!(plan.worktree, Some(real(&w.path)));
+        assert!(w.path.exists(), "a dry run changes nothing");
+        // A shell in it keeps it; a shell's own deletion takes nothing along.
+        let sh = spawn(&d, Launch::new("shell", vec![], Some(w.path.display().to_string()))).unwrap();
+        assert!(lifecycle::delete_session(&d, &id, true).unwrap().kept_for.is_some());
+        assert_eq!(lifecycle::delete_session(&d, &sh, false).unwrap(), ipc::Deletion::default());
+        assert!(w.path.exists());
+
+        let pid = session(&d, &id).pane.pid().unwrap();
+        lifecycle::delete_session(&d, &id, false).unwrap();
+        assert!(!d.sessions.lock().unwrap().iter().any(|s| s.id == id));
+        assert!(!load_saved().iter().any(|s| s.id == id));
+        assert!(unsafe { libc::kill(pid as i32, 0) } != 0, "its agent stopped");
+        assert!(!w.path.exists());
+        assert!(load_worktrees().is_empty());
+        assert!(git(&repo, &["branch", "--list", &w.branch]).is_empty(), "an empty branch goes");
+
+        // A commit that isn't merged: the branch stays.
+        let id = start();
+        let w = wt_of(&id);
+        std::fs::write(w.path.join("a.txt"), "three\n").unwrap();
+        git(&w.path, &["commit", "-qam", "three"]);
+        let done = lifecycle::delete_session(&d, &id, false).unwrap();
+        assert_eq!((done.uncommitted, done.unpushed, done.keeps_branch), (0, 1, true));
+        assert!(!w.path.exists());
+        assert_eq!(git(&repo, &["branch", "--list", "--format=%(refname:short)", &w.branch]), w.branch);
+        assert!(lifecycle::delete_session(&d, &id, false).is_err(), "it's gone");
     }
 
     /// A running session's screen is kept on disk, and a dinod that starts it again (after a

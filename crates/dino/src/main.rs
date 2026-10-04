@@ -804,6 +804,7 @@ const USAGE: &str = "Sessions
   dino new [--worktree] <agent> [--on <provider> <model>] [args...]
                                     start one in the background; prints its id
   dino attach | resume | kill <id>
+  dino rm [--force] <id>            delete it, and the worktree dino made for it
   dino found [--all] [--json]       agents dino didn't start, to continue here
   dino continue <id>                continue one of those in dino
 
@@ -822,7 +823,7 @@ Setup
   dino mcp [--read-only]            an MCP server on stdio, for agents
   dino ping | stop | daemon | --version
 
-`dino <command> --help` says more about ls, found, login and fan.";
+`dino <command> --help` says more about ls, rm, found, login and fan.";
 
 fn main() {
     // Piped into `head`, stop quietly when it has enough, as other commands do; Rust otherwise
@@ -930,6 +931,7 @@ fn dino() -> anyhow::Result<()> {
             say(&format!("Closed session {}.", printable(&id)));
             return Ok(());
         }
+        Some("rm") => return cmd_rm(&cli[1..]),
         Some("resume") => {
             let id = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino resume <id>\n`dino ls` lists the sessions; Ended ones resume."))?.clone();
             done(client::request(&Request::Resume { id: id.clone() })?)?;
@@ -1410,6 +1412,69 @@ fn cmd_claude_token(action: &str) -> anyhow::Result<()> {
     }
     print!("{}", out::fields(&rows));
     Ok(())
+}
+
+const RM_HELP: &str = "usage: dino rm [--force] <id>
+
+Delete a session: its agent stops, dino forgets it, and the worktree dino made for it is removed,
+with its branch unless that has commits that aren't merged. A shell's folder, or a checkout of
+yours, is never removed. The agent's own conversation stays: `dino found --all` lists it.
+
+  -f, --force   delete it even when its worktree has uncommitted changes, which are lost
+
+A branch with commits that aren't merged stays, pushed or not.";
+
+/// `dino rm [--force] <id>`: delete a session, and the worktree dino made for it.
+fn cmd_rm(args: &[String]) -> anyhow::Result<()> {
+    let force = args.iter().any(|a| a == "-f" || a == "--force");
+    let mut ids = args.iter().filter(|a| !matches!(a.as_str(), "-f" | "--force"));
+    let id = match ids.next() {
+        Some(a) if matches!(a.as_str(), "-h" | "--help") => {
+            println!("{RM_HELP}");
+            return Ok(());
+        }
+        Some(a) if a.starts_with('-') => anyhow::bail!("dino rm doesn't take `{}`\n`dino rm --help` says what it does.", printable(a)),
+        Some(a) => a.clone(),
+        None => anyhow::bail!("usage: dino rm [--force] <id>\n`dino ls` lists the sessions."),
+    };
+    if let Some(a) = ids.next() {
+        anyhow::bail!("dino rm takes one session, not `{}` too\n`dino rm --help` says what it does.", printable(a));
+    }
+    let deletion = |dry_run| match client::request(&Request::Delete { id: id.clone(), dry_run })? {
+        Response::Deletion { deletion } => Ok(deletion),
+        Response::Error { message } => Err(hinted(message)),
+        _ => Err(unexpected()),
+    };
+    let shown = printable(&id);
+    if !force {
+        let plan = deletion(true)?;
+        if let (true, Some(path)) = (plan.uncommitted > 0, &plan.worktree) {
+            anyhow::bail!(
+                "session {shown}'s worktree {} has {}, which deleting it would lose.\n`dino rm --force {shown}` deletes it anyway.",
+                printable(path),
+                count(plan.uncommitted, "uncommitted change")
+            );
+        }
+    }
+    let done = deletion(false)?;
+    let mut said = match &done.worktree {
+        Some(path) => format!("Deleted session {shown} and its worktree {}.", printable(path)),
+        None => format!("Deleted session {shown}."),
+    };
+    if let (true, Some(branch)) = (done.keeps_branch, &done.branch) {
+        let unpushed = if done.unpushed > 0 { format!(", with {}", count(done.unpushed, "unpushed commit")) } else { String::new() };
+        said += &format!(" Its branch {} stays{unpushed}: it isn't merged.", printable(branch));
+    }
+    if let Some(other) = &done.kept_for {
+        said += &format!(" Its worktree stays: {} is in it.", printable(other));
+    }
+    say(&said);
+    Ok(())
+}
+
+/// `n thing` or `n things`.
+fn count(n: u32, thing: &str) -> String {
+    format!("{n} {thing}{}", if n == 1 { "" } else { "s" })
 }
 
 const FOUND_HELP: &str = "usage: dino found [--all] [--json]

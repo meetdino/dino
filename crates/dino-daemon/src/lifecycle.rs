@@ -14,7 +14,7 @@ use dino_core::ipc::{self, Request, Response};
 use dino_core::{pr, trust, worktree};
 
 use super::{
-    Daemon, Launch, SavedSession, SessionWorktree, kill, now_secs, real, save, save_worktrees,
+    Daemon, Launch, SavedSession, SessionWorktree, kill, now_secs, real, save, save_groups, save_worktrees,
     session_worktree, sessions_in, spawn,
 };
 
@@ -58,6 +58,10 @@ pub(crate) fn serve(d: &Arc<Daemon>, req: Request) -> Response {
             Err(e) => Response::Error { message: e.to_string() },
         },
         Request::DeleteArchived { id } => done(delete(d, &id)),
+        Request::Delete { id, dry_run } => match delete_session(d, &id, dry_run) {
+            Ok(deletion) => Response::Deletion { deletion },
+            Err(e) => Response::Error { message: e.to_string() },
+        },
         Request::Storage => Response::Storage { worktrees: storage(d) },
         Request::RemoveStored { path } => done(remove_stored(d, &path)),
         Request::FreeUpSpace => {
@@ -231,6 +235,111 @@ fn delete(d: &Daemon, id: &str) -> anyhow::Result<()> {
         let _ = trust::claude_forget(&w.path);
     }
     Ok(())
+}
+
+/// The worktree dino made that a session's deletion takes along: its own, or its fan-out seat.
+struct Doomed {
+    path: PathBuf,
+    repo: PathBuf,
+    branch: String,
+}
+
+/// Delete a session for good: its agent stopped, everything dinod keeps for it forgotten (its
+/// restore state, screens, fan-out seat, PR watch), and the worktree dino made for it removed,
+/// uncommitted work and all. Its branch goes too when nothing on it is unmerged; else it stays.
+/// A shell, a session on another machine, or one in a folder of the user's takes nothing along,
+/// and a worktree another session is in stays. The agent's conversation file is never touched:
+/// Continue a Session still finds it. `dry_run` only says what would happen.
+pub(crate) fn delete_session(d: &Daemon, id: &str, dry_run: bool) -> anyhow::Result<ipc::Deletion> {
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    let member = d.groups.lock().unwrap().iter().find_map(|g| {
+        g.members.iter().find(|m| m.session == id).map(|m| Doomed { path: m.worktree.clone(), repo: g.repo.clone(), branch: m.branch.clone() })
+    });
+    let own = || session_worktree(d, &s.cwd).map(|w| Doomed { path: w.path, repo: w.repo, branch: w.branch });
+    let doomed = if s.host.is_some() || s.agent_id == "shell" { None } else { member.or_else(own) };
+
+    let mut out = ipc::Deletion::default();
+    let mut landed = false;
+    if let Some(w) = &doomed {
+        let target = real(&w.path);
+        // Another session in it, ended or not: the worktree is still in use.
+        if let Some(o) = sessions_in(d, &target).into_iter().find(|o| o.id != id) {
+            out.kept_for = Some(o.label.lock().unwrap().clone().unwrap_or_else(|| o.name.clone()));
+        } else if w.path.is_dir() {
+            out.worktree = Some(target);
+            out.branch = Some(w.branch.clone());
+            if let Ok(r) = worktree::at_risk(&w.path, Some(&w.branch), &base_of(&w.repo)) {
+                (out.uncommitted, out.unpushed, landed) = (r.uncommitted, r.unpushed, r.landed);
+            }
+            out.keeps_branch = !landed;
+        }
+    }
+    if dry_run {
+        return Ok(out);
+    }
+
+    let pid = s.pane.pid();
+    kill(d, id);
+    d.closing.lock().unwrap().remove(id);
+    d.prs.lock().unwrap().remove(id);
+    {
+        let mut groups = d.groups.lock().unwrap();
+        if groups.iter().any(|g| g.members.iter().any(|m| m.session == id)) {
+            for g in groups.iter_mut() {
+                g.members.retain(|m| m.session != id);
+            }
+            groups.retain(|g| !g.members.is_empty());
+            save_groups(&groups);
+        }
+    }
+    {
+        let mut archived = d.archived.lock().unwrap();
+        if archived.iter().any(|a| a.saved.id == id) {
+            archived.retain(|a| a.saved.id != id);
+            save_archived(&archived);
+        }
+    }
+    save(d);
+
+    let (Some(w), Some(_)) = (&doomed, &out.worktree) else { return Ok(out) };
+    // The agent lets go of its folder before it goes.
+    if let Some(pid) = pid {
+        gone(pid, std::time::Duration::from_secs(3));
+    }
+    if landed {
+        worktree::remove(&w.repo, &w.path, &w.branch);
+    } else {
+        worktree::discard(&w.repo, &w.path)?;
+    }
+    anyhow::ensure!(!w.path.exists(), "Couldn't remove its worktree {}", w.path.display());
+    let target = real(&w.path);
+    let _ = trust::claude_forget(&w.path);
+    {
+        let mut worktrees = d.worktrees.lock().unwrap();
+        worktrees.retain(|o| o.path != w.path);
+        save_worktrees(&worktrees);
+    }
+    d.summaries.lock().unwrap().remove(&target);
+    d.sizes.lock().unwrap().remove(&target);
+    d.pushed.lock().unwrap().remove(&target);
+    // An archived session that ran here makes it again from its branch if it's started.
+    let mut archived = d.archived.lock().unwrap();
+    if archived.iter().any(|a| a.worktree.as_ref().is_some_and(|o| o.path == w.path)) {
+        for a in archived.iter_mut().filter(|a| a.worktree.as_ref().is_some_and(|o| o.path == w.path)) {
+            a.worktree_removed = true;
+        }
+        save_archived(&archived);
+    }
+    Ok(out)
+}
+
+/// Wait up to `max` for process `pid` to exit.
+fn gone(pid: u32, max: std::time::Duration) {
+    let since = Instant::now();
+    // Signal 0 only checks; ESRCH means it's gone.
+    while unsafe { libc::kill(pid as i32, 0) } == 0 && since.elapsed() < max {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 // ---- Storage: every worktree dino made, how big, and cleaning up. ----

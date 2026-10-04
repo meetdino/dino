@@ -240,6 +240,15 @@ pub enum Request {
     Unarchive { id: String },
     /// Forget an archived session for good.
     DeleteArchived { id: String },
+    /// Delete session `id`: stop its agent, forget it, and remove the worktree dino made for it
+    /// (its branch too when merged or empty; one with unmerged commits stays). Never a shell's
+    /// folder or a checkout of the user's. The agent's own conversation file stays. `dry_run`
+    /// only says what it would do. Answers `Deletion`.
+    Delete {
+        id: String,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Every worktree dino made, with its size on disk.
     Storage,
     /// Remove a worktree dino made (and its branch when merged), never forcing: refuses one
@@ -346,6 +355,8 @@ pub enum Response {
     Pr { pr: PrInfo },
     Review { findings: Vec<crate::review::Finding> },
     Archived { sessions: Vec<ArchivedInfo> },
+    /// What deleting a session does, or did.
+    Deletion { deletion: Deletion },
     Storage { worktrees: Vec<StoredWorktree> },
     /// What Free up space removed, and how many bytes that gave back (as last measured).
     Freed { removed: Vec<String>, bytes: u64 },
@@ -360,6 +371,30 @@ pub enum Response {
     /// `installed`: a newer `dino` this dinod put in place of its own binary; it restarts into it
     /// once no agent is working and no shell is running a command.
     Version { dino: String, installed: Option<String> },
+}
+
+/// What deleting a session does (`Request::Delete`): the worktree that goes with it and what's in
+/// it that would be lost.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct Deletion {
+    /// The worktree dino made for it, removed with it. None for a shell, a session in a folder of
+    /// the user's, or on another machine.
+    #[serde(default)]
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Files with uncommitted changes in that worktree, new files included: lost with it.
+    #[serde(default)]
+    pub uncommitted: u32,
+    /// Commits on no remote and not on the branch it came from.
+    #[serde(default)]
+    pub unpushed: u32,
+    /// The branch stays: it has commits that aren't merged. Else it goes with the worktree.
+    #[serde(default)]
+    pub keeps_branch: bool,
+    /// The worktree stays because another session is in it: that session's name.
+    #[serde(default)]
+    pub kept_for: Option<String>,
 }
 
 /// The dino account on this Mac and where settings sync stands.
