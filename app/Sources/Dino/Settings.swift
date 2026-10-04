@@ -93,6 +93,12 @@ struct DinoSettings: Codable, Equatable {
         var quick_autohide: Bool
         var on_quit: String
         var appearance: String
+        /// Who ⌘I in a shell asks for a command, by agent id; empty: dino picks (`dino ai`).
+        var ask_agent: String = ""
+        /// The model ⌘I asks `ask_agent`; empty: the one its new sessions start with.
+        var ask_model: String = ""
+        /// Who ⌘⏎ hands the line to, by launcher; empty: ⌘I's agent.
+        var handoff_agent: String = ""
 
         /// dinod's defaults: StartWith.last, QuickTerminal.Key.commandGrave, hide on click, ask on
         /// quit, the Mac's look.
@@ -106,7 +112,8 @@ struct DinoSettings: Codable, Equatable {
             self.appearance = appearance
         }
 
-        /// A dinod from before `appearance` leaves it out: the Mac's look.
+        /// A dinod from before `appearance` (or the AI line's choices) leaves it out: the Mac's
+        /// look (and dino picks).
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             start_with = try c.decode(String.self, forKey: .start_with)
@@ -114,6 +121,23 @@ struct DinoSettings: Codable, Equatable {
             quick_autohide = try c.decode(Bool.self, forKey: .quick_autohide)
             on_quit = try c.decode(String.self, forKey: .on_quit)
             appearance = try c.decodeIfPresent(String.self, forKey: .appearance) ?? "system"
+            ask_agent = try c.decodeIfPresent(String.self, forKey: .ask_agent) ?? ""
+            ask_model = try c.decodeIfPresent(String.self, forKey: .ask_model) ?? ""
+            handoff_agent = try c.decodeIfPresent(String.self, forKey: .handoff_agent) ?? ""
+        }
+
+        /// Only what the app also keeps for itself (`mirrored`), the rest at its defaults.
+        var appOwn: Terminal {
+            Terminal(start_with: start_with, quick_key: quick_key, quick_autohide: quick_autohide, on_quit: on_quit, appearance: appearance)
+        }
+
+        /// These, with what the app keeps for itself taken from `own`.
+        func with(appOwn own: Terminal) -> Terminal {
+            var t = own.appOwn
+            t.ask_agent = ask_agent
+            t.ask_model = ask_model
+            t.handoff_agent = handoff_agent
+            return t
         }
 
         /// As the app keeps them for itself (it reads them there at launch, before dinod answers).
@@ -131,7 +155,7 @@ struct DinoSettings: Codable, Equatable {
         /// Make the app's copy these, and claim a changed shortcut.
         @MainActor func mirror() {
             let before = Terminal.mirrored
-            guard before != self else { return }
+            guard before != appOwn else { return }
             let d = UserDefaults.standard
             d.set(start_with, forKey: StartWith.key)
             d.set(quick_key, forKey: QuickTerminal.Key.storageKey)
@@ -613,7 +637,8 @@ private struct TerminalChoicesSync: ViewModifier {
     @AppStorage(Appearance.key) private var appearance = Appearance.system.rawValue
 
     func body(content: Content) -> some View {
-        content.onChange(of: DinoSettings.Terminal(start_with: startWith, quick_key: quickKey, quick_autohide: quickAutohide, on_quit: quitChoice, appearance: appearance)) { _, t in
+        content.onChange(of: DinoSettings.Terminal(start_with: startWith, quick_key: quickKey, quick_autohide: quickAutohide, on_quit: quitChoice, appearance: appearance)) { _, own in
+            let t = (store.settings?.terminal ?? .defaults).with(appOwn: own)
             if store.settings?.terminal != t { store.update { $0.terminal = t } }
         }
     }
@@ -705,6 +730,7 @@ private struct TerminalSettingsPane: View {
             } footer: {
                 Footnote("Shell integration has zsh and bash mark each prompt and say which folder they're in, as in Ghostty, without touching your startup files (new shells).")
             }
+            ShellAISection()
             Section {
                 Picker("Shortcut", selection: Binding(
                     get: { quickKey },
@@ -760,6 +786,102 @@ private struct TerminalSettingsPane: View {
             isDefault = Opening.isDefault
             quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
         }
+    }
+}
+
+/// Settings → Terminal: who the shell's AI line asks (⌘I) and hands requests to (⌘⏎).
+private struct ShellAISection: View {
+    @EnvironmentObject var store: SettingsStore
+
+    private var terminal: DinoSettings.Terminal { store.settings?.terminal ?? .defaults }
+
+    private func allowed(_ l: LauncherInfo) -> Bool { store.settings?.policies.allows(l.short) ?? true }
+
+    /// Agents here that can answer once with no tools, one per agent.
+    private var askers: [LauncherInfo] {
+        var seen = Set<String>()
+        return store.agents.filter { $0.answers_once == true && allowed($0) && seen.insert($0.agent_id).inserted }
+    }
+
+    /// Everything dino can start here, but a shell.
+    private var startable: [LauncherInfo] {
+        store.agents.filter { $0.agent_id != "shell" && allowed($0) }
+    }
+
+    /// Who ⌘I asks when none is chosen, as `dino ai` picks: the default agent if it can answer,
+    /// else the first here that can.
+    private var automatic: LauncherInfo? {
+        // A free tier's agent, on its own models.
+        let launcher = store.settings?.policies.default_agent ?? "claude"
+        let wanted = launcher == "free" ? "claude" : launcher.replacingOccurrences(of: "-free", with: "")
+        return askers.first { $0.agent_id == wanted } ?? askers.first
+    }
+
+    private var asker: LauncherInfo? {
+        terminal.ask_agent.isEmpty ? automatic : askers.first { $0.agent_id == terminal.ask_agent }
+    }
+
+    private func set(_ change: @escaping (inout DinoSettings.Terminal) -> Void) {
+        store.update { s in
+            var t = s.terminal ?? .defaults
+            change(&t)
+            s.terminal = t
+        }
+    }
+
+    /// The model, as `ControlFields` takes it: only the model, Default being new sessions'.
+    private func model(_ agent: LauncherInfo) -> some View {
+        var knobs = agent.knobs ?? .none
+        knobs.modes = []
+        knobs.efforts = []
+        return ControlFields(
+            knobs: knobs,
+            controls: Binding(
+                get: { Controls(model: terminal.ask_model.isEmpty ? nil : terminal.ask_model) },
+                set: { c in if (c.model ?? "") != terminal.ask_model { set { $0.ask_model = c.model ?? "" } } }
+            ),
+            defaults: Controls(model: store.settings?.agents?[agent.agent_id]?.model)
+        )
+        .orgLocked("terminal.ask_model")
+    }
+
+    var body: some View {
+        Section {
+            Picker("⌘I asks", selection: Binding(
+                get: { terminal.ask_agent },
+                set: { id in
+                    guard id != terminal.ask_agent else { return }
+                    // A model is one agent's own name for it.
+                    set { $0.ask_agent = id; $0.ask_model = "" }
+                }
+            )) {
+                Text(automatic.map { "Automatic (\($0.label))" } ?? "Automatic").tag("")
+                ForEach(askers) { Text($0.label).tag($0.agent_id) }
+                if !terminal.ask_agent.isEmpty, !askers.contains(where: { $0.agent_id == terminal.ask_agent }) {
+                    Text("\(terminal.ask_agent) (not on this Mac)").tag(terminal.ask_agent)
+                }
+            }
+            .orgLocked("terminal.ask_agent")
+            if !terminal.ask_agent.isEmpty, let a = asker, a.knobs?.model == true {
+                model(a)
+            }
+            Picker("⌘⏎ hands off to", selection: Binding(
+                get: { terminal.handoff_agent },
+                set: { id in if id != terminal.handoff_agent { set { $0.handoff_agent = id } } }
+            )) {
+                Text(asker.map { "Same as ⌘I (\($0.label))" } ?? "Same as ⌘I").tag("")
+                ForEach(startable) { Text($0.label).tag($0.short) }
+                if !terminal.handoff_agent.isEmpty, !startable.contains(where: { $0.short == terminal.handoff_agent }) {
+                    Text("\(terminal.handoff_agent) (not on this Mac)").tag(terminal.handoff_agent)
+                }
+            }
+            .orgLocked("terminal.handoff_agent")
+        } header: {
+            Text("AI in the Shell")
+        } footer: {
+            Footnote("In a shell, type what you want in plain English. ⌘I asks for a command and puts it on the line for you to read and run; ⌘⏎ hands the line to an agent as a new session. Elsewhere, with dino's shell integration, they're Alt+I and Alt+Enter. ⌘I asks with no tools, so it can't change anything, and only agents that can answer that way are listed; a small, fast model answers sooner.")
+        }
+        .disabled(store.settings == nil)
     }
 }
 

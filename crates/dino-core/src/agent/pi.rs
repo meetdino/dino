@@ -268,6 +268,19 @@ impl Agent for Pi {
         self.free
     }
 
+    fn answers_once(&self) -> bool {
+        !self.free
+    }
+
+    // Printed and gone: no tools, no session kept, none of the folder's own files (its AGENTS.md,
+    // its extensions), no network but the model's.
+    fn one_shot(&self, ask: &super::OneShot) -> Vec<String> {
+        let mut out = strings(&["-p", "--no-session", "--no-tools", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve", "--offline", "--system-prompt", ask.instructions]);
+        out.extend(ask.controls.iter().cloned());
+        out.extend(["--".into(), ask.request.into()]);
+        out
+    }
+
     fn provider_formats(&self) -> &'static [Format] {
         if self.free { &[] } else { &[Format::Anthropic, Format::Chat, Format::Responses] }
     }

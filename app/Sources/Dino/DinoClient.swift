@@ -226,6 +226,8 @@ struct LauncherInfo: Codable, Identifiable, Equatable {
     var program: String
     /// The mode, model and effort it offers; nil from an older dinod.
     var knobs: Knobs?
+    /// It can answer the shell's ⌘I with no tools; nil from an older dinod.
+    var answers_once: Bool?
     var id: String { short }
 }
 

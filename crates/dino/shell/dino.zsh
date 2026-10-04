@@ -1,10 +1,10 @@
 # dino shell integration for zsh (`dino init zsh`).
 #
 # The AI line: ⌘I in Dino, Alt+I elsewhere ($DINO_AI_KEY), or start the line with #. Type what
-# you want in plain words and press Enter: your own agent (Claude Code or Codex, run with no
-# tools) puts one command on the prompt. Nothing runs until you press Enter on it, and a command
-# that could destroy something is shown in red and needs Enter twice. ⌘⏎ in Dino (Alt+Enter
-# elsewhere) hands the line to the agent as a new session instead.
+# you want in plain words and press Enter: your own agent (the one Settings → Terminal names, or
+# Claude Code or Codex; run with no tools) puts one command on the prompt. Nothing runs until you
+# press Enter on it, and a command that could destroy something is shown in red and needs Enter
+# twice. ⌘⏎ in Dino (Alt+Enter elsewhere) hands the line to an agent as a new session instead.
 #
 # Search: Alt+R (or Ctrl+R with DINO_SEARCH_CTRL_R=1) lists this shell's history and dino's
 # sessions together; what you pick goes on the prompt.

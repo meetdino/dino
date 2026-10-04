@@ -642,12 +642,14 @@ final class DinoModel: ObservableObject {
                       var settings = try? conn.settings() else { return }
                 let tmux = settings.tmux
                 await MainActor.run { self.noteTmuxSettings(tmux) }
-                guard let there = settings.terminal else { return }
+                guard let whole = settings.terminal else { return }
+                // Only what the app keeps for itself: the rest is dinod's alone.
+                let there = whole.appOwn
                 let (here, agreed) = await MainActor.run { (DinoSettings.Terminal.mirrored, self.agreedTerminal) }
                 // First look: an app that had these before dinod kept them hands them over once.
                 let fromApp = agreed.map { here != $0 && there == $0 } ?? (there == .defaults && here != .defaults)
                 if fromApp {
-                    settings.terminal = here
+                    settings.terminal = whole.with(appOwn: here)
                     try? conn.setSettings(settings)
                     await MainActor.run { self.agreedTerminal = here }
                 } else {

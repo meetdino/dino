@@ -178,6 +178,18 @@ pub trait Agent: Sync {
     fn prompt_args(&self, prompt: String) -> Vec<String> {
         vec![prompt]
     }
+    /// It can answer one request headless and leave: no tools, no questions, nothing kept, and
+    /// its answer as plain text (see `one_shot`). The shell's ⌘I asks it for a command this way.
+    /// Not yet: Qwen Code keeps tools however it's started (and runs a memory subagent with write
+    /// tools), OpenCode and Kimi Code have no way to run without theirs, and Copilot CLI, which
+    /// does, keeps every run as a session in its history (and so in dino's).
+    fn answers_once(&self) -> bool {
+        false
+    }
+    /// Arguments that run it that way on `ask`, for one that `answers_once`.
+    fn one_shot(&self, _ask: &OneShot) -> Vec<String> {
+        vec![]
+    }
     /// Arguments that start conversation `session` (set when dino picks the id up front), or
     /// resume it when `restoring`: those before dino's other arguments, and those after.
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>);
@@ -385,6 +397,20 @@ pub fn agent(id: &str) -> Option<&'static dyn Agent> {
     }
 }
 
+/// One request for an agent that `answers_once`.
+pub struct OneShot<'a> {
+    /// What it's told it is for, in place of its own instructions where it takes them.
+    pub instructions: &'a str,
+    pub request: &'a str,
+    /// Its model and effort flags (`controls::args`).
+    pub controls: Vec<String>,
+    /// Where it runs.
+    pub cwd: &'a Path,
+    /// A new empty file only the user can read, for an agent that writes its answer to a file
+    /// rather than printing it.
+    pub answer: &'a Path,
+}
+
 /// A prompt an agent is started on goes on its command line (see `Agent::prompt_args`), where one
 /// starting with `-` would be read as a flag (`--dangerously-skip-permissions`, `--settings=...`):
 /// refuse it, since not every agent's command line honours `--`.
@@ -414,6 +440,24 @@ mod tests {
 
     fn env<'a>(w: &'a Wiring, k: &str) -> Option<&'a str> {
         w.0.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn agents_that_answer_once_get_the_request_and_their_instructions() {
+        let dir = std::env::temp_dir();
+        let answer = dir.join("answer.txt");
+        let ask = OneShot { instructions: "Reply with one command.", request: "Request: list files", controls: strings(&["--model", "m"]), cwd: &dir, answer: &answer };
+        let answering: Vec<&str> = all().into_iter().filter(|a| a.answers_once()).map(|a| a.id()).collect();
+        assert_eq!(answering, ["claude", "codex", "pi"]);
+        for id in answering {
+            let args = agent(id).unwrap().one_shot(&ask);
+            assert!(args.last().is_some_and(|l| l.ends_with("Request: list files")), "{id}: {args:?}");
+            assert!(args.iter().any(|a| a.contains("Reply with one command.")), "{id}: {args:?}");
+            assert!(args.windows(2).any(|w| w == ["--model", "m"]), "{id}: {args:?}");
+        }
+        for free in ["claude-free", "qwen-free", "pi-free"] {
+            assert!(!agent(free).unwrap().answers_once(), "{free} picks its model turn by turn");
+        }
     }
 
     #[test]
