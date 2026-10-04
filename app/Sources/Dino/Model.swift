@@ -410,6 +410,10 @@ final class DinoModel: ObservableObject {
                 if let needs = s.needs, prev.needs == nil {
                     Notifier.post(session: s, title: "\(s.display) needs you", body: needs)
                 }
+                // Not in front of you: say an agent started using the Mac or the browser.
+                if let sentence = s.usingSentence, prev.reach == nil, s.needs == nil, !appActive {
+                    Notifier.post(session: s, title: sentence, body: "\(s.display) · Open it to watch or stop it")
+                }
             }
             // Nobody watched a scheduled run start: say when it's done, even if it's in front of you.
             if let task = s.scheduled {

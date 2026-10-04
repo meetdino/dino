@@ -221,6 +221,31 @@ fn typed_in(content: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
+/// The tools its last message calls (an assistant's `tool_use` parts), while their results
+/// aren't in yet: the calls out now.
+fn tools_in(text: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else { return vec![] };
+    let Some(last) = v["messages"].as_array().and_then(|m| m.last()) else { return vec![] };
+    if last["role"] != "assistant" {
+        return vec![];
+    }
+    last["content"].as_array().into_iter().flatten().filter(|p| p["type"] == "tool_use").filter_map(|p| p["name"].as_str().map(String::from)).collect()
+}
+
+/// `tools_in` of the turn's copy, read again only when it changes: it's looked at twice a second.
+fn tools_out(id: &str) -> Vec<String> {
+    static LAST: std::sync::Mutex<Option<(PathBuf, std::time::SystemTime, u64, Vec<String>)>> = std::sync::Mutex::new(None);
+    let Some(p) = checkpoint(id) else { return vec![] };
+    let Some((modified, len)) = p.metadata().ok().and_then(|m| Some((m.modified().ok()?, m.len()))) else { return vec![] };
+    let mut last = LAST.lock().unwrap();
+    if let Some((_, _, _, tools)) = last.as_ref().filter(|(q, m, l, _)| *q == p && *m == modified && *l == len) {
+        return tools.clone();
+    }
+    let tools = std::fs::read_to_string(&p).map(|t| tools_in(&t)).unwrap_or_default();
+    *last = Some((p, modified, len, tools.clone()));
+    tools
+}
+
 /// A conversation document's messages as turns.
 fn turns_in(text: &str) -> Vec<Turn> {
     let Ok(v) = serde_json::from_str::<Value>(text) else { return vec![] };
@@ -434,6 +459,10 @@ impl Agent for CodeWhale {
         true
     }
 
+    fn tools_now(&self, session: &str) -> Vec<String> {
+        tools_out(session)
+    }
+
     fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
         begun(cwd, since, claimed).map(|(id, _)| id)
     }
@@ -543,6 +572,14 @@ mod tests {
         let old = r#"{"metadata":{"id":"a6e09c50","title":"t","workspace":"/r"},"messages":[{"role":"user","content":[{"type":"text","text":"<turn_meta>\nCurrent local date: 2026-10-03\n</turn_meta>"},{"type":"text","text":"Reply with PELICAN"}]}]}"#;
         assert_eq!(turns_in(old)[0].text, "Reply with PELICAN");
         assert!(turns_in(&DOC[..200]).is_empty(), "part of a document isn't one");
+    }
+
+    #[test]
+    fn its_turns_copy_says_which_tools_are_out() {
+        assert!(tools_in(DOC).is_empty(), "answered");
+        let i = DOC.find(r#"{"role":"user","content":[{"type":"tool_result""#).unwrap();
+        let mid = format!("{}]}}", DOC[..i].trim_end().trim_end_matches(','));
+        assert_eq!(tools_in(&mid), ["bash"], "the call out");
     }
 
     #[test]

@@ -117,6 +117,19 @@ fn event_of(v: &Value) -> LogEvent {
     }
 }
 
+/// The tools an assistant's entry calls (its `toolCall` parts), or the call a tool's result ends.
+fn tool_calls_in(v: &Value) -> Vec<(String, bool)> {
+    if v["type"] != "message" {
+        return vec![];
+    }
+    let m = &v["message"];
+    match m["role"].as_str() {
+        Some("assistant") => m["content"].as_array().into_iter().flatten().filter(|p| p["type"] == "toolCall").filter_map(|c| Some((c["name"].as_str()?.to_string(), true))).collect(),
+        Some("toolResult") => vec![(m["toolName"].as_str().unwrap_or_default().to_string(), false)],
+        _ => vec![],
+    }
+}
+
 fn busy_in(jsonl: &str) -> bool {
     let mut busy = false;
     for v in jsonl.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
@@ -346,6 +359,10 @@ impl Agent for Pi {
         event_of(line)
     }
 
+    fn tool_calls(&self, line: &Value) -> Vec<(String, bool)> {
+        tool_calls_in(line)
+    }
+
     fn busy(&self, pid: u32) -> Option<bool> {
         Some(busy_in(&std::fs::read_to_string(conversation_in(pid)?).ok()?))
     }
@@ -435,6 +452,12 @@ mod tests {
 {"type":"message","id":"a6","parentId":"a5","timestamp":"2026-09-30T04:06:22.000Z","message":{"role":"assistant","content":[{"type":"text","text":""},{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls","timeout":5}}],"stopReason":"toolUse"}}
 {"type":"message","id":"a7","parentId":"a6","timestamp":"2026-09-30T04:06:22.500Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","content":[{"type":"text","text":"(no output)"}]}}
 {"type":"message","id":"a8","parentId":"a7","timestamp":"2026-09-30T04:06:24.000Z","message":{"role":"assistant","content":[{"type":"text","text":"DONE"}],"stopReason":"stop"}}"#;
+
+    #[test]
+    fn its_session_says_which_tools_it_calls() {
+        let calls: Vec<(String, bool)> = SESSION.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).flat_map(|v| tool_calls_in(&v)).collect();
+        assert_eq!(calls, [("bash".to_string(), true), ("bash".to_string(), false)]);
+    }
 
     #[test]
     fn its_session_reads_as_turns() {

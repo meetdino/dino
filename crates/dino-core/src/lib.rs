@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod agent;
+pub mod agent_mcp;
 pub mod ask;
 pub mod claude_token;
 pub mod compat;
