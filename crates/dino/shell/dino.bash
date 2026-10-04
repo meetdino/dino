@@ -1,7 +1,7 @@
 # dino shell integration for bash (`dino init bash`).
 #
-# The AI line: start a line with # and press Enter, and your own agent (Claude Code or Codex, run
-# with no tools) answers with one command. On bash 4 or later ⌘I in Dino (Alt+I elsewhere,
+# The AI line: start a line with # and press Enter, and your own agent (the one Settings →
+# Terminal names, or Claude Code or Codex; run with no tools) answers with one command. On bash 4 or later ⌘I in Dino (Alt+I elsewhere,
 # $DINO_AI_KEY) puts it straight on the prompt; on the old bash macOS ships, ⌘I asks the same way
 # as the # line, and ↑ puts the answer on the prompt.
 # Nothing runs by itself. A command that could destroy something arrives commented out: delete

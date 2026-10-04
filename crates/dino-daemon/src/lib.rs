@@ -182,6 +182,7 @@ impl Daemon {
         let mut out = self.launchers.read().unwrap().clone();
         for l in &mut out {
             l.knobs = self.knobs(&l.agent_id, allow_bypass);
+            l.answers_once = agent(&l.agent_id).is_some_and(|a| a.answers_once());
         }
         out
     }
@@ -683,25 +684,25 @@ fn launchers_from(free_tier: bool, agents: Vec<dino_core::Detected>) -> Vec<Laun
     for d in agents {
         let program: String = d.path.to_string_lossy().into();
         if d.kind.id == "claude" && free_tier {
-            out.push(LauncherInfo { short: "free".into(), agent_id: "claude-free".into(), label: "Claude Code · free models".into(), program: program.clone(), knobs: Default::default() });
+            out.push(LauncherInfo { short: "free".into(), agent_id: "claude-free".into(), label: "Claude Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
         }
         if d.kind.id == "qwen" && free_tier {
-            out.push(LauncherInfo { short: "qwen-free".into(), agent_id: "qwen-free".into(), label: "Qwen Code · free models".into(), program: program.clone(), knobs: Default::default() });
+            out.push(LauncherInfo { short: "qwen-free".into(), agent_id: "qwen-free".into(), label: "Qwen Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
         }
         if d.kind.id == "kimi" && free_tier {
-            out.push(LauncherInfo { short: "kimi-free".into(), agent_id: "kimi-free".into(), label: "Kimi Code · free models".into(), program: program.clone(), knobs: Default::default() });
+            out.push(LauncherInfo { short: "kimi-free".into(), agent_id: "kimi-free".into(), label: "Kimi Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
         }
         if d.kind.id == "pi" && free_tier {
-            out.push(LauncherInfo { short: "pi-free".into(), agent_id: "pi-free".into(), label: "Pi · free models".into(), program: program.clone(), knobs: Default::default() });
+            out.push(LauncherInfo { short: "pi-free".into(), agent_id: "pi-free".into(), label: "Pi · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
         }
         if d.kind.id == "hermes" && free_tier {
-            out.push(LauncherInfo { short: "hermes-free".into(), agent_id: "hermes-free".into(), label: "Hermes Agent · free models".into(), program: program.clone(), knobs: Default::default() });
+            out.push(LauncherInfo { short: "hermes-free".into(), agent_id: "hermes-free".into(), label: "Hermes Agent · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false });
         }
-        out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program, knobs: Default::default() });
+        out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program, knobs: Default::default(), answers_once: false });
     }
     let shell = user_shell();
     let shell_name = shell.rsplit('/').next().unwrap_or("shell").to_string();
-    out.push(LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell, knobs: Default::default() });
+    out.push(LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell, knobs: Default::default(), answers_once: false });
     out
 }
 
@@ -3892,7 +3893,7 @@ mod tests {
 
     fn shell_daemon() -> Arc<Daemon> {
         test_home();
-        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default() };
+        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false };
         new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![shell])
     }
 
@@ -4000,8 +4001,8 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "one\n").unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default() };
-        let agent = LauncherInfo { short: "agent".into(), agent_id: "agent".into(), label: "Agent".into(), program: "/bin/sh".into(), knobs: Default::default() };
+        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false };
+        let agent = LauncherInfo { short: "agent".into(), agent_id: "agent".into(), label: "Agent".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false };
         let d = new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![shell, agent]);
         let start = || spawn_in_worktree(&d, Launch::new("agent", vec![], Some(repo.display().to_string()))).unwrap();
         let wt_of = |id: &str| d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == real(&session(&d, id).cwd)).cloned().unwrap();

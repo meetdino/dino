@@ -523,6 +523,9 @@ pub struct LauncherInfo {
     /// The mode, model and effort it offers.
     #[serde(default)]
     pub knobs: Knobs,
+    /// It can answer one request with no tools, as the shell's ⌘I asks (`Agent::answers_once`).
+    #[serde(default)]
+    pub answers_once: bool,
 }
 
 /// The pane a tmux client in a dino shell shows.

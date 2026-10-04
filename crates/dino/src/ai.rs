@@ -3,23 +3,23 @@
 //! the command: the shell integration puts it on the prompt for the user to read and run.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use dino_core::agent::{self as agents, Agent, OneShot};
 use dino_core::controls::{self, Controls};
 use dino_core::ipc::{Request, Response};
 use dino_core::models;
 use dino_core::settings::Settings;
-use dino_core::trust;
 
 /// Exit status of `dino ai suggest` when the command it prints could destroy something.
 pub const RISKY: i32 = 10;
 /// Exit status when the agent says it's not something a command can do; the reason is on stderr.
 pub const NOT_A_COMMAND: i32 = 3;
 
-const USAGE: &str = "usage: dino ai suggest [--agent claude|codex] [--shell zsh] [--cwd DIR] [--last CMD --status N] -- <request>
-       dino ai agent [--agent claude|codex] [--cwd DIR] [--last CMD --status N] -- <request>
+const USAGE: &str = "usage: dino ai suggest [--agent AGENT] [--shell zsh] [--cwd DIR] [--last CMD --status N] -- <request>
+       dino ai agent [--agent AGENT] [--cwd DIR] [--last CMD --status N] -- <request>
        dino ai risky [--cwd DIR] -- <command>";
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
@@ -128,30 +128,73 @@ fn private_temp(prefix: &str) -> std::io::Result<std::path::PathBuf> {
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for a temp file"))
 }
 
-/// Which agent answers: `--agent`/`DINO_AI_AGENT`, else the default in Settings, else whichever
-/// of Claude Code and Codex is installed.
-fn which_agent(asked: Option<&str>) -> anyhow::Result<&'static str> {
-    let pick = |a: &str| if a.starts_with("codex") { "codex" } else { "claude" };
-    if let Some(a) = asked {
-        return Ok(pick(a));
+/// Who ⌘I asks, and its program: `--agent`/`DINO_AI_AGENT`, else the agent chosen in Settings →
+/// Terminal, else the default agent, else Claude Code, Codex or another that can answer that way,
+/// whichever is here first. Each must be able to answer once with no tools (`Agent::answers_once`).
+fn asker(asked: Option<&str>, s: &Settings) -> anyhow::Result<(&'static dyn Agent, PathBuf)> {
+    if let Some(id) = asked {
+        let a = agents::agent(one_shot_id(id)).filter(|a| a.answers_once()).ok_or_else(|| anyhow::anyhow!("{id} can't suggest a command: it has no way to answer once with no tools"))?;
+        let program = agent_program(a.id()).ok_or_else(|| anyhow::anyhow!("{} isn't installed", agent_name(a.id())))?;
+        return Ok((a, program));
     }
-    let default = Settings::load().policies.default_agent.filter(|a| a.starts_with("claude") || a.starts_with("codex"));
-    let wanted = default.as_deref().map(pick).unwrap_or("claude");
-    let other = if wanted == "claude" { "codex" } else { "claude" };
-    [wanted, other].into_iter().find(|a| installed(a)).ok_or_else(|| anyhow::anyhow!("neither Claude Code nor Codex is installed"))
+    let chosen = [s.terminal.ask_agent.as_str(), s.policies.default_agent.as_deref().unwrap_or_default()];
+    let others = agents::all().map(|a| a.id());
+    chosen
+        .into_iter()
+        .chain(others)
+        .filter(|id| !id.is_empty())
+        .filter_map(|id| agents::agent(one_shot_id(id)))
+        .filter(|a| a.answers_once() && s.policies.allows(a.id()))
+        .find_map(|a| Some((a, agent_program(a.id())?)))
+        .ok_or_else(|| anyhow::anyhow!("no agent here can suggest a command: install Claude Code or Codex"))
 }
 
-fn installed(program: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(program).is_file()))
+/// What ⌘⏎ starts, by launcher: `--agent`/`DINO_AI_AGENT`, else the one chosen in Settings →
+/// Terminal, else the agent ⌘I asks.
+fn handoff(asked: Option<&str>, s: &Settings) -> anyhow::Result<String> {
+    if let Some(a) = asked {
+        return Ok(a.to_string());
+    }
+    let chosen = s.terminal.handoff_agent.as_str();
+    // One dino knows only by launcher (a free tier) is dinod's to find; an agent by its program.
+    let here = || dino_core::KNOWN_AGENTS.iter().all(|k| k.id != chosen) || agent_program(chosen).is_some();
+    if !chosen.is_empty() && here() {
+        return Ok(chosen.to_string());
+    }
+    Ok(asker(None, s)?.0.id().to_string())
 }
 
-/// Model and effort from Settings → Agents, as the agent's own flags; its defaults otherwise.
-fn control_args(agent: &str) -> Vec<String> {
-    let chosen = Settings::load().agents.get(agent).cloned().unwrap_or_default();
-    let c = Controls { mode: None, ..chosen };
+/// The agent that answers for launcher `id`: a free tier picks its models turn by turn, so its
+/// agent on its own models.
+fn one_shot_id(id: &str) -> &str {
+    match id {
+        "free" => "claude",
+        _ => id.strip_suffix("-free").unwrap_or(id),
+    }
+}
+
+/// Agent `id`'s program, where dino finds it to start it.
+fn agent_program(id: &str) -> Option<PathBuf> {
+    dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id).and_then(dino_core::which_agent)
+}
+
+fn agent_name(id: &str) -> &str {
+    dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id).map_or(id, |k| k.name)
+}
+
+/// The model chosen for ⌘I with its agent (Settings → Terminal), else the one new sessions start
+/// with, and their effort (Settings → Agents), as the agent's own flags; its defaults otherwise.
+fn control_args(agent: &str, s: &Settings) -> Vec<String> {
+    let mut c = Controls { mode: None, ..s.agent_defaults(agent) };
+    let model = s.terminal.ask_model.trim();
+    if s.terminal.ask_agent == agent && !model.is_empty() {
+        c.model = Some(model.to_string());
+    }
+    // Only these two keep their list in files, quick to read; another's model goes as chosen.
     let catalog = match agent {
         "codex" => models::codex_from_files(),
-        _ => models::claude_from_files(None),
+        "claude" => models::claude_from_files(None),
+        _ => None,
     };
     controls::args(agent, &c, &controls::knobs(agent, false, catalog.as_ref()))
 }
@@ -233,42 +276,34 @@ fn suggest(o: &Opts) -> Result<String, Failure> {
     if o.words.is_empty() {
         return Err(Failure::NotACommand("type what you want to do first".into()));
     }
-    let agent = which_agent(o.agent.as_deref())?;
+    let settings = Settings::load();
+    let (a, program) = asker(o.agent.as_deref(), &settings)?;
     // After a failed command its error is usually what the request is about.
     let output = shell_output()
         .filter(|(_, exit)| exit.is_some_and(|e| e != 0))
         .map(|(text, _)| text.lines().rev().take(SUGGEST_OUTPUT_LINES).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
     let out_file = private_temp("dino-ai")?;
-    let mut cmd = Command::new(agent);
-    match agent {
-        "codex" => {
-            // Read-only sandbox, never asks, keeps no session: it can look but not act.
-            cmd.args(["exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "--color", "never", "-o"]).arg(&out_file);
-            cmd.args(control_args(agent));
-            cmd.arg(format!("{}\n\n{}", instructions(&o.shell), request_text(o, output.as_deref())));
-        }
-        _ => {
-            // No tools at all, no MCP servers, nothing saved: a plain answer. In a folder Claude
-            // doesn't trust, not the project's settings either: their hooks would run.
-            cmd.args(trust::claude_headless_args(trust::claude_trusts(&o.cwd)));
-            cmd.args(["-p", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--output-format", "text", "--system-prompt"]);
-            cmd.arg(instructions(&o.shell));
-            cmd.args(control_args(agent));
-            cmd.arg(request_text(o, output.as_deref()));
-        }
-    }
+    let ask = OneShot {
+        instructions: &instructions(&o.shell),
+        request: &request_text(o, output.as_deref()),
+        controls: control_args(a.id(), &settings),
+        cwd: &o.cwd,
+        answer: &out_file,
+    };
+    let mut cmd = Command::new(&program);
+    cmd.args(a.one_shot(&ask));
     scrub(&mut cmd);
     // Claude Code here not signed in (or Settings say so): the Claude subscription token, Claude's alone.
-    let agent_id = if agent == "codex" { "codex" } else { "claude" };
     let launch = dino_core::claude_token::Launch::Headless;
-    if let Some(t) = dino_core::claude_token::for_launch(agent_id, launch, false, &Settings::load(), &dino_core::load_keys(), dino_core::claude_token::signed_in()) {
+    if let Some(t) = dino_core::claude_token::for_launch(a.id(), launch, false, &settings, &dino_core::load_keys(), dino_core::claude_token::signed_in()) {
         cmd.env(dino_core::claude_token::KEY, t);
     }
     cmd.current_dir(&o.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let text = run_for(cmd, timeout(), agent)?;
-    let text = if agent == "codex" { std::fs::read_to_string(&out_file).unwrap_or(text) } else { text };
+    let printed = run_for(cmd, timeout(), agent_name(a.id()));
+    // What it wrote to the file, for one that answers there; else what it printed.
+    let written = std::fs::read_to_string(&out_file).ok().filter(|t| !t.trim().is_empty());
     let _ = std::fs::remove_file(&out_file);
-    parse(&text)
+    parse(&written.unwrap_or(printed?))
 }
 
 fn timeout() -> Duration {
@@ -514,7 +549,7 @@ fn runs_a_download(command: &str) -> bool {
 /// attached here in any other terminal.
 fn agent(o: &Opts) -> anyhow::Result<()> {
     anyhow::ensure!(!o.words.is_empty(), "type what you want the agent to do first");
-    let agent = which_agent(o.agent.as_deref())?;
+    let agent = handoff(o.agent.as_deref(), &Settings::load())?;
     // In a Dino shell the app shows the new session under it; elsewhere it takes this terminal.
     let by = std::env::var("DINO_SESSION").ok().filter(|s| !s.is_empty());
     let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
@@ -529,7 +564,7 @@ fn agent(o: &Opts) -> anyhow::Result<()> {
         format!("\n\nFor context: in my shell, {what}{how} printed:\n```\n{text}\n```")
     });
     let req = Request::New {
-        launcher: agent.into(),
+        launcher: agent,
         args: vec![],
         cwd: Some(o.cwd.display().to_string()),
         cols,
@@ -704,6 +739,19 @@ mod tests {
         let shown = hide_secrets(text);
         assert_eq!(shown.lines().filter(|l| l.starts_with("[line hidden")).count(), 4, "{shown}");
         assert!(shown.contains("error: build failed") && shown.contains("https://example.com/docs") && shown.contains("commit 4f2a9c1e"));
+    }
+
+    #[test]
+    fn the_model_chosen_for_cmd_i_goes_to_its_agent_only() {
+        let mut s = Settings::default();
+        s.agents.insert("pi".into(), Controls { model: Some("big".into()), ..Controls::default() });
+        assert_eq!(control_args("pi", &s), ["--model", "big"], "new sessions' model without a choice");
+        s.terminal.ask_agent = "pi".into();
+        s.terminal.ask_model = " small ".into();
+        assert_eq!(control_args("pi", &s), ["--model", "small"]);
+        s.terminal.ask_agent = "codex".into();
+        assert_eq!(control_args("pi", &s), ["--model", "big"], "another agent's model isn't Pi's");
+        assert_eq!((one_shot_id("free"), one_shot_id("pi-free"), one_shot_id("codex")), ("claude", "pi", "codex"));
     }
 
     #[test]

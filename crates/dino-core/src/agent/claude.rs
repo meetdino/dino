@@ -39,6 +39,20 @@ impl Agent for Claude {
         !self.free
     }
 
+    fn answers_once(&self) -> bool {
+        !self.free
+    }
+
+    // No tools at all, no MCP servers, nothing saved: a plain answer. In a folder Claude doesn't
+    // trust, not the project's settings either: their hooks would run.
+    fn one_shot(&self, ask: &super::OneShot) -> Vec<String> {
+        let mut out = crate::trust::claude_headless_args(crate::trust::claude_trusts(ask.cwd));
+        out.extend(strings(&["-p", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--output-format", "text", "--system-prompt", ask.instructions]));
+        out.extend(ask.controls.iter().cloned());
+        out.push(ask.request.into());
+        out
+    }
+
     fn free(&self) -> bool {
         self.free
     }

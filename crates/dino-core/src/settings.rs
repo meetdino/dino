@@ -89,11 +89,29 @@ pub struct Terminal {
     pub on_quit: String,
     /// The app's look: "system" (follow the Mac), "light" or "dark"; its panes follow it too.
     pub appearance: String,
+    /// Who ⌘I in a shell asks for a command (`dino ai suggest`), by agent id; empty: the default
+    /// agent if it can answer that way, else Claude Code, Codex or another that can, whichever is
+    /// here first.
+    pub ask_agent: String,
+    /// The model ⌘I asks `ask_agent`, by the agent's own name for it; empty, or with no agent
+    /// chosen: the one its new sessions start with.
+    pub ask_model: String,
+    /// Who ⌘⏎ hands the line to as a new session (`dino ai agent`), by launcher; empty: ⌘I's agent.
+    pub handoff_agent: String,
 }
 
 impl Default for Terminal {
     fn default() -> Self {
-        Self { start_with: "last".into(), quick_key: "cmd-grave".into(), quick_autohide: true, on_quit: String::new(), appearance: "system".into() }
+        Self {
+            start_with: "last".into(),
+            quick_key: "cmd-grave".into(),
+            quick_autohide: true,
+            on_quit: String::new(),
+            appearance: "system".into(),
+            ask_agent: String::new(),
+            ask_model: String::new(),
+            handoff_agent: String::new(),
+        }
     }
 }
 
@@ -636,6 +654,18 @@ mod tests {
         assert!(set_key("bad name", Some("x")).is_err());
         assert!(set_key("DINO_TEST_A_KEY", Some("a\nb")).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_ai_line_picks_its_agents_until_told() {
+        let older: Settings = toml::from_str("[terminal]\nstart_with = \"shell\"\n").unwrap();
+        assert_eq!(older.terminal.start_with, "shell");
+        assert!(older.terminal.ask_agent.is_empty() && older.terminal.ask_model.is_empty() && older.terminal.handoff_agent.is_empty());
+        let mut s = Settings::default();
+        s.terminal.ask_agent = "pi".into();
+        s.terminal.ask_model = "small".into();
+        s.terminal.handoff_agent = "codex".into();
+        assert_eq!(toml::from_str::<Settings>(&toml::to_string(&s).unwrap()).unwrap(), s);
     }
 
     #[test]
