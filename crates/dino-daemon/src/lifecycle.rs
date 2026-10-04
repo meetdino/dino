@@ -430,11 +430,20 @@ fn remove_stored(d: &Daemon, path: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!fanout, "It belongs to a fan-out: keep or discard the fan-out instead");
     let w = d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == target).cloned();
     let w = w.ok_or_else(|| anyhow::anyhow!("{path} isn't a worktree dino made"))?;
-    if let Some(s) = sessions_in(d, &target).into_iter().find(|s| !s.pane.is_exited()) {
+    let ended = sessions_in(d, &target);
+    if let Some(s) = ended.iter().find(|s| !s.pane.is_exited()) {
         anyhow::bail!("{} is running in it", s.label.lock().unwrap().clone().unwrap_or_else(|| s.name.clone()));
     }
     worktree::clean(&w.path).map_err(|e| anyhow::anyhow!("Kept {}: {e}", w.branch))?;
-    for s in sessions_in(d, &target) {
+    forget_stored(d, &w, &target, ended);
+    Ok(())
+}
+
+/// dino's records of its worktree `w` (at `target`), now that it's gone: the sessions that ended
+/// in it (`ended`, found while it was there: a path that's gone can't be resolved to compare) are
+/// archived, and an archived one that ran there makes it again if it's started.
+fn forget_stored(d: &Daemon, w: &SessionWorktree, target: &str, ended: Vec<Arc<super::Session>>) {
+    for s in ended {
         if archive_as(d, &s.id, false).is_err() {
             kill(d, &s.id);
         }
@@ -444,9 +453,9 @@ fn remove_stored(d: &Daemon, path: &str) -> anyhow::Result<()> {
         worktrees.retain(|o| o.path != w.path);
         save_worktrees(&worktrees);
     }
-    d.summaries.lock().unwrap().remove(&target);
-    d.sizes.lock().unwrap().remove(&target);
-    d.pushed.lock().unwrap().remove(&target);
+    d.summaries.lock().unwrap().remove(target);
+    d.sizes.lock().unwrap().remove(target);
+    d.pushed.lock().unwrap().remove(target);
     // An archived session that ran here makes it again from its branch (or a new one) if it's started.
     let mut archived = d.archived.lock().unwrap();
     let mut kept = false;
@@ -457,6 +466,46 @@ fn remove_stored(d: &Daemon, path: &str) -> anyhow::Result<()> {
     save_archived(&archived);
     if !kept {
         let _ = trust::claude_forget(&w.path);
+    }
+}
+
+/// The sidebar's Clean Up for any worktree of a repo, dino's or another tool's. Never the main
+/// checkout, a fan-out's, or one something works in: a live session, a running subagent, a
+/// program whose folder is inside it, or a change in the last few minutes (an agent between
+/// commands). Without `force` one with uncommitted changes stays; with it they're lost. Its
+/// branch goes only when git sees it merged, so commits are never lost.
+pub(crate) fn clean_up(d: &Daemon, path: &str, force: bool) -> anyhow::Result<()> {
+    let target = real(Path::new(path));
+    let fanout = d.groups.lock().unwrap().iter().any(|g| g.members.iter().any(|m| real(&m.worktree) == target));
+    anyhow::ensure!(!fanout, "it belongs to a fan-out: keep or discard the fan-out instead");
+    let ended = sessions_in(d, &target);
+    if let Some(s) = ended.iter().find(|s| !s.pane.is_exited()) {
+        anyhow::bail!("{} is running in it", s.label.lock().unwrap().clone().unwrap_or_else(|| s.name.clone()));
+    }
+    anyhow::ensure!(
+        !super::subagent_owners(d).iter().any(|(p, o)| *p == target && o.running),
+        "a subagent is working in it"
+    );
+    let me = std::process::id();
+    let inside = |p: &str| p == target || p.starts_with(&format!("{target}/"));
+    let mut users: Vec<String> =
+        dino_core::procinfo::working_dirs().into_iter().filter(|(pid, _, cwd)| *pid != me && inside(cwd)).map(|p| p.1).collect();
+    users.sort();
+    users.dedup();
+    anyhow::ensure!(users.is_empty(), "{} is working in it", users.join(", "));
+    anyhow::ensure!(
+        !worktree::recently(worktree::last_changed(Path::new(&target)), super::now_secs()),
+        "it changed in the last {} minutes",
+        worktree::RECENTLY / 60
+    );
+    // Looked up while it's there: a path that's gone doesn't resolve to compare.
+    let w = d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == target).cloned();
+    worktree::clean_as(Path::new(path), force)?;
+    match w {
+        Some(w) => forget_stored(d, &w, &target, ended),
+        None => {
+            d.summaries.lock().unwrap().remove(&target);
+        }
     }
     Ok(())
 }
@@ -477,6 +526,31 @@ fn free_up_space(d: &Arc<Daemon>) -> (Vec<String>, u64) {
         removed.push(s.path);
     }
     (removed, bytes)
+}
+
+/// dino's worktrees that no session runs in any more, whose work landed on the branch they came
+/// from (a merged PR, say), go as a merged session's does (`Policies::close_merged`): only when
+/// nothing would be lost and nothing works in them (see `clean_up`). Others' worktrees are never
+/// removed on their own; the sidebar offers to.
+pub(crate) fn sweep_merged(d: &Daemon) {
+    if !dino_core::settings::Settings::load().policies.close_merged {
+        return;
+    }
+    let mine = d.worktrees.lock().unwrap().clone();
+    for w in mine {
+        let target = real(&w.path);
+        let sessions = sessions_in(d, &target);
+        // Pinned sessions keep theirs until the user says otherwise, as after a merge.
+        if sessions.iter().any(|s| !s.pane.is_exited() || s.pinned.load(Ordering::Relaxed)) {
+            continue;
+        }
+        let base = base_of(&w.repo);
+        let landed = super::summary(d, &target, Some(&w.branch), &base).is_some_and(|s| !s.dirty && s.state == "merged");
+        if landed && clean_up(d, &target, false).is_ok() {
+            super::reshaped(d);
+            eprintln!("{} removed {target}: its work is on {base} and no session runs there", super::stamp());
+        }
+    }
 }
 
 /// Sessions whose PR merged or closed are archived rather than killed: a PR can have follow-ups,

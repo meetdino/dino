@@ -322,6 +322,7 @@ pub fn run() -> anyhow::Result<()> {
         std::thread::spawn(move || {
             loop {
                 refresh_prs(&d);
+                lifecycle::sweep_merged(&d);
                 std::thread::sleep(std::time::Duration::from_secs(30));
             }
         });
@@ -1208,12 +1209,9 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::CleanWorktree { path } => match (real(Path::new(&path)), worktree::clean(Path::new(&path))) {
-                (key, Ok(_)) => {
-                    d.summaries.lock().unwrap().remove(&key);
-                    Response::Ok
-                }
-                (_, Err(e)) => Response::Error { message: format!("Couldn't clean up {path}: {e}") },
+            Request::CleanWorktree { path, force } => match lifecycle::clean_up(d, &path, force) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: format!("Couldn't clean up {path}: {e}") },
             },
             req @ (Request::Rename { .. }
             | Request::Pin { .. }
@@ -1234,9 +1232,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::Version => Response::Version { dino: env!("CARGO_PKG_VERSION").into(), installed: update::installed() },
         };
         if reshapes {
-            let mut trees = d.trees.lock().unwrap();
-            d.tree_gen.fetch_add(1, Ordering::Relaxed);
-            trees.clear();
+            reshaped(d);
         }
         if !reads_state {
             *d.asked.0.lock().unwrap() += 1;
@@ -2869,6 +2865,15 @@ struct TreeCache {
 /// seconds, so what it shows is at most this much plus one of its polls behind git.
 const TREE_FRESH: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// What the sidebar's tree shows changed (a session started or stopped, a worktree came or went):
+/// the next ask reads git again instead of the cache, so a new session is filed under its repo and
+/// worktree at once rather than listed loose until the cache's next read.
+pub(crate) fn reshaped(d: &Daemon) {
+    let mut trees = d.trees.lock().unwrap();
+    d.tree_gen.fetch_add(1, Ordering::Relaxed);
+    trees.clear();
+}
+
 /// The tree for `folders`, from the last read: git runs (worktree lists, summaries) take tens to
 /// hundreds of ms while agents make worktrees, so they happen off the request. The first ask for a
 /// set of folders reads it in place.
@@ -2941,6 +2946,17 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
     dirs.sort_by_key(|d| d.len());
     dirs.dedup();
     let inside = |dir: &str, p: &str| dir == p || dir.starts_with(&format!("{p}/"));
+    // What's working where, read once and only when there's a worktree to ask about.
+    let me = std::process::id();
+    let procs = std::sync::OnceLock::new();
+    let working_in = |path: &str| -> Vec<String> {
+        let all: &Vec<(u32, String, String)> =
+            procs.get_or_init(|| dino_core::procinfo::working_dirs().into_iter().filter(|p| p.0 != me).collect());
+        let mut names: Vec<String> = all.iter().filter(|p| inside(&p.2, path)).map(|p| p.1.clone()).collect();
+        names.sort();
+        names.dedup();
+        names
+    };
     let mut repos: Vec<ipc::RepoInfo> = Vec::new();
     let mut plain: Vec<String> = Vec::new();
     for dir in dirs {
@@ -2963,26 +2979,54 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
                             (!fanned.contains(&path)).then(|| sc.spawn(move || summary(d, &path, branch.as_deref(), base)))
                         })
                         .collect();
+                    let dino_dir = real(&worktree::worktrees_dir(Path::new(&w[0].path)));
                     for (w, read) in w.iter_mut().skip(1).zip(reads) {
                         let path = real(Path::new(&w.path));
                         w.dino = made.contains(&path);
+                        let by_dino = w.dino || fanned.contains(&path) || inside(&path, &dino_dir);
+                        w.made_by = if by_dino { Some("dino".into()) } else { worktree::made_by_path(&path).map(String::from) };
+                        w.users = working_in(&path);
                         if let Some(read) = read {
                             w.git = read.join().unwrap_or_default();
                             w.owner = owners.iter().find(|o| o.0 == path).map(|o| o.1.clone());
                         }
+                        w.in_use = !w.users.is_empty()
+                            || w.owner.as_ref().is_some_and(|o| o.running)
+                            || worktree::recently(w.git.as_ref().and_then(|g| g.changed), now_secs());
                     }
                 });
+                let default_branch = default_branch(&w[0]);
                 let path = w[0].path.clone();
-                repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w });
+                repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w, default_branch: Some(default_branch) });
             }
             // A plain folder stands for everything under it, except repos, which get their own node.
             _ if plain.iter().any(|p| inside(&dir, p)) => {}
             _ => plain.push(dir),
         }
     }
-    repos.extend(plain.into_iter().map(|path| ipc::RepoInfo { name: base_name(&path), path, worktrees: Vec::new() }));
+    repos.extend(plain.into_iter().map(|path| ipc::RepoInfo { name: base_name(&path), path, worktrees: Vec::new(), default_branch: None }));
     repos.sort_by_key(|r| r.name.to_lowercase());
     repos
+}
+
+/// The branch `main` (a repo's main checkout) is compared with for "on its default branch".
+/// Checked out on main or master, that's taken as the default without asking git; otherwise
+/// origin's HEAD is read once a minute at most.
+fn default_branch(main: &worktree::Worktree) -> String {
+    static KNOWN: Mutex<Option<HashMap<String, (Instant, String)>>> = Mutex::new(None);
+    if let Some(b @ ("main" | "master")) = main.branch.as_deref() {
+        return b.to_string();
+    }
+    let mut known = KNOWN.lock().unwrap();
+    let known = known.get_or_insert_default();
+    match known.get(&main.path) {
+        Some((at, b)) if at.elapsed() < std::time::Duration::from_secs(60) => b.clone(),
+        _ => {
+            let b = dino_core::pr::default_branch(Path::new(&main.path));
+            known.insert(main.path.clone(), (Instant::now(), b.clone()));
+            b
+        }
+    }
 }
 
 /// A worktree's git summary, read again when older than a few seconds.
@@ -3064,7 +3108,7 @@ fn save_subagents(all: &[SubagentWorktree]) {
 }
 
 /// Worktree path → who made it: takes in what the sessions' hooks reported since last time.
-fn subagent_owners(d: &Daemon) -> Vec<(String, worktree::Owner)> {
+pub(crate) fn subagent_owners(d: &Daemon) -> Vec<(String, worktree::Owner)> {
     let sessions: Vec<(String, bool)> = d.sessions.lock().unwrap().iter().map(|s| (s.id.clone(), !s.pane.is_exited())).collect();
     let mut all = d.subagents.lock().unwrap();
     let before = all.clone();
@@ -3435,8 +3479,9 @@ fn archive_done_prs(d: &Daemon) {
             s.auto.lock().unwrap().pr.note = Some("Kept open after the merge: its worktree has work that isn't pushed".into());
             continue;
         }
-        if let Err(e) = lifecycle::archive_pr_done(d, &target, merged) {
-            s.auto.lock().unwrap().pr.note = Some(format!("Couldn't archive after the PR {state}: {e}"));
+        match lifecycle::archive_pr_done(d, &target, merged) {
+            Ok(()) => reshaped(d),
+            Err(e) => s.auto.lock().unwrap().pr.note = Some(format!("Couldn't archive after the PR {state}: {e}")),
         }
     }
 }
@@ -3796,6 +3841,62 @@ mod tests {
         assert!(!w.path.exists());
         assert_eq!(git(&repo, &["branch", "--list", "--format=%(refname:short)", &w.branch]), w.branch);
         assert!(lifecycle::delete_session(&d, &id, false).is_err(), "it's gone");
+    }
+
+    #[test]
+    fn clean_up_leaves_worktrees_in_use_alone() {
+        let home = test_home().to_path_buf();
+        let repo = home.join("cleanup-repo");
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        // Another tool's worktree (Claude Code's), with a file it was working on.
+        let wt = repo.join(".claude/worktrees/fix");
+        git(&repo, &["worktree", "add", "-q", "-b", "fix", &wt.to_string_lossy()]);
+        std::fs::write(wt.join("draft.txt"), "draft\n").unwrap();
+        let d = shell_daemon();
+        let find = |d: &Daemon| {
+            let repos = tree(d, vec![repo.display().to_string()]);
+            repos.into_iter().flat_map(|r| r.worktrees).find(|w| real(Path::new(&w.path)) == real(&wt)).unwrap()
+        };
+        let w = find(&d);
+        assert_eq!(w.made_by.as_deref(), Some("claude"));
+        assert!(w.in_use, "it just changed: an agent between commands has no program in it");
+        assert!(lifecycle::clean_up(&d, &wt.display().to_string(), true).unwrap_err().to_string().contains("changed in the last"));
+
+        // An hour on.
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let age = |p: &Path| std::fs::File::options().write(true).open(p).unwrap().set_modified(hour_ago).unwrap();
+        age(&wt.join("draft.txt"));
+        age(&PathBuf::from(git(&wt, &["rev-parse", "--absolute-git-dir"])).join("logs/HEAD"));
+        d.summaries.lock().unwrap().clear();
+        let w = find(&d);
+        assert!(!w.in_use && w.users.is_empty());
+        assert_eq!(w.git.as_ref().map(|g| (g.uncommitted, g.unpushed)), Some((1, 0)));
+
+        // A program working in it: never removed, whatever is asked.
+        let mut sleeper = std::process::Command::new("/bin/sleep").arg("30").current_dir(&wt).spawn().unwrap();
+        wait_for("the program to show", || find(&d).users.contains(&"sleep".to_string()));
+        assert!(find(&d).in_use);
+        assert!(lifecycle::clean_up(&d, &wt.display().to_string(), true).unwrap_err().to_string().contains("sleep is working in it"));
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
+
+        // Uncommitted work stays unless the user said it may go.
+        assert!(lifecycle::clean_up(&d, &wt.display().to_string(), false).is_err());
+        assert!(wt.exists());
+        lifecycle::clean_up(&d, &wt.display().to_string(), true).unwrap();
+        assert!(!wt.exists());
+        assert!(git(&repo, &["branch", "--list", "fix"]).is_empty(), "nothing on it but main's commits: it goes");
+        assert!(lifecycle::clean_up(&d, &repo.display().to_string(), true).is_err(), "never the main checkout");
+        assert!(repo.join("a.txt").exists());
     }
 
     /// A running session's screen is kept on disk, and a dinod that starts it again (after a

@@ -249,7 +249,7 @@ struct StartSessionSheet: View {
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
             } icon: {
-                Image(systemName: isRepo(path) ? "shippingbox" : "folder")
+                Image(systemName: FolderLook.icon(repo: isRepo(path)))
             }
         case .github(let r):
             Label {

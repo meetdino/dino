@@ -172,9 +172,14 @@ pub enum Request {
     /// Close a worktree dino made for a session: stop the sessions in it, remove it and its branch.
     /// `apply` first brings its changes into the checkout it came from, uncommitted.
     RemoveWorktree { path: String, apply: bool },
-    /// Remove a finished worktree and its merged branch, never forcing: refuses one with
-    /// uncommitted work, keeps a branch git doesn't see merged.
-    CleanWorktree { path: String },
+    /// Remove a worktree and its branch if git sees it merged (a branch it doesn't stays). Refuses
+    /// the main checkout, a fan-out's, and one in use (see `Worktree::in_use`); refuses one with
+    /// uncommitted work unless `force`, which loses that work.
+    CleanWorktree {
+        path: String,
+        #[serde(default)]
+        force: bool,
+    },
     /// The settings document.
     Settings,
     /// Replace the settings document.
@@ -766,6 +771,9 @@ pub struct RepoInfo {
     pub path: String,
     pub name: String,
     pub worktrees: Vec<Worktree>,
+    /// The branch PRs go into (origin's HEAD, else main or master); None for a plain folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
 }
 
 pub use crate::worktree::{DiffLine, DiffStat, FileDiff};

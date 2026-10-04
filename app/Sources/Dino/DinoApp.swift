@@ -477,6 +477,7 @@ struct ContentView: View {
                 ? "They're applied to the checkout it came from, uncommitted, for you to review. Its sessions stop, and the worktree and its branch are removed."
                 : "Its sessions stop, and the worktree, its branch and every change in it are removed.")
         }
+        .modifier(CleanUpAlert(model: model))
         .alert(
             "Something went wrong",
             isPresented: Binding(get: { model.error != nil && !model.sessions.isEmpty }, set: { if !$0 { model.error = nil } })
@@ -864,6 +865,21 @@ struct Sidebar: View {
         // up to seconds while agents made worktrees): rows keep unique tags and stable
         // identities instead, so the list's own diff stays right.
         .listStyle(.sidebar)
+        // → opens the selected row's group and ← closes it, as in an outline.
+        .onKeyPress(.rightArrow) { openSelected(true) }
+        .onKeyPress(.leftArrow) { openSelected(false) }
+    }
+
+    private func openSelected(_ open: Bool) -> KeyPress.Result {
+        guard filter != .archived, let tag = model.selected else { return .ignored }
+        let tree = SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups)
+        guard let (key, startsOpen) = tree.repos.lazy.compactMap({ $0.opening(tag) }).first else { return .ignored }
+        var set = collapsed.wrappedValue
+        let isOpen = startsOpen != set.contains(key)
+        guard isOpen != open else { return .ignored }
+        if open == startsOpen { set.remove(key) } else { set.insert(key) }
+        collapsed.wrappedValue = set
+        return .handled
     }
 
     /// An agent running in another terminal: shown where tmux keeps it, or offered to move to dino.
@@ -987,13 +1003,7 @@ struct SessionRow: View {
                 SessionName(session: session, place: .sidebar, font: .body.weight(.semibold))
                     .layoutPriority(1)
                 if let branch {
-                    Text(branch)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .padding(.horizontal, 4).padding(.vertical, 1)
-                        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 3))
+                    BranchChip(branch: branch)
                         .help("Branch \(branch)\(root.map { "\n\($0)" } ?? "")")
                 }
                 if let task = session.scheduled {

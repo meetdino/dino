@@ -94,6 +94,8 @@ final class DinoModel: ObservableObject {
     @Published var confirmKeep: MemberInfo?
     /// A session worktree the user is about to close, and whether its changes come along.
     @Published var closingWorktree: ClosingWorktree?
+    /// Clean Up… waiting on the user's yes.
+    @Published var cleaningUp: CleanUpPlan?
 
     /// Prompts dinod runs on a schedule, the one open in the editor and the one about to go.
     @Published var scheduled: [ScheduledTask] = []
@@ -234,16 +236,21 @@ final class DinoModel: ObservableObject {
     }
 
     @Published private(set) var daemonDown = false
-    /// dinod has answered for the sessions and for the scheduled tasks once: the sidebar is built
-    /// then, whole (see Sidebar).
+    /// dinod has answered once for everything the sidebar lists: the sessions, the repos and
+    /// worktrees they're filed under, the agents in other terminals and the scheduled tasks. The
+    /// sidebar is built then, whole (see Sidebar).
     @Published private(set) var sidebarReady = false
     private var sessionsPolled = false
     private var schedulePolled = false
+    private var treePolled = false
+    private var elsewherePolled = false
 
-    private func notePolled(sessions: Bool = false, schedule: Bool = false) {
+    private func notePolled(sessions: Bool = false, schedule: Bool = false, tree: Bool = false, elsewhere: Bool = false) {
         sessionsPolled = sessionsPolled || sessions
         schedulePolled = schedulePolled || schedule
-        if !sidebarReady, sessionsPolled, schedulePolled { sidebarReady = true }
+        treePolled = treePolled || tree
+        elsewherePolled = elsewherePolled || elsewhere
+        if !sidebarReady, sessionsPolled, schedulePolled, treePolled, elsewherePolled { sidebarReady = true }
     }
     /// dinod isn't the dino this app carries (it's from before an update); see Updates.swift.
     @Published var daemonOutdated = false
@@ -705,6 +712,14 @@ final class DinoModel: ObservableObject {
         }
     }
 
+    /// A new shell in `dir` (Open in New Terminal on a worktree). False if none could start.
+    @discardableResult
+    func newShell(in dir: String) -> Bool {
+        guard connection != nil, let l = launchers.first(where: { $0.short == "shell" }) else { return false }
+        newSession(l, in: dir)
+        return true
+    }
+
     /// A new shell where you are, like a new Ghostty tab (⌘T): the folder the selected shell has
     /// moved to, when it says, else the current folder. False if none could start.
     @discardableResult
@@ -748,6 +763,7 @@ final class DinoModel: ObservableObject {
     /// ones are polled; finished conversations load when the browser opens.
     private func watchElsewhere() {
         Task.detached {
+            var first = true
             while true {
                 if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let running = try? conn.found(cloud: false, runningOnly: true) {
                     let ended = await MainActor.run { () -> Bool in
@@ -765,6 +781,11 @@ final class DinoModel: ObservableObject {
                     }
                     if ended { await self.loadFound(cloud: false) }
                     await MainActor.run { self.updateBadge(self.sessions) }
+                }
+                // Answered or not, the sidebar needn't wait for it again.
+                if first {
+                    first = false
+                    await MainActor.run { self.notePolled(elsewhere: true) }
                 }
                 try? await Task.sleep(for: .seconds(3))
             }
@@ -917,10 +938,18 @@ final class DinoModel: ObservableObject {
     func refreshTree() {
         let folders = [folder.path]
         Task.detached {
-            guard let list = try? DinoConnection(path: DinoEnvironment.socketPath).tree(folders: folders) else { return }
+            // A dinod that can't answer still gets a sidebar.
+            guard let list = try? DinoConnection(path: DinoEnvironment.socketPath).tree(folders: folders) else {
+                await MainActor.run { self.notePolled(tree: true) }
+                return
+            }
             // An answer for a folder we've since left (on launch: home, before the first session
             // is selected) would show that folder until the next tick.
-            await MainActor.run { if [self.folder.path] == folders, list != self.repos { self.repos = list } }
+            await MainActor.run {
+                guard [self.folder.path] == folders else { return }
+                if list != self.repos { self.repos = list }
+                self.notePolled(tree: true)
+            }
         }
     }
 
@@ -1101,13 +1130,14 @@ final class DinoModel: ObservableObject {
         }
     }
 
-    /// Remove finished worktrees, and their branches where git sees them merged. Never forced:
-    /// dinod refuses one with uncommitted work.
-    func cleanWorktrees(_ paths: [String]) {
+    /// Remove worktrees, and their branches where git sees them merged. dinod refuses one in use,
+    /// and one with uncommitted work unless `force`, which loses that work.
+    func cleanWorktrees(_ paths: [String], force: Bool = false) {
+        guard !paths.isEmpty else { return }
         Task.detached {
             for path in paths {
                 do {
-                    _ = try DinoConnection(path: DinoEnvironment.socketPath).request(["type": "clean_worktree", "path": path])
+                    _ = try DinoConnection(path: DinoEnvironment.socketPath).request(["type": "clean_worktree", "path": path, "force": force])
                 } catch {
                     await MainActor.run { self.error = error.localizedDescription }
                 }
