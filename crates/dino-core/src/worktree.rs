@@ -75,6 +75,13 @@ pub struct Worktree {
     /// `RECENTLY` seconds. Clean Up leaves it alone.
     #[serde(default)]
     pub in_use: bool,
+    /// The commit it has out, as `git worktree list` says: dinod's alone, not sent.
+    #[serde(skip)]
+    pub head: Option<String>,
+    /// Its git state is still being read (`git` is None till then): dinod read a repo with a
+    /// thousand worktrees for the first time, the sidebar shows them meanwhile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reading: bool,
 }
 
 /// A worktree changed this many seconds ago or less is still being worked on: an agent between
@@ -86,9 +93,14 @@ pub fn recently(changed: Option<u64>, now: u64) -> bool {
     changed.is_some_and(|t| now.saturating_sub(t) <= RECENTLY)
 }
 
+/// `git status` as dinod reads it, many worktrees at a time: without the index lock it would
+/// otherwise take to save what it learned (an agent's own git run in that worktree would find it
+/// held), and without writing to the worktree at all, so reading it never looks like a change.
+const STATUS: [&str; 4] = ["--no-optional-locks", "status", "--porcelain", "-uall"];
+
 /// When something last changed in `dir` (see `Summary::changed`).
 pub fn last_changed(dir: &Path) -> Option<u64> {
-    let status = git(dir, &["status", "--porcelain", "-uall"]).ok()?;
+    let status = git(dir, &STATUS).ok()?;
     last_change(dir, &status.lines().filter(|l| l.len() > 3).collect::<Vec<_>>())
 }
 
@@ -174,18 +186,101 @@ static HISTORY: Mutex<Option<HashMap<(PathBuf, Option<String>, String), History>
 /// `dir` at a glance next to `base` (a branch of its repo). Only reads: it may be another agent's
 /// worktree, so its index is left alone.
 pub fn summary(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<Summary> {
-    let tips = git(dir, &["rev-parse", "HEAD", base])?;
+    summary_at(dir, branch, base, git(dir, &["rev-parse", "HEAD", base])?, None)
+}
+
+/// `summary` when the commits it and `base` have out are known (`git worktree list` says, for
+/// every worktree at once), with what `batch` read for many worktrees at once.
+pub fn summary_of(dir: &Path, branch: Option<&str>, base: &str, head: &str, base_tip: &str, batch: &Batch) -> anyhow::Result<Summary> {
+    summary_at(dir, branch, base, format!("{head}\n{base_tip}\n"), Some(batch))
+}
+
+/// What a summary reads from history, for many worktrees of a repo in a few git runs: a repo
+/// with a thousand worktrees took ten thousand runs one by one, and `--remotes` alone reads
+/// every remote branch each time. Keyed by the commit each worktree has out.
+#[derive(Default, Debug)]
+pub struct Batch {
+    ahead: HashMap<String, u32>,
+    unpushed: HashMap<String, u32>,
+    subjects: HashMap<String, String>,
+}
+
+/// `Batch` for `heads` (commits worktrees of the repo at `dir` have out), next to `base`. Empty
+/// where git fails: each summary then asks for itself.
+pub fn batch(dir: &Path, heads: &[&str], base: &str) -> Batch {
+    let mut heads: Vec<&str> = heads.to_vec();
+    heads.sort_unstable();
+    heads.dedup();
+    let Ok(ahead) = reach_counts(dir, &heads, &["--not", base]) else { return Batch::default() };
+    let own: Vec<&str> = heads.iter().copied().filter(|h| ahead.get(*h).is_some_and(|&n| n > 0)).collect();
+    let unpushed = if own.is_empty() { Ok(HashMap::new()) } else { reach_counts(dir, &own, &["--not", "--remotes", base]) };
+    let subjects = if own.is_empty() {
+        Ok(String::new())
+    } else {
+        git_in(dir, &["log", "--no-walk=unsorted", "--format=%H%x09%s", "--stdin"], Some((own.join("\n") + "\n").as_bytes()))
+    };
+    let subjects = subjects.map(|out| out.lines().filter_map(|l| l.split_once('\t')).map(|(h, s)| (h.to_string(), s.trim().to_string())).collect());
+    match (unpushed, subjects) {
+        (Ok(unpushed), Ok(subjects)) => Batch { ahead, unpushed, subjects },
+        _ => Batch::default(),
+    }
+}
+
+/// For each of `heads`, how many commits are reachable from it and from none of `not` (as
+/// `git rev-list --count <head> <not…>` says), from one walk for all of them.
+fn reach_counts(dir: &Path, heads: &[&str], not: &[&str]) -> anyhow::Result<HashMap<String, u32>> {
+    if heads.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // `--stdin` first: what it reads isn't turned around by the `--not` after it.
+    let mut args = vec!["rev-list", "--parents", "--stdin"];
+    args.extend(not);
+    let out = git_in(dir, &args, Some((heads.join("\n") + "\n").as_bytes()))?;
+    // The commits only `heads` reach, each with its parents.
+    let graph: HashMap<&str, Vec<&str>> = out
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split(' ');
+            Some((it.next()?, it.collect()))
+        })
+        .collect();
+    // What a head reaches among them is what it alone reaches: a commit on the way to one that
+    // `not` reaches would be reached by `not` too.
+    Ok(heads
+        .iter()
+        .map(|&h| {
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let mut todo = vec![h];
+            while let Some(c) = todo.pop() {
+                if let Some(parents) = graph.get(c) {
+                    if seen.insert(c) {
+                        todo.extend(parents);
+                    }
+                }
+            }
+            (h.to_string(), seen.len() as u32)
+        })
+        .collect())
+}
+
+fn summary_at(dir: &Path, branch: Option<&str>, base: &str, tips: String, batch: Option<&Batch>) -> anyhow::Result<Summary> {
     let key = (dir.to_path_buf(), branch.map(String::from), base.to_string());
     let known = HISTORY.lock().unwrap().get_or_insert_default().get(&key).filter(|h| h.tips == tips).cloned();
+    let tip = tips.lines().next().unwrap_or_default();
     let mut h = match known {
         Some(h) => h,
-        None => history(dir, branch, base, tips)?,
+        None => {
+            let read = batch.and_then(|b| Some((*b.ahead.get(tip)?, b.subjects.get(tip).cloned())));
+            history(dir, branch, base, tips.clone(), read)?
+        }
     };
-    let status = git(dir, &["status", "--porcelain", "-uall"])?;
+    let status = git(dir, &STATUS)?;
     let dirty = !status.trim().is_empty();
     // With nothing uncommitted, the diff from the merge base is history's too.
     let (mut added, removed) = match h.clean {
         Some(n) if !dirty => n,
+        // Nothing of its own, nothing uncommitted: nothing changed.
+        _ if !dirty && h.ahead == 0 => (0, 0),
         _ => {
             let (mut added, mut removed) = (0, 0);
             for line in git(dir, &["diff", "--numstat", &h.mb])?.lines() {
@@ -207,7 +302,10 @@ pub fn summary(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<S
     let entries: Vec<&str> = status.lines().filter(|l| l.len() > 3).collect();
     // With no commits of its own, every commit it has is on the base branch already. Not from
     // history: a push leaves HEAD and the base where they were.
-    let unpushed = if h.ahead == 0 { 0 } else { unpushed(dir, base) };
+    let unpushed = match batch.and_then(|b| b.unpushed.get(tip)) {
+        Some(&n) if h.ahead > 0 => n,
+        _ => unpushed(dir, base, h.ahead),
+    };
     let summary = Summary {
         label,
         added,
@@ -223,20 +321,58 @@ pub fn summary(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<S
     Ok(summary)
 }
 
-/// Commits at `dir`'s HEAD on no remote and not on `base`.
-fn unpushed(dir: &Path, base: &str) -> u32 {
+/// Commits at `dir`'s HEAD on no remote and not on `base`; `ahead` of it by that many commits.
+pub fn unpushed(dir: &Path, base: &str, ahead: u32) -> u32 {
+    if ahead == 0 {
+        return 0;
+    }
     git(dir, &["rev-list", "--count", "HEAD", "--not", "--remotes", base]).ok().and_then(|n| n.trim().parse().ok()).unwrap_or(0)
+}
+
+/// `unpushed` for each of `heads` (`ahead` of `base` by the counts given), one git run for all.
+pub fn unpushed_all(dir: &Path, heads: &[(&str, u32)], base: &str) -> HashMap<String, u32> {
+    let own: Vec<&str> = heads.iter().filter(|h| h.1 > 0).map(|h| h.0).collect();
+    let mut counts = reach_counts(dir, &own, &["--not", "--remotes", base]).unwrap_or_default();
+    for (h, _) in heads.iter().filter(|h| h.1 == 0) {
+        counts.insert(h.to_string(), 0);
+    }
+    counts
+}
+
+/// The commit the branch `branch` started at: the oldest entry of its reflog, read from the file
+/// (`git reflog` is a run per worktree). Asked of git where refs aren't files (reftable).
+fn branch_start(dir: &Path, branch: &str) -> Option<String> {
+    let common = git_common_dir(dir)?;
+    if !common.join("reftable").exists() {
+        let log = std::fs::read_to_string(common.join("logs/refs/heads").join(branch)).ok()?;
+        return log.lines().next()?.split(' ').nth(1).map(str::to_string);
+    }
+    git(dir, &["reflog", "show", "--format=%H", &format!("refs/heads/{branch}")]).ok()?.lines().last().map(str::to_string)
+}
+
+/// The git dir of the checkout at `dir`, read from its files: a worktree's `.git` is a file
+/// naming it, the main checkout's is the dir itself.
+pub fn git_dir(dir: &Path) -> Option<PathBuf> {
+    match std::fs::read_to_string(dir.join(".git")) {
+        Ok(s) => s.trim().strip_prefix("gitdir: ").map(|g| dir.join(g)),
+        Err(_) => Some(dir.join(".git")).filter(|g| g.is_dir()),
+    }
+}
+
+/// The git dir every worktree of the repo at `dir` shares (refs, objects, `worktrees/`).
+pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    let own = git_dir(dir)?;
+    match std::fs::read_to_string(own.join("commondir")) {
+        Ok(c) => Some(own.join(c.trim())),
+        Err(_) => Some(own),
+    }
 }
 
 /// The newest of: its uncommitted files (`entries`, as `git status --porcelain` lists them) and
 /// its HEAD's reflog (commits, checkouts, resets). Read from the files, no git run.
 fn last_change(dir: &Path, entries: &[&str]) -> Option<u64> {
     let modified = |p: &Path| std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok();
-    // A worktree's `.git` is a file naming its git dir; the main checkout's is the dir itself.
-    let git_dir = match std::fs::read_to_string(dir.join(".git")) {
-        Ok(s) => s.trim().strip_prefix("gitdir: ").map(|g| dir.join(g)),
-        Err(_) => Some(dir.join(".git")),
-    };
+    let git_dir = git_dir(dir);
     // A few hundred is plenty to see it's being worked on; a generated tree may list thousands.
     let files = entries.iter().take(300).filter_map(|l| {
         let path = l[3..].rsplit(" -> ").next()?.trim_matches('"');
@@ -282,14 +418,17 @@ fn untracked_lines(file: &Path) -> u32 {
     b.iter().filter(|&&c| c == b'\n').count() as u32
 }
 
-fn history(dir: &Path, branch: Option<&str>, base: &str, tips: String) -> anyhow::Result<History> {
+/// `read`: how far ahead of `base` it is and its HEAD's subject, when already read (`Batch`).
+fn history(dir: &Path, branch: Option<&str>, base: &str, tips: String, read: Option<(u32, Option<String>)>) -> anyhow::Result<History> {
     let tip = tips.lines().next().unwrap_or_default().to_string();
-    let mb = git(dir, &["merge-base", "HEAD", base])?.trim().to_string();
-    let ahead: u32 = git(dir, &["rev-list", "--count", &format!("{base}..HEAD")])?.trim().parse().unwrap_or(0);
+    let ahead: u32 = match &read {
+        Some((n, _)) => *n,
+        None => git(dir, &["rev-list", "--count", &format!("{base}..HEAD")])?.trim().parse().unwrap_or(0),
+    };
+    // Nothing of its own: it's on the base branch, so it's where the two meet.
+    let mb = if ahead == 0 && !tip.is_empty() { tip.clone() } else { git(dir, &["merge-base", "HEAD", base])?.trim().to_string() };
     // The oldest reflog entry is where the branch started; no reflog, then judge by the base.
-    let start = branch
-        .and_then(|b| git(dir, &["reflog", "show", "--format=%H", &format!("refs/heads/{b}")]).ok())
-        .and_then(|log| log.lines().last().map(str::to_string));
+    let start = branch.and_then(|b| branch_start(dir, b));
     let had_commits = start.as_deref().map_or(ahead > 0, |s| s != tip);
     let same_as_base = ahead > 0 && {
         let changed = git(dir, &["diff", "--name-only", &mb, "HEAD"])?;
@@ -300,7 +439,11 @@ fn history(dir: &Path, branch: Option<&str>, base: &str, tips: String) -> anyhow
             git(dir, &args).is_ok()
         }
     };
-    let subject = if ahead > 0 { git(dir, &["log", "-1", "--format=%s"]).ok().map(|s| s.trim().to_string()) } else { None };
+    let subject = match read {
+        _ if ahead == 0 => None,
+        Some((_, Some(s))) => Some(s),
+        _ => git(dir, &["log", "-1", "--format=%s"]).ok().map(|s| s.trim().to_string()),
+    };
     Ok(History { tips, mb, ahead, had_commits, same_as_base, subject, clean: None })
 }
 
@@ -317,7 +460,8 @@ pub fn list(dir: &Path) -> anyhow::Result<Vec<Worktree>> {
         .filter_map(|b| {
             let path = b.lines().next()?.strip_prefix("worktree ")?.to_string();
             let branch = b.lines().find_map(|l| l.strip_prefix("branch refs/heads/")).map(String::from);
-            Some(Worktree { path, branch, dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false })
+            let head = b.lines().find_map(|l| l.strip_prefix("HEAD ")).map(String::from);
+            Some(Worktree { path, branch, dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false, head, reading: false })
         })
         .collect())
 }
@@ -839,7 +983,7 @@ pub struct AtRisk {
 pub fn at_risk(dir: &Path, branch: Option<&str>, base: &str) -> anyhow::Result<AtRisk> {
     let uncommitted = git(dir, &["status", "--porcelain", "-uall"])?.lines().filter(|l| !l.trim().is_empty()).count() as u32;
     // No base to compare with (gone, renamed): nothing counts as landed, and only remotes as pushed.
-    let landed = git(dir, &["rev-parse", "HEAD", base]).and_then(|tips| history(dir, branch, base, tips)).is_ok_and(|h| h.ahead == 0 || h.same_as_base);
+    let landed = git(dir, &["rev-parse", "HEAD", base]).and_then(|tips| history(dir, branch, base, tips, None)).is_ok_and(|h| h.ahead == 0 || h.same_as_base);
     let mut not = vec!["rev-list", "--count", "HEAD", "--not", "--remotes"];
     if git(dir, &["rev-parse", "--verify", "--quiet", base]).is_ok() {
         not.push(base);
@@ -1081,7 +1225,15 @@ mod tests {
 
         let wt = tmp.join("agent-abc1234def");
         git(&repo, &["worktree", "add", "-q", "-b", "worktree-agent-abc1234def", &wt.to_string_lossy(), "main"]).unwrap();
-        let s = |dir: &Path, b: &str| summary(dir, Some(b), "main").unwrap();
+        // Read on its own, and as dinod reads many at once (`batch`): the same.
+        let s = |dir: &Path, b: &str| {
+            let one = summary(dir, Some(b), "main").unwrap();
+            HISTORY.lock().unwrap().take();
+            let (head, base_tip) = (git(dir, &["rev-parse", "HEAD"]).unwrap(), git(dir, &["rev-parse", "main"]).unwrap());
+            let read = batch(dir, &[head.trim()], "main");
+            assert_eq!(summary_of(dir, Some(b), "main", head.trim(), base_tip.trim(), &read).unwrap(), one, "{read:?}");
+            one
+        };
         let b = "worktree-agent-abc1234def";
         let fresh = s(&wt, b);
         assert_eq!((fresh.label.as_str(), fresh.state.as_str(), fresh.added, fresh.dirty), ("Subagent abc1234", "empty", 0, false));
@@ -1166,8 +1318,8 @@ mod tests {
         let all = list(&wt).unwrap();
         let real = |p: &Path| p.canonicalize().unwrap().to_string_lossy().into_owned();
         assert_eq!(all, vec![
-            Worktree { path: real(repo), branch: Some("main".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false },
-            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false },
+            Worktree { path: real(repo), branch: Some("main".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false, reading: false, head: Some(git(repo, &["rev-parse", "HEAD"]).unwrap().trim().into()) },
+            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false, reading: false, head: Some(git(&wt, &["rev-parse", "HEAD"]).unwrap().trim().into()) },
         ]);
 
         std::fs::write(wt.join("a.txt"), "one\ntwo\nthree\n").unwrap();

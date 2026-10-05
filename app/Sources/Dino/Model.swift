@@ -1065,12 +1065,23 @@ final class DinoModel: ObservableObject {
         }
     }
 
+    /// The version of `repos` dinod sent, and for which folders: asked with, so an unchanged
+    /// tree comes back as "the same" instead of again in full.
+    private var treeVersion: (folders: [String], version: String)?
+
     /// Worktrees come from git, so this runs off the main thread and off the session poll.
     func refreshTree() {
         let folders = [folder.path]
+        let known = treeVersion.flatMap { $0.folders == folders ? $0.version : nil }
         Task.detached {
             // A dinod that can't answer still gets a sidebar.
-            guard let list = try? DinoConnection(path: DinoEnvironment.socketPath).tree(folders: folders) else {
+            let answer: (repos: [RepoInfo], version: String?)??
+            do {
+                answer = .some(try DinoConnection(path: DinoEnvironment.socketPath).tree(folders: folders, known: known))
+            } catch {
+                answer = nil
+            }
+            guard let answer else {
                 await MainActor.run { self.notePolled(tree: true) }
                 return
             }
@@ -1078,7 +1089,10 @@ final class DinoModel: ObservableObject {
             // is selected) would show that folder until the next tick.
             await MainActor.run {
                 guard [self.folder.path] == folders else { return }
-                if list != self.repos { self.repos = list }
+                if let (list, version) = answer {
+                    self.treeVersion = version.map { (folders, $0) }
+                    if list != self.repos { self.repos = list }
+                }
                 self.notePolled(tree: true)
             }
         }
