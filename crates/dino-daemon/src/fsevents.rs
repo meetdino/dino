@@ -58,15 +58,22 @@ pub(crate) struct Changes {
     pub more: bool,
 }
 
+/// Each batch of changes: the paths, with FSEvents' flags for each.
+type OnChanges = Box<dyn Fn(&[(PathBuf, u32)]) + Send + Sync>;
+
+/// Events were lost (FSEvents' MustScanSubDirs, UserDropped, KernelDropped): anything under the
+/// watched paths may have changed.
+pub(crate) const LOST: u32 = 0x1 | 0x2 | 0x4;
+/// A watched folder itself was moved or removed (FSEvents' RootChanged).
+pub(crate) const ROOT_CHANGED: u32 = 0x20;
+
 struct Shared {
-    changes: Mutex<Changes>,
-    /// Told after each batch of changes (wakes the scheduler).
-    poke: Box<dyn Fn() + Send + Sync>,
+    on: OnChanges,
 }
 
 pub(crate) struct Watch {
     stream: Stream,
-    shared: Arc<Shared>,
+    changes: Arc<Mutex<Changes>>,
     pub root: PathBuf,
 }
 
@@ -74,6 +81,16 @@ pub(crate) struct Watch {
 // from any thread; the callback reaches `Shared` only, which is Sync.
 unsafe impl Send for Watch {}
 unsafe impl Sync for Watch {}
+
+/// Folders watched together, each batch of changes handed to a callback as it comes: what changed
+/// is folders (not each file), so a build writing thousands of files is a few events.
+pub(crate) struct Folders {
+    stream: Stream,
+}
+
+// SAFETY: as for `Watch`.
+unsafe impl Send for Folders {}
+unsafe impl Sync for Folders {}
 
 fn queue() -> *mut c_void {
     struct Q(*mut c_void);
@@ -89,75 +106,121 @@ extern "C" fn release(info: *const c_void) {
     unsafe { drop(Arc::from_raw(info as *const Shared)) };
 }
 
-extern "C" fn changed(_stream: *const c_void, info: *mut c_void, count: usize, paths: *mut c_void, _flags: *const u32, _ids: *const u64) {
+extern "C" fn changed(_stream: *const c_void, info: *mut c_void, count: usize, paths: *mut c_void, flags: *const u32, _ids: *const u64) {
     // SAFETY: FSEvents passes back the context's `info` (a live `Shared`: the stream holds a
     // reference until it's released) and, without kFSEventStreamCreateFlagUseCFTypes, `count`
-    // C strings.
+    // C strings and as many flags.
     let shared = unsafe { &*(info as *const Shared) };
     let paths = unsafe { std::slice::from_raw_parts(paths as *const *const c_char, count) };
-    {
-        let mut c = shared.changes.lock().unwrap();
-        for &p in paths {
-            let p = PathBuf::from(unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned());
-            if c.paths.len() >= KEEP {
-                c.more = true;
-            } else if !c.paths.contains(&p) {
-                c.paths.push(p);
+    let flags = unsafe { std::slice::from_raw_parts(flags, count) };
+    let batch: Vec<(PathBuf, u32)> = paths
+        .iter()
+        .zip(flags)
+        .map(|(&p, &f)| (PathBuf::from(unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()), f))
+        .collect();
+    (shared.on)(&batch);
+}
+
+/// A started stream over `roots` (canonical), or why not.
+fn stream(roots: &[PathBuf], latency: f64, flags: u32, on: OnChanges) -> anyhow::Result<Stream> {
+    let shared = Arc::new(Shared { on });
+    // SAFETY: plain CoreFoundation/FSEvents calls with valid arguments; the array and strings
+    // are released once the stream has its own copies.
+    unsafe {
+        let mut strings = Vec::new();
+        for r in roots {
+            let c = CString::new(r.to_string_lossy().as_bytes())?;
+            let s = CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), UTF8);
+            if s.is_null() {
+                strings.iter().for_each(|&s| CFRelease(s));
+                anyhow::bail!("can't watch {}", r.display());
             }
+            strings.push(s);
         }
-        c.last = Some(Instant::now());
+        let arr = CFArrayCreate(std::ptr::null(), strings.as_ptr(), strings.len() as isize, &kCFTypeArrayCallBacks);
+        strings.iter().for_each(|&s| CFRelease(s));
+        let ctx = Context { version: 0, info: Arc::into_raw(shared) as *mut c_void, retain: None, release: Some(release), describe: None };
+        let stream = FSEventStreamCreate(std::ptr::null(), changed, &ctx, arr, SINCE_NOW, latency, flags);
+        CFRelease(arr);
+        if stream.is_null() {
+            release(ctx.info);
+            anyhow::bail!("macOS won't watch {}", roots.first().map_or_else(String::new, |r| r.display().to_string()));
+        }
+        FSEventStreamSetDispatchQueue(stream, queue());
+        if FSEventStreamStart(stream) == 0 {
+            FSEventStreamInvalidate(stream);
+            FSEventStreamRelease(stream);
+            anyhow::bail!("macOS won't watch {}", roots.first().map_or_else(String::new, |r| r.display().to_string()));
+        }
+        Ok(stream)
     }
-    (shared.poke)();
+}
+
+fn drop_stream(stream: Stream) {
+    // SAFETY: a stream `stream` started, stopped and freed once.
+    unsafe {
+        FSEventStreamStop(stream);
+        FSEventStreamInvalidate(stream);
+        FSEventStreamRelease(stream);
+    }
 }
 
 impl Watch {
     /// Watch `root` and everything under it.
     pub(crate) fn new(root: &Path, poke: impl Fn() + Send + Sync + 'static) -> anyhow::Result<Watch> {
         let root = std::fs::canonicalize(root)?;
-        let c = CString::new(root.to_string_lossy().as_bytes())?;
-        let shared = Arc::new(Shared { changes: Mutex::default(), poke: Box::new(poke) });
-        // SAFETY: plain CoreFoundation/FSEvents calls with valid arguments; the array and string
-        // are released once the stream has its own copies.
-        unsafe {
-            let s = CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), UTF8);
-            anyhow::ensure!(!s.is_null(), "can't watch {}", root.display());
-            let arr = CFArrayCreate(std::ptr::null(), &s, 1, &kCFTypeArrayCallBacks);
-            CFRelease(s);
-            let ctx = Context { version: 0, info: Arc::into_raw(shared.clone()) as *mut c_void, retain: None, release: Some(release), describe: None };
-            let stream = FSEventStreamCreate(std::ptr::null(), changed, &ctx, arr, SINCE_NOW, 1.0, NO_DEFER | WATCH_ROOT | FILE_EVENTS);
-            CFRelease(arr);
-            if stream.is_null() {
-                release(ctx.info);
-                anyhow::bail!("macOS won't watch {}", root.display());
+        let changes: Arc<Mutex<Changes>> = Arc::default();
+        let kept = changes.clone();
+        let on = move |batch: &[(PathBuf, u32)]| {
+            {
+                let mut c = kept.lock().unwrap();
+                for (p, _) in batch {
+                    if c.paths.len() >= KEEP {
+                        c.more = true;
+                    } else if !c.paths.contains(p) {
+                        c.paths.push(p.clone());
+                    }
+                }
+                c.last = Some(Instant::now());
             }
-            FSEventStreamSetDispatchQueue(stream, queue());
-            if FSEventStreamStart(stream) == 0 {
-                FSEventStreamInvalidate(stream);
-                FSEventStreamRelease(stream);
-                anyhow::bail!("macOS won't watch {}", root.display());
-            }
-            Ok(Watch { stream, shared, root })
-        }
+            poke();
+        };
+        let stream = stream(std::slice::from_ref(&root), 1.0, NO_DEFER | WATCH_ROOT | FILE_EVENTS, Box::new(on))?;
+        Ok(Watch { stream, changes, root })
     }
 
     /// When the last change came, without taking anything.
     pub(crate) fn last(&self) -> Option<Instant> {
-        self.shared.changes.lock().unwrap().last
+        self.changes.lock().unwrap().last
     }
 
     pub(crate) fn take(&self) -> Changes {
-        std::mem::take(&mut *self.shared.changes.lock().unwrap())
+        std::mem::take(&mut *self.changes.lock().unwrap())
     }
 }
 
 impl Drop for Watch {
     fn drop(&mut self) {
-        // SAFETY: the stream this watch started, stopped and freed once.
-        unsafe {
-            FSEventStreamStop(self.stream);
-            FSEventStreamInvalidate(self.stream);
-            FSEventStreamRelease(self.stream);
-        }
+        drop_stream(self.stream);
+    }
+}
+
+impl Folders {
+    /// Watch `roots` (canonical) and everything under them; `on` gets the folders that changed,
+    /// about once a second at most while they keep changing.
+    pub(crate) fn new(roots: &[PathBuf], on: impl Fn(&[(PathBuf, u32)]) + Send + Sync + 'static) -> anyhow::Result<Folders> {
+        Ok(Folders { stream: stream(roots, 1.0, NO_DEFER | WATCH_ROOT, Box::new(on))? })
+    }
+
+    /// `new`, with each file that changed rather than its folder.
+    pub(crate) fn files(roots: &[PathBuf], on: impl Fn(&[(PathBuf, u32)]) + Send + Sync + 'static) -> anyhow::Result<Folders> {
+        Ok(Folders { stream: stream(roots, 1.0, NO_DEFER | WATCH_ROOT | FILE_EVENTS, Box::new(on))? })
+    }
+}
+
+impl Drop for Folders {
+    fn drop(&mut self) {
+        drop_stream(self.stream);
     }
 }
 
