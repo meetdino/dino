@@ -831,52 +831,53 @@ fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
     if let Some(e) = t.error {
         rows.push(("Error", printable(&e)));
     }
-    let others = claude_accounts(&dino_core::load_keys());
-    if !others.is_empty() {
-        let list: Vec<String> = others.iter().map(|(n, _)| n.to_string()).collect();
-        rows.push(("Other accounts", format!("{} (answer in turn when Claude Code's own is at its limit)", list.join(", "))));
+    // Your Claude accounts, each by name with what it's doing; what that means, once, after.
+    let accounts = match client::request(&Request::ClaudeAccounts { action: "status".into(), value: None, account: None, order: vec![] }) {
+        Ok(Response::ClaudeAccounts { accounts }) if accounts.accounts.len() > 1 => accounts.accounts,
+        _ => vec![],
+    };
+    let names: Vec<String> = accounts.iter().map(|a| if a.number == 1 { "Your Claude Code login".to_string() } else { format!("Account {}", a.number) }).collect();
+    for (a, name) in accounts.iter().zip(&names) {
+        rows.push((name.as_str(), account_state(a)));
     }
     print!("{}", out::fields(&rows));
+    if !accounts.is_empty() {
+        println!("\nWhen an account hits its limit, Claude Code goes on with the next one until it resets.");
+    }
     Ok(())
 }
 
-/// The key store's names for your other Claude accounts: `CLAUDE_ACCOUNT_<n>`, n from 2.
-const CLAUDE_ACCOUNT: &str = "CLAUDE_ACCOUNT_";
-
-/// Your other Claude accounts in the key store: their number and token, in order.
-fn claude_accounts(keys: &std::collections::HashMap<String, String>) -> Vec<(u32, String)> {
-    let mut v: Vec<(u32, String)> = keys.iter().filter_map(|(k, t)| Some((k.strip_prefix(CLAUDE_ACCOUNT)?.parse().ok()?, t.trim().to_string()))).collect();
-    v.sort();
-    v
+/// What a Claude account is doing now: "answering now", "ready", "at its limit until today 14:00".
+fn account_state(a: &dino_core::ipc::ClaudeAccountInfo) -> String {
+    match (a.answering, a.spent, a.resets_at, a.retry_at) {
+        (true, ..) => "answering now".into(),
+        (_, true, Some(t), _) => format!("at its limit until {}", automations::when(t)),
+        (_, true, None, Some(t)) => format!("at its limit, tried again {}", automations::when(t)),
+        (_, true, None, None) => "at its limit".into(),
+        _ => "ready".into(),
+    }
 }
 
 /// `dino claude-token add-account` (token on stdin) and `remove-account <n>`: your other Claude
-/// accounts, kept in dino's key store as `CLAUDE_ACCOUNT_<n>`, never synced or shown.
+/// accounts, which dinod keeps in its key store as `CLAUDE_ACCOUNT_<n>`, never synced or shown.
 fn cmd_claude_account(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
-    let taken = claude_accounts(&dino_core::load_keys());
-    let (n, value) = if action == "add-account" {
+    let (action, value, account) = if action == "add-account" {
         let mut t = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)?;
-        let t = dino_core::claude_token::find(&t).ok_or_else(|| anyhow::anyhow!("that isn't a Claude token: paste what `claude setup-token` printed"))?;
-        if let Some((n, _)) = taken.iter().find(|(_, have)| *have == t) {
-            println!("That's Claude account {n} already.");
-            return Ok(());
-        }
-        ((2..).find(|n| !taken.iter().any(|(t, _)| t == n)).unwrap_or(2), Some(t))
+        ("add", Some(t), None)
     } else {
         let n: u32 = arg.and_then(|a| a.parse().ok()).ok_or_else(|| anyhow::anyhow!("usage: dino claude-token remove-account <n>"))?;
-        anyhow::ensure!(taken.iter().any(|(t, _)| *t == n), "there's no Claude account {n}");
-        (n, None)
+        ("remove", None, Some(n))
     };
-    match client::request(&Request::SetKey { name: format!("{CLAUDE_ACCOUNT}{n}"), value: value.clone() })? {
-        Response::Ok => {}
+    let info = match client::request(&Request::ClaudeAccounts { action: action.into(), value, account, order: vec![] })? {
+        Response::ClaudeAccounts { accounts } => accounts,
         Response::Error { message } => return Err(hinted(message)),
         _ => return Err(unexpected()),
-    }
-    if value.is_some() {
-        println!("Claude account {n} added: when Claude Code's own account is at its limit, its calls go on with this one until that resets.");
-    } else {
-        println!("Claude account {n} removed.");
+    };
+    match (info.added, account) {
+        (Some(n), _) => println!("Account {n} added. When an account hits its limit, Claude Code goes on with the next one until it resets."),
+        (None, Some(n)) => println!("Account {n} removed."),
+        _ => {}
     }
     Ok(())
 }
