@@ -22,9 +22,19 @@ pub fn others(keys: &HashMap<String, String>) -> Vec<(u32, String)> {
     v
 }
 
-/// Account `n` as fallbacks track routes (see `fallback::route_key`).
-pub fn key(n: u32) -> String {
-    format!("anthropic#account{n}")
+/// The account signing with `token` as fallbacks track routes (see `fallback::route_key`): by
+/// its token, not its number, so a spent account stays spent when the user reorders them.
+pub fn key(token: &str) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(token.trim(), &mut h);
+    format!("{KEY_PREFIX}{:08x}", std::hash::Hasher::finish(&h) as u32)
+}
+
+const KEY_PREFIX: &str = "anthropic#account-";
+
+/// One of the other accounts' keys, not Claude Code's own.
+pub fn is_key(key: &str) -> bool {
+    key.starts_with(KEY_PREFIX)
 }
 
 /// As the session shows it.

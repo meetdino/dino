@@ -1573,6 +1573,7 @@ private struct AgentsPane: View {
                 Footnote("Run `claude` in any dino shell and it shows in the sidebar from its first moment, with its turns, questions and tasks, as a session dino started. Needs Shell integration (General). A shell's own menu has Keep as Terminal, for one that should stay a plain terminal.")
             }
             if store.setup?.contains(where: { $0.id == "claude" && $0.installed }) == true {
+                ClaudeAccountsSection(act: openShell)
                 ClaudeTokenSection(act: openShell)
             }
             BypassSection()

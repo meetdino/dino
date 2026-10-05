@@ -142,7 +142,7 @@ fn quoted(name: &str) -> String {
 }
 
 /// "today 09:00", "Tue 09:00": local time, as `date` would say it.
-fn when(secs: u64) -> String {
+pub(crate) fn when(secs: u64) -> String {
     let t = secs as libc::time_t;
     // SAFETY: localtime_r only writes the tm it's given.
     let tm = unsafe {

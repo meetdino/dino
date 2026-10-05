@@ -17,6 +17,30 @@ pub const LIFETIME_SECS: u64 = 365 * 24 * 60 * 60;
 /// What `claude setup-token`'s tokens start with.
 const PREFIX: &str = "sk-ant-oat";
 
+/// Your other Claude accounts in the key store: `CLAUDE_ACCOUNT_<n>`, n from 2 (1 is the account
+/// Claude Code signed in with), each a token `claude setup-token` printed. When one is at its
+/// limit, dino's proxy has Claude Code go on with the next (see `dino_proxy::accounts`).
+pub const ACCOUNT_PREFIX: &str = "CLAUDE_ACCOUNT_";
+
+/// The other accounts, in order: their number and token.
+pub fn accounts(keys: &HashMap<String, String>) -> Vec<(u32, String)> {
+    let mut v: Vec<(u32, String)> = keys
+        .iter()
+        .filter_map(|(k, t)| {
+            let n: u32 = k.strip_prefix(ACCOUNT_PREFIX)?.parse().ok().filter(|n| *n >= 2)?;
+            let t = t.trim();
+            t.starts_with(PREFIX).then(|| (n, t.to_string()))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Account `n`'s name in the key store.
+pub fn account_key(n: u32) -> String {
+    format!("{ACCOUNT_PREFIX}{n}")
+}
+
 /// Where a Claude Code dino starts runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Launch {
@@ -108,6 +132,23 @@ mod tests {
         assert_eq!(find(&format!("token:\n{a}\n{b}\n\nStore this")).as_deref(), Some(T));
         assert_eq!(find("no token here"), None);
         assert_eq!(find("sk-ant-oat01-short"), None);
+    }
+
+    #[test]
+    fn other_accounts_in_order() {
+        let keys: HashMap<String, String> = [
+            ("CLAUDE_ACCOUNT_3", T),
+            ("CLAUDE_ACCOUNT_2", " sk-ant-oat01-two \n"),
+            ("CLAUDE_ACCOUNT_4", "sk-ant-api03-not-a-subscription"),
+            ("CLAUDE_ACCOUNT_1", "sk-ant-oat01-one-is-claude-codes-own"),
+            ("CLAUDE_ACCOUNT_X", "sk-ant-oat01-no-number"),
+            (KEY, "sk-ant-oat01-the-subscription-token"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(accounts(&keys), vec![(2, "sk-ant-oat01-two".to_string()), (3, T.to_string())]);
+        assert_eq!(account_key(2), "CLAUDE_ACCOUNT_2");
     }
 
     #[test]

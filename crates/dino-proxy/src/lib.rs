@@ -614,8 +614,21 @@ impl Proxy {
     pub fn spent(&self, key: &str) -> Option<fallback::Limited> {
         let l = self.stats.limited(key)?;
         let subscription = key.starts_with("anthropic#") && l.name == fallback::CLAUDE;
-        let spare = subscription && accounts::others(&self.keys.read().unwrap()).iter().any(|(n, _)| self.stats.limited(&accounts::key(*n)).is_none());
+        let spare = subscription && accounts::others(&self.keys.read().unwrap()).iter().any(|(_, t)| self.stats.limited(&accounts::key(t)).is_none());
         (!spare).then_some(l)
+    }
+
+    /// The user's Claude accounts as they stand: Claude Code's own (signed in with a
+    /// subscription), spent until when, if it was found so; and each other account's, by token.
+    pub fn claude_accounts(&self, tokens: &[&str]) -> (Option<fallback::Limited>, Vec<Option<fallback::Limited>>) {
+        let own = self
+            .stats
+            .limited_routes()
+            .into_iter()
+            .filter(|(k, l)| k.starts_with("anthropic#") && !accounts::is_key(k) && l.name == fallback::CLAUDE)
+            .filter_map(|(k, _)| self.stats.limited(&k))
+            .max_by_key(|l| l.retry_at);
+        (own, tokens.iter().map(|t| self.stats.limited(&accounts::key(t))).collect())
     }
 
     /// The coding plans to serve at `plan/<id>`, from the next request on.
@@ -928,7 +941,8 @@ async fn forward(
     let api = if is_model_call && !collect { fallback::Api::of(&rest) } else { None };
 
     // Which account signs the call: its own while that isn't spent; one turn stays on one account.
-    let spare = |n: u32| st.stats.limited(&accounts::key(n)).is_none();
+    let key_of = |n: u32| accounts.iter().find(|a| a.0 == n).map(|a| accounts::key(&a.1)).unwrap_or_default();
+    let spare = |n: u32| st.stats.limited(&key_of(n)).is_none();
     let mut account: Option<(u32, String)> = None;
     if let Some(p) = &primary
         && !accounts.is_empty()
@@ -1062,7 +1076,7 @@ async fn forward(
             {
                 let current = account.as_ref().map(|a| a.0);
                 let signer = |a: Option<u32>| match a {
-                    Some(n) => (accounts::key(n), accounts::name(n)),
+                    Some(n) => (key_of(n), accounts::name(n)),
                     None => (p.key.clone(), p.tag.name.clone()),
                 };
                 let (key, name) = signer(current);
@@ -1110,7 +1124,7 @@ async fn forward(
                         }
                         // Signed by another Claude account, spent too: its own stays as it was
                         // found, or else as that account is.
-                        let other = account.as_ref().and_then(|(n, _)| st.stats.limited(&p.key).or_else(|| st.stats.limited(&accounts::key(*n))));
+                        let other = account.as_ref().and_then(|(n, _)| st.stats.limited(&p.key).or_else(|| st.stats.limited(&key_of(*n))));
                         Some(other.unwrap_or_else(|| st.stats.mark_limited(&p.key, &p.tag.name, &t)))
                     }
                     None if fallback::is_outage(status.as_u16()) && chain.as_ref().is_some_and(|c| c.on_outage) => {
@@ -2293,6 +2307,11 @@ mod tests {
         assert_eq!((s.last_error, s.limit_error), (None, None), "the turn didn't fail");
         let own = proxy.stats.limited_routes().into_iter().find(|(k, _)| k.starts_with("anthropic#") && !k.contains("account")).unwrap().0;
         assert!(proxy.stats.limited(&own).is_some() && proxy.spent(&own).is_none(), "Claude Code isn't at its limit while another account answers");
+        // As Settings lists them: its own and account 2 spent until the reset, account 3 not; by
+        // token, so reordered they stay as they were found.
+        let (own_spent, others) = proxy.claude_accounts(&["sk-ant-oat01-fourth", "sk-ant-oat01-third"]);
+        assert_eq!(own_spent.map(|l| l.resets_at), Some(Some(spent_until)));
+        assert_eq!(others.iter().map(|l| l.as_ref().map(|l| l.resets_at)).collect::<Vec<_>>(), [None, Some(Some(spent_until))]);
 
         // The next call goes straight to account 3.
         assert!(send("acct", "sk-ant-oat01-own").contains("OTHER"));

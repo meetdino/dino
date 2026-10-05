@@ -282,7 +282,7 @@ struct FallbackChip: View {
         if !usage.isEmpty {
             lines.append(usage.map { "\($0.name): ↑\(roundTokens($0.input_tokens)) ↓\(roundTokens($0.output_tokens))" }.joined(separator: " · "))
         }
-        lines.append(f.isAccount ? "Your other Claude accounts: dino claude-token status" : "Settings → Agents says where each agent goes")
+        lines.append(f.isAccount ? "Settings → Agents → Claude Code Accounts lists your Claude accounts" : "Settings → Agents says where each agent goes")
         return lines.joined(separator: "\n")
     }
 }
