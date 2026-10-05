@@ -118,6 +118,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         exit_code: None,
         route: s.route.clone(),
         instead_of: s.instead_of.clone(),
+        account: s.account.clone(),
     };
     let w = if s.host.is_some() { None } else { session_worktree(d, &s.cwd) };
     kill(d, id);
@@ -187,6 +188,16 @@ fn list(d: &Daemon) -> Vec<ipc::ArchivedInfo> {
 /// conversation resumed where the agent can (`spawn` knows how), else a fresh start in the same place.
 fn unarchive(d: &Daemon, id: &str) -> anyhow::Result<String> {
     let a = d.archived.lock().unwrap().iter().find(|a| a.saved.id == id).cloned().ok_or_else(|| anyhow::anyhow!("nothing archived as {id}"))?;
+    // Its conversation is a session's again (continued since): that one, not a second.
+    if let Some(h) = a.saved.agent_session.as_deref().and_then(|c| super::holder(d, c, None)) {
+        if h.pane.is_exited() {
+            super::resume(d, &h.id)?;
+        }
+        let mut archived = d.archived.lock().unwrap();
+        archived.retain(|o| o.saved.id != id);
+        save_archived(&archived);
+        return Ok(h.id.clone());
+    }
     d.allowed_launcher(&a.saved.launcher)?;
     if let (Some(w), true) = (&a.worktree, a.worktree_removed) {
         worktree::restore(&w.repo, &w.path, &w.branch)?;

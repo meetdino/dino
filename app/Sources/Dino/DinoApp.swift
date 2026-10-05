@@ -226,6 +226,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model.showPalette = false
                 return nil
             }
+            // Esc while the session in front waits to continue in dino stops the wait, rather than
+            // reaching its agent (where it would interrupt the turn being waited on).
+            if e.keyCode == 53, e.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+               let model = self?.model, let w = e.window, !(w is NSPanel), w.attachedSheet == nil,
+               w.identifier?.rawValue != SettingsView.windowID,
+               let s = model.selectedSession, model.isTakingOver(s) {
+                model.cancelTakeOver(s.id)
+                return nil
+            }
             guard let model = self?.model, let w = e.window, !(w is NSPanel), w.attachedSheet == nil,
                   w.identifier?.rawValue != SettingsView.windowID,
                   Self.desktopKey(e, model: model) else { return e }
@@ -434,6 +443,7 @@ struct ContentView: View {
                     TabStrip()
                     TmuxSuggestion()
                     ComputerUseBanner()
+                    TakeOverBanner()
                     UpdateBanner()
                     Terminals()
                 }
@@ -531,7 +541,6 @@ struct ContentView: View {
                 ? "It's working right now. dino waits for the current turn to finish, closes it in \(f.terminal ?? "the other terminal") and continues the conversation here."
                 : "dino closes it in \(f.terminal ?? "the other terminal") and continues the same conversation here, with its history.")
         }
-        .overlay { if let f = model.moving { MovingOverlay(session: f) } }
         .background(WelcomeCard())
     }
 }
@@ -1116,7 +1125,15 @@ struct SessionRow: View {
                 // The row's name is already the agent's title: the badge says what it is and where.
                 HStack(spacing: 5) {
                     AgentBadge(agent: f.agent)
-                    Text("in a shell").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    if model.isTakingOver(session) {
+                        Image(systemName: "hourglass").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
+                        Text("continues in dino after this turn").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Button("Cancel") { model.cancelTakeOver(session.id) }
+                            .buttonStyle(.link).font(.caption)
+                            .help("Stop waiting: \(f.agentName) goes on in this shell")
+                    } else {
+                        Text("in a shell").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
                 .help("\(f.agentName) started by hand in this shell")
             }
@@ -1515,9 +1532,59 @@ struct TakeOverButton: View {
     let found: FoundSession
 
     var body: some View {
-        Button("Continue in dino") { model.takeOver(session) }
-            .controlSize(.small)
-            .help("Continue this \(found.agentName) conversation as a dino session, once its turn is over: status, tasks, controls and previews then work. The shell goes.")
+        if model.isTakingOver(session) {
+            Button("Cancel Continue") { model.cancelTakeOver(session.id) }
+                .controlSize(.small)
+                .help("Stop waiting to continue it in dino (Esc): \(found.agentName) goes on in this shell")
+        } else {
+            Button("Continue in dino") { model.takeOver(session) }
+                .controlSize(.small)
+                .help("Continue this \(found.agentName) conversation as a dino session, once its turn is over: status, tasks, controls and previews then work. The shell goes.")
+        }
+    }
+}
+
+/// Over the terminals: a shell in view whose agent waits for its turn to end to continue in
+/// dino, with Cancel (Esc in its terminal). Only that session waits; the rest of dino goes on.
+/// No animation: a turn can take minutes, and a terminal at rest should cost nothing.
+struct TakeOverBanner: View {
+    @EnvironmentObject var model: DinoModel
+
+    var body: some View {
+        let shown = model.shownSplit.map { [$0.first, $0.second] } ?? model.selected.map { [$0] } ?? []
+        let ids = shown.filter { $0 == model.selected } + shown.filter { $0 != model.selected }
+        if let s = ids.lazy.compactMap({ id in model.sessions.first { $0.id == id && model.isTakingOver($0) } }).first,
+           let f = s.inside {
+            let title = f.title.isEmpty ? f.agentName : "“\(f.title)”"
+            HStack(spacing: 10) {
+                Image(systemName: "hourglass")
+                    .font(.title3)
+                    .foregroundStyle(Brand.green)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(ids.count > 1 && s.id != model.selected ? "Continuing \(title) in dino (\(s.display))" : "Continuing \(title) in dino")
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    Text(f.isBusy
+                        ? "Waiting for \(f.agentName)'s turn to end, then the conversation continues here as a dino session."
+                        : "\(f.agentName) stops in this shell and the conversation continues here as a dino session.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Button("Cancel") { model.cancelTakeOver(s.id) }
+                    .controlSize(.regular)
+                    .help("Stop waiting (Esc): \(f.agentName) goes on in this shell")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Brand.green.opacity(0.10))
+            .overlay(alignment: .bottom) { Divider() }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Continuing \(title) in dino")
+        }
     }
 }
 
@@ -1567,7 +1634,15 @@ struct ElsewhereRow: View {
                 Text(whereText(session)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            if session.asking {
+            if model.adopting.contains(session.id) {
+                // Waiting for its turn to end: only this row waits.
+                Image(systemName: "hourglass").foregroundStyle(.secondary)
+                    .help("Continues in dino once its turn ends")
+                    .accessibilityLabel("Continues in dino once its turn ends")
+                Button("Cancel") { model.cancelAdopt(session) }
+                    .buttonStyle(.link).font(.caption)
+                    .help("Stop waiting: it goes on in \(session.terminal ?? "the other terminal")")
+            } else if session.asking {
                 Image(systemName: "exclamationmark.circle.fill").foregroundStyle(SessionStatus.needsYou.color)
                     .help("Asking for something in tmux: click to go there")
             } else if session.tmux != nil {
@@ -1610,30 +1685,6 @@ func ago(_ secs: UInt64) -> String {
     case ..<3600: return "\(d / 60)m ago"
     case ..<86400: return "\(d / 3600)h ago"
     default: return "\(d / 86400)d ago"
-    }
-}
-
-struct MovingOverlay: View {
-    let session: FoundSession
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.35).ignoresSafeArea()
-            VStack(spacing: 12) {
-                ProgressView().controlSize(.large)
-                Text("Continuing “\(session.title)” in dino").font(.headline)
-                if session.source == "running" {
-                    Text(session.isBusy
-                        ? "Waiting for its current turn to finish, then it continues here."
-                        : session.terminal == "dino"
-                        ? "Restarting it under dino, in the same row."
-                        : "Closing it in \(session.terminal ?? "the other terminal") and continuing here.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(28)
-            .background(RoundedRectangle(cornerRadius: 14).fill(.regularMaterial))
-        }
     }
 }
 

@@ -137,6 +137,10 @@ struct Session {
     route: Option<ProviderRoute>,
     /// Started with this agent because the one asked for was at its limit.
     instead_of: Option<ipc::InsteadOf>,
+    /// What chose the account of an agent started by hand that dino continues (see
+    /// `agent::account_env`), for every start of it. Secrets: only in its environment and in
+    /// dinod's private files, never shown or logged.
+    account: Vec<(String, String)>,
 }
 
 /// What a shell is running in the foreground, as last looked at.
@@ -275,6 +279,9 @@ struct Daemon {
     fallback_seen: Mutex<fallbacks::Seen>,
     /// Sessions whose cost a client is looking at (the sidebar's hover card).
     costs: cost::Costs,
+    /// Conversations waiting for their turn to end to continue in dino (see `Waiting`), by the
+    /// shell's session id (`TakeOver`) or the conversation's (`Adopt`): set to cancel.
+    moves: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 /// `dino lid-watchdog <pid>`: see [`lid`].
@@ -698,6 +705,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         next_sub: AtomicU64::new(1),
         fallback_seen: Mutex::default(),
         costs: cost::Costs::default(),
+        moves: Mutex::default(),
     });
     // Archived ids stay theirs, so a new session never takes one.
     let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
@@ -1298,6 +1306,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::CancelTakeOver { id } => match cancel_move(d, &id) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::Stats { range } => match stats::report(d, range) {
                 Ok(report) => Response::Stats { report: Box::new(report) },
                 Err(e) => Response::Error { message: e.to_string() },
@@ -1657,6 +1669,12 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     };
     // Ended before dinod stopped: it comes back as it was, not running, until resumed.
     let ended = restore.as_ref().filter(|r| r.ended);
+    // One conversation, one agent: never a second process on one another session runs.
+    if let (Some(c), None) = (&agent_session, ended)
+        && let Some(other) = holder(d, c, Some(&id)).filter(|o| !o.pane.is_exited())
+    {
+        anyhow::bail!("its conversation is running in {} already", other.name);
+    }
     let (spec, cwd, server) = match &host {
         _ if ended.is_some() => (None, PathBuf::from(ended.map(|r| r.cwd.clone()).unwrap_or_default()), None),
         Some(host) => {
@@ -1666,7 +1684,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
             (Some(remote_spec(d, &settings, &l, host, &folder, &id, &mut agent_session, restoring, &controls, &args, prompt)?), PathBuf::from(folder), None)
         }
         None => {
-            let (spec, cwd, server) = local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.is_some(), &controls, &args, prompt, route.as_ref());
+            let (spec, cwd, server) = local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.as_ref(), &controls, &args, prompt, route.as_ref());
             (Some(spec), cwd, server)
         }
     };
@@ -1788,6 +1806,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         servers: Mutex::new(vec![]),
         route,
         instead_of,
+        account: restore.as_ref().map(|r| r.account.clone()).unwrap_or_default(),
     }));
     let session = sessions.last().cloned();
     drop(sessions);
@@ -1854,7 +1873,7 @@ fn local_spec(
     cwd: Option<String>,
     id: &str,
     agent_session: &mut Option<String>,
-    restoring: bool,
+    restore: Option<&SavedSession>,
     controls: &Controls,
     args: &[String],
     prompt: Option<String>,
@@ -1919,6 +1938,10 @@ fn local_spec(
     if let Some(t) = claude_token::for_launch(&l.agent_id, claude_token::Launch::Local, route.is_some(), settings, &load_keys(), claude_token::signed_in()) {
         env.insert(claude_token::KEY.into(), t);
     }
+    // An agent started by hand keeps the account it had there (another account's token, its
+    // own gateway) over dino's defaults, the key store's token and the user's own login.
+    let restoring = restore.is_some();
+    env.extend(restore.map(|r| r.account.clone()).unwrap_or_default());
     if adapter.is_some_and(|a| a.session_tools()) && settings.policies.session_tools {
         peers::wire_claude(id, &mut wired_args);
     }
@@ -2502,6 +2525,7 @@ fn state(d: &Daemon) -> Response {
     let previews = d.previews.lock().unwrap().clone();
     let group_of = |id: &str| groups.iter().find(|g| g.members.iter().any(|m| m.session == id)).map(|g| g.id.clone());
     let live = d.sessions.lock().unwrap().clone();
+    let moving: HashSet<String> = d.moves.lock().unwrap().keys().cloned().collect();
     let sessions = live
         .iter()
         .map(|s| {
@@ -2575,6 +2599,8 @@ fn state(d: &Daemon) -> Response {
                 revealed: Some(s.revealed.load(Ordering::Relaxed)).filter(|&t| t > 0),
                 tasks,
                 inside,
+                taking_over: moving.contains(&s.id),
+                conversation: s.agent_session.lock().unwrap().clone(),
                 running,
                 foreground,
                 password: s.host.is_none() && !s.pane.is_exited() && s.pane.shared.password.load(Ordering::Relaxed),
@@ -2717,6 +2743,9 @@ struct SavedSession {
     route: Option<ProviderRoute>,
     #[serde(default)]
     instead_of: Option<ipc::InsteadOf>,
+    /// See `Session::account`. Kept in dinod's private files (mode 600), as its key store is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    account: Vec<(String, String)>,
 }
 
 fn saved_path() -> PathBuf {
@@ -2858,6 +2887,7 @@ fn snapshot(s: &Session) -> SavedSession {
         exit_code: s.pane.exit_code(),
         route: s.route.clone(),
         instead_of: s.instead_of.clone(),
+        account: s.account.clone(),
     }
 }
 
@@ -2877,6 +2907,16 @@ fn attachable(d: &Daemon, id: &str) -> Option<Arc<Session>> {
 /// with them, under the same id. Attached clients see the socket drop without an exit and
 /// reattach (see `dino attach`), so the terminal carries on.
 fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
+    restart_with(d, id, |saved| {
+        if saved.controls.model != controls.model {
+            d.proxy.stats.reset_context(id);
+        }
+        saved.controls = controls;
+    })
+}
+
+/// Stop session `id`'s agent and start it again as `change` makes what it was started with.
+fn restart_with(d: &Daemon, id: &str, change: impl FnOnce(&mut SavedSession)) -> anyhow::Result<()> {
     let (s, mut saved) = {
         let sessions = d.sessions.lock().unwrap();
         let s = sessions.iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
@@ -2891,10 +2931,7 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
     s.subscribers.lock().unwrap().clear();
     s.pane.kill();
     d.proxy.stats.restarted(id);
-    if saved.controls.model != controls.model {
-        d.proxy.stats.reset_context(id);
-    }
-    saved.controls = controls;
+    change(&mut saved);
     saved.ended = false;
     saved.exit_code = None;
     let (cols, rows) = s.pane.size();
@@ -2926,6 +2963,9 @@ fn take_place(d: &Daemon, old: &Arc<Session>) {
 fn resume(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
     anyhow::ensure!(s.pane.is_exited(), "{} is still running", s.name);
+    if let Some(other) = s.agent_session.lock().unwrap().clone().and_then(|c| holder(d, &c, Some(id))).filter(|o| !o.pane.is_exited()) {
+        anyhow::bail!("its conversation is running in {} already", other.name);
+    }
     let controls = s.pending.lock().unwrap().take().unwrap_or_else(|| s.controls.clone());
     restart(d, id, controls)
 }
@@ -2951,11 +2991,29 @@ fn apply_pending(d: &Daemon) {
 fn restore(d: &Daemon, saved: Vec<SavedSession>) {
     let max_id = saved.iter().filter_map(|s| s.id.parse::<u64>().ok()).max().unwrap_or(0);
     d.next_id.fetch_max(max_id + 1, Ordering::Relaxed);
-    for s in saved {
+    for s in one_per_conversation(saved) {
         if let Err(e) = spawn(d, Launch { restore: Some(s.clone()), ..Launch::new(&s.launcher, s.args.clone(), Some(s.cwd.clone())) }) {
             eprintln!("restore {} ({}): {e}", s.id, s.name);
         }
     }
+}
+
+/// Sessions saved on the same conversation (left by an older dino) become one: the one running
+/// it, else the newest, with a name or pin another had.
+fn one_per_conversation(saved: Vec<SavedSession>) -> Vec<SavedSession> {
+    let key = |s: &SavedSession| s.agent_session.clone().map(|c| (s.host.clone(), c));
+    let best = |a: &SavedSession, b: &SavedSession| (!a.ended, a.started_at) >= (!b.ended, b.started_at);
+    let mut out: Vec<SavedSession> = vec![];
+    for s in saved {
+        let Some(at) = key(&s).and_then(|k| out.iter().position(|o| key(o).as_ref() == Some(&k))) else {
+            out.push(s);
+            continue;
+        };
+        let (keep, drop) = if best(&out[at], &s) { (out[at].clone(), s) } else { (s, out[at].clone()) };
+        eprintln!("{} dinod: sessions {} and {} were on one conversation: {} stays", stamp(), keep.id, drop.id, keep.id);
+        out[at] = SavedSession { label: keep.label.clone().or(drop.label), pinned: keep.pinned || drop.pinned, ..keep };
+    }
+    out
 }
 
 fn now_secs() -> u64 {
@@ -3011,58 +3069,189 @@ fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
 }
 
 /// Hand a session over to dino. A running one is left to finish its current turn, stopped, and
-/// resumed here with the same conversation, folder and flags; its old terminal gets a note.
+/// resumed here with the same conversation, folder, flags and account; its old terminal gets a
+/// note. A conversation a dino session already has continues in that session, not a second one.
 fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<String> {
     let Some(a) = agent(&f.agent) else { anyhow::bail!("don't know how to continue {} sessions yet", f.agent) };
     let launcher = a.id().to_string();
     if f.source == Source::Cloud {
         return spawn(d, Launch::new(&launcher, a.cloud_args(&f.session_id), cwd.or(f.cwd.clone())));
     }
+    let running = f.pid.filter(|_| f.source == Source::Running);
+    let held = (!f.session_id.is_empty()).then(|| holder(d, &f.session_id, None)).flatten();
+    if let (Some(h), None) = (&held, running) {
+        // Nothing to stop: it's that session's already. One that ended starts again.
+        if h.pane.is_exited() {
+            resume(d, &h.id)?;
+        }
+        return Ok(h.id.clone());
+    }
 
     // Whatever would stop it starting here is checked before the running one is stopped: a
     // conversation is never left with nothing running it.
-    launcher_for(d, &launcher, f.pid.filter(|_| f.source == Source::Running))?;
+    launcher_for(d, &launcher, running)?;
     if let Some(dir) = &f.cwd {
         anyhow::ensure!(Path::new(dir).is_dir(), "{dir} is gone, so it's left running where it is");
     }
 
     let mut tty = None;
-    if let (Source::Running, Some(pid)) = (&f.source, f.pid) {
-        wait_until_idle(a, pid, std::time::Duration::from_secs(180))?;
+    let mut account = vec![];
+    if let Some(pid) = running {
+        let key = if f.session_id.is_empty() { pid.to_string() } else { f.session_id.clone() };
+        let waiting = Waiting::start(d, &key)?;
+        waiting.until_idle(a, pid)?;
+        if let Some(h) = &held {
+            waiting.until_restartable(h)?;
+        }
+        account = account_of(&f.agent, pid);
         tty = tty_of(pid);
+        waiting.done()?;
         stop(pid)?;
     }
 
-    let id = d.next_id.fetch_add(1, Ordering::Relaxed).to_string();
-    let restore = SavedSession {
-        id: id.clone(),
-        name: session_name(&f.title),
-        launcher: launcher.clone(),
-        args: f.args.clone(),
-        cwd: f.cwd.clone().unwrap_or_else(|| home().display().to_string()),
-        started_at: now_secs(),
-        agent_session: Some(f.session_id.clone()),
-        auto: AutoState::default(),
-        // It keeps whatever the conversation ran with.
-        controls: Controls::default(),
-        scheduled: None,
-        started_by: None,
-        messaged_by: None,
-        label: None,
-        pinned: false,
-        host: None,
-        ended: false,
-        exit_code: None,
-        route: None,
-        instead_of: None,
+    let id = match held {
+        Some(h) => {
+            restart_with(d, &h.id, |saved| {
+                saved.args = f.args.clone();
+                saved.account = account;
+            })?;
+            h.id.clone()
+        }
+        None => {
+            let id = d.next_id.fetch_add(1, Ordering::Relaxed).to_string();
+            let restore = SavedSession {
+                id: id.clone(),
+                name: session_name(&f.title),
+                launcher: launcher.clone(),
+                args: f.args.clone(),
+                cwd: f.cwd.clone().unwrap_or_else(|| home().display().to_string()),
+                started_at: now_secs(),
+                agent_session: Some(f.session_id.clone()),
+                auto: AutoState::default(),
+                // It keeps whatever the conversation ran with.
+                controls: Controls::default(),
+                scheduled: None,
+                started_by: None,
+                messaged_by: None,
+                label: None,
+                pinned: false,
+                host: None,
+                ended: false,
+                exit_code: None,
+                route: None,
+                instead_of: None,
+                account,
+            };
+            spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?
+        }
     };
-    let id = spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
     if let Some(tty) = tty {
-        // Tell whoever looks at the old tab where the conversation went.
-        let note = format!("\r\n\x1b[38;2;117;179;64m▲▲ dino\x1b[0m  \"{}\" continues in dino (session {id}). Open dino, or run: dino attach {id}\r\n", f.title);
-        let _ = std::fs::OpenOptions::new().write(true).open(&tty).and_then(|mut t| io::Write::write_all(&mut t, note.as_bytes()));
+        moved_note(&tty, &f.title, &id);
     }
     Ok(id)
+}
+
+/// Tell whoever looks at the terminal an agent left (`tty`) where its conversation went.
+fn moved_note(tty: &str, title: &str, id: &str) {
+    let note = format!("\r\n\x1b[38;2;117;179;64m▲▲ dino\x1b[0m  \"{title}\" continues in dino (session {id}). Open dino, or run: dino attach {id}\r\n");
+    let _ = std::fs::OpenOptions::new().write(true).open(tty).and_then(|mut t| io::Write::write_all(&mut t, note.as_bytes()));
+}
+
+/// What chose the account of agent `agent_id` running as `pid` (see `agent::account_env`).
+fn account_of(agent_id: &str, pid: u32) -> Vec<(String, String)> {
+    dino_core::procinfo::args_and_env(pid).map(|(_, env)| dino_core::agent::account_env(agent_id, &env)).unwrap_or_default()
+}
+
+/// The session of dino's that has conversation `conversation`, but `except`: one running it
+/// first, else one that ended on it. dino runs each conversation in one session at most.
+fn holder(d: &Daemon, conversation: &str, except: Option<&str>) -> Option<Arc<Session>> {
+    let sessions = d.sessions.lock().unwrap();
+    let held: Vec<&Arc<Session>> = sessions
+        .iter()
+        .filter(|s| Some(s.id.as_str()) != except && !s.replaced.load(Ordering::Relaxed) && s.agent_session.lock().unwrap().as_deref() == Some(conversation))
+        .collect();
+    held.iter().find(|s| !s.pane.is_exited()).or(held.first()).map(|s| Arc::clone(s))
+}
+
+/// How long continuing a conversation in dino waits for its turn to end; it can be cancelled
+/// (`CancelTakeOver`) meanwhile, and the rest of dino goes on.
+const MOVE_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// A conversation waiting to continue in dino, listed in `Daemon::moves` under its key until
+/// it's done or dropped. `CancelTakeOver` sets its flag; past `done`, it can't be cancelled.
+struct Waiting<'a> {
+    d: &'a Daemon,
+    key: String,
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+impl<'a> Waiting<'a> {
+    fn start(d: &'a Daemon, key: &str) -> anyhow::Result<Self> {
+        let mut moves = d.moves.lock().unwrap();
+        anyhow::ensure!(!moves.contains_key(key), "it's already waiting to continue in dino");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        moves.insert(key.to_string(), cancelled.clone());
+        drop(moves);
+        bump(d);
+        Ok(Self { d, key: key.to_string(), cancelled, deadline: Instant::now() + MOVE_WAIT })
+    }
+
+    fn check(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.cancelled.load(Ordering::SeqCst), "cancelled");
+        anyhow::ensure!(Instant::now() < self.deadline, "the session is still working; try again when its turn finishes");
+        Ok(())
+    }
+
+    /// Don't cut a turn in half, for agents that say when they're on one.
+    fn until_idle(&self, a: &dyn dino_core::agent::Agent, pid: u32) -> anyhow::Result<()> {
+        while a.busy(pid) == Some(true) {
+            self.check()?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        self.check()
+    }
+
+    /// Nor the turn of dino's own session `s` on the same conversation.
+    fn until_restartable(&self, s: &Session) -> anyhow::Result<()> {
+        while !restartable(self.d, s) {
+            self.check()?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        self.check()
+    }
+
+    /// No more waiting: off the list, unless it was cancelled first.
+    fn done(self) -> anyhow::Result<()> {
+        let flag = self.d.moves.lock().unwrap().remove(&self.key);
+        anyhow::ensure!(!flag.is_some_and(|f| f.load(Ordering::SeqCst)), "cancelled");
+        Ok(())
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let mut moves = self.d.moves.lock().unwrap();
+        if moves.get(&self.key).is_some_and(|f| Arc::ptr_eq(f, &self.cancelled)) {
+            moves.remove(&self.key);
+        }
+        drop(moves);
+        bump(self.d);
+    }
+}
+
+/// Stop waiting to continue conversation or shell `key` in dino (see `Waiting`).
+fn cancel_move(d: &Daemon, key: &str) -> anyhow::Result<()> {
+    let moves = d.moves.lock().unwrap();
+    let flag = moves.get(key).ok_or_else(|| anyhow::anyhow!("nothing is waiting to continue in dino there"))?;
+    flag.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Clients waiting on `StateChange` look again now.
+fn bump(d: &Daemon) {
+    *d.asked.0.lock().unwrap() += 1;
+    d.asked.1.notify_all();
 }
 
 /// What has session `s`'s terminal right now, asked of its pty, when it isn't the session's own
@@ -3185,7 +3374,9 @@ fn follow_tmux(s: &Session, fg: u32) -> bool {
 }
 
 /// Continue the agent someone started by hand in shell `id` as a dino session in the shell's
-/// place: same id and row, the agent's folder and flags, its conversation resumed. The shell goes.
+/// place: same id and row, the agent's folder, flags and account, its conversation resumed. The
+/// shell goes. A conversation a dino session already has continues in that session instead, and
+/// the shell stays, back at its prompt.
 fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
     anyhow::ensure!(s.agent_id == "shell" && s.host.is_none(), "{id} isn't a shell on this Mac");
@@ -3194,8 +3385,27 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let Some(a) = agent(&f.agent) else { anyhow::bail!("dino can't continue {} sessions yet", f.agent) };
     anyhow::ensure!(!f.session_id.is_empty(), "the agent hasn't started a conversation yet; send it a prompt first");
     let pid = f.pid.ok_or_else(|| anyhow::anyhow!("no agent is running in {id}"))?;
-    wait_until_idle(a, pid, std::time::Duration::from_secs(180))?;
+    let waiting = Waiting::start(d, id)?;
+    waiting.until_idle(a, pid)?;
+    let held = holder(d, &f.session_id, Some(id));
+    if let Some(h) = &held {
+        waiting.until_restartable(h)?;
+    }
+    // Read before it's stopped: what it was started with goes with it.
+    let account = account_of(&f.agent, pid);
+    let tty = tty_of(pid);
+    waiting.done()?;
     stop(pid)?;
+    if let Some(h) = held {
+        restart_with(d, &h.id, |saved| {
+            saved.args = f.args.clone();
+            saved.account = account;
+        })?;
+        if let Some(tty) = tty {
+            moved_note(&tty, &f.title, &h.id);
+        }
+        return Ok(());
+    }
     let restore = SavedSession {
         id: id.to_string(),
         name: session_name(&f.title),
@@ -3217,6 +3427,7 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
         exit_code: None,
         route: None,
         instead_of: None,
+        account,
     };
     let (cols, rows) = s.pane.size();
     spawn(d, Launch { cols, rows, restore: Some(restore.clone()), ..Launch::new(&restore.launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
@@ -3227,16 +3438,6 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
     s.pane.kill();
     d.proxy.stats.restarted(id);
     save(d);
-    Ok(())
-}
-
-/// Don't cut a turn in half, for agents that say when they're on one.
-fn wait_until_idle(a: &dyn dino_core::agent::Agent, pid: u32, max: std::time::Duration) -> anyhow::Result<()> {
-    let deadline = Instant::now() + max;
-    while a.busy(pid) == Some(true) {
-        anyhow::ensure!(Instant::now() < deadline, "the session is still working; try again when its turn finishes");
-        std::thread::sleep(std::time::Duration::from_millis(300));
-    }
     Ok(())
 }
 
@@ -4347,6 +4548,106 @@ mod tests {
 
     fn session(d: &Daemon, id: &str) -> Arc<Session> {
         d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().unwrap()
+    }
+
+    fn saved_on(id: &str, conversation: &str, started_at: u64) -> SavedSession {
+        SavedSession {
+            id: id.into(),
+            name: format!("s{id}"),
+            launcher: "shell".into(),
+            args: vec![],
+            cwd: test_home().display().to_string(),
+            started_at,
+            agent_session: Some(conversation.into()),
+            auto: AutoState::default(),
+            controls: Controls::default(),
+            scheduled: None,
+            started_by: None,
+            messaged_by: None,
+            label: None,
+            pinned: false,
+            host: None,
+            ended: false,
+            exit_code: None,
+            route: None,
+            instead_of: None,
+            account: vec![],
+        }
+    }
+
+    /// dino never runs two processes on one conversation: a second start of it is refused, an
+    /// ended one won't resume while another runs it, and sessions saved on one become one.
+    #[test]
+    fn a_conversation_runs_in_one_session() {
+        let d = shell_daemon();
+        let first = spawn(&d, Launch { restore: Some(saved_on("9001", "conv-a", 1)), ..Launch::new("shell", vec![], None) }).unwrap();
+        let e = spawn(&d, Launch { restore: Some(saved_on("9002", "conv-a", 2)), ..Launch::new("shell", vec![], None) }).err().unwrap();
+        assert!(e.to_string().contains("running in s9001 already"), "{e}");
+        assert_eq!(holder(&d, "conv-a", None).map(|h| h.id.clone()).as_deref(), Some("9001"));
+        assert!(holder(&d, "conv-a", Some("9001")).is_none());
+        // One saved as ended comes back ended, and can't resume while the other runs.
+        let ended = spawn(&d, Launch { restore: Some(SavedSession { ended: true, ..saved_on("9003", "conv-a", 3) }), ..Launch::new("shell", vec![], None) }).unwrap();
+        assert!(session(&d, &ended).pane.is_exited());
+        assert!(resume(&d, &ended).unwrap_err().to_string().contains("already"));
+        // The running one is who has it, ended rows or not.
+        assert_eq!(holder(&d, "conv-a", None).map(|h| h.id.clone()).as_deref(), Some("9001"));
+        kill(&d, &first);
+        kill(&d, &ended);
+
+        // Left by an older dino: one running stays over a newer that ended, and keeps a pin.
+        let older = SavedSession { label: Some("mine".into()), ..saved_on("1", "conv-b", 10) };
+        let newer = SavedSession { pinned: true, ..saved_on("2", "conv-b", 20) };
+        let ended = SavedSession { ended: true, ..saved_on("3", "conv-b", 30) };
+        let other = saved_on("4", "conv-c", 5);
+        let kept = one_per_conversation(vec![older, other, newer, ended]);
+        assert_eq!(kept.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["2", "4"]);
+        assert_eq!((kept[0].label.as_deref(), kept[0].pinned), (Some("mine"), true));
+    }
+
+    /// The account of an agent started by hand goes with it to every start, in its environment
+    /// and dinod's private sessions file only.
+    #[test]
+    fn a_continued_agent_keeps_its_account() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = shell_daemon();
+        let account = vec![("DINO_TEST_ACCOUNT_TOKEN".to_string(), "second-account-42".to_string())];
+        let id = spawn(&d, Launch { restore: Some(SavedSession { account: account.clone(), ..saved_on("9101", "conv-acct", 1) }), ..Launch::new("shell", vec![], None) }).unwrap();
+        let s = session(&d, &id);
+        s.pane.write(b"echo got-$DINO_TEST_ACCOUNT_TOKEN\r".to_vec());
+        wait_for("the variable", || s.pane.text(50).contains("got-second-account-42"));
+        // A restart (new controls) starts it with the same account.
+        restart(&d, &id, Controls::default()).unwrap();
+        let again = session(&d, &id);
+        assert_eq!(again.account, account);
+        save(&d);
+        assert_eq!(load_saved().iter().find(|x| x.id == id).map(|x| x.account.clone()), Some(account));
+        assert_eq!(std::fs::metadata(saved_path()).unwrap().permissions().mode() & 0o777, 0o600);
+        // Never in what clients are shown.
+        let Response::State { sessions, .. } = state(&d) else { panic!() };
+        assert!(!serde_json::to_string(&sessions).unwrap().contains("second-account-42"));
+        kill(&d, &id);
+        save(&d);
+    }
+
+    /// Waiting to continue a conversation can be cancelled until it's done waiting, not after.
+    #[test]
+    fn waiting_to_take_over_can_be_cancelled() {
+        let d = shell_daemon();
+        let w = Waiting::start(&d, "77").unwrap();
+        assert!(Waiting::start(&d, "77").is_err(), "one wait per shell");
+        let Response::State { .. } = state(&d) else { panic!() };
+        cancel_move(&d, "77").unwrap();
+        assert_eq!(w.check().unwrap_err().to_string(), "cancelled");
+        assert_eq!(w.done().unwrap_err().to_string(), "cancelled");
+        assert!(d.moves.lock().unwrap().is_empty());
+        assert!(cancel_move(&d, "77").is_err(), "nothing waits");
+
+        let w = Waiting::start(&d, "78").unwrap();
+        w.done().unwrap();
+        assert!(cancel_move(&d, "78").is_err(), "too late: it's moving");
+        // Given up on (an error, a client gone): off the list.
+        drop(Waiting::start(&d, "79").unwrap());
+        assert!(d.moves.lock().unwrap().is_empty());
     }
 
     /// Claude's settings carry the proxy's secret (its hook URL): they leave the command line for

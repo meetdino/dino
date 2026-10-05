@@ -196,6 +196,11 @@ impl Agent for Copilot {
         "copilot"
     }
 
+    // Signed in with a GitHub token in its environment, or its own home's.
+    fn account_vars(&self) -> &'static [&'static str] {
+        &["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "COPILOT_HOME"]
+    }
+
     // It asks before edits and commands; `--allow-tool=write` stops asking before edits, `--plan`
     // plans first, `--yolo` allows everything.
     fn modes(&self) -> &'static [&'static str] {

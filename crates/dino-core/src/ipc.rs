@@ -177,6 +177,11 @@ pub enum Request {
     /// Shell `id` is running an agent started by hand (`SessionInfo::inside`): once it's idle,
     /// stop it and resume its conversation as session `id`, in the shell's place.
     TakeOver { id: String },
+    /// Stop waiting to continue a conversation in dino (`TakeOver`, `Adopt`, which wait for its
+    /// turn to end): `id` is the shell's session id, or for `Adopt` the conversation's id. The
+    /// waiting request then fails with "cancelled", and the agent runs on where it is. An error
+    /// when nothing waits for it (it may have just moved).
+    CancelTakeOver { id: String },
     /// One prompt to several agents, each in its own git worktree of the repo at `cwd`.
     Fanout { prompt: String, launchers: Vec<String>, cwd: Option<String> },
     Groups,
@@ -734,6 +739,12 @@ pub struct SessionInfo {
     /// A shell's foreground agent that someone started by hand: its title and busy/idle status.
     #[serde(default)]
     pub inside: Option<crate::found::FoundSession>,
+    /// A shell whose agent `TakeOver` waits on, until its turn ends (`CancelTakeOver` stops it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub taking_over: bool,
+    /// The agent's own conversation id, when dino knows it: one conversation is one session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
     /// Where a shell with shell integration says it is now (`cwd` is where it started), and the
     /// exit code of the last command it ran.
     #[serde(default)]
