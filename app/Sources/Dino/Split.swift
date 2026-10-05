@@ -274,6 +274,7 @@ struct SessionMenu: View {
     let session: SessionInfo
 
     var body: some View {
+        UsingMenuItems(session: session)
         if let current = model.selectedSession, current.id != session.id {
             Button("Open Beside \(current.name)") { model.openBeside(session.id) }
             Button("Open Below \(current.name)") { model.openBeside(session.id, vertical: true) }

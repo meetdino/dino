@@ -141,6 +141,7 @@ struct DinoApp: App {
                     .disabled(model.selectedSession.map { $0.host != nil || model.pr(of: $0) != nil } ?? true)
                 OpenInMenuItems().environmentObject(model)
                 Divider()
+                if let s = model.selectedSession { UsingMenuItems(session: s).environmentObject(model) }
                 ControlMenuItems().environmentObject(model)
                 Divider()
                 // ⌘1…⌘9: the tabs, as in Ghostty and browsers.
