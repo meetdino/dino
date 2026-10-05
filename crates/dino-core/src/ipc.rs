@@ -436,12 +436,18 @@ pub enum Response {
     Error { message: String },
     /// `installed`: a newer `dino` this dinod put in place of its own binary; it restarts into it
     /// once no agent is working and no shell is running a command. `launchd`: the launch agent
-    /// running this dinod (its label), if launchd started it.
+    /// running this dinod (its label), if launchd started it. `build`: which build of `dino` it
+    /// is (the commit it was built from, for app/build.sh and release builds), and `exe` the
+    /// binary it runs from: an app restarts a dinod from another build into its own.
     Version {
         dino: String,
         installed: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         launchd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exe: Option<String>,
     },
 }
 
@@ -1228,6 +1234,19 @@ mod tests {
         assert_eq!(back, serde_json::from_str::<serde_json::Value>(json).unwrap());
         let req: Request = serde_json::from_str(r#"{"type":"session_cost","id":"4"}"#).unwrap();
         assert!(matches!(req, Request::SessionCost { id } if id == "4"));
+    }
+
+    #[test]
+    fn version_says_the_build_and_binary_when_it_knows_them() {
+        // An older dinod says only its version: no build, no binary.
+        let old: Response = serde_json::from_str(r#"{"type":"version","dino":"0.1.3","installed":null}"#).unwrap();
+        assert!(matches!(old, Response::Version { build: None, exe: None, .. }));
+        let v = Response::Version { dino: "0.1.4".into(), installed: None, launchd: None, build: Some("c1ddaea2f".into()), exe: Some("/Applications/Dino.app/Contents/Helpers/dino".into()) };
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#"{"type":"version","dino":"0.1.4","installed":null,"build":"c1ddaea2f","exe":"/Applications/Dino.app/Contents/Helpers/dino"}"#);
+        // A plain `cargo build` has no build to say: the field isn't sent.
+        let plain = Response::Version { dino: "0.1.4".into(), installed: None, launchd: None, build: None, exe: None };
+        assert_eq!(serde_json::to_string(&plain).unwrap(), r#"{"type":"version","dino":"0.1.4","installed":null}"#);
     }
 
     #[test]

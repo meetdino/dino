@@ -127,16 +127,19 @@ You need the Xcode Command Line Tools (`xcode-select --install`) and Rust
 git clone https://github.com/asdf9384/dino.git
 cd dino
 cargo build --release      # the dino command and dinod: target/release/dino
-./app/build.sh             # Dino.app, ad hoc signed: app/build/Dino.app
+./app/build.sh --install   # Dino.app with both inside: ~/Applications/Dino.app
+open ~/Applications/Dino.app
 ```
 
-The app runs the `dino` command it finds on your `PATH` or in `~/.local/bin`, so put the one you
-built there:
+That's the dino to use every day: it runs dinod from the `dino` inside it, as a release does, and
+moves dinod over to a new build once nothing is working. Run `./app/build.sh --install` again after
+pulling (it replaces the app only once the new one is built), then quit and reopen dino. dino →
+Install Command Line Tool links `~/.local/bin/dino` to the `dino` inside it. Builds are signed
+with your Developer ID if the keychain has one (macOS then keeps dino's permissions from one build
+to the next), ad hoc otherwise.
 
-```sh
-mkdir -p ~/.local/bin && ln -sf "$PWD/target/release/dino" ~/.local/bin/dino
-open app/build/Dino.app
-```
+`./app/build.sh` alone makes `app/build/Dino.app`, "dino dev": a build to try things in, with its
+own settings and permissions, that runs the `dino` on your `PATH`.
 
 To try a build without touching the dino you use every day, give it its own home, and it runs its
 own `dinod` there:
