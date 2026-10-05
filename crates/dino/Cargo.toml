@@ -14,3 +14,4 @@ dino-daemon.workspace = true
 serde_json = "1"
 unicode-width = "0.2"
 libc = "0.2"
+memchr = "2"
