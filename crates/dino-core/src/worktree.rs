@@ -778,9 +778,8 @@ pub fn disk_size(dir: &Path) -> u64 {
 
 /// Size of everything the agent changed in `dir` since `base`: edits, new files, its own commits.
 pub fn stat(dir: &Path, base: &str) -> anyhow::Result<DiffStat> {
-    track_new_files(dir)?;
     let mut stat = DiffStat::default();
-    for line in git(dir, &["diff", "--numstat", base])?.lines() {
+    for line in diff_new_files_too(dir, &["diff", "--numstat", base])?.lines() {
         let mut parts = line.split('\t');
         stat.files += 1;
         stat.added += parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
@@ -791,13 +790,7 @@ pub fn stat(dir: &Path, base: &str) -> anyhow::Result<DiffStat> {
 
 /// The patch for everything the agent changed in `dir` since `base`.
 pub fn diff(dir: &Path, base: &str) -> anyhow::Result<String> {
-    track_new_files(dir)?;
-    git(dir, &["diff", "--binary", base])
-}
-
-/// Mark new files intent-to-add so diffs include them; nothing else in the worktree changes.
-fn track_new_files(dir: &Path) -> anyhow::Result<()> {
-    git(dir, &["add", "--all", "--intent-to-add"]).map(drop)
+    diff_new_files_too(dir, &["diff", "--binary", base])
 }
 
 /// A file's changes, parsed for review.
@@ -844,6 +837,12 @@ pub fn changes(dir: &Path, base: &str) -> anyhow::Result<Vec<FileDiff>> {
 
 /// `changes` as one unified diff, as git prints it.
 pub fn changes_patch(dir: &Path, base: &str) -> anyhow::Result<String> {
+    diff_new_files_too(dir, &["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--find-renames", base])
+}
+
+/// git `diff_args` in `dir` with new files in it too: marked intent-to-add in a copy of the index,
+/// so the checkout's own staging area, and so its `git status`, stays exactly as it was.
+fn diff_new_files_too(dir: &Path, diff_args: &[&str]) -> anyhow::Result<String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let index = PathBuf::from(git(dir, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?.trim());
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -853,11 +852,10 @@ pub fn changes_patch(dir: &Path, base: &str) -> anyhow::Result<String> {
     }
     let run = |args: &[&str]| -> anyhow::Result<String> {
         let out = Command::new("git").arg("-C").arg(dir).args(args).env("GIT_INDEX_FILE", &tmp).stdin(Stdio::null()).output()?;
-        anyhow::ensure!(out.status.success(), "git {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::ensure!(out.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let text = run(&["add", "--all", "--intent-to-add"])
-        .and_then(|_| run(&["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--find-renames", base]));
+    let text = run(&["add", "--all", "--intent-to-add"]).and_then(|_| run(diff_args));
     let _ = std::fs::remove_file(&tmp);
     text
 }
@@ -1346,9 +1344,12 @@ mod tests {
 
         std::fs::write(wt.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         std::fs::write(wt.join("new.txt"), "hi\n").unwrap();
+        let status = git(&wt, &["status", "--porcelain"]).unwrap();
         assert_eq!(stat(&wt, &base).unwrap(), DiffStat { files: 2, added: 2, removed: 0 });
         let text = diff(&wt, &base).unwrap();
         assert!(text.contains("+three") && text.contains("new.txt"));
+        assert_eq!(git(&wt, &["status", "--porcelain"]).unwrap(), status, "looking leaves the agent's index alone");
+        assert!(status.contains("?? new.txt"));
 
         apply(&wt, &base, repo).unwrap();
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\ntwo\nthree\n");
