@@ -289,8 +289,14 @@ pub fn lid_watchdog(pid: i32) {
     lid::watchdog(pid)
 }
 
-pub fn run() -> anyhow::Result<()> {
+/// `build`: which build of dino this is (`DINO_BUILD` when it was compiled: app/build.sh and
+/// scripts/release.sh set it to the commit), told to clients with the binary dinod runs from, so
+/// an app can tell a dinod from another build of the same version from its own.
+pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     under_launchd();
+    let _ = BUILD.set(build.map(str::to_string));
+    // Now, while it's still there: a rebuild can put another binary at this path, or none.
+    let _ = EXE.set(std::env::current_exe().and_then(|e| e.canonicalize()).ok().map(|e| e.to_string_lossy().into_owned()));
     // Nothing dinod starts is a child of the agent session that may have started dinod.
     for var in dino_core::PARENT_AGENT_ENV {
         // SAFETY: first thing, before dinod starts any thread.
@@ -452,7 +458,8 @@ pub fn run() -> anyhow::Result<()> {
     }
     log_exits();
     let by = LAUNCHD_LABEL.get().map(|l| format!(", launchd's {l}")).unwrap_or_default();
-    eprintln!("{} dinod {} listening on {} (pid {}{by})", stamp(), env!("CARGO_PKG_VERSION"), path.display(), std::process::id());
+    let build = BUILD.get().cloned().flatten().map(|b| format!(" ({b})")).unwrap_or_default();
+    eprintln!("{} dinod {}{build} listening on {} (pid {}{by})", stamp(), env!("CARGO_PKG_VERSION"), path.display(), std::process::id());
     for stream in listener.incoming().flatten() {
         // Another user's process is hung up on, whatever the socket's permissions let through.
         if !same_user(&stream) {
@@ -465,6 +472,10 @@ pub fn run() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// The build of dino this is, and the binary it runs from (see `run`).
+static BUILD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static EXE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 /// The launch agent that started this dinod (see crates/dino/src/launchd.rs), if one did.
 static LAUNCHD_LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -1540,7 +1551,13 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 stop_all(d);
                 std::process::exit(0);
             }
-            Request::Version => Response::Version { dino: env!("CARGO_PKG_VERSION").into(), installed: update::installed(), launchd: LAUNCHD_LABEL.get().cloned() },
+            Request::Version => Response::Version {
+                dino: env!("CARGO_PKG_VERSION").into(),
+                installed: update::installed(),
+                launchd: LAUNCHD_LABEL.get().cloned(),
+                build: BUILD.get().cloned().flatten(),
+                exe: EXE.get().cloned().flatten(),
+            },
         };
         if reshapes {
             reshaped(d);

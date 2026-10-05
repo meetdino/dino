@@ -269,11 +269,9 @@ final class DinoModel: ObservableObject {
     @Published var daemonVersion: String?
     /// dinod isn't run by this app's launch agent, though it's registered: it was started before
     /// the agent was (or allowed), so what it runs lacks dino's permissions; or an update changed
-    /// the agent. Restarted like an outdated one (LaunchAgent.swift).
+    /// the agent. Offered a restart like an outdated one (LaunchAgent.swift).
     @Published var daemonUnmanaged = false
     @Published var restartingDaemon = false
-    /// The automatic restart into a new dino happens once a launch at most.
-    private var restartedForUpdate = false
 
     /// dinod's tag for the state last applied: it answers once there's something else to show.
     private var stateSeen: UInt64?
@@ -539,12 +537,8 @@ final class DinoModel: ObservableObject {
             select(shownOne ? open : last ?? recent?.id ?? next.first?.id)
         }
         // An update waiting for quiet installs now, restarting dino and dinod both (Updates.swift).
-        // After an update: into the new dinod once nothing would be cut off.
         if Updates.shared.pending?.whenIdle == true {
             Updates.shared.sessionsChanged(quiet: restartIsQuiet)
-        } else if daemonOutdated || daemonUnmanaged, !restartedForUpdate, restartIsQuiet {
-            restartedForUpdate = true
-            restartDaemon()
         }
         updateBadge(next)
     }

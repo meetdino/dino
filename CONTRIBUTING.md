@@ -12,11 +12,14 @@ you use, and get it merged.
 
 ```sh
 cargo build --release      # target/release/dino: the CLI, and dinod (`dino daemon`)
-./app/build.sh             # app/build/Dino.app, ad hoc signed
+./app/build.sh             # app/build/Dino.app, "dino dev": a build to try things in
+./app/build.sh --install   # the dino you use, built from here: ~/Applications/Dino.app
 ```
 
-The app runs the `dino` it finds on your `PATH` or in `~/.local/bin` (or `DINO_BIN`, when set), so
-link the one you built: `ln -sf "$PWD/target/release/dino" ~/.local/bin/dino`.
+"dino dev" has its own bundle id, so it shares no settings or permissions with the dino you use,
+and runs the `dino` it finds on your `PATH` or in `~/.local/bin` (or `DINO_BIN`, when set): link
+the one you built, `ln -sf "$PWD/target/release/dino" ~/.local/bin/dino`. An installed build
+carries its `dino` and runs dinod from it, as a release does.
 
 ## Where things are
 
@@ -50,7 +53,12 @@ DINO_HOME=/tmp/dino-dev ./target/release/dino stop
 
 For the app, pass the same `DINO_HOME` (and `DINO_BIN`, the `dino` it should use) in its
 environment, and give the copy you test its own bundle id, so it shares nothing with an installed
-Dino.app.
+Dino.app. To try an installed build (its own dinod as a launch agent, the move to a new build),
+make one for its own home:
+
+```sh
+DINO_BUNDLE_ID=dev.dino.app.test DINO_AGENT_HOME=/tmp/dino-dev DINO_APP=/tmp/dino-dev-app/Dino.app ./app/build.sh --install
+```
 
 ## Before a pull request
 

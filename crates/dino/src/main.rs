@@ -839,6 +839,10 @@ Setup
 
 `dino <command> --help` says more about ls, rm, found, stats, login, fan and automations.";
 
+/// The build this is: the commit app/build.sh and scripts/release.sh built it from. Read here, in
+/// the crate built last, so a new commit recompiles only this one.
+const BUILD: Option<&str> = option_env!("DINO_BUILD");
+
 fn main() {
     // Piped into `head`, stop quietly when it has enough, as other commands do; Rust otherwise
     // ignores SIGPIPE and the next print panics. Not dinod: a client hanging up mustn't end it.
@@ -856,7 +860,7 @@ fn main() {
 fn dino() -> anyhow::Result<()> {
     let mut cli: Vec<String> = std::env::args().skip(1).collect();
     match cli.first().map(String::as_str) {
-        Some("daemon") => return dino_daemon::run(),
+        Some("daemon") => return dino_daemon::run(BUILD),
         Some("lid-watchdog") => {
             dino_daemon::lid_watchdog(cli.get(1).and_then(|p| p.parse().ok()).unwrap_or(0));
             return Ok(());
@@ -875,7 +879,10 @@ fn dino() -> anyhow::Result<()> {
         // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
         Some("statusline") => std::process::exit(dino_core::statusline::run(cli.get(1).map(String::as_str))),
         Some("--version" | "-V" | "version") => {
-            println!("dino {}", env!("CARGO_PKG_VERSION"));
+            match BUILD {
+                Some(build) => println!("dino {} ({build})", env!("CARGO_PKG_VERSION")),
+                None => println!("dino {}", env!("CARGO_PKG_VERSION")),
+            }
             return Ok(());
         }
         Some("found") => return cmd_found(&cli[1..]),

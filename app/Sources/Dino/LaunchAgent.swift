@@ -13,7 +13,8 @@ import SwiftUI
 /// used, as before, and keeps running when the app quits). The app writes the agent's label and
 /// state in `$DINO_HOME/dinod.launchd`, where `dino` (the app's, or one on the `PATH`) looks when it
 /// starts dinod: `launchctl kickstart` for this agent, the old way without it
-/// (crates/dino/src/launchd.rs). Development builds (app/build.sh) carry no agent.
+/// (crates/dino/src/launchd.rs). The dino you use built from source (app/build.sh --install) carries
+/// one as a release does; a build to try things in (app/build.sh) carries none.
 enum DinodAgent {
     /// The agent this app carries for this dino: the one whose `DINO_HOME` is the one the app runs
     /// with (none in its plist: the user's own). Nil in a development build, and for an isolated
@@ -47,9 +48,12 @@ enum DinodAgent {
     private static let registeredKey = "dinodAgentPlist"
 
     /// The agent and the build carrying it: launchd won't start an agent registered by the build
-    /// an update replaced (its job fails to spawn), so every update registers it again.
+    /// an update replaced (its job fails to spawn), so every update registers it again, as does
+    /// every rebuild of the dino you use (its commit). The build on disk now: an app still running
+    /// when a rebuild replaced it registers the new one.
     private static var digest: String? {
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        let info = Updates.diskInfo
+        let build = (info["CFBundleVersion"] as? String ?? "") + ((info["DinoBuild"] as? String).map { " \($0)" } ?? "")
         return bundled.map { SHA256.hash(data: $0.data + Data(build.utf8)).map { String(format: "%02x", $0) }.joined() }
     }
 
@@ -162,7 +166,7 @@ struct DinodAgentSection: View {
         }
     }
 
-    /// Back from Login Items: allowed now, and dinod moves into launchd once nothing is busy.
+    /// Back from Login Items: allowed now, and Restart to Update offers to move dinod into launchd.
     private func refresh() {
         needsApproval = DinodAgent.needsApproval
         DinodAgent.writeRecord()

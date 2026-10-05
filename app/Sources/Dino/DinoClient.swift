@@ -677,7 +677,7 @@ struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
 
-    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, limits, launchers, id, message, version, dino, installed, launchd }
+    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, limits, launchers, id, message, version, dino, installed, launchd, build, exe }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -694,6 +694,8 @@ struct Response: Decodable {
         dino = try c.decodeIfPresent(String.self, forKey: .dino)
         installed = try c.decodeIfPresent(String.self, forKey: .installed)
         launchd = try c.decodeIfPresent(String.self, forKey: .launchd)
+        build = try c.decodeIfPresent(String.self, forKey: .build)
+        exe = try c.decodeIfPresent(String.self, forKey: .exe)
     }
     var quotas: [QuotaInfo]?
     var power: PowerInfo?
@@ -709,6 +711,9 @@ struct Response: Decodable {
     var installed: String?
     /// The launch agent running dinod (its label), if launchd started it; nil from an older dinod.
     var launchd: String?
+    /// Which build of dino it is (the commit), and the binary it runs from; nil from an older dinod.
+    var build: String?
+    var exe: String?
 }
 
 /// Keeping agents running with the lid closed, as dinod sees it.
@@ -1085,7 +1090,8 @@ enum DinoEnvironment {
         return path.isEmpty ? (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin") : path
     }()
 
-    /// The `dino` a release build carries in Contents/Helpers; nil in a development build.
+    /// The `dino` a release build (and the dino you use, built by app/build.sh --install) carries
+    /// in Contents/Helpers; nil in a build to try things in.
     static let bundledDino: String? = {
         let path = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/dino").path
         return FileManager.default.isExecutableFile(atPath: path) ? path : nil
