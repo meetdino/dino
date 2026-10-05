@@ -25,10 +25,24 @@ struct WelcomeCard: View {
     /// The ones dino works with best, in this order.
     private static let featured = ["claude", "codex", "copilot", "cursor", "amp", "kimi", "qwen", "pi", "hermes", "codewhale", "opencode"]
 
+    @ObservedObject private var updates = Updates.shared
+
+    /// Up: asked for (Help → Show Welcome), or on a Mac that hasn't seen it once an update found
+    /// first has been offered (Updates.beforeWelcome).
     private var shown: Bool {
         guard let machine = store.settings?.machine else { return false }
-        return !machine.onboarded || model.showWelcome
+        return (!machine.onboarded && !updates.holdingWelcome) || model.showWelcome
     }
+
+    /// The card is coming on this Mac: an update goes first.
+    private var firstTime: Bool { store.settings?.machine.onboarded == false }
+
+    /// dinod never said whether this Mac has seen the card (see the second `.task`).
+    @State private var gaveUp = false
+
+    /// For Updates: whether the card is up or about to be (or out of the way for an install), or
+    /// nil while dino doesn't know yet whether it will be. The daily check waits for it.
+    private var up: Bool? { store.settings == nil && !gaveUp ? nil : shown || firstTime }
 
     var body: some View {
         Color.clear
@@ -64,7 +78,10 @@ struct WelcomeCard: View {
                     store.load()
                     try? await Task.sleep(for: .seconds(1))
                 }
+                gaveUp = true
             }
+            .onChange(of: up, initial: true) { _, up in Updates.shared.welcomeUp = up }
+            .onChange(of: firstTime, initial: true) { _, first in if first { Updates.shared.beforeWelcome() } }
             .onChange(of: model.showWelcome) { _, on in if on { store.load() } }
     }
 

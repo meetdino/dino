@@ -24,7 +24,7 @@
 #
 # A second, isolated dino (testing a release build beside the real one):
 #   DINO_BUNDLE_ID     the app's bundle identifier (default dev.dino.app), which names its launch agent
-#   DINO_AGENT_HOME    the $DINO_HOME its dinod runs with (default: the user's own, ~/.config/dino)
+#   DINO_AGENT_HOME    the $DINO_HOME its dinod and the app run with (default: the user's own, ~/.config/dino)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -101,6 +101,8 @@ AGENT_ENV=""
 if [ -n "${DINO_AGENT_HOME:-}" ]; then
     LABEL_AGENT="$LABEL_AGENT.$(printf %s "$DINO_AGENT_HOME" | shasum -a 256 | cut -c1-8)"
     AGENT_ENV="<key>DINO_HOME</key><string>$DINO_AGENT_HOME</string>"
+    # The app runs with it too, however it's opened: from Finder, or relaunched by an update.
+    /usr/libexec/PlistBuddy -c "Add :DinoHome string $DINO_AGENT_HOME" "$APP/Contents/Info.plist"
 fi
 mkdir -p "$APP/Contents/Library/LaunchAgents"
 cat > "$APP/Contents/Library/LaunchAgents/$LABEL_AGENT.plist" <<PLIST

@@ -46,12 +46,15 @@ enum DinodAgent {
     /// The plist registered last, to register again when an update changes it.
     private static let registeredKey = "dinodAgentPlist"
 
+    /// The agent and the build carrying it: launchd won't start an agent registered by the build
+    /// an update replaced (its job fails to spawn), so every update registers it again.
     private static var digest: String? {
-        bundled.map { SHA256.hash(data: $0.data).map { String(format: "%02x", $0) }.joined() }
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        return bundled.map { SHA256.hash(data: $0.data + Data(build.utf8)).map { String(format: "%02x", $0) }.joined() }
     }
 
-    /// An update changed the agent, and launchd runs the old one until dinod is stopped and the
-    /// agent registered again (`setUp(stopped: true)`, when the app restarts dinod).
+    /// An update changed the app or its agent, and launchd runs the old one until dinod is stopped
+    /// and the agent registered again (`setUp(stopped: true)`, when the app restarts dinod).
     static var stale: Bool {
         guard enabled, let registered = UserDefaults.standard.string(forKey: registeredKey) else { return false }
         return registered != digest
@@ -66,7 +69,7 @@ enum DinodAgent {
         case .notRegistered, .notFound:
             register(service, digest)
         case .enabled where registered != nil && registered != digest && stopped:
-            // An update changed the agent: launchd keeps the old one until it's registered again.
+            // An update: launchd keeps the old agent, and won't start it, until it's registered again.
             try? service.unregister()
             register(service, digest)
         case .enabled where registered == nil:
