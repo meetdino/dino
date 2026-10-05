@@ -120,7 +120,8 @@ pub(crate) struct RepoWatch {
     /// The worktrees it files changes under, to know when they change.
     worktrees: Vec<String>,
     roots: Vec<PathBuf>,
-    _folders: Folders,
+    /// None while the repo has no worktrees but its main checkout: no folders to watch.
+    _folders: Option<Folders>,
     _git: Option<Folders>,
     used: Instant,
 }
@@ -253,6 +254,15 @@ fn roots(main: &str, worktrees: &[String]) -> Vec<PathBuf> {
     out.into_iter().map(PathBuf::from).collect()
 }
 
+/// A stream over `roots` filing changes in `marks`: none for no roots (FSEvents makes none).
+fn folders(roots: &[PathBuf], marks: &Arc<Marks>) -> anyhow::Result<Option<Folders>> {
+    if roots.is_empty() {
+        return Ok(None);
+    }
+    let marks = marks.clone();
+    Ok(Some(Folders::new(roots, move |b| marks.folders(b))?))
+}
+
 /// The repo's watch, made or brought up to date with `worktrees`; None when macOS won't watch.
 fn watch(d: &Daemon, main: &str, worktrees: &[String]) -> Option<(u64, Arc<Marks>)> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -278,9 +288,8 @@ fn watch(d: &Daemon, main: &str, worktrees: &[String]) -> Option<(u64, Arc<Marks
             w.marks.seen.lock().unwrap().retain(|k, _| lookup.worktrees.contains(k));
             *w.marks.lookup.write().unwrap() = lookup;
             if w.roots != roots {
-                let marks = w.marks.clone();
                 // The new stream starts before the old one stops, so no change falls between.
-                let Ok(f) = Folders::new(&roots, move |b| marks.folders(b)) else {
+                let Ok(f) = folders(&roots, &w.marks) else {
                     all.remove(main);
                     return None;
                 };
@@ -292,8 +301,7 @@ fn watch(d: &Daemon, main: &str, worktrees: &[String]) -> Option<(u64, Arc<Marks
         }
         None => {
             let marks = Arc::new(Marks { lookup: RwLock::new(lookup), ..Default::default() });
-            let m = marks.clone();
-            let folders = Folders::new(&roots, move |b| m.folders(b)).ok()?;
+            let folders = folders(&roots, &marks).ok()?;
             let m = marks.clone();
             let git = (!common.is_empty()).then(|| Folders::files(&[PathBuf::from(&common)], move |b| m.git(b)).ok()).flatten();
             // Without the git dir watched, remote branches moving goes unseen: read on a timer.

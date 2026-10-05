@@ -5360,6 +5360,41 @@ while (sysread(STDIN, my $c, 1)) {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    /// A new repo, no worktrees but its main checkout (an agent's first session in it): its tree
+    /// reads without a stream over no folders (macOS makes none, and freeing that one's state
+    /// twice crashed dinod), and once it has a worktree, a change in that is seen.
+    #[test]
+    fn a_repo_without_worktrees_is_watched_once_it_has_one() {
+        let repo = test_home().join(format!("no-worktrees-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let d = shell_daemon();
+        let ask = || tree(&d, vec![repo.display().to_string()]);
+        for _ in 0..20 {
+            assert!(ask().iter().any(|r| real(Path::new(&r.path)) == real(&repo)));
+        }
+        let wait_for = |what: &str, mut done: Box<dyn FnMut() -> bool + '_>| {
+            let since = Instant::now();
+            while !done() {
+                assert!(since.elapsed() < std::time::Duration::from_secs(40), "timed out waiting for {what}");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let wt = repo.join(".claude/worktrees/first");
+        git(&repo, &["worktree", "add", "-q", "-b", "first", &wt.to_string_lossy()]);
+        let find = || ask().iter().flat_map(|r| r.worktrees.clone()).find(|w| real(Path::new(&w.path)) == real(&wt));
+        wait_for("the new worktree to show", Box::new(|| find().is_some_and(|w| w.git.is_some())));
+        std::fs::write(wt.join("draft.txt"), "draft\n").unwrap();
+        wait_for("its new file to show", Box::new(|| find().and_then(|w| w.git).is_some_and(|g| g.uncommitted == 1)));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     /// An agent's fallbacks as the proxy gets them: only routes that serve the API it talks in,
     /// that the policies allow and that are on. While its own account is spent, a new session
     /// starts with the agent its fallback names, saying why, unless asked to stay.
