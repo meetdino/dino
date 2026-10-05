@@ -105,8 +105,7 @@ struct ComputerUseBanner: View {
 
     var body: some View {
         // The selected session, else the other half of its split.
-        let shown = model.shownSplit.map { [$0.first, $0.second] } ?? model.selected.map { [$0] } ?? []
-        let ids = shown.filter { $0 == model.selected } + shown.filter { $0 != model.selected }
+        let ids = model.shownSessions
         if display == UsingDisplay.banner.rawValue,
            let s = ids.lazy.compactMap({ id in model.sessions.first { $0.id == id && $0.reach != nil && !model.usingHidden.contains(id) } }).first,
            let reach = s.reach, let sentence = s.usingSentence {

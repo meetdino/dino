@@ -97,6 +97,7 @@ enum GhosttyConfig {
         defer {
             paneAppearance = windowTheme(controller, paired: paired)
             readPaneChrome(controller, paired: paired)
+            SplitChrome.shared.read(controller, background: paneBackground(controller, lines: all, colored: colored, paired: paired))
         }
         // Ghostty takes all of a config or none of it: leave out the lines it names and try again.
         for _ in 0 ..< 2 {
@@ -124,6 +125,39 @@ enum GhosttyConfig {
             let luminance = (0.299 * Double(bg.red) + 0.587 * Double(bg.green) + 0.114 * Double(bg.blue)) / 255
             return luminance > 0.5 ? .aqua : .darkAqua
         }
+    }
+
+    /// A pane's background as Ghostty draws it: the config's `background`, or, for a pair of
+    /// light and dark colors (a `light:…,dark:…` theme, or dino's own), the half for the look a
+    /// pane is shown in.
+    private static func paneBackground(_ controller: TerminalController, lines: [String], colored: Bool, paired: Bool) -> NSColor {
+        let fixed = controller.configColor("background").map(NSColor.init(ghostty:)) ?? .textBackgroundColor
+        guard paired, !lines.contains(where: { key(of: $0) == "background" }) else { return fixed }
+        var light = NSColor(srgbRed: 0xF7 / 255, green: 0xF7 / 255, blue: 0xF7 / 255, alpha: 1)
+        var dark = NSColor(srgbRed: 0x21 / 255, green: 0x21 / 255, blue: 0x21 / 255, alpha: 1)
+        if colored {
+            // The theme's two files: each one's own `background`.
+            guard let theme = lines.last(where: { $0.hasPrefix("theme = light:") }) else { return fixed }
+            for half in theme.dropFirst("theme = ".count).split(separator: ",") {
+                let parts = half.split(separator: ":", maxSplits: 1).map(String.init)
+                guard parts.count == 2, let bg = themeBackground(parts[1]) else { continue }
+                if parts[0] == "light" { light = bg } else { dark = bg }
+            }
+        }
+        if let forced = paneAppearance { return forced == .darkAqua ? dark : light }
+        return NSColor(name: nil) { look in look.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light }
+    }
+
+    /// The `background` a theme file sets.
+    private static func themeBackground(_ path: String) -> NSColor? {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        for line in text.components(separatedBy: .newlines) where key(of: line) == "background" {
+            var hex = line.split(separator: "=", maxSplits: 1).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+            if hex.hasPrefix("#") { hex.removeFirst() }
+            guard hex.count == 6, let v = UInt32(hex, radix: 16) else { return nil }
+            return NSColor(ghostty: (UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)))
+        }
+        return nil
     }
 
     /// A config line's key: `background` for `background = #fff`.

@@ -204,12 +204,15 @@ final class DinoModel: ObservableObject {
     }
     static let unseenKey = "unseenDone.\(DinoEnvironment.home)"
 
-    /// Sessions shown side by side; selecting either one shows both.
-    @Published var splits: [Split] = Split.saved() {
-        didSet { if splits != oldValue { Split.save(splits) } }
+    /// Each tab's panes, when it has more than one: selecting any of them shows them all.
+    @Published var splits: [SplitTree] = SplitTree.saved() {
+        didSet { if splits != oldValue { SplitTree.save(splits) } }
     }
     /// Split partners dinod has started that no poll has listed yet.
     var awaited: Set<String> = []
+    /// The size of the area the panes share, as last laid out: what Ghostty's `resize_split`
+    /// moves a divider in.
+    var paneArea = CGSize(width: 1000, height: 700)
 
     /// One live Ghostty surface per session, kept mounted so switching is instant.
     private(set) var terminals: [String: TerminalViewState] = [:]
@@ -505,7 +508,13 @@ final class DinoModel: ObservableObject {
         for s in next { webPages[s.id]?.follow(s.previews ?? []) }
         // A pane whose session ended closes, as it would in a terminal.
         awaited.subtract(live)
-        let kept = splits.filter { [$0.first, $0.second].allSatisfy { live.contains($0) || awaited.contains($0) } }
+        let present = { (id: String) in live.contains(id) || self.awaited.contains(id) }
+        // The selected pane's session gone: the pane Ghostty would focus next takes over.
+        if pendingSelect == nil, let id = selected, !present(id), let t = split(of: id),
+           let next = t.pruned({ present($0) || $0 == id })?.afterClosing(id) {
+            pendingSelect = next
+        }
+        let kept = splits.compactMap { $0.pruned(present) }
         if kept != splits { splits = kept }
         // `dino <folder>`: the session it started, brought forward even from another app.
         let revealed = next.filter { ($0.revealed ?? 0) > revealedUpTo }.max { ($0.revealed ?? 0) < ($1.revealed ?? 0) }
@@ -760,7 +769,9 @@ final class DinoModel: ObservableObject {
         ClipboardConfirmation.install(on: t, session: id)
         // ⌘-clicked paths and local URLs open in dino's side pane; dropped files paste as paths.
         t.makePlatformView = { [weak self] in
-            LinkTerminalView(local: { self?.sessions.first { $0.id == id }?.host == nil }) { self?.openLink($0, from: id) }
+            let view = LinkTerminalView(local: { self?.sessions.first { $0.id == id }?.host == nil }) { self?.openLink($0, from: id) }
+            view.pointerEntered = { self?.pointerEntered(id) }
+            return view
         }
         terminals[id] = t
         return t
