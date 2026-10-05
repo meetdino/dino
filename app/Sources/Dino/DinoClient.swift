@@ -403,6 +403,9 @@ struct Knobs: Codable, Equatable {
     /// What a conversation it resumes keeps as it was ("model", a mode id): fixed for a running
     /// session, open for a new one. Nil from an older dinod.
     var resume_keeps: [String]? = nil
+    /// Its mode switches in place (Claude's Shift+Tab) where it can, rather than by restarting it.
+    /// Nil from an older dinod.
+    var live_modes: Bool? = nil
 
     /// A running session can't change `what` (see `resume_keeps`).
     func keeps(_ what: String) -> Bool { resume_keeps?.contains(what) ?? false }
@@ -457,6 +460,8 @@ extension Knobs {
         efforts = try c.decodeIfPresent([String].self, forKey: .efforts) ?? []
         restart = try c.decodeIfPresent(Bool.self, forKey: .restart) ?? false
         mode_labels = try? c.decodeIfPresent([String: String].self, forKey: .mode_labels)
+        resume_keeps = try? c.decodeIfPresent([String].self, forKey: .resume_keeps)
+        live_modes = try? c.decodeIfPresent(Bool.self, forKey: .live_modes)
     }
 }
 

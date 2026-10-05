@@ -148,6 +148,45 @@ impl Agent for Claude {
         Some(id.into())
     }
 
+    // Its footer, under the prompt: "⏸ manual mode on · ? for shortcuts", "⏵⏵ accept edits on
+    // (shift+tab to cycle)". Versions before 2.1.2xx name no mode in the default one, only "? for
+    // shortcuts".
+    fn screen_mode(&self, screen: &str) -> Option<String> {
+        const SAYS: &[(&str, &str)] = &[
+            ("manual mode on", "ask"),
+            ("default mode on", "ask"),
+            ("accept edits on", "edits"),
+            ("plan mode on", "plan"),
+            ("auto mode on", "auto"),
+            ("bypass permissions on", "bypass"),
+        ];
+        for line in screen.lines().rev().filter(|l| !l.trim().is_empty()).take(3) {
+            let t = line.trim_start();
+            if let Some(rest) = t.strip_prefix("⏵⏵").or_else(|| t.strip_prefix('⏸')) {
+                return SAYS.iter().find(|(says, _)| rest.trim_start().starts_with(says)).map(|(_, m)| m.to_string());
+            }
+            if t.starts_with("? for shortcuts") {
+                return Some("ask".into());
+            }
+        }
+        None
+    }
+
+    // Shift+Tab, Claude Code 2.1: manual → accept edits → plan → bypass (when started with it
+    // allowed) → auto (when the account and model have it) → manual.
+    fn mode_cycle(&self, args: &[String]) -> Option<(&'static str, Vec<&'static str>)> {
+        let bypass = args.iter().enumerate().any(|(i, a)| {
+            matches!(a.as_str(), "--dangerously-skip-permissions" | "--allow-dangerously-skip-permissions" | "--permission-mode=bypassPermissions")
+                || (a == "--permission-mode" && args.get(i + 1).is_some_and(|v| v == "bypassPermissions"))
+        });
+        let mut order = vec!["ask", "edits", "plan"];
+        if bypass {
+            order.push("bypass");
+        }
+        order.push("auto");
+        Some(("\x1b[Z", order))
+    }
+
     fn catalog_key(&self) -> &'static str {
         "claude"
     }

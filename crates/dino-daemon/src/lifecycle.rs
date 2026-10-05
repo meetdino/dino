@@ -98,6 +98,9 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
     anyhow::ensure!(super::group_of(d, id).is_none(), "{} is part of a fan-out: keep or discard it instead", s.name);
     let agent_session = s.agent_session.lock().unwrap().clone().or_else(|| super::conversation_of(&s));
+    // The mode it's in, which it may have switched to since it started. Read before any of its
+    // locks is taken below: the pane's reader takes them holding its screen.
+    let controls = super::mode::current(d, &s);
     let saved = SavedSession {
         id: s.id.clone(),
         name: s.name.clone(),
@@ -109,7 +112,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         started_at: s.started_at,
         agent_session,
         auto: s.auto.lock().unwrap().clone(),
-        controls: s.controls.clone(),
+        controls,
         scheduled: s.scheduled.clone(),
         started_by: s.started_by.clone(),
         messaged_by: s.messaged_by.lock().unwrap().clone(),

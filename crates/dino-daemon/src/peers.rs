@@ -94,11 +94,11 @@ pub(crate) fn message(d: &Daemon, id: &str, text: &str, by: Option<String>) -> a
     anyhow::ensure!(by.as_deref() != Some(id), "that's this session; message another one");
     anyhow::ensure!(!text.trim().is_empty(), "the message is empty");
     anyhow::ensure!(!s.pane.is_exited(), "{} has exited", s.name);
-    // Its mode as dino set it, as the agent last reported it (Claude's Shift+Tab), and as it's
-    // about to become.
-    let reported = d.proxy.stats.session(&s.id).agent_mode.as_deref().and_then(|m| dino_core::controls::reported_mode(&s.agent_id, m));
+    // Its mode as dino started it, as the agent says it is now (Claude's Shift+Tab), and as
+    // it's about to become.
+    let now = super::mode::now(&s, d.proxy.stats.session(&s.id).agent_mode.as_deref());
     let pending = s.pending.lock().unwrap().as_ref().and_then(|c| c.mode.clone());
-    check_messageable(&s.name, &s.agent_id, &[s.controls.mode.as_deref(), reported.as_deref(), pending.as_deref()])?;
+    check_messageable(&s.name, &s.agent_id, &[s.controls.mode.as_deref(), now.as_deref(), pending.as_deref()])?;
     // Typed into a permission prompt or mid-turn, the text would answer the wrong question.
     anyhow::ensure!(idle(d, &s), "{} is {}; message it once it's idle", s.name, status(d, &s));
     // Hand over only once nobody is typing into it, so the text doesn't join a half-written prompt.
