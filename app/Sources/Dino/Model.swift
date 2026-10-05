@@ -475,7 +475,7 @@ final class DinoModel: ObservableObject {
         // A session in a folder the tree hasn't seen: ask for it now rather than on the next tick.
         if Set(next.compactMap(\.here)) != Set(sessions.compactMap(\.here)) { refreshTree() }
         // The selected shell `cd`d: the tree, and sessions started next to it, follow.
-        if let id = selected, let here = next.first(where: { $0.id == id })?.here,
+        if let id = selected, let s = next.first(where: { $0.id == id }), s.host == nil, let here = s.here,
            here != sessions.first(where: { $0.id == id })?.here { folder = URL(fileURLWithPath: here) }
         placeHandedOff(next)
         if next != sessions { sessions = next }
@@ -585,7 +585,8 @@ final class DinoModel: ObservableObject {
         openTab(id)
         shownOne = true
         // New sessions start next to the one you're looking at.
-        if let cwd = sessions.first(where: { $0.id == id })?.here { moveFolder(to: cwd) }
+        // (Only one on this Mac: a remote session's folder isn't one here.)
+        if let s = sessions.first(where: { $0.id == id }), s.host == nil, let cwd = s.here { moveFolder(to: cwd) }
         if attention.contains(id) { attention.remove(id) }
         if unseenDone.contains(id) { unseenDone.remove(id) }
         if !keepKeyboard { terminals[id]?.requestFocus() }

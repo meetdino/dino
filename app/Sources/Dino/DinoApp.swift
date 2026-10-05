@@ -81,9 +81,12 @@ struct DinoApp: App {
                 // Its shortcut works from any app (Settings → Terminal); a menu key would only work here.
                 Button("Quick Terminal") { QuickTerminal.shared.toggle() }
                     .disabled(model.launchers.isEmpty)
-                // One way in: where (here, recent, GitHub, a URL, a new project), then which agent.
-                Button("New Session…") { model.startSession() }
+                // ⌘N: the default agent where you are, like a new tab; no questions.
+                Button("New Session") { model.newSessionHere() }
                     .keyboardShortcut("n")
+                    .disabled(model.launchers.isEmpty)
+                // Anywhere: where (here, recent, GitHub, a URL, a new project), then which agent.
+                Button("New Session…") { model.startSession() }
                     .disabled(model.launchers.isEmpty)
                 Button("New Session in Worktree…") { model.startSession(worktree: true) }
                     .keyboardShortcut("n", modifiers: [.command, .option])
@@ -697,7 +700,7 @@ struct TerminalPane: View {
     }
 }
 
-/// The sidebar's +: the new-session picker (⌘N).
+/// The sidebar's +: the new-session picker (⌘N starts the default agent here without it).
 struct NewSessionButton: View {
     @EnvironmentObject var model: DinoModel
 
@@ -707,7 +710,7 @@ struct NewSessionButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
-        .help("New session: pick a folder or repository, then an agent (⌘N)")
+        .help("New session: pick a folder or repository, then an agent (⌘N starts the default agent here)")
         .accessibilityLabel("New Session")
         .disabled(model.launchers.isEmpty)
     }
@@ -745,7 +748,7 @@ struct EmptyState: View {
                     Label("New Session…", systemImage: "plus").frame(width: 240)
                 }
                 .controlSize(.large)
-                .help("Pick a folder, a recent repository, one of yours on GitHub or a URL to clone, then an agent (⌘N)")
+                .help("Pick a folder, a recent repository, one of yours on GitHub or a URL to clone, then an agent (⌘N starts the default agent here)")
             }
         }
         .padding(40)
