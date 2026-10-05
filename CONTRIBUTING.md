@@ -77,7 +77,8 @@ DINO_BUNDLE_ID=dev.dino.app.test DINO_AGENT_HOME=/tmp/dino-dev DINO_APP=/tmp/din
 scripts/check.sh           # builds and tests the workspace and the app
 ```
 
-It runs `cargo build --release`, `cargo test --workspace --release` and the app's `swift build`, and
+It runs `cargo build`, `cargo test --workspace` and the app's `swift build` (the dev profile, quick
+to build; releases build the shipping one), and
 refuses code marked `TEST-ONLY`. CI runs the same on every pull request.
 
 dino is a terminal first, so speed is a feature. If your change touches the app or `dinod`, also
