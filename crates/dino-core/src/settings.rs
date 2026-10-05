@@ -1,5 +1,5 @@
 //! `settings.toml`: the one document of user choices, owned by dinod. The app reads and writes it
-//! through dinod as JSON; the TUI, being in-process, uses it directly.
+//! through dinod as JSON; the `dino` command line reads it directly.
 //!
 //! Split for a later sync: `routing` travels with the user, `machine` stays on this Mac.
 

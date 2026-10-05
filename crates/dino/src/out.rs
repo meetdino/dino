@@ -162,6 +162,11 @@ pub fn table(columns: &[Column], rows: &[Vec<Cell>], header: bool) -> String {
     render(columns, rows, header, width(), colour())
 }
 
+/// Rows under a dim header, fitted to the terminal, piped too: for people, not for `cut`.
+pub fn grid(columns: &[Column], rows: &[Vec<Cell>]) -> String {
+    render(columns, rows, true, width(), colour())
+}
+
 fn render(columns: &[Column], rows: &[Vec<Cell>], header: bool, width: usize, on: bool) -> String {
     let mut widths: Vec<usize> = columns
         .iter()

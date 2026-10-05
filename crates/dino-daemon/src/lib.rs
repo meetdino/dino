@@ -1,6 +1,6 @@
-//! dinod: owns agent sessions (PTY + terminal state), the proxy and the router. Clients (the TUI,
-//! `dino attach` inside a Ghostty surface, the future app) talk to it over a Unix socket; agents
-//! keep running when every client goes away.
+//! dinod: owns agent sessions (PTY + terminal state), the proxy and the router. Clients (the app,
+//! `dino attach` inside a Ghostty surface, the `dino` command line) talk to it over a Unix socket;
+//! agents keep running when every client goes away.
 
 use std::collections::{HashMap, HashSet};
 use std::io;

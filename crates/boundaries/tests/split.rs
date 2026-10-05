@@ -16,7 +16,7 @@ const RULES: &[(&str, &str, &[&str])] = &[
     ("dino-proxy", "dino", &["dino-router"]),
     // dinod and its CLI put the pieces together.
     ("dino-daemon", "dino", &["dino-core", "dino-sync", "dino-term", "dino-proxy", "dino-router"]),
-    ("dino", "dino", &["dino-core", "dino-sync", "dino-term", "dino-daemon", "dino-proxy", "dino-router"]),
+    ("dino", "dino", &["dino-core", "dino-sync", "dino-daemon", "dino-proxy", "dino-router"]),
     ("boundaries", "dino", &[]),
 ];
 
