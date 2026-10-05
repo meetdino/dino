@@ -21,6 +21,17 @@ and runs the `dino` it finds on your `PATH` or in `~/.local/bin` (or `DINO_BIN`,
 the one you built, `ln -sf "$PWD/target/release/dino" ~/.local/bin/dino`. An installed build
 carries its `dino` and runs dinod from it, as a release does.
 
+To keep the dino you use built from main, install the git hooks once:
+
+```sh
+scripts/install-hooks.sh   # main moves in the main checkout: ./app/build.sh --install, in the background
+```
+
+Then every commit or merge to main in the main checkout rebuilds it (log: `app/build/build.log`)
+and the running dino offers Restart to Update; `scripts/check.sh --push` from any worktree
+fast-forwards the main checkout's main too, unless it has changes of its own. To sign with your
+Developer ID, `git config dino.signingIdentity "Developer ID Application: Name (TEAMID)"`.
+
 ## Where things are
 
 | Path | What it is |
