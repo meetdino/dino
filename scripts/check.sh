@@ -1,7 +1,9 @@
 #!/bin/sh
 # The checks main has to pass: run after merging and before pushing, against the current base.
 #   scripts/check.sh            build and test the workspace and the app
-#   scripts/check.sh --push     also fetch, refuse if origin/main moved, and push only on success
+#   scripts/check.sh --push     also fetch, refuse if origin/main moved, and push only on success;
+#                               then, where scripts/install-hooks.sh ran, the main checkout's main
+#                               follows and the dino you use rebuilds (scripts/dev-rebuild.sh)
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -29,5 +31,6 @@ fi
 
 if [ "${1:-}" = "--push" ]; then
     git push origin HEAD:main
+    scripts/dev-rebuild.sh --sync HEAD || true
 fi
 echo "all checks passed"
