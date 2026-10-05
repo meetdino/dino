@@ -430,6 +430,10 @@ impl Agent for Codex {
         out
     }
 
+    fn account_vars(&self) -> &'static [&'static str] {
+        &["CODEX_HOME", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"]
+    }
+
     fn login(&self) -> Option<String> {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         Some(match crate::discover::read_json(home.join(".codex/auth.json")) {

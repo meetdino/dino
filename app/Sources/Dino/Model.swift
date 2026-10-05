@@ -75,7 +75,11 @@ final class DinoModel: ObservableObject {
     /// Finished conversations on disk are in `found` (the browser has loaded them once).
     @Published var loadedHistory = false
     /// A handoff in progress: the session being moved, and whether we're waiting on its turn.
-    @Published var moving: FoundSession?
+    /// Shells whose agent is waiting for its turn to end to continue in dino, as asked here
+    /// (dinod says so too: `SessionInfo.taking_over`); see `takeOver`.
+    @Published var takingOver: Set<String> = []
+    /// Found sessions waiting to continue in dino, by `FoundSession.id`; see `adopt`.
+    @Published var adopting: Set<String> = []
     @Published var showContinue = false
     /// A handoff waiting for the user's confirmation.
     @Published var confirmMove: FoundSession?
@@ -397,7 +401,7 @@ final class DinoModel: ObservableObject {
                 SecureInput.shared.update()
             }
         }
-        let raw = next.filter { $0.id != QuickTerminal.shared.sessionID }
+        let raw = Self.onePerConversation(next.filter { $0.id != QuickTerminal.shared.sessionID })
         // Only which side of 1.5s and 5s the last output is matters here. Kept exact, a session
         // printing anything differs on every tick and the whole window redraws four times a second.
         // Agents also animate a spinner at the front of their terminal title (Claude cycles
@@ -543,6 +547,20 @@ final class DinoModel: ObservableObject {
             restartDaemon()
         }
         updateBadge(next)
+    }
+
+    /// One row per conversation: a second session on one (an older dinod could leave them) is
+    /// hidden behind the one running it, else the newest.
+    nonisolated static func onePerConversation(_ list: [SessionInfo]) -> [SessionInfo] {
+        let rank = { (s: SessionInfo) in (s.exited ? 0 : 1, Int(s.id) ?? 0) }
+        var best: [String: SessionInfo] = [:]
+        for s in list {
+            guard let c = s.conversation else { continue }
+            if let b = best[c], rank(b) >= rank(s) { continue }
+            best[c] = s
+        }
+        guard best.count < list.filter({ $0.conversation != nil }).count else { return list }
+        return list.filter { s in s.conversation.map { best[$0]?.id == s.id } ?? true }
     }
 
     /// A terminal title without the spinner or status glyphs an agent puts before its words.
@@ -896,9 +914,11 @@ final class DinoModel: ObservableObject {
         loadedHistory = true
     }
 
-    /// Move a found session into dino. A running one finishes its turn first, then continues here.
+    /// Move a found session into dino. A running one finishes its turn first, then continues
+    /// here; its row says so meanwhile, with Cancel, and the rest of the app goes on.
     func adopt(_ f: FoundSession) {
-        moving = f
+        guard !adopting.contains(f.id) else { return }
+        adopting.insert(f.id)
         let cwd = folder.path
         Task.detached {
             do {
@@ -906,7 +926,7 @@ final class DinoModel: ObservableObject {
                 let conn = try DinoConnection(path: DinoEnvironment.socketPath)
                 let id = try conn.adopt(f, cwd: cwd)
                 await MainActor.run {
-                    self.moving = nil
+                    self.adopting.remove(f.id)
                     self.showContinue = false
                     self.found.removeAll { $0 == f }
                     // The next poll brings the new session; select it once it's there.
@@ -914,12 +934,23 @@ final class DinoModel: ObservableObject {
                 }
             } catch {
                 await MainActor.run {
-                    self.moving = nil
-                    self.error = error.localizedDescription
+                    self.adopting.remove(f.id)
+                    if !Self.cancelled(error) { self.error = error.localizedDescription }
                 }
             }
         }
     }
+
+    /// Stop waiting to continue `f` in dino: it runs on where it is.
+    func cancelAdopt(_ f: FoundSession) {
+        // What dinod waits on it by (see adopt in dinod).
+        let key = f.session_id.isEmpty ? f.pid.map(String.init) : f.session_id
+        guard let key else { return }
+        Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).cancelTakeOver(id: key) }
+    }
+
+    /// dinod's answer to a wait that was cancelled: nothing to tell the user.
+    nonisolated static func cancelled(_ error: Error) -> Bool { error.localizedDescription == "cancelled" }
 
     var pendingSelect: String?
     /// One of Settings → tmux's options is on (then dino stops suggesting them).
@@ -944,23 +975,39 @@ final class DinoModel: ObservableObject {
     /// Reveals up to here are handled: ones from before the app started (and opened it) count too.
     private var revealedUpTo = UInt64(Date().timeIntervalSince1970 * 1000) - 10_000
 
-    /// Continue the agent started by hand in shell `s` as a dino session, in the same row.
+    /// Continue the agent started by hand in shell `s` as a dino session, in the same row (or in
+    /// the session that has its conversation already). It waits for the agent's turn to end; the
+    /// session's banner says so, with Cancel (Esc), and the rest of the app goes on.
     func takeOver(_ s: SessionInfo) {
-        guard let f = s.inside else { return }
-        moving = f
+        guard let f = s.inside, !isTakingOver(s) else { return }
+        takingOver.insert(s.id)
         let id = s.id
         Task.detached {
             do {
                 // Own connection: it waits for the agent's turn to end.
                 try DinoConnection(path: DinoEnvironment.socketPath).takeOver(session: id)
-                await MainActor.run { self.moving = nil }
+                await MainActor.run {
+                    self.takingOver.remove(id)
+                    // Continued in the session that had the conversation: show that one.
+                    if let other = self.sessions.first(where: { $0.conversation == f.session_id && $0.id != id }) {
+                        self.selected = other.id
+                    }
+                }
             } catch {
                 await MainActor.run {
-                    self.moving = nil
-                    self.error = error.localizedDescription
+                    self.takingOver.remove(id)
+                    if !Self.cancelled(error) { self.error = error.localizedDescription }
                 }
             }
         }
+    }
+
+    /// Shell `s`'s agent is waiting to continue in dino.
+    func isTakingOver(_ s: SessionInfo) -> Bool { s.taking_over == true || takingOver.contains(s.id) }
+
+    /// Stop waiting to take over shell `id`'s agent: it runs on in the shell.
+    func cancelTakeOver(_ id: String) {
+        Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).cancelTakeOver(id: id) }
     }
 
     /// Diff sizes need git, so these refresh slower than session state. Launchers too: keys and
