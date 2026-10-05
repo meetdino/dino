@@ -219,8 +219,15 @@ final class LinkTerminalView: TerminalView {
         scroller?.update(bar)
     }
 
+    /// The pointer moved over this pane while another has the keyboard (Ghostty's
+    /// `focus-follows-mouse`, in the key window only).
+    var pointerEntered: (() -> Void)?
+
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
+        if SplitChrome.shared.followsMouse, window?.isKeyWindow == true, terminalState?.isFocused == false {
+            pointerEntered?()
+        }
         guard let scroller else { return }
         let x = convert(event.locationInWindow, from: nil).x
         if x >= bounds.width - PaneScroller.width { scroller.pointerAtEdge() }
