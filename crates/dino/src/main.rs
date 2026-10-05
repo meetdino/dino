@@ -82,6 +82,8 @@ Setup
   dino fallback [<agent> [<provider>:<model>... | off] [--outages] [--new-sessions <agent>[:<model>]]]
                                     where an agent goes when it hits a limit
   dino power [status|setup|remove]  keep agents running with the lid closed
+  dino build-cache [on|off|size <GB>|install]
+                                    one compiler cache for every session's builds
   dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]
   dino ai suggest|agent -- <request> | search [--json|--pick]
                                     the shell's AI line and history search
@@ -95,6 +97,13 @@ Setup
 const BUILD: Option<&str> = option_env!("DINO_BUILD");
 
 fn main() {
+    // Run by Cargo for every rustc call, in sessions with the build cache (see
+    // `dino_core::build_cache`): first, before anything else, and with arguments as they are (a
+    // path needn't be UTF-8).
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "rustc-wrapper") {
+        std::process::exit(dino_core::build_cache::wrap(&args[1..]));
+    }
     // Piped into `head`, stop quietly when it has enough, as other commands do; Rust otherwise
     // ignores SIGPIPE and the next print panics. Not dinod: a client hanging up mustn't end it.
     if !matches!(std::env::args().nth(1).as_deref(), Some("daemon" | "lid-watchdog")) {
@@ -116,6 +125,7 @@ fn dino() -> anyhow::Result<()> {
             dino_daemon::lid_watchdog(cli.get(1).and_then(|p| p.parse().ok()).unwrap_or(0));
             return Ok(());
         }
+        Some("build-cache") => return cmd_build_cache(&cli[1..]),
         Some("power") => return cmd_power(cli.get(1).map(String::as_str).unwrap_or("status")),
         Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status"), cli.get(2).map(String::as_str)),
         Some("fallback") => return cmd_fallback(&cli[1..]),
@@ -671,6 +681,113 @@ fn cmd_power(action: &str) -> anyhow::Result<()> {
 fn awake_session_name(s: &SessionInfo) -> String {
     let agent = s.inside.as_ref().map_or(s.agent_id.as_str(), |f| f.agent.as_str());
     if agent == "shell" { name(s) } else { format!("{}: {}", agent_name(agent), name(s)) }
+}
+
+const BUILD_CACHE_USAGE: &str = "usage: dino build-cache [on|off|size <GB>|install]
+
+Every agent dino starts, and every dino shell, builds Rust through one sccache cache on this Mac, so
+a new worktree compiles only what no other worktree has compiled already. Each worktree keeps its
+own target/. A missing, broken or full cache never fails a build: it compiles as it would without.
+Settings → Workspaces → Worktrees has the same. On and size apply to sessions started from now on.
+
+  install    run sccache's install command in a new dino shell, where it shows as it runs";
+
+/// `dino build-cache`: the build cache's hits and misses, and turning it on and off.
+fn cmd_build_cache(args: &[String]) -> anyhow::Result<()> {
+    use dino_core::settings::BuildCache;
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    // On or off, or a size.
+    let change: Option<(Option<bool>, Option<u32>)> = match words.as_slice() {
+        [] | ["status"] => None,
+        ["on"] => Some((Some(true), None)),
+        ["off"] => Some((Some(false), None)),
+        ["size", gb] => {
+            let gb: u32 = gb.trim_end_matches(['G', 'g']).parse().ok().filter(|g| BuildCache::SIZES_GB.contains(g)).ok_or_else(|| {
+                anyhow::anyhow!("{} isn't a size from {} to {} GB", printable(gb), BuildCache::SIZES_GB.start(), BuildCache::SIZES_GB.end())
+            })?;
+            Some((None, Some(gb)))
+        }
+        ["install"] => {
+            let id = match client::request(&Request::BuildCacheInstall)? {
+                Response::Created { id } => id,
+                Response::Error { message } => return Err(hinted(message)),
+                _ => return Err(unexpected()),
+            };
+            say(&format!("Installing sccache in session {id}: `dino attach {id}` to watch."));
+            return Ok(());
+        }
+        _ => {
+            println!("{BUILD_CACHE_USAGE}");
+            return Ok(());
+        }
+    };
+    if let Some((on, size)) = change {
+        let (mut settings, locked) = match client::request(&Request::Settings)? {
+            Response::Settings { settings, locked, .. } => (settings, locked),
+            Response::Error { message } => return Err(hinted(message)),
+            _ => return Err(unexpected()),
+        };
+        let before = settings.machine.build_cache.clone();
+        let b = &mut settings.machine.build_cache;
+        b.enabled = on.unwrap_or(b.enabled);
+        b.size_gb = size.unwrap_or(b.size_gb);
+        let lock = |field: &str| locked.iter().any(|p| ["machine", "machine.build_cache"].contains(&p.as_str()) || *p == format!("machine.build_cache.{field}"));
+        anyhow::ensure!(before.enabled == settings.machine.build_cache.enabled || !lock("enabled"), "the build cache is turned {} by your organization", if before.enabled { "on" } else { "off" });
+        anyhow::ensure!(before.size_gb == settings.machine.build_cache.size_gb || !lock("size_gb"), "the build cache's size is set by your organization");
+        match client::request(&Request::SetSettings { settings })? {
+            Response::Ok => {}
+            Response::Error { message } => return Err(hinted(message)),
+            _ => return Err(unexpected()),
+        }
+    }
+    let info = match client::request(&Request::BuildCache)? {
+        Response::BuildCache { info } => info,
+        Response::Error { message } => return Err(hinted(message)),
+        _ => return Err(unexpected()),
+    };
+    print!("{}", out::fields(&build_cache_rows(&info)));
+    Ok(())
+}
+
+/// The build cache as `dino build-cache` shows it.
+fn build_cache_rows(i: &dino_core::ipc::BuildCacheInfo) -> Vec<(&'static str, String)> {
+    let gb = |b: u64| {
+        let g = b as f64 / f64::from(1u32 << 30);
+        if g >= 10.0 || g.fract() == 0.0 { format!("{g:.0} GB") } else { format!("{g:.1} GB") }
+    };
+    let mut rows = vec![];
+    let state = match (&i.sccache, i.enabled) {
+        (_, false) => out::paint("off", Paint::Dim) + "  (`dino build-cache on` turns it on)",
+        (None, true) => out::paint("waiting for sccache", Paint::Orange) + &format!(": `{}`, or `dino build-cache install`", i.install),
+        (Some(_), true) => match &i.unused {
+            Some(why) => out::paint("not used", Paint::Orange) + &format!(": {}", printable(why)),
+            None => out::paint("on", Paint::Green) + "  every session dino starts from now on",
+        },
+    };
+    rows.push(("Build cache", state));
+    if let Some(p) = &i.sccache {
+        rows.push(("sccache", format!("{}{}", i.version.as_deref().map(|v| format!("{} ", printable(v))).unwrap_or_default(), printable(&search::tilde(p)))));
+    }
+    if i.enabled && i.sccache.is_some() && i.unused.is_none() {
+        let s = i.stats.clone().unwrap_or_default();
+        rows.push((
+            "Hits",
+            match s.hit_rate() {
+                Some(r) => format!("{} of {} compiles ({r:.0}%)", s.hits, s.hits + s.misses),
+                None if i.running => "none yet".into(),
+                None => "none yet: it starts with the first session".into(),
+            },
+        ));
+        if s.not_cacheable > 0 {
+            rows.push(("Not cacheable", format!("{} (programs, build scripts, incremental builds: always compiled)", s.not_cacheable)));
+        }
+        rows.push(("Size", match i.size_bytes {
+            Some(b) => format!("{} of {}", gb(b), gb(i.max_bytes)),
+            None => format!("up to {}", gb(i.max_bytes)),
+        }));
+        rows.push(("Folder", printable(&search::tilde(&i.dir))));
+    }
+    rows
 }
 
 /// An agent's name as people know it: "Claude Code" for `claude`.

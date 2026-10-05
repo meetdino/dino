@@ -639,6 +639,8 @@ struct Terminals: View {
         .overlay(alignment: .bottomTrailing) {
             if let s = model.selectedSession, let u = s.local_url, model.offered[s.id] != u, model.sidePane != .preview {
                 PreviewOffer(session: s, url: u)
+            } else {
+                BuildCacheOfferSlot()
             }
         }
         .animation(.spring(duration: 0.3), value: model.selectedSession?.local_url)

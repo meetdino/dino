@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 pub mod agent;
 pub mod agent_mcp;
 pub mod ask;
+pub mod build_cache;
 pub mod claude_token;
 pub mod compat;
 pub mod controls;

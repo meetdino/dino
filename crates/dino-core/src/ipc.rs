@@ -21,8 +21,11 @@ pub const EXIT: u8 = 3;
 /// The client's terminal gained (payload `[1]`) or lost (`[0]`) focus.
 pub const FOCUS: u8 = 4;
 
+/// dinod's socket's name, in dino's folder.
+pub const SOCKET_NAME: &str = "dinod.sock";
+
 pub fn socket_path() -> PathBuf {
-    crate::config_dir().join("dinod.sock")
+    crate::config_dir().join(SOCKET_NAME)
 }
 
 pub fn write_frame(w: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
@@ -87,6 +90,13 @@ pub enum Request {
     ComputerUsePermissions,
     /// Add it to agent `agent` (with the agent's own MCP command), or remove what dino added.
     ComputerUseAgent { agent: String, on: bool },
+    /// The build cache shared by every session's builds (Settings → Workspaces → Worktrees): where
+    /// it stands, and its hits and misses.
+    BuildCache,
+    /// Install sccache for it, in a new shell where the command shows as it runs.
+    BuildCacheInstall,
+    /// Its server isn't answering: start it again (asked by `dino rustc-wrapper`, unanswered).
+    BuildCacheEnsure,
     /// Start a session; with `worktree`, in a new git worktree (and branch) of the repo at `cwd`.
     New {
         launcher: String,
@@ -398,6 +408,7 @@ pub enum Response {
     Launchers { launchers: Vec<LauncherInfo> },
     AgentSetup { agents: Vec<AgentSetupInfo> },
     ComputerUse { info: ComputerUseInfo },
+    BuildCache { info: BuildCacheInfo },
     Created { id: String },
     ShellOutput { output: Option<String>, exit: Option<i32> },
     SessionCost { cost: SessionCost },
@@ -599,6 +610,55 @@ pub struct AgentSetupInfo {
     /// What signing in means for it, when that isn't obvious ("Pi has no models of its own…").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in_note: Option<String>,
+}
+
+/// The build cache (see `crate::build_cache`), as Settings and `dino build-cache` show it.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct BuildCacheInfo {
+    /// Turned on (Settings, or the organization's).
+    pub enabled: bool,
+    /// sccache, where dino found it; none: not installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sccache: Option<String>,
+    /// What `sccache --version` says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// How to install it.
+    pub install: String,
+    /// Why sessions don't get it although it's on and installed (dinod's own environment sets up
+    /// a wrapper or sccache already, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unused: Option<String>,
+    /// Its server is up.
+    pub running: bool,
+    /// The folder it keeps the cache in.
+    pub dir: String,
+    /// The limit, and what it holds now (while the server is up).
+    pub max_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// Since the server started: compiles it was asked for, found in the cache, compiled and
+    /// kept, and that it can't keep (programs, build scripts, incremental builds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<BuildCacheStats>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct BuildCacheStats {
+    pub requests: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub not_cacheable: u64,
+    /// Compiles the cache didn't take part in after all (errors, not a compile at all).
+    pub other: u64,
+}
+
+impl BuildCacheStats {
+    /// Hits among the compiles it could have kept, in percent.
+    pub fn hit_rate(&self) -> Option<f64> {
+        let cacheable = self.hits + self.misses;
+        (cacheable > 0).then(|| self.hits as f64 * 100.0 / cacheable as f64)
+    }
 }
 
 /// Computer use for agents that have none of their own (Settings → Experimental).

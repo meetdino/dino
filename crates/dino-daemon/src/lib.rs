@@ -27,6 +27,7 @@ use dino_term::{Pane, SpawnSpec};
 mod agentlog;
 mod agentserver;
 mod awake;
+mod build_cache;
 mod chatgpt;
 mod claude_accounts;
 mod clients;
@@ -353,6 +354,7 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     tmux_mirror::start(daemon.clone());
     // Turned off (or by the organization) while dinod wasn't running.
     std::thread::spawn(computer_use::reconcile);
+    std::thread::spawn(build_cache::reconcile);
     {
         // Pick up late-discovered agent ids (Codex) and sessions that exited on their own.
         let d = daemon.clone();
@@ -599,6 +601,11 @@ fn log_exits() {
         // mark's path was made before any signal could come.
         unsafe {
             libc::write(2, msg.as_ptr().cast(), msg.len());
+            // The build cache's server stops with dinod.
+            let server = build_cache::SERVER_PID.load(Ordering::Relaxed);
+            if server > 0 {
+                libc::kill(server, libc::SIGTERM);
+            }
             if let Some(mark) = STOPPED_MARK.get() {
                 let fd = libc::open(mark.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o600);
                 if fd >= 0 {
@@ -891,6 +898,16 @@ fn agent_action(d: &Daemon, id: &str, action: &str) -> anyhow::Result<String> {
     Ok(session)
 }
 
+/// Install sccache for the build cache, in a new shell where its command shows as it runs: never
+/// without being asked.
+fn install_sccache(d: &Daemon) -> anyhow::Result<String> {
+    let session = spawn(d, Launch::new("shell", vec![], Some(home().display().to_string())))?;
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == session).cloned().ok_or_else(|| anyhow::anyhow!("the shell went away"))?;
+    *s.label.lock().unwrap() = Some("Install sccache".into());
+    type_at_prompt(s, dino_core::build_cache::install_command().to_string());
+    Ok(session)
+}
+
 /// Interrupt the agent's turn with its own key, as if pressed in its pane: the agent stops what it
 /// does (a tool call included) and waits for you, and the session goes on. A shell's agent started
 /// by hand is interrupted the same way; a plain shell has no turn to interrupt.
@@ -1029,7 +1046,9 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 | Request::FreeUpSpace
         );
         // A hover card asks for its session's cost every couple of seconds: nothing changes.
-        let reads_state = matches!(req, Request::State | Request::StateChange { .. } | Request::SessionCost { .. });
+        // Nothing a client shows changes with these: no client looks again because of them (the build
+        // cache's stats are asked for every few seconds while Settings shows them).
+        let reads_state = matches!(req, Request::State | Request::StateChange { .. } | Request::SessionCost { .. } | Request::BuildCache | Request::BuildCacheEnsure);
         let resp = match req {
             Request::State => state(d),
             Request::StateChange { seen } => state_change(d, seen),
@@ -1056,6 +1075,18 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => Response::ComputerUse { info: computer_use::info() },
                 Err(e) => Response::Error { message: format!("{e:#}") },
             },
+            Request::BuildCache => Response::BuildCache { info: build_cache::info() },
+            Request::BuildCacheEnsure => {
+                build_cache::heal();
+                Response::Ok
+            }
+            Request::BuildCacheInstall => match install_sccache(d) {
+                Ok(id) => {
+                    save(d);
+                    Response::Created { id }
+                }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::Settings => {
                 let managed = dino_core::settings::Managed::load();
                 Response::Settings {
@@ -1075,6 +1106,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     sync::kick();
                     // Turned off: what dino added to agents goes.
                     std::thread::spawn(computer_use::reconcile);
+                    std::thread::spawn(build_cache::reconcile);
                     Response::Ok
                 }
                 Err(e) => Response::Error { message: e.to_string() },
@@ -1956,6 +1988,11 @@ fn local_spec(
         env.extend(penv);
         wired_args.extend(pargs);
     }
+    // One compiler cache for every session's builds, whatever worktree they're in; shells too, for
+    // what's built by hand or by an agent typed there.
+    if let Some((k, v)) = build_cache::session_env(settings, &env) {
+        env.insert(k, v);
+    }
     // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
     env.insert("DINO_SESSION".into(), id.to_string());
     // What draws it is Ghostty's engine: say so, so programs (tmux among them) use what it can do.
@@ -2720,6 +2757,7 @@ fn stop_all(d: &Daemon) {
     let _ = std::fs::write(stopped_mark(), b"");
     lid::stop(d);
     awake::stop(d);
+    build_cache::stop();
     // Each stopped for sure (see `Pane::kill`), all at once, outside the lock; dinod exits next,
     // and an agent that outlived it would be left running unowned.
     // Closed ones end with them: they weren't saved.
