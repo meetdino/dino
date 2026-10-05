@@ -105,7 +105,7 @@ struct ReviewPanel: View {
             closeHelp: "Hide changes (⇧⌘D)",
             close: { model.showReview = false }
         ) {
-            Image(systemName: "plusminus.circle")
+            Image(systemName: "plus.forwardslash.minus")
         } trailing: {
             if let files = changes?.files, !files.isEmpty {
                 StatText(stat: DiffStat(
