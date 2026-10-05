@@ -102,6 +102,9 @@ struct Session {
     controls: Controls,
     /// Asked for mid-turn: `restart` with these once the turn is over.
     pending: Mutex<Option<Controls>>,
+    /// Being replaced by a restart (see `restart`): its program is stopped, and clients wait for
+    /// the one taking its place rather than attach to it.
+    replaced: AtomicBool,
     /// The scheduled task that started it, by name.
     scheduled: Option<String>,
     /// The session whose agent started it, by id.
@@ -1249,7 +1252,9 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             }
             Request::Attach { id, cols, rows, wait } => {
                 let session = loop {
-                    match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                    match attachable(d, &id) {
+                        // Restarting: wait for the one taking its place.
+                        Some(s) if s.replaced.load(Ordering::Relaxed) => {}
                         // Ended: wait for it to be resumed, from this client or any other.
                         Some(s) if wait && s.pane.is_exited() => {}
                         other => break other,
@@ -1766,6 +1771,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         auto: Mutex::new(restore.as_ref().map(|r| r.auto.clone()).unwrap_or_default()),
         controls,
         pending: Mutex::default(),
+        replaced: AtomicBool::new(false),
         scheduled: restore.as_ref().map_or(scheduled, |r| r.scheduled.clone()),
         started_by: restore.as_ref().map_or(started_by, |r| r.started_by.clone()),
         messaged_by: Mutex::new(restore.as_ref().and_then(|r| r.messaged_by.clone())),
@@ -2125,6 +2131,9 @@ fn kept_on_resume(s: &Session, controls: &Controls) -> anyhow::Result<()> {
 /// See `state`: how long a working agent can be silent before its turn counts as over.
 const TURN_OVER_QUIET: std::time::Duration = std::time::Duration::from_millis(2500);
 
+/// See `restartable`: how long after the user's last keystroke a restart waits.
+const TYPED_QUIET: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// How long after a keystroke, resize or attach the agent's output is taken as its answer to
 /// that (an echo, a redraw) rather than as work of its own.
 const USER_ECHO: std::time::Duration = std::time::Duration::from_millis(700);
@@ -2318,8 +2327,31 @@ fn setup_prompt(screen: &str) -> Option<&'static str> {
         Some("Sign in to Claude Code")
     } else if screen.contains("Choose the text style") {
         Some("Finish setting up Claude Code")
+    } else if bypass_prompt(screen) {
+        Some(BYPASS_PROMPT)
     } else {
         None
+    }
+}
+
+const BYPASS_PROMPT: &str = "Accept Bypass Permissions mode?";
+
+/// Claude's warning the first time it starts in bypass, a session switched to it included:
+/// until it's accepted, Claude does nothing ("No, exit" is the default).
+fn bypass_prompt(screen: &str) -> bool {
+    screen.contains("Claude Code running in Bypass Permissions mode") && screen.lines().any(|l| l.trim_end().ends_with("Yes, I accept"))
+}
+
+/// What Claude's own screen asks before it can go on (see `setup_prompt`): before its first
+/// hook, or after a finished turn when it was restarted into bypass.
+fn claude_setup(s: &Session, activity: Option<&Activity>) -> Option<&'static str> {
+    if s.agent_id != "claude" || s.pane.is_exited() {
+        return None;
+    }
+    match activity {
+        None => setup_prompt(&s.pane.text(0)),
+        Some(Activity::Done) if s.controls.mode.as_deref() == Some("bypass") => bypass_prompt(&s.pane.text(0)).then_some(BYPASS_PROMPT),
+        Some(_) => None,
     }
 }
 
@@ -2436,7 +2468,10 @@ fn restartable(d: &Daemon, s: &Session) -> bool {
         return true;
     }
     let st = d.proxy.stats.session(&s.id);
-    idle(d, s) && !st.subagents.iter().any(|a| a.running) && !st.background.iter().any(|b| b.running)
+    // A message just typed may not have started a turn yet: on a busy Mac the agent can take
+    // seconds to say so, and a restart then would lose it.
+    let typing = s.poked.lock().unwrap().is_some_and(|t| t.elapsed() < TYPED_QUIET);
+    idle(d, s) && !typing && !st.subagents.iter().any(|a| a.running) && !st.background.iter().any(|b| b.running)
 }
 
 /// "1 agent", "2 commands", "1 agent, 1 command": what a turn ended on and still runs.
@@ -2506,7 +2541,9 @@ fn state(d: &Daemon) -> Response {
                 output_tokens: st.usage.output,
                 last_model: st.last_model,
                 tier: st.tier,
-                activity: on_screen(s, st.activity.map(|a| match a {
+                // Before its first hook, Claude can already be waiting on you: its folder trust
+                // prompt, its login, its first-run setup, its bypass warning. Shown, so it isn't "idle".
+                activity: on_screen(s, claude_setup(s, st.activity.as_ref()).map(|what| format!("needs:{what}")).or_else(|| st.activity.clone().map(|a| match a {
                     Activity::Working => "working".into(),
                     Activity::Done => match (waiting.0, waiting.1.saturating_sub(serving_waited)) {
                         (0, 0) if serving_waited > 0 => format!("server:{}", ports(&serving)),
@@ -2514,10 +2551,7 @@ fn state(d: &Daemon) -> Response {
                         (agents, commands) => format!("waiting:{}", waiting_words(agents, commands)),
                     },
                     Activity::NeedsPermission(what) => format!("needs:{what}"),
-                })
-                // Before its first hook, Claude can already be waiting on you: its folder trust
-                // prompt, its login, its first-run setup. Shown, so a first session isn't "idle".
-                .or_else(|| (s.agent_id == "claude" && !s.pane.is_exited()).then(|| setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}")))
+                }))
                 .or_else(|| (s.agent_id == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}")))),
                 group: group_of(&s.id),
                 error: st.last_error,
@@ -2827,6 +2861,18 @@ fn snapshot(s: &Session) -> SavedSession {
     }
 }
 
+/// Session `id` for a client to attach to: while a restart replaces it, the new one as soon as
+/// it's in the list, else the old one (marked `replaced`, for the client to wait on).
+fn attachable(d: &Daemon, id: &str) -> Option<Arc<Session>> {
+    let sessions = d.sessions.lock().unwrap();
+    let mut same = sessions.iter().filter(|s| s.id == id);
+    let first = same.next().cloned();
+    if first.as_ref().is_some_and(|s| s.replaced.load(Ordering::Relaxed)) {
+        return same.next().cloned().or(first);
+    }
+    first
+}
+
 /// Run session `id` with `controls` from now on: stop its agent and resume the conversation
 /// with them, under the same id. Attached clients see the socket drop without an exit and
 /// reattach (see `dino attach`), so the terminal carries on.
@@ -2837,6 +2883,10 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
         let saved = snapshot(&s);
         (s, saved)
     };
+    // Starting the new agent can take seconds on a busy Mac. A client reattaching meanwhile
+    // waits for it: attached to this one, it would see it end, gone from the list by then,
+    // and take that for the session's removal, closing its terminal.
+    s.replaced.store(true, Ordering::Relaxed);
     // Dropping the subscribers ends each client's stream without the exit the dying agent would send.
     s.subscribers.lock().unwrap().clear();
     s.pane.kill();
@@ -2852,6 +2902,10 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
     let spawned = spawn(d, launch);
     // The new one takes the old one's place, so the session never drops out of the list.
     take_place(d, &s);
+    if spawned.is_err() {
+        // Nothing takes its place: it stays, ended, for its clients to show as such.
+        s.replaced.store(false, Ordering::Relaxed);
+    }
     save(d);
     spawned.map(|_| ())
 }
@@ -4236,6 +4290,10 @@ mod tests {
         assert_eq!(setup_prompt(" Select login method:\n ❯ 1. Claude account"), Some("Sign in to Claude Code"));
         assert_eq!(setup_prompt(" Choose the text style that looks best"), Some("Finish setting up Claude Code"));
         assert_eq!(setup_prompt("❯ hello\n● Hi!"), None);
+        // Its warning on starting in bypass, as Claude Code 2.1 draws it.
+        let bypass = "  WARNING: Claude Code running in Bypass Permissions mode\n\n In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous\n commands.\n\n  ❯ No, exit\n    Yes, I accept\n\n   Enter to confirm · Esc to cancel";
+        assert_eq!(setup_prompt(bypass), Some("Accept Bypass Permissions mode?"));
+        assert_eq!(setup_prompt("● Claude Code running in Bypass Permissions mode asks \"Yes, I accept\" first"), None);
         // Pi without a provider, its sign-in, and after it.
         let warned = " Warning: No models available. Use /login to log into a provider via OAuth or API key. See:\n   /x/docs/providers.md\n   /x/docs/models.md\n\n────\n\n────\n/tmp";
         assert_eq!(pi_setup_prompt(warned), Some("Connect a provider: type /login in Pi"));
@@ -4313,6 +4371,68 @@ mod tests {
         // dinod's header for agents with the secret off their command line is the proxy's.
         assert_eq!(dino_core::agent::KEY_HEADER, dino_proxy::KEY_HEADER);
         std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    /// A client reattaching while a restart (a mode switched) replaces the session's program waits
+    /// for the new one. Attached to the old one, it saw that end, by then out of the list, and
+    /// took it for the session's removal: `dino attach` exited and closed its terminal.
+    #[test]
+    fn reattaching_during_a_restart_gets_the_new_program() {
+        let home = test_home().to_path_buf();
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
+        let old = session(&d, &id);
+
+        // `restart`, up to starting the new program, which can take seconds on a busy Mac.
+        old.replaced.store(true, Ordering::Relaxed);
+        old.subscribers.lock().unwrap().clear();
+        old.pane.kill();
+        wait_for("the old program to end", || old.pane.is_exited());
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let d2 = d.clone();
+        std::thread::spawn(move || serve(&d2, server));
+        ipc::write_json(&mut client, &Request::Attach { id: id.clone(), cols: 80, rows: 24, wait: false }).unwrap();
+        client.set_read_timeout(Some(std::time::Duration::from_millis(400))).unwrap();
+        let mut b = [0u8; 1];
+        let early = io::Read::read(&mut client, &mut b);
+        assert!(early.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock), "answered before the new program was there: {early:?}");
+
+        let mut saved = snapshot(&old);
+        saved.ended = false;
+        saved.exit_code = None;
+        spawn(&d, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) }).unwrap();
+        take_place(&d, &old);
+        let new = session(&d, &id);
+        assert!(!Arc::ptr_eq(&new, &old) && !new.replaced.load(Ordering::Relaxed));
+
+        client.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        let (kind, ok) = ipc::read_frame(&mut client).unwrap();
+        assert!(kind == ipc::JSON && matches!(serde_json::from_slice(&ok), Ok(Response::Ok)));
+        ipc::write_frame(&mut client, ipc::DATA, b"echo new-$((6*7))\r").unwrap();
+        let mut seen = Vec::new();
+        while !String::from_utf8_lossy(&seen).contains("new-42") {
+            let (kind, payload) = ipc::read_frame(&mut client).unwrap();
+            assert_ne!(kind, ipc::EXIT, "the client was told the session ended");
+            seen.extend(payload);
+        }
+        kill(&d, &id);
+    }
+
+    /// A mode switched right after a message is typed waits: the agent may not have started on it yet.
+    #[test]
+    fn a_restart_waits_for_the_users_typing_to_settle() {
+        let home = test_home().to_path_buf();
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        let ago = |secs| Instant::now().checked_sub(std::time::Duration::from_secs(secs));
+        *s.last_output.lock().unwrap() = ago(10);
+        *s.poked.lock().unwrap() = ago(10);
+        assert!(restartable(&d, &s));
+        *s.poked.lock().unwrap() = Some(Instant::now());
+        assert!(!restartable(&d, &s));
+        kill(&d, &id);
     }
 
     /// A session whose program exits stays, ended, across a dinod restart, and resumes in place.
