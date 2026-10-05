@@ -1166,7 +1166,11 @@ async fn forward(
             };
             // The plan's key, balance or limit: the plan's state, not just this call's.
             let limit = coding_plan.is_some() && plan::limited(status.as_u16(), &codex::error_message(&text)).is_some();
-            failed(if limit || status == StatusCode::TOO_MANY_REQUESTS { CallStatus::Limit } else { CallStatus::Error }, model.clone());
+            // A limit is a spent quota, window or balance. Another 429 (a short rate limit, or the
+            // one-token check Claude Code makes as it starts, which Anthropic answers with a bare 429
+            // when the account has no extra usage) is an error of the call, not the account's limit.
+            let quota = fallback::classify(status.as_u16(), &headers, &text).is_some_and(|t| t.kind == fallback::Kind::Quota);
+            failed(if limit || quota { CallStatus::Limit } else { CallStatus::Error }, model.clone());
             if let Some((id, _)) = coding_plan.as_ref().filter(|_| limit || matches!(status.as_u16(), 401 | 403)) {
                 st.stats.plan_errors.lock().unwrap().insert(id.clone(), msg.clone());
             }
@@ -1174,6 +1178,10 @@ async fn forward(
                 s.errors += 1;
                 if limit {
                     s.limit_error = Some(msg.clone());
+                }
+                // Its own route answered, if with a refusal: whatever fallback it was on, it isn't now.
+                if account.is_none() && primary.as_ref().is_some_and(|p| s.fallback.as_ref().is_some_and(|f| f.from == p.key)) {
+                    s.fallback = None;
                 }
                 s.call_failed(msg);
             });
@@ -1798,7 +1806,11 @@ fn record_quota(stats: &Stats, provider: &str, headers: &HeaderMap) {
         return;
     }
     const PREFIX: &str = "anthropic-ratelimit-unified-";
-    let mut windows: HashMap<String, Window> = HashMap::new();
+    if !headers.keys().any(|n| n.as_str().starts_with(PREFIX)) {
+        return;
+    }
+    // On top of what was known: a refusal may say only which window refused, not the others' use.
+    let mut windows: HashMap<String, Window> = stats.quotas.lock().unwrap().get(provider).map(|q| q.windows.iter().cloned().collect()).unwrap_or_default();
     for (name, value) in headers {
         let Some(rest) = name.as_str().strip_prefix(PREFIX) else { continue };
         let Some((window, field)) = rest.split_once('-') else { continue };
@@ -1811,6 +1823,9 @@ fn record_quota(stats: &Stats, provider: &str, headers: &HeaderMap) {
             _ => {}
         }
     }
+    // Only windows: `-overage-status`, `-representative-claim` and `-fallback-percentage` share the
+    // prefix but have no reset to count down to.
+    windows.retain(|_, w| w.resets_at.is_some());
     if windows.is_empty() {
         return;
     }
@@ -2198,6 +2213,39 @@ mod tests {
         format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
     }
 
+    /// A session that was on a fallback goes back to its own route at a turn's start. When that
+    /// route refuses again and nothing else answers (its chain since removed), the session isn't
+    /// on the fallback any more: it says nothing stale, and the agent gets its own route's answer.
+    #[test]
+    fn back_on_its_own_route_is_off_the_fallback_even_when_refused() {
+        use std::io::{Read, Write};
+        let (a, _from_a) = stand_in(|_| reply("429 Too Many Requests", "", r#"{"error":{"code":"1308","message":"Usage limit reached for 5 hour. Your limit will reset at 2026-10-04 02:00:00"}}"#));
+        let (b, _from_b) = stand_in(|_| streamed("glm-b", "PELICAN"));
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        let plan = |name: &str, base: &str, key: &str| plan::Plan { name: name.into(), anthropic: Some(base.into()), openai: None, key: key.into() };
+        proxy.set_plans(HashMap::from([("a".to_string(), plan("Plan A", &a, "key-a")), ("b".to_string(), plan("Plan B", &b, "key-b"))]));
+        proxy.set_fallback("8", Some(fallback::Chain { steps: vec![fallback::Step { route: "plan/b".into(), model: "glm-b".into(), name: "Plan B".into() }], on_outage: false }));
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let send = |text: &str| {
+            let path = proxy.base_url("8", "plan/a").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+            let body = json!({"model": "claude-opus-5-5", "max_tokens": 10, "stream": true, "messages": [{"role": "user", "content": text}]}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        assert!(send("hi").contains("PELICAN"));
+        assert!(proxy.stats.session("8").fallback.is_some(), "on Plan B");
+        // The chain is removed; Plan A's time is up, and it refuses again as the next turn starts.
+        proxy.set_fallback("8", None);
+        proxy.stats.limited.lock().unwrap().get_mut("plan/a").unwrap().retry_at = 0;
+        proxy.stats.update("8", |s| s.fallback.as_mut().unwrap().retry_at = 0);
+        let out = send("again");
+        assert!(out.starts_with("HTTP/1.1 429") && out.contains("1308"), "its own route's answer: {out}");
+        assert!(proxy.stats.session("8").fallback.is_none(), "not on Plan B any more");
+    }
+
     /// Over real connections, the whole way: a plan's spent window is answered by the next route
     /// in the chain, with that route's key and model and never the agent's credentials; the
     /// session says so and stays there mid-turn; after the reset it goes back as a turn starts,
@@ -2367,6 +2415,59 @@ mod tests {
         send("acct-api", "sk-ant-api03-a-key");
         assert_eq!(auth_of(&from.recv_timeout(wait()).unwrap()), "bearer sk-ant-api03-a-key");
         assert!(from.recv_timeout(std::time::Duration::from_millis(300)).is_err());
+    }
+
+    /// Claude Code's one-token check as it starts, which Anthropic answers with a bare 429 when
+    /// the account has no extra usage, and a short rate limit: errors of the call, not the
+    /// account's limit. A spent subscription is a limit. Only real windows (with a reset) are
+    /// kept from Anthropic's headers, as it sends them.
+    #[test]
+    fn a_bare_429_is_not_a_limit_and_windows_are_windows() {
+        use std::io::{Read, Write};
+        let reset = fallback::now() + 3600;
+        let (anthropic, _from) = stand_in(move |req| {
+            if req.contains("\"max_tokens\":1,") {
+                reply("429 Too Many Requests", "", r#"{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}"#)
+            } else if req.contains("retry-me") {
+                reply("429 Too Many Requests", "retry-after: 3\r\n", r#"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#)
+            } else if req.contains("spent-now") {
+                claude_spent(reset)
+            } else {
+                let h = format!(
+                    "anthropic-ratelimit-unified-status: allowed\r\nanthropic-ratelimit-unified-5h-status: allowed\r\n\
+                     anthropic-ratelimit-unified-5h-utilization: 0.02\r\nanthropic-ratelimit-unified-5h-reset: {reset}\r\n\
+                     anthropic-ratelimit-unified-7d-status: allowed\r\nanthropic-ratelimit-unified-7d-utilization: 0.18\r\n\
+                     anthropic-ratelimit-unified-7d-reset: {}\r\nanthropic-ratelimit-unified-overage-status: rejected\r\n\
+                     anthropic-ratelimit-unified-overage-disabled-reason: org_level_disabled\r\n\
+                     anthropic-ratelimit-unified-representative-claim: five_hour\r\nanthropic-ratelimit-unified-fallback-percentage: 0.5\r\n\
+                     anthropic-ratelimit-unified-reset: {reset}\r\n",
+                    reset + 86400
+                );
+                reply("200 OK", &h, r#"{"id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"OK"}],"model":"claude-opus-5-5","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1}}"#)
+            }
+        });
+        let base = anthropic.trim_end_matches("/api/anthropic").to_string();
+        STAND_INS.lock().unwrap().push(("probe".into(), "anthropic".into(), base));
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let ask = |max_tokens: u32, text: &str| {
+            let path = proxy.base_url("probe", "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+            let body = json!({"model": "claude-opus-5-5", "max_tokens": max_tokens, "messages": [{"role": "user", "content": text}]}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-own\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        assert!(ask(1, "quota").starts_with("HTTP/1.1 429"));
+        assert!(ask(10, "retry-me").starts_with("HTTP/1.1 429"));
+        assert!(ask(10, "hi").starts_with("HTTP/1.1 200"));
+        assert!(ask(10, "spent-now").starts_with("HTTP/1.1 429"));
+        let status: Vec<CallStatus> = proxy.stats.take_calls().into_iter().map(|c| c.status).collect();
+        assert_eq!(status, [CallStatus::Error, CallStatus::Error, CallStatus::Ok, CallStatus::Limit]);
+        let quota = proxy.stats.quotas.lock().unwrap().get("anthropic").cloned().expect("windows");
+        let names: Vec<&str> = quota.windows.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["5h", "7d"], "only windows with a reset");
     }
 
     /// The real thing, by hand: `DINO_CLAUDE_ACCOUNT_FILE=<file with a setup-token> cargo test -p
