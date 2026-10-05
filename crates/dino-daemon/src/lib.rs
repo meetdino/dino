@@ -2621,6 +2621,16 @@ fn state(d: &Daemon) -> Response {
             }))
             .or_else(|| (s.agent_id == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))));
             let output_ms_ago = s.last_output.lock().unwrap().map(|t| t.elapsed().as_millis() as u64);
+            // Each of its locks read on its own, none held as the next is taken: a lock taken in
+            // the struct below is held to its end, and `snapshot` (the save loop) takes some of
+            // them in another order (`agent_session`, then `auto`): both waited on each other.
+            let auto = s.auto.lock().unwrap().pr.clone();
+            let local_url = s.local_url.lock().unwrap().clone();
+            let pending = s.pending.lock().unwrap().clone();
+            let messaged_by = s.messaged_by.lock().unwrap().clone();
+            let conversation = s.agent_session.lock().unwrap().clone();
+            let shell_cwd = s.pane.shared.cwd.lock().unwrap().clone();
+            let last_exit = *s.pane.shared.last_exit.lock().unwrap();
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -2642,19 +2652,19 @@ fn state(d: &Daemon) -> Response {
                 cwd: if s.host.is_some() { s.cwd.display().to_string() } else { real(&s.cwd) },
                 host: s.host.clone(),
                 pr: prs.get(&s.id).cloned(),
-                auto: s.auto.lock().unwrap().pr.clone(),
+                auto,
                 previews: previews.iter().filter(|p| p.session == s.id).map(|p| p.info()).collect(),
-                local_url: s.local_url.lock().unwrap().clone(),
+                local_url,
                 // What it runs with as its agent says (its screen, else its hooks), never what's
                 // only asked for: that's `pending` until it's in effect.
                 controls: Controls { mode: agent_mode.clone().or_else(|| s.controls.mode.clone()), ..s.controls.clone() },
-                pending: s.pending.lock().unwrap().clone(),
+                pending,
                 agent_mode,
                 context_tokens,
                 context_limit,
                 scheduled: s.scheduled.clone(),
                 started_by: s.started_by.clone(),
-                messaged_by: s.messaged_by.lock().unwrap().clone(),
+                messaged_by,
                 label,
                 pinned: s.pinned.load(Ordering::Relaxed),
                 keep_terminal: s.agent_id == "shell" && keeps_terminal(&s.id),
@@ -2662,13 +2672,13 @@ fn state(d: &Daemon) -> Response {
                 tasks,
                 inside,
                 taking_over: moving.contains(&s.id),
-                conversation: s.agent_session.lock().unwrap().clone(),
+                conversation,
                 running,
                 foreground,
                 password: s.host.is_none() && !s.pane.is_exited() && s.pane.shared.password.load(Ordering::Relaxed),
                 tmux,
-                shell_cwd: s.pane.shared.cwd.lock().unwrap().clone(),
-                last_exit: *s.pane.shared.last_exit.lock().unwrap(),
+                shell_cwd,
+                last_exit,
                 servers: serving.into_iter().map(|x| ipc::ServerInfo { task: x.task, command: x.command, ports: x.ports }).collect(),
                 // With the model it runs on now.
                 route: s.route.clone().map(|r| ProviderRoute { model: s.controls.model.clone().unwrap_or(r.model), ..r }),
@@ -2929,10 +2939,17 @@ fn resume_folder(s: &Session) -> String {
 fn snapshot(d: &Daemon, s: &Session) -> SavedSession {
     // The mode it's in, which it may have switched to since it started: what it resumes in.
     let controls = mode::current(d, s);
-    let mut agent_session = s.agent_session.lock().unwrap();
-    if agent_session.is_none() {
-        *agent_session = conversation_of(s);
-    }
+    // Released before the session's other locks are taken (see `state`).
+    let agent_session = {
+        let mut agent_session = s.agent_session.lock().unwrap();
+        if agent_session.is_none() {
+            *agent_session = conversation_of(s);
+        }
+        agent_session.clone()
+    };
+    let auto = s.auto.lock().unwrap().clone();
+    let messaged_by = s.messaged_by.lock().unwrap().clone();
+    let label = s.label.lock().unwrap().clone();
     SavedSession {
         id: s.id.clone(),
         name: s.name.clone(),
@@ -2940,13 +2957,13 @@ fn snapshot(d: &Daemon, s: &Session) -> SavedSession {
         args: s.args.clone(),
         cwd: resume_folder(s),
         started_at: s.started_at,
-        agent_session: agent_session.clone(),
-        auto: s.auto.lock().unwrap().clone(),
+        agent_session,
+        auto,
         controls,
         scheduled: s.scheduled.clone(),
         started_by: s.started_by.clone(),
-        messaged_by: s.messaged_by.lock().unwrap().clone(),
-        label: s.label.lock().unwrap().clone(),
+        messaged_by,
+        label,
         pinned: s.pinned.load(Ordering::Relaxed),
         host: s.host.clone(),
         ended: s.pane.is_exited(),
@@ -4741,6 +4758,33 @@ mod tests {
 
     /// dino never runs two processes on one conversation: a second start of it is refused, an
     /// ended one won't resume while another runs it, and sessions saved on one become one.
+    /// The app's state, asked for four times a second, and the save loop's snapshot take a
+    /// session's locks at once: in two orders, they waited on each other for good (dinod hung).
+    #[test]
+    fn state_and_saving_never_wait_on_each_other() {
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], None)).unwrap();
+        let s = session(&d, &id);
+        let done = Arc::new(AtomicU64::new(0));
+        let until = Instant::now() + std::time::Duration::from_millis(1500);
+        let mut threads = vec![];
+        for n in 0..4 {
+            let (d, s, done) = (d.clone(), s.clone(), done.clone());
+            threads.push(std::thread::spawn(move || {
+                while Instant::now() < until {
+                    if n % 2 == 0 {
+                        let _ = state(&d);
+                    } else {
+                        let _ = snapshot(&d, &s);
+                    }
+                }
+                done.fetch_add(1, Ordering::Relaxed);
+            }));
+        }
+        wait_for("both to finish", || done.load(Ordering::Relaxed) == 4);
+        threads.into_iter().for_each(|t| t.join().unwrap());
+    }
+
     #[test]
     fn a_conversation_runs_in_one_session() {
         let d = shell_daemon();
