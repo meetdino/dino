@@ -551,6 +551,7 @@ struct ContentView: View {
 
 struct Terminals: View {
     @EnvironmentObject var model: DinoModel
+    @ObservedObject private var chrome = SplitChrome.shared
     static let space = "terminals"
     /// Why the selected session can't use what needs its checkout on this Mac, if it can't.
     private var remoteReason: String? { model.selectedSession?.remoteReason }
@@ -570,7 +571,7 @@ struct Terminals: View {
                 let split = model.shownSplit
                 let layout = PaneLayout(split: split, selected: model.selected, size: geo.size)
                 ZStack(alignment: .topLeading) {
-                    // Every session stays mounted; only the selected one (and its split partner) draws.
+                    // Every session stays mounted; only the selected one (and the rest of its split) draws.
                     ForEach(model.sessions) { s in
                         let rect = layout.surface(s.id)
                         let state = model.terminal(for: s.id)
@@ -578,9 +579,10 @@ struct Terminals: View {
                             // A new state (after reconnecting) must mean a new surface.
                             .id(ObjectIdentifier(state))
                             .overlay {
-                                // The other half of a split sits back a little, like Ghostty's.
-                                if split != nil, s.id != model.selected {
-                                    Color.black.opacity(0.18).allowsHitTesting(false)
+                                // The rest of a split sits back, as Ghostty's `unfocused-split-opacity`
+                                // and `unfocused-split-fill` say.
+                                if split != nil, s.id != model.selected, chrome.dim > 0 {
+                                    Color(nsColor: chrome.fill).opacity(chrome.dim).allowsHitTesting(false)
                                 }
                             }
                             // Last: an offset moves only the drawing, so anything added after it would sit unmoved.
@@ -589,18 +591,22 @@ struct Terminals: View {
                             .allowsHitTesting(rect != nil)
                     }
                     if let split {
-                        ForEach([split.first, split.second], id: \.self) { id in
+                        ForEach(split.shownPanes, id: \.self) { id in
                             if let s = model.sessions.first(where: { $0.id == id }), let f = layout.frame(id) {
                                 PaneHeader(session: s, split: split, focused: id == model.selected)
                                     .placed(CGRect(x: f.minX, y: f.minY, width: f.width, height: PaneLayout.header))
                             }
                         }
-                        if let d = layout.divider {
-                            SplitDivider(split: split, size: geo.size).placed(d)
+                        ForEach(layout.dividers, id: \.path) { d in
+                            // Wider than the line, to grab.
+                            let hit = d.vertical ? d.line.insetBy(dx: 0, dy: -3) : d.line.insetBy(dx: -3, dy: 0)
+                            SplitDivider(divider: d).placed(hit)
                         }
                     }
                 }
                 .coordinateSpace(name: Self.space)
+                .onAppear { model.paneArea = geo.size }
+                .onChange(of: geo.size) { _, size in model.paneArea = size }
             }
             if let g = model.groups.first(where: { "group:\($0.id)" == model.selected }) {
                 CompareView(group: g)
@@ -1153,9 +1159,10 @@ struct SessionRow: View {
                         .accessibilityLabel("Started instead of \(asked)")
                 }
                 if let pr = model.pr(of: session) { PRChip(pr: pr, auto: session.auto) }
-                if let split = model.splits.first(where: { $0.contains(session.id) }) {
-                    let other = model.sessions.first { $0.id == split.other(session.id) }?.display ?? "another session"
-                    Image(systemName: split.vertical ? "rectangle.split.1x2" : "rectangle.split.2x1")
+                if let split = model.split(of: session.id) {
+                    let others = split.panes.filter { $0 != session.id }.map { id in model.sessions.first { $0.id == id }?.display ?? "another session" }
+                    let other = ListFormatter.localizedString(byJoining: others)
+                    Image(systemName: split.panes.count > 2 ? "rectangle.split.3x1" : "rectangle.split.2x1")
                         .font(.caption).foregroundStyle(.tertiary)
                         .help("In a split with \(other)")
                         .accessibilityLabel("In a split with \(other)")
@@ -1610,8 +1617,7 @@ struct TakeOverBanner: View {
     @EnvironmentObject var model: DinoModel
 
     var body: some View {
-        let shown = model.shownSplit.map { [$0.first, $0.second] } ?? model.selected.map { [$0] } ?? []
-        let ids = shown.filter { $0 == model.selected } + shown.filter { $0 != model.selected }
+        let ids = model.shownSessions
         if let s = ids.lazy.compactMap({ id in model.sessions.first { $0.id == id && model.isTakingOver($0) } }).first,
            let f = s.inside {
             let title = f.title.isEmpty ? f.agentName : "“\(f.title)”"
