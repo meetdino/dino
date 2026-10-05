@@ -21,6 +21,7 @@
         // here because extensions cannot add stored properties.
         var keyEcho: KeyEchoState = .init()
         var focusBridge: FocusBridgeState = .init()
+        var accessibilityText: AccessibilityTextCache = .init()
 
         open weak var delegate: (any TerminalSurfaceViewDelegate)? {
             get { core.delegate }
