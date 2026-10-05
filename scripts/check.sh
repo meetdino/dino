@@ -15,9 +15,12 @@ if [ "${1:-}" = "--push" ]; then
     fi
 fi
 
-cargo build --release
-cargo test --workspace --release
-(cd app && swift build -c release)
+# The dev profile: a check needs what compiles and what passes, not the shipping profile's full
+# LTO on one codegen unit (app/build.sh and scripts/release.sh build that), and cargo test reuses
+# what cargo build compiled.
+cargo build
+cargo test --workspace
+(cd app && swift build)
 if git grep -n 'TEST-ONLY' -- crates app cloud >/dev/null; then
     echo "TEST-ONLY code is still in the tree" >&2
     exit 1
