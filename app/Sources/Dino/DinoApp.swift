@@ -1461,7 +1461,7 @@ struct UsagePanel: View {
                         Text("\(tokens(used)) tok")
                     }
                     .font(.caption.monospacedDigit())
-                    .help("Tokens in and out across the sessions in the sidebar; each row's tooltip has its own")
+                    .help("Tokens in (cached included) and out of the sessions in the sidebar, every turn dino's proxy carried for their conversations, also from before dino restarted. Agents dino doesn't route (Copilot, Cursor, Amp) aren't counted. Each row's tooltip has its own.")
                 }
                 let free = model.sessions.filter { $0.tier != nil }.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens }
                 if free > 0 {

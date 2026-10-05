@@ -212,7 +212,11 @@ impl SessionStats {
         self.usage.add(u);
         let Some(r) = route else { return };
         match self.by_route.iter_mut().find(|x| x.route == r.path) {
-            Some(x) => x.usage.add(u),
+            Some(x) => {
+                x.usage.add(u);
+                // A live call knows the route's name best (a seeded one may only have its path).
+                x.name.clone_from(&r.name);
+            }
             None => self.by_route.push(RouteUsage { route: r.path.clone(), name: r.name.clone(), usage: u.clone() }),
         }
     }
@@ -354,6 +358,20 @@ impl Stats {
         if calls.len() < MAX_CALLS {
             calls.push(call);
         }
+    }
+
+    /// What session `id` used before this dinod started (from usage statistics), so its tokens and
+    /// its budget carry on across a restart. Only into a session that hasn't been metered yet.
+    pub fn seed(&self, id: &str, routes: &[(String, Usage)]) {
+        self.update(id, |s| {
+            if s.usage.total_input() + s.usage.output > 0 {
+                return;
+            }
+            for (route, u) in routes {
+                let tag = (!route.is_empty()).then(|| RouteTag { path: route.clone(), name: fallback::seed_name(route) });
+                s.metered(tag.as_ref(), u);
+            }
+        });
     }
 
     pub fn session(&self, id: &str) -> SessionStats {
@@ -1973,6 +1991,24 @@ impl Meter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_is_seeded_once_from_its_history() {
+        let stats = Stats::default();
+        let u = |input, output| Usage { input, output, ..Default::default() };
+        stats.seed("1", &[("anthropic".into(), u(100, 10)), ("plan/zai".into(), u(5, 1))]);
+        let s = stats.session("1");
+        assert_eq!((s.usage.total_input(), s.usage.output), (105, 11));
+        assert_eq!(s.by_route.iter().find(|r| r.route == "anthropic").map(|r| r.name.as_str()), Some("Anthropic"));
+        // A second seed (the same session started again) doesn't count it twice.
+        stats.seed("1", &[("anthropic".into(), u(100, 10))]);
+        assert_eq!(stats.session("1").usage.total_input(), 105);
+        // A live call adds to it, and names the route as it knows it.
+        stats.update("1", |s| s.metered(Some(&RouteTag { path: "anthropic".into(), name: "Claude".into() }), &u(1, 1)));
+        let s = stats.session("1");
+        assert_eq!((s.usage.total_input(), s.usage.output), (106, 12));
+        assert_eq!(s.by_route.iter().find(|r| r.route == "anthropic").map(|r| r.name.as_str()), Some("Claude"));
+    }
     use serde_json::json;
 
     #[test]

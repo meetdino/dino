@@ -179,6 +179,15 @@ pub(crate) fn primary_name(route: &str, headers: &HeaderMap) -> String {
     }
 }
 
+/// A route's name from its path alone, for usage carried over from before a restart: without the
+/// request's credentials, `anthropic` can't tell Claude's plan from the API.
+pub(crate) fn seed_name(route: &str) -> String {
+    match route {
+        "anthropic" => "Anthropic".into(),
+        other => primary_name(other, &HeaderMap::new()),
+    }
+}
+
 /// The agent's credentials and account ids: none of them go to a fallback route.
 pub(crate) fn is_credential(name: &str) -> bool {
     matches!(name, "authorization" | "x-api-key" | "openai-organization" | "openai-project" | "chatgpt-account-id" | "cookie")
