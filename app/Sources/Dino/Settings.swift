@@ -330,12 +330,8 @@ final class SettingsStore: ObservableObject {
         } done: {
             self.agents = $0
             self.saves += 1
-            NotificationCenter.default.post(name: Self.saved, object: saved)
         }
     }
-
-    /// Posted with the `DinoSettings` dinod just saved from here.
-    static let saved = Notification.Name("dino.settingsSaved")
 
     func setKey(_ name: String, value: String?) {
         run { c in
@@ -1181,11 +1177,6 @@ private struct ExperimentalFeature: Identifiable {
             summary: "Lets agents without built-in computer use see your screen and click and type in your apps, using the open-source open-computer-use. Only the agents you choose get it. Be careful: anything on screen, such as a web page or a message, could tell an agent to do something you didn't ask for. Turning this off removes everything dino added."
         ),
         ExperimentalFeature(
-            id: "fan_out",
-            title: "Fan out",
-            summary: "Send one prompt to several agents at once, each in its own worktree, and keep the best result: Session → Fan Out… (⇧⌘N). Turning this off hides the command. Fan-outs already running stay in the sidebar."
-        ),
-        ExperimentalFeature(
             id: "session_tools",
             title: "Cross-session communication",
             summary: "Lets Claude sessions list and read your other dino sessions, whatever agent they run. With your permission, they can also message an idle session or start a new one. Applies to new sessions. To give other agents the same ability, add “dino mcp” as an MCP server in their settings."
@@ -1339,7 +1330,7 @@ private struct ManagedPane: View {
         case ("policies", "session_token_budget"): return make("Tokens per session", "Agents → Limits", .agents)
         case ("policies", "fallback_providers"): return make("Providers agents may fall back to", "Agents → Limits", .agents)
         case ("policies", "session_tools"): return make("Cross-session communication", "Experimental", .experimental)
-        case ("policies", "worktree_trust"): return make("Trust fan-out worktrees when the repo is trusted", "Workspaces → Worktrees", .workspaces, .worktrees)
+        case ("policies", "worktree_trust"): return make("Trust worktrees when the repo is trusted", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("policies", "close_merged"): return make("Archive sessions after their PR merges or closes", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("routing", "proxy"): return make("Route agent traffic through dino", "Models & Providers → Providers", .models, .providers)
         case ("machine", "shell_integration"): return make("Shell integration", "Terminal", .terminal)

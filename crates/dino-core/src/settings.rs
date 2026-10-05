@@ -117,10 +117,9 @@ pub struct Experimental {
     /// each agent's own MCP command. Off, dino removes every one it added (see dinod's
     /// `computer_use`). Nothing leaves the Mac either way.
     pub computer_use: bool,
-    /// Fan out in the app: one prompt to several agents, each in its own worktree, from the menu
-    /// (⇧⌘N) and the command palette. Off, the app doesn't offer it; fan-outs already running stay
-    /// in the sidebar, and dinod and `dino fanout` work either way.
-    pub fan_out: bool,
+    /// Switches this dino doesn't know (a newer one's, or a feature since removed), kept as they are.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 /// For people who live in tmux. Their tmux stays theirs: dino never edits its config, never takes
@@ -787,7 +786,15 @@ mod tests {
         assert!(Settings::default().policies.allow_bypass, "bypass offered by default");
         assert!(!Settings::default().policies.session_tools, "session tools off by default");
         assert!(!Settings::load().experimental.free_models, "free models off unless turned on");
-        assert!(!Settings::load().experimental.fan_out, "fan out off unless turned on");
+
+        // A switch for a feature since removed (fan out) loads, and stays in the file.
+        std::fs::write(Settings::path(), "[experimental]\ncomputer_use = true\nfan_out = true\n").unwrap();
+        let old = Settings::load();
+        assert!(old.experimental.computer_use);
+        old.save().unwrap();
+        let text = std::fs::read_to_string(Settings::path()).unwrap();
+        assert!(text.contains("fan_out = true"), "{text}");
+        assert_eq!(Settings::load(), old);
 
         let mut s4 = Settings::default();
         s4.agents.insert("claude".into(), Controls { model: Some("haiku".into()), ..Controls::default() });

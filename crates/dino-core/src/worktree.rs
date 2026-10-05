@@ -1,4 +1,4 @@
-//! Git worktrees for fan-out: one checkout per agent, compared, then one kept and the rest removed.
+//! Git worktrees dino makes for sessions: one checkout per agent, its changes applied back or removed.
 //!
 //! Worktrees live in `~/.dino/worktrees/<repo>/<name>` by default, outside the repo so they don't nest
 //! copies of it in its own file tree; dino carries the repo's trust over (see `trust`). Settings →
@@ -472,7 +472,7 @@ pub fn snapshot(repo: &Path) -> anyhow::Result<String> {
     // A file rewritten as it was (`npm install` rewrites package-lock.json) looks changed to the
     // index until it's looked at again, and `stash create` then fails without a word.
     let _ = git(repo, &["update-index", "-q", "--refresh"]);
-    let stash = git(repo, &["stash", "create", "dino fan-out base"])?;
+    let stash = git(repo, &["stash", "create", "dino worktree base"])?;
     let commit = if stash.trim().is_empty() { git(repo, &["rev-parse", "HEAD"])? } else { stash };
     Ok(commit.trim().to_string())
 }
@@ -516,14 +516,6 @@ fn inner_dir(repo: &Path, dir: &Path) -> Option<String> {
     let rel = dir.strip_prefix(repo).ok()?;
     let first = rel.components().next()?.as_os_str().to_str()?;
     (first != "..").then(|| first.to_string())
-}
-
-/// A new worktree at `worktrees_dir(repo)/<name>` on a new `branch` from `base`, with the
-/// `.worktreeinclude` files of `repo` copied in.
-pub fn add(repo: &Path, name: &str, branch: &str, base: &str) -> anyhow::Result<PathBuf> {
-    let dir = add_bare(repo, name, branch, base)?;
-    copy_included(repo, &dir);
-    Ok(dir)
 }
 
 /// Past these, the rest of the `.worktreeinclude` files are left out (say a pattern caught
@@ -1180,13 +1172,9 @@ mod tests {
         assert_eq!(read("tracked.txt").as_deref(), Some("edited\n"), "tracked files come from git, edits and all");
         assert_eq!(git(&wt, &["status", "--porcelain"]).unwrap(), " M tracked.txt\n", "copied files stay ignored");
 
-        // Fan-out worktrees get them too; no .worktreeinclude, nothing copied.
-        let base = snapshot(repo).unwrap();
-        let fan = add(repo, "g/codex", "dino/g/codex", &base).unwrap();
-        assert!(fan.join(".env").exists());
+        // No .worktreeinclude, nothing copied.
         std::fs::remove_file(repo.join(".worktreeinclude")).unwrap();
-        assert!(copy_included(repo, &fan).is_empty());
-        remove(repo, &fan, "dino/g/codex");
+        assert!(copy_included(repo, &wt).is_empty());
         remove(repo, &wt, "dino/claude-ab12");
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1319,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn fan_out_round_trip() {
+    fn worktree_round_trip() {
         let tmp = std::env::temp_dir().join(format!("dino-wt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -1328,18 +1316,17 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "one\n").unwrap();
         git(repo, &["add", "."]).unwrap();
         git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).unwrap();
-        // An uncommitted edit the agents should start from.
+        // An uncommitted edit the agent should start from.
         std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
 
-        let base = snapshot(repo).unwrap();
-        let wt = add(repo, "g/claude", "dino/g/claude", &base).unwrap();
+        let (wt, base) = start(repo, "g-claude", "dino/g-claude").unwrap();
         assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "one\ntwo\n");
         assert!(git(repo, &["status", "--porcelain"]).unwrap().lines().all(|l| !l.contains(".dino")));
         let all = list(&wt).unwrap();
         let real = |p: &Path| p.canonicalize().unwrap().to_string_lossy().into_owned();
         assert_eq!(all, vec![
             Worktree { path: real(repo), branch: Some("main".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false, reading: false, head: Some(git(repo, &["rev-parse", "HEAD"]).unwrap().trim().into()) },
-            Worktree { path: real(&wt), branch: Some("dino/g/claude".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false, reading: false, head: Some(git(&wt, &["rev-parse", "HEAD"]).unwrap().trim().into()) },
+            Worktree { path: real(&wt), branch: Some("dino/g-claude".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false, reading: false, head: Some(git(&wt, &["rev-parse", "HEAD"]).unwrap().trim().into()) },
         ]);
 
         std::fs::write(wt.join("a.txt"), "one\ntwo\nthree\n").unwrap();
@@ -1355,7 +1342,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\ntwo\nthree\n");
         assert_eq!(std::fs::read_to_string(repo.join("new.txt")).unwrap(), "hi\n");
 
-        remove(repo, &wt, "dino/g/claude");
+        remove(repo, &wt, "dino/g-claude");
         assert!(!wt.exists());
 
         // A session's worktree: the branch starts at HEAD, the uncommitted edits come along uncommitted.

@@ -154,9 +154,8 @@ struct PlaceNode: Identifiable, Equatable {
 
 struct RepoNode: Identifiable, Equatable {
     var repo: RepoInfo
-    /// The main checkout first, then other worktrees; fan-out worktrees are in `groups` instead.
+    /// The main checkout first, then other worktrees.
     var places: [PlaceNode]
-    var groups: [GroupInfo]
     /// Session id → the worktrees its subagents made, shown under that session.
     var subagents: [String: [PlaceNode]] = [:]
     /// Session id → the forks of its conversation (and their forks), shown under that session.
@@ -184,10 +183,10 @@ struct RepoNode: Identifiable, Equatable {
         }
         return all ? sorted : Array(sorted.prefix(Self.othersShown))
     }
-    /// Has something to show: agents, fan-outs, worktrees dino made or merged, or it's the folder
-    /// new sessions start in. Other worktrees alone don't count.
+    /// Has something to show: agents, worktrees dino made or merged, or it's the folder new
+    /// sessions start in. Other worktrees alone don't count.
     func worthShowing(here: String) -> Bool {
-        sessionCount > 0 || !groups.isEmpty || !merged.isEmpty || !subagents.isEmpty || places.contains(where: \.dino)
+        sessionCount > 0 || !merged.isEmpty || !subagents.isEmpty || places.contains(where: \.dino)
             || SessionTree.contains(repo.path, here)
     }
 
@@ -196,7 +195,6 @@ struct RepoNode: Identifiable, Equatable {
     func opening(_ tag: String) -> (key: String, startsOpen: Bool)? {
         if tag == "repo:\(repo.path)" { return (repo.path, true) }
         if tag == "others:\(id)", !others.isEmpty { return ("open:\(tag)", false) }
-        if tag.hasPrefix("group:"), groups.contains(where: { "group:\($0.id)" == tag }) { return (tag, true) }
         if tag.hasPrefix("dir:"), let p = worktreePlaces.first(where: { "dir:\($0.path)" == tag }),
            p.sessions.count > 1 || p.sessions.contains(where: { subagents[$0.id] != nil || forks[$0.id] != nil }) {
             return (p.path, true)
@@ -214,19 +212,17 @@ struct RepoNode: Identifiable, Equatable {
 }
 
 enum SessionTree {
-    /// Each session goes under the deepest worktree or folder containing its cwd; fan-out
-    /// members go under their group. Sessions the tree doesn't cover yet come back as `unfiled`.
+    /// Each session goes under the deepest worktree or folder containing its cwd. Sessions the
+    /// tree doesn't cover yet come back as `unfiled`.
     /// Worktrees a session's subagents made go under that session; merged ones and ones nobody
     /// here made fold away.
-    static func build(repos: [RepoInfo], sessions: [SessionInfo], groups: [GroupInfo]) -> (repos: [RepoNode], unfiled: [SessionInfo]) {
+    static func build(repos: [RepoInfo], sessions: [SessionInfo]) -> (repos: [RepoNode], unfiled: [SessionInfo]) {
         // Pinned ones first wherever they land, the rest in dinod's order.
         let sessions = sessions.filter { $0.pinned == true } + sessions.filter { $0.pinned != true }
-        let inGroup = Set(groups.flatMap { $0.members.map(\.session) })
-        let groupWorktrees = Set(groups.flatMap { $0.members.map(\.worktree) })
         var nodes = repos.map { r in
             let places = r.worktrees.isEmpty
                 ? [PlaceNode(path: r.path, label: r.name, sessions: [])]
-                : r.worktrees.filter { !groupWorktrees.contains($0.path) }.map {
+                : r.worktrees.map {
                     PlaceNode(
                         path: $0.path,
                         label: $0.git?.label ?? $0.branch ?? URL(fileURLWithPath: $0.path).lastPathComponent,
@@ -234,11 +230,11 @@ enum SessionTree {
                         madeBy: $0.madeBy, users: $0.users ?? [], inUse: $0.inUse ?? false, reading: $0.reading ?? false
                     )
                 }
-            return RepoNode(repo: r, places: places, groups: groups.filter { $0.repo == r.path })
+            return RepoNode(repo: r, places: places)
         }
         var unfiled: [SessionInfo] = []
         // A session on an SSH host is in a folder there, never in one of these.
-        for s in sessions where !inGroup.contains(s.id) {
+        for s in sessions {
             if s.host != nil {
                 unfiled.append(s)
                 continue
@@ -299,17 +295,14 @@ enum SessionTree {
         return (nodes, unfiled)
     }
 
-    /// The tree with only the sessions `keep` passes: places, fan-outs and repos left empty go too.
-    static func build(repos: [RepoInfo], sessions: [SessionInfo], groups: [GroupInfo], keep: (SessionInfo) -> Bool) -> (repos: [RepoNode], unfiled: [SessionInfo]) {
-        let kept = sessions.filter(keep)
-        let ids = Set(kept.map(\.id))
-        var tree = build(repos: repos, sessions: kept, groups: groups)
+    /// The tree with only the sessions `keep` passes: places and repos left empty go too.
+    static func build(repos: [RepoInfo], sessions: [SessionInfo], keep: (SessionInfo) -> Bool) -> (repos: [RepoNode], unfiled: [SessionInfo]) {
+        var tree = build(repos: repos, sessions: sessions.filter(keep))
         tree.repos = tree.repos.compactMap { node in
             var node = node
             node.places.removeAll { $0.sessions.isEmpty }
-            node.groups = node.groups.filter { $0.members.contains { ids.contains($0.session) } }
             node.others = []
-            return node.places.isEmpty && node.groups.isEmpty ? nil : node
+            return node.places.isEmpty ? nil : node
         }
         return tree
     }
@@ -711,18 +704,6 @@ struct RepoRows: View {
                             .contextMenu { placeMenu(place) }
                     } content: {
                         sessionRows(place.sessions, root: place.path)
-                    }
-                }
-            }
-            ForEach(node.groups) { g in
-                OpeningRows(open: expanded("group:\(g.id)"), tag: "group:\(g.id)") {
-                    GroupRow(group: g)
-                } content: {
-                    ForEach(g.members) { m in
-                        if let s = model.sessions.first(where: { $0.id == m.session }), filter.passes(model.status(of: s)) {
-                            SessionRow(session: s, index: 0, stat: m.stat).tag(s.id)
-                                .contextMenu { SessionMenu(session: s) }
-                        }
                     }
                 }
             }

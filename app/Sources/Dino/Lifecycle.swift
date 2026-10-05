@@ -39,13 +39,12 @@ struct StoredWorktree: Codable, Identifiable, Equatable {
     /// "working", "idle", or "ended" (removing the worktree archives it); nil with no session there.
     var session_state: String?
     var archived: Bool
-    var fanout: Bool
     /// Free Up Space would remove it: nothing running in it, and its work merged or pushed.
     var reclaimable: Bool?
     var id: String { path }
 
     /// Nothing in it would be lost, and nothing is using it.
-    var removable: Bool { !dirty && session == nil && !fanout }
+    var removable: Bool { !dirty && session == nil }
 }
 
 /// What deleting a session does, or did: the worktree dino made for it and what's in it.
@@ -246,9 +245,8 @@ extension DinoModel {
         select(order.indices.contains(i + 1) ? order[i + 1] : i > 0 ? order[i - 1] : nil)
     }
 
-    /// A fan-out member goes with its fan-out: it's kept or discarded instead.
     func canArchive(_ id: String) -> Bool {
-        sessions.contains { $0.id == id } && !groups.contains { $0.members.contains { $0.session == id } }
+        sessions.contains { $0.id == id }
     }
 
     /// The sidebar's filter lives in the defaults (`@AppStorage("sidebar.filter")`).
@@ -290,11 +288,10 @@ extension DinoModel {
 
     /// Sessions top to bottom as the sidebar lists them.
     var sidebarOrder: [String] {
-        let tree = SessionTree.build(repos: repos, sessions: sidebarSessions, groups: groups)
+        let tree = SessionTree.build(repos: repos, sessions: sidebarSessions)
         var ids: [String] = []
         for node in tree.repos {
             ids += node.places.flatMap { $0.sessions.map(\.id) }
-            ids += node.groups.flatMap { $0.members.map(\.session) }
         }
         ids += tree.unfiled.map(\.id)
         let live = Set(sessions.map(\.id))

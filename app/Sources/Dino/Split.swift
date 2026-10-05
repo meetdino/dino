@@ -91,7 +91,7 @@ extension DinoModel {
         return shown.filter { $0 == selected } + shown.filter { $0 != selected }
     }
 
-    /// The session you're looking at, if it's a session (not a folder or a fan-out).
+    /// The session you're looking at, if it's a session (not a folder or a run).
     var selectedSession: SessionInfo? { sessions.first { $0.id == selected } }
 
     /// ⌘D and Ghostty's `new_split`: a shell next to session `at` (the selected one), in its
