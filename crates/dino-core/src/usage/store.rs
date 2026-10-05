@@ -139,6 +139,23 @@ impl Store {
         Ok(())
     }
 
+    /// What dino's proxy carried for one dino session, by route: its calls since it started (an
+    /// id can be used again by a later session), any under `before` (the id an unarchived session
+    /// had), and any on its conversation `conversation` whichever session made them (one resumed
+    /// in another session). Tokens: input, cache read, cache write, output.
+    pub fn session_routes(&self, session: &str, before: Option<&str>, since_ms: i64, conversation: Option<&str>) -> anyhow::Result<Vec<(String, [u64; 4])>> {
+        let mut q = self.db.prepare_cached(
+            "SELECT COALESCE(route, ''), SUM(input), SUM(cache_read), SUM(cache_write), SUM(output) FROM calls
+             WHERE source = 0 AND ((session = ?1 AND ts >= ?2) OR (?3 IS NOT NULL AND session = ?3) OR (?4 IS NOT NULL AND conversation = ?4))
+             GROUP BY COALESCE(route, '')",
+        )?;
+        let rows = q.query_map(params![session, since_ms, before, conversation], |r| {
+            let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
+            Ok((r.get::<_, String>(0)?, [n(1)?, n(2)?, n(3)?, n(4)?]))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// dino session `session`'s agent is (or was) on `conversation`.
     pub fn link(&mut self, session: &str, agent: &str, conversation: &str) -> anyhow::Result<()> {
         self.db.execute("INSERT OR IGNORE INTO links (session, conversation, agent) VALUES (?1, ?2, ?3)", params![session, conversation, agent])?;

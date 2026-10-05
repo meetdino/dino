@@ -819,6 +819,34 @@ mod tests {
     }
 
     #[test]
+    fn a_sessions_usage_so_far() {
+        let (mut st, dir) = store();
+        let mut plan = call(5_000, "7", Some("conv-a"), "m", 100);
+        plan.route = "plan/zai".into();
+        st.add_calls(&[
+            // An earlier session that had id 7, before this one started: not its usage.
+            call(1_000, "7", Some("conv-old"), "m", 1),
+            call(5_000, "7", Some("conv-a"), "m", 10),
+            plan,
+            // Its conversation, carried on in another session (resumed, unarchived).
+            call(6_000, "3", Some("conv-a"), "m", 1000),
+            // Someone else's.
+            call(6_000, "4", Some("conv-b"), "m", 5),
+        ])
+        .unwrap();
+        let mut routes = st.session_routes("7", None, 4_000, Some("conv-a")).unwrap();
+        routes.sort();
+        assert_eq!(routes, vec![("anthropic".to_string(), [1010, 0, 0, 20]), ("plan/zai".to_string(), [100, 0, 0, 10])]);
+        // Unarchived as 9: its calls under 7 come along; with no conversation known, only those.
+        let routes = st.session_routes("9", Some("7"), 0, None).unwrap();
+        assert_eq!(routes.iter().map(|(_, t)| t[0]).sum::<u64>(), 111);
+        // Agents' own records aren't the proxy's: never in the meter.
+        st.add_used(&[("claude", used("u1", 5_500, "conv-a", 50_000))]).unwrap();
+        assert_eq!(st.session_routes("7", None, 4_000, Some("conv-a")).unwrap().iter().map(|(_, t)| t[0]).sum::<u64>(), 1110);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn calendar_round_trips() {
         for day in [-1000, 0, 19000, 20730, 30000] {
             let (y, m, d) = civil(day);
