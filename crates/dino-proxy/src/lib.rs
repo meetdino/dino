@@ -8,6 +8,7 @@
 //! through Sign in with ChatGPT (see `siwc`), `local/<runtime>` a model server on this Mac (see `local`),
 //! `plan/<id>` a coding plan with the key the user pasted (see `plan`).
 
+mod accounts;
 mod catalog;
 mod codex;
 pub mod computer;
@@ -39,6 +40,19 @@ pub const PROVIDERS: &[(&str, &str)] = &[
     // Codex signed in with ChatGPT.
     ("chatgpt", "https://chatgpt.com/backend-api"),
 ];
+
+/// Where `provider` is: `PROVIDERS`, or for Anthropic what `DINO_ANTHROPIC_UPSTREAM` names (a
+/// stand-in to try a spent Claude account against, e.g. one that answers some calls itself and
+/// passes the rest on).
+fn provider_upstream(provider: &str) -> Option<&'static str> {
+    static ANTHROPIC: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if provider == "anthropic"
+        && let Some(u) = ANTHROPIC.get_or_init(|| std::env::var("DINO_ANTHROPIC_UPSTREAM").ok().filter(|u| !u.is_empty())).as_deref()
+    {
+        return Some(u);
+    }
+    PROVIDERS.iter().find(|(p, _)| *p == provider).map(|&(_, u)| u)
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Usage {
@@ -595,6 +609,15 @@ impl Proxy {
         *self.keys.write().unwrap() = keys;
     }
 
+    /// Route `key` is spent (or down) and nothing of the user's own stands in: for Claude Code's
+    /// subscription, none of their other Claude accounts answers instead (see `accounts`).
+    pub fn spent(&self, key: &str) -> Option<fallback::Limited> {
+        let l = self.stats.limited(key)?;
+        let subscription = key.starts_with("anthropic#") && l.name == fallback::CLAUDE;
+        let spare = subscription && accounts::others(&self.keys.read().unwrap()).iter().any(|(n, _)| self.stats.limited(&accounts::key(*n)).is_none());
+        (!spare).then_some(l)
+    }
+
     /// The coding plans to serve at `plan/<id>`, from the next request on.
     pub fn set_plans(&self, plans: HashMap<String, plan::Plan>) {
         let mut errors = self.stats.plan_errors.lock().unwrap();
@@ -831,8 +854,13 @@ async fn forward(
             _ => None,
         }
     };
-    let upstream = match PROVIDERS.iter().find(|(p, _)| *p == provider) {
-        Some(&(_, upstream)) => upstream,
+    // Tests put a stand-in where a provider is, for one session.
+    #[cfg(test)]
+    let in_tests = tests::upstream_for(&session, &provider);
+    #[cfg(not(test))]
+    let in_tests: Option<String> = None;
+    let upstream = match in_tests.as_deref().or_else(|| provider_upstream(&provider)) {
+        Some(upstream) => upstream,
         None if hosted.is_some() => hosted.as_ref().map(|h| h.2.as_str()).unwrap_or_default(),
         None => return error(StatusCode::NOT_FOUND, format!("unknown provider {provider}")),
     };
@@ -887,9 +915,36 @@ async fn forward(
     }
     let mut guard = is_model_call.then(|| InFlight { stats: st.stats.clone(), session: session.clone() });
 
+    // The user's other Claude accounts, for Claude Code's own calls to Anthropic signed in with a
+    // subscription: while the one it signed in with is spent, the first that isn't answers.
+    let accounts = if provider == "anthropic" && is_model_call && parts.headers.get("authorization").and_then(|v| v.to_str().ok()).is_some_and(fallback::is_claude_subscription) {
+        accounts::others(&st.keys.read().unwrap())
+    } else {
+        vec![]
+    };
+
     // What the session falls back to, if anything: only for the APIs that answer a turn, and not
     // for an agent that wanted the ChatGPT plan's stream put together.
     let api = if is_model_call && !collect { fallback::Api::of(&rest) } else { None };
+
+    // Which account signs the call: its own while that isn't spent; one turn stays on one account.
+    let spare = |n: u32| st.stats.limited(&accounts::key(n)).is_none();
+    let mut account: Option<(u32, String)> = None;
+    if let Some(p) = &primary
+        && !accounts.is_empty()
+    {
+        let mut on = None;
+        st.stats.update(&session, |s| on = s.fallback.as_ref().filter(|f| f.from == p.key).and_then(|f| f.account));
+        let mid_turn = on.filter(|_| api.is_some_and(|a| !fallback::turn_start(a, &body)));
+        let pick = if let Some(n) = mid_turn.filter(|n| spare(*n)) {
+            Some(n)
+        } else if st.stats.limited(&p.key).is_some() {
+            accounts.iter().map(|a| a.0).find(|n| spare(*n))
+        } else {
+            None
+        };
+        account = pick.and_then(|n| accounts.iter().find(|a| a.0 == n).cloned());
+    }
     let chain = api.and_then(|_| st.chains.read().unwrap().get(&session).cloned());
     let query_ref = query.as_str();
     // The chain was asked already, and nothing in it answered: not again for the same call.
@@ -897,7 +952,9 @@ async fn forward(
     if let (Some(chain), Some(api), Some(p)) = (&chain, api, &primary) {
         // Spent (or down, when that counts), or back from a fallback but in the middle of a turn:
         // the chain answers, without asking the route that can't.
-        if let Some(why) = skip_primary(&st.stats, &session, &p.key, chain.on_outage, api, &body) {
+        if account.is_none()
+            && let Some(why) = skip_primary(&st.stats, &session, &p.key, chain.on_outage, api, &body)
+        {
             if let Some(r) = steps(&st, &session, chain, api, &body, &parts.headers, &parts.method, query_ref, p, &why, &mut guard).await {
                 return r;
             }
@@ -914,14 +971,19 @@ async fn forward(
     let method = parts.method.clone();
     let on_mac = runtime.is_some();
     let (headers, hosted_ref, url_ref, method_ref) = (&parts.headers, &hosted, &url, &method);
-    let send = |body: Bytes| {
+    // `account`: another of the user's Claude accounts signs the call instead (see `accounts`).
+    let send = |body: Bytes, account: Option<&str>| {
+        let bearer = account.map(|t| format!("Bearer {t}"));
         st.upstream.send(on_mac, move |client| {
             let mut up = client.request(method_ref.clone(), url_ref).body(body.clone());
             for (name, value) in headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
-                if hosted_ref.as_ref().is_some_and(|h| h.1(name.as_str())) {
+                if hosted_ref.as_ref().is_some_and(|h| h.1(name.as_str())) || (bearer.is_some() && name == "authorization") {
                     continue;
                 }
                 up = up.header(name, value);
+            }
+            if let Some(b) = &bearer {
+                up = up.header("authorization", b);
             }
             for (name, value) in hosted_ref.iter().flat_map(|h| &h.0) {
                 up = up.header(*name, value);
@@ -950,7 +1012,7 @@ async fn forward(
         log(format_args!("{session} {provider} {method} /{rest} -> upstream error: {e:?}"));
         upstream::unreachable(&rest, &msg)
     };
-    let mut resp = match send(body.clone()).await {
+    let mut resp = match send(body.clone(), account.as_ref().map(|a| a.1.as_str())).await {
         Ok(r) => r,
         Err(e) => {
             // Unreachable: down, if it goes on and the chain counts outages.
@@ -980,7 +1042,7 @@ async fn forward(
                 let rejected = requested.clone().unwrap_or_default();
                 for model in codex::fallbacks(&rejected) {
                     let Some(retry) = codex::with_model(&body, &model) else { continue };
-                    match send(retry).await {
+                    match send(retry, None).await {
                         Ok(r) if r.status().is_success() => {
                             log(format_args!("{session} chatgpt: {rejected} rejected, using {model}"));
                             st.substitutes.lock().unwrap().insert(rejected, model.clone());
@@ -992,8 +1054,51 @@ async fn forward(
                     }
                 }
             }
+            // The account that signed it is spent: its own, when another answered and its own
+            // isn't known spent, then the user's other Claude accounts in order, until one answers.
+            if !accounts.is_empty()
+                && let Some(p) = &primary
+                && let Some(t) = fallback::classify(status.as_u16(), &headers, &text).filter(|t| t.kind == fallback::Kind::Quota)
+            {
+                let current = account.as_ref().map(|a| a.0);
+                let signer = |a: Option<u32>| match a {
+                    Some(n) => (accounts::key(n), accounts::name(n)),
+                    None => (p.key.clone(), p.tag.name.clone()),
+                };
+                let (key, name) = signer(current);
+                st.stats.mark_limited(&key, &name, &t);
+                if current.is_none() {
+                    record_quota(&st.stats, &provider, &headers);
+                }
+                let own = (current.is_some() && st.stats.limited(&p.key).is_none()).then_some(None);
+                let others = accounts.iter().filter(|(n, _)| Some(*n) != current && spare(*n)).map(Some);
+                for next in own.into_iter().chain(others) {
+                    let (next_key, next_name) = signer(next.map(|a| a.0));
+                    match send(body.clone(), next.map(|a| a.1.as_str())).await {
+                        Ok(r) if r.status().is_success() => {
+                            log(format_args!("{session} {name} is spent; {next_name} answers"));
+                            // The refusal is a call of its own, for statistics.
+                            failed(CallStatus::Limit, model.clone());
+                            account = next.cloned();
+                            break 'retry r;
+                        }
+                        Ok(r) => {
+                            let (s2, h2) = (r.status(), r.headers().clone());
+                            let t2 = read_capped(r, MAX_BODY).await.unwrap_or_default();
+                            log(format_args!("{session} {next_name} -> {s2}"));
+                            if let Some(t2) = fallback::classify(s2.as_u16(), &h2, &t2) {
+                                st.stats.mark_limited(&next_key, &next_name, &t2);
+                            }
+                        }
+                        Err(e) => log(format_args!("{session} {next_name}: {}", reason(&e))),
+                    }
+                }
+            }
             log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
-            record_quota(&st.stats, &provider, &headers);
+            // Claude Code's plan usage is its own account's, not another's that signed the call.
+            if account.is_none() {
+                record_quota(&st.stats, &provider, &headers);
+            }
             // Spent: known as such (for new sessions, and the other sessions on it), and with a
             // chain, answered by it. Down, for a chain that counts outages, once it goes on.
             if let Some(p) = &primary {
@@ -1003,7 +1108,10 @@ async fn forward(
                         if let Some((id, plan)) = &coding_plan {
                             st.stats.plan_errors.lock().unwrap().insert(id.clone(), plan::refused(&plan.name, status.as_u16(), &codex::error_message(&text)));
                         }
-                        Some(st.stats.mark_limited(&p.key, &p.tag.name, &t))
+                        // Signed by another Claude account, spent too: its own stays as it was
+                        // found, or else as that account is.
+                        let other = account.as_ref().and_then(|(n, _)| st.stats.limited(&p.key).or_else(|| st.stats.limited(&accounts::key(*n))));
+                        Some(other.unwrap_or_else(|| st.stats.mark_limited(&p.key, &p.tag.name, &t)))
                     }
                     None if fallback::is_outage(status.as_u16()) && chain.as_ref().is_some_and(|c| c.on_outage) => {
                         st.stats.outage(&session, &p.key, &p.tag.name, format!("{} {}", status.as_u16(), codex::error_message(&text)))
@@ -1052,14 +1160,17 @@ async fn forward(
         let names: Vec<String> = resp.headers().iter().filter(|(n, _)| (n.as_str().contains("limit") || n.as_str().starts_with("x-codex")) && !n.as_str().ends_with("turn-state")).map(|(n, v)| format!("{n}={}", v.to_str().unwrap_or("?"))).collect();
         log(format_args!("  headers: {}", names.join(" ")));
     }
-    record_quota(&st.stats, &provider, resp.headers());
+    if account.is_none() {
+        record_quota(&st.stats, &provider, resp.headers());
+    }
     if !status.is_success() && is_model_call {
         st.stats.update(&session, |s| s.errors += 1);
     } else if is_model_call {
         if let Some((id, _)) = &coding_plan {
             st.stats.plan_errors.lock().unwrap().remove(id);
         }
-        if let Some(p) = &primary {
+        // Answered by another Claude account: its own is still spent.
+        if let Some(p) = primary.as_ref().filter(|_| account.is_none()) {
             st.stats.not_limited(&p.key);
         }
         st.stats.update(&session, |s| {
@@ -1069,8 +1180,33 @@ async fn forward(
                 s.last_error = None;
             }
             s.outages = (0, 0);
-            if let Some(f) = s.fallback.take() {
-                log(format_args!("{session} back on {} from {}", f.from_name, f.name));
+            // Answered by another of the user's Claude accounts: shown, and noticed once, as a
+            // fallback; back on its own account, as any.
+            let other = account.as_ref().zip(primary.as_ref()).map(|((n, _), p)| (accounts::name(*n), p));
+            match other {
+                Some((name, p)) if s.fallback.as_ref().is_none_or(|f| f.name != name) => {
+                    let spent = st.stats.limited(&p.key);
+                    s.fallback = Some(fallback::OnFallback {
+                        route: "anthropic".into(),
+                        name,
+                        model: model.clone().unwrap_or_default(),
+                        from: p.key.clone(),
+                        from_name: p.tag.name.clone(),
+                        kind: fallback::Kind::Quota,
+                        said: spent.as_ref().map(|l| l.said.clone()).unwrap_or_default(),
+                        resets_at: spent.as_ref().and_then(|l| l.resets_at),
+                        retry_at: spent.as_ref().map_or(0, |l| l.retry_at),
+                        since: fallback::now(),
+                        step: 0,
+                        account: account.as_ref().map(|a| a.0),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    if let Some(f) = s.fallback.take() {
+                        log(format_args!("{session} back on {} from {}", f.from_name, f.name));
+                    }
+                }
             }
         });
     }
@@ -1124,7 +1260,8 @@ fn skip_primary(stats: &Stats, session: &str, key: &str, on_outage: bool, api: f
     }
     let mut on = None;
     stats.update(session, |s| {
-        on = s.fallback.as_ref().filter(|f| f.from == key).map(|f| fallback::Limited {
+        // Another Claude account answers with the same model: its own can take over mid-turn.
+        on = s.fallback.as_ref().filter(|f| f.from == key && f.account.is_none()).map(|f| fallback::Limited {
             name: f.from_name.clone(),
             kind: f.kind,
             said: f.said.clone(),
@@ -1156,7 +1293,7 @@ async fn steps(
 ) -> Option<Response<Body>> {
     // Mid-turn, a session stays where it is in the chain; it moves up only as a turn starts.
     let mut current = None;
-    st.stats.update(session, |s| current = s.fallback.as_ref().filter(|f| f.from == primary.key).map(|f| f.step));
+    st.stats.update(session, |s| current = s.fallback.as_ref().filter(|f| f.from == primary.key && f.account.is_none()).map(|f| f.step));
     let start = current.filter(|_| !fallback::turn_start(api, body)).unwrap_or(0);
     for (i, step) in chain.steps.iter().enumerate().skip(start) {
         if step.route == primary.tag.path {
@@ -1183,6 +1320,7 @@ async fn steps(
                     retry_at: why.retry_at,
                     since,
                     step: i,
+                    account: None,
                 });
                 s.mixed = true;
                 s.call_error = None;
@@ -1981,6 +2119,24 @@ mod tests {
         format!("HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
     }
 
+    /// Stand-ins for a provider, for one test session: (session, provider) → base URL.
+    static STAND_INS: std::sync::Mutex<Vec<(String, String, String)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn upstream_for(session: &str, provider: &str) -> Option<String> {
+        STAND_INS.lock().unwrap().iter().find(|(s, p, _)| s == session && p == provider).map(|(_, _, u)| u.clone())
+    }
+
+    /// The Claude subscription limit as Anthropic answers it (status, headers and body as seen),
+    /// its 5-hour window reset at `reset`.
+    fn claude_spent(reset: u64) -> String {
+        let headers = format!(
+            "anthropic-ratelimit-unified-status: rejected\r\nanthropic-ratelimit-unified-5h-status: rejected\r\n\
+             anthropic-ratelimit-unified-5h-reset: {reset}\r\nanthropic-ratelimit-unified-7d-status: allowed\r\n\
+             anthropic-ratelimit-unified-representative-claim: five_hour\r\nanthropic-ratelimit-unified-reset: {reset}\r\n"
+        );
+        reply("429 Too Many Requests", &headers, r#"{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}"#)
+    }
+
     /// Anthropic's stream, as a route that answers sends it.
     fn streamed(model: &str, text: &str) -> String {
         let body = format!(
@@ -2078,6 +2234,108 @@ mod tests {
         let call = |route: &str, fallback: Option<&str>, status| (route.to_string(), fallback.map(String::from), status);
         let b = call("plan/b", Some("plan/a"), CallStatus::Ok);
         assert_eq!(calls, [call("plan/a", None, CallStatus::Limit), b.clone(), b.clone(), b, call("plan/a", None, CallStatus::Ok)]);
+    }
+
+    /// The user's other Claude accounts: Claude Code's own account at its limit, the same call
+    /// goes on signed by the next account that isn't (that token, no other credentials), the turn
+    /// doesn't fail, the session says which account answers; back on its own once its window
+    /// resets. A token that isn't a Claude subscription is no account, and an agent that didn't
+    /// sign in with a subscription gets none of them.
+    #[test]
+    fn a_spent_claude_account_goes_on_with_the_next() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicBool;
+        let reset = Arc::new(AtomicBool::new(false));
+        let r = reset.clone();
+        let spent_until = fallback::now() + 3600;
+        let (anthropic, from) = stand_in(move |req| {
+            // Its own until the reset, and account 2 throughout, are spent.
+            let own = req.contains("authorization: bearer sk-ant-oat01-own");
+            if (own && !r.load(Ordering::Relaxed)) || req.contains("authorization: bearer sk-ant-oat01-third") {
+                claude_spent(spent_until)
+            } else {
+                streamed("claude-opus-5-5", if req.contains("sk-ant-oat01-own") { "OWN" } else { "OTHER" })
+            }
+        });
+        let base = anthropic.trim_end_matches("/api/anthropic").to_string();
+        STAND_INS.lock().unwrap().extend([("acct".into(), "anthropic".into(), base.clone()), ("acct-api".into(), "anthropic".into(), base)]);
+        let keys = HashMap::from([
+            ("CLAUDE_ACCOUNT_3".to_string(), "sk-ant-oat01-fourth".to_string()),
+            ("CLAUDE_ACCOUNT_2".to_string(), "sk-ant-oat01-third".to_string()),
+            ("CLAUDE_ACCOUNT_5".to_string(), "sk-ant-api03-not-an-account".to_string()),
+        ]);
+        let proxy = Proxy::start(keys).unwrap();
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let turn = json!([{"role": "user", "content": "hi"}]);
+        let tool = json!([{"role": "user", "content": "hi"}, {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}]);
+        let ask = |session: &str, auth: &str, messages: &Value| {
+            let path = proxy.base_url(session, "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+            let body = json!({"model": "claude-opus-5-5", "max_tokens": 10, "stream": true, "messages": messages}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer {auth}\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        let send = |session: &str, auth: &str| ask(session, auth, &turn);
+        let wait = || std::time::Duration::from_secs(5);
+        let auth_of = |req: &str| req.lines().find_map(|l| l.strip_prefix("authorization: ")).unwrap_or_default().to_string();
+
+        // Its own account is spent; account 2 is too; account 3 answers. The agent sees its answer.
+        let out = send("acct", "sk-ant-oat01-own");
+        assert!(out.starts_with("HTTP/1.1 200") && out.contains("OTHER"), "{out}");
+        let asked: Vec<String> = (0..3).map(|_| auth_of(&from.recv_timeout(wait()).unwrap())).collect();
+        assert_eq!(asked, ["bearer sk-ant-oat01-own", "bearer sk-ant-oat01-third", "bearer sk-ant-oat01-fourth"]);
+        assert!(from.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "not the key that isn't an account");
+        let s = proxy.stats.session("acct");
+        let f = s.fallback.clone().expect("says which account answers");
+        assert_eq!((f.name.as_str(), f.from_name.as_str(), f.resets_at), ("Claude account 3", "Claude", Some(spent_until)));
+        assert_eq!((s.last_error, s.limit_error), (None, None), "the turn didn't fail");
+        let own = proxy.stats.limited_routes().into_iter().find(|(k, _)| k.starts_with("anthropic#") && !k.contains("account")).unwrap().0;
+        assert!(proxy.stats.limited(&own).is_some() && proxy.spent(&own).is_none(), "Claude Code isn't at its limit while another account answers");
+
+        // The next call goes straight to account 3.
+        assert!(send("acct", "sk-ant-oat01-own").contains("OTHER"));
+        assert_eq!(auth_of(&from.recv_timeout(wait()).unwrap()), "bearer sk-ant-oat01-fourth");
+        assert!(from.recv_timeout(std::time::Duration::from_millis(300)).is_err());
+
+        // Its window resets: mid-turn, the turn stays on account 3; back on its own as the next starts.
+        reset.store(true, Ordering::Relaxed);
+        proxy.stats.limited.lock().unwrap().get_mut(&own).unwrap().retry_at = 0;
+        assert!(ask("acct", "sk-ant-oat01-own", &tool).contains("OTHER"));
+        assert_eq!(auth_of(&from.recv_timeout(wait()).unwrap()), "bearer sk-ant-oat01-fourth");
+        assert!(send("acct", "sk-ant-oat01-own").contains("OWN"));
+        assert_eq!(auth_of(&from.recv_timeout(wait()).unwrap()), "bearer sk-ant-oat01-own");
+        assert!(proxy.stats.session("acct").fallback.is_none(), "back on its own");
+
+        // An API key isn't a subscription: no account signs its calls.
+        send("acct-api", "sk-ant-api03-a-key");
+        assert_eq!(auth_of(&from.recv_timeout(wait()).unwrap()), "bearer sk-ant-api03-a-key");
+        assert!(from.recv_timeout(std::time::Duration::from_millis(300)).is_err());
+    }
+
+    /// The real thing, by hand: `DINO_CLAUDE_ACCOUNT_FILE=<file with a setup-token> cargo test -p
+    /// dino-proxy --lib -- --ignored real_claude_account`. With Claude Code's own account spent,
+    /// Anthropic answers the call signed by the other account.
+    #[test]
+    #[ignore]
+    fn real_claude_account_answers() {
+        use std::io::{Read, Write};
+        let token = std::fs::read_to_string(std::env::var("DINO_CLAUDE_ACCOUNT_FILE").unwrap()).unwrap().trim().to_string();
+        let proxy = Proxy::start(HashMap::from([("CLAUDE_ACCOUNT_2".to_string(), token)])).unwrap();
+        let mut h = HeaderMap::new();
+        h.insert("authorization", "Bearer sk-ant-oat01-own-spent".parse().unwrap());
+        let own = fallback::route_key("anthropic", &h);
+        proxy.stats.mark_limited(&own, "Claude", &fallback::Trigger { kind: fallback::Kind::Quota, resets_at: Some(fallback::now() + 600), said: "spent".into() });
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let path = proxy.base_url("real", "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+        let body = json!({"model": "claude-haiku-4-5", "max_tokens": 20, "system": "You are Claude Code, Anthropic's official CLI for Claude.", "messages": [{"role": "user", "content": "Reply with the word OK"}]}).to_string();
+        let mut c = std::net::TcpStream::connect(&here).unwrap();
+        write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-own-spent\r\nanthropic-version: 2023-06-01\r\nanthropic-beta: oauth-2025-04-20\r\ncontent-type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut out = String::new();
+        let _ = c.read_to_string(&mut out);
+        assert!(out.starts_with("HTTP/1.1 200") && out.contains("OK"), "{}", out.lines().next().unwrap_or_default());
+        assert_eq!(proxy.stats.session("real").fallback.map(|f| f.name), Some("Claude account 2".into()));
     }
 
     /// What isn't a spent route doesn't move a session: a short rate limit the agent waits out,
