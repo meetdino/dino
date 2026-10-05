@@ -5,7 +5,7 @@ import SwiftUI
 /// when, and installs (once, with an administrator's password) the permission it needs.
 struct LidSection: View {
     @EnvironmentObject var store: SettingsStore
-    @EnvironmentObject var model: DinoModel
+    @ObservedObject private var powerState = PowerState.shared
     /// The permission is installed; nil until dinod has said.
     @State private var ready: Bool?
     @State private var busy = false
@@ -69,15 +69,15 @@ struct LidSection: View {
                     Text("No limit").tag(0.0)
                 }
             }
-            if let power = model.power, power.holding || power.external {
+            if let power = powerState.info, power.holding || power.external {
                 Label(power.holding ? "Awake now, with the lid closed or open" : "Sleep is already off, turned off outside dino; dino leaves it alone",
                       systemImage: power.holding ? "laptopcomputer" : "info.circle")
                     .foregroundStyle(.secondary)
             }
-            if let power = model.power, !power.holding, let note = power.note {
+            if let power = powerState.info, !power.holding, let note = power.note {
                 Text("Last time: \(note).").foregroundStyle(.secondary)
             }
-            if let error = error ?? model.power?.error {
+            if let error = error ?? powerState.info?.error {
                 Text(error).foregroundStyle(.red).textSelection(.enabled)
             }
             if ready == true {
