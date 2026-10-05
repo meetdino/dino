@@ -393,6 +393,19 @@ fn hinted(message: String) -> anyhow::Error {
     anyhow::anyhow!(message)
 }
 
+/// An agent fallbacks are for: one of the agents dino knows. A shell has no account to run out of
+/// and takes no prompt, so it's neither a chain's agent nor one to start new sessions with.
+fn fallback_agent(name: &str) -> anyhow::Result<String> {
+    if let Some(k) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == name || k.bin == name) {
+        return Ok(k.id.to_string());
+    }
+    let agents = match client::request(&Request::Launchers) {
+        Ok(Response::Launchers { launchers }) => launchers.into_iter().map(|l| l.short).filter(|s| dino_core::KNOWN_AGENTS.iter().any(|k| k.id == s)).collect::<Vec<_>>().join(", "),
+        _ => String::new(),
+    };
+    Err(anyhow::anyhow!("`{}` isn't an agent fallbacks can use. Agents here: {agents}.", printable(name)))
+}
+
 /// `name` isn't an agent dino can start: how to install it, when it's one dino knows, or the ones it
 /// can. `command`: it was the first word, so it could have been meant as a command.
 fn unknown_agent(name: &str, command: bool) -> anyhow::Error {
@@ -833,7 +846,7 @@ fn cmd_fallback(args: &[String]) -> anyhow::Result<()> {
         }
         return Ok(());
     };
-    let agent = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == agent || k.bin == agent).map(|k| k.id.to_string()).ok_or_else(|| unknown_agent(agent, false))?;
+    let agent = fallback_agent(agent)?;
     let rest = &args[1..];
     if rest.is_empty() {
         print!("{}", show_fallback(&settings, &agent, &provider_name));
@@ -851,7 +864,7 @@ fn cmd_fallback(args: &[String]) -> anyhow::Result<()> {
                 "--new-sessions" => {
                     let to = words.next().ok_or_else(|| anyhow::anyhow!("--new-sessions needs an agent: --new-sessions codex[:<model>]"))?;
                     let (id, model) = to.split_once(':').map_or((to.as_str(), None), |(a, m)| (a, Some(m.to_string())));
-                    let id = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id || k.bin == id).map(|k| k.id.to_string()).ok_or_else(|| unknown_agent(id, false))?;
+                    let id = fallback_agent(id)?;
                     anyhow::ensure!(id != agent, "new sessions can't fall back to the agent itself");
                     f.new_sessions = Some(AgentSwitch { agent: id, model, ..Default::default() });
                 }
