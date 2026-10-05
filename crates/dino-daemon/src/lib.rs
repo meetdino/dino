@@ -3901,6 +3901,7 @@ const TREE_FIRST: std::time::Duration = std::time::Duration::from_millis(1500);
 /// How long each look after it reads (off the request) before the tree is shown again.
 const TREE_MORE: std::time::Duration = std::time::Duration::from_secs(4);
 
+#[cfg(test)]
 fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
     tree_until(d, folders, None)
 }
