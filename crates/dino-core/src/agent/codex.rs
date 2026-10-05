@@ -23,12 +23,15 @@ pub const NOTICE_ARGS: [&str; 6] =
 
 /// The conversation Codex process `pid` is on: the rollout it has open. A subagent's is open too
 /// while it runs; the session's own is the one that isn't a subagent's.
+/// After `/fork` it keeps the original's open too (Codex 0.160): the one it's on is the one written
+/// last, which the fork is from the moment it's made.
 pub fn open_rollout(pid: u32) -> Option<PathBuf> {
     procinfo::open_files(pid)
         .into_iter()
         .map(PathBuf::from)
         .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")))
-        .find(|p| !history::codex_meta(p).hidden)
+        .filter(|p| !history::codex_meta(p).hidden)
+        .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())
 }
 
 /// Each Codex process's open conversation: when it started, the descriptor, the file.
@@ -257,6 +260,19 @@ impl Agent for Codex {
         // So it says when it waits on the user (see dinod's `codex`).
         after.extend(NOTICE_ARGS.map(String::from));
         (before, after)
+    }
+
+    // `codex fork <id> [prompt]` (Codex 0.160): a new conversation, its rollout naming the original
+    // as `forked_from_id`; its id is known once the rollout is open. Started anywhere but the
+    // original's folder it asks which folder to work in, unless told with `-C`.
+    fn fork_args(&self, parent: &str, cwd: &Path, _session: &mut Option<String>) -> Option<(Vec<String>, Vec<String>)> {
+        let mut after = vec!["-C".to_string(), cwd.display().to_string(), parent.to_string()];
+        after.extend(NOTICE_ARGS.map(String::from));
+        Some((vec!["fork".into()], after))
+    }
+
+    fn forked_from(&self, session: &str) -> Option<String> {
+        history::codex_forked_from(&crate::transcript::codex_path(session)?)
     }
 
     fn status_source(&self) -> StatusSource {

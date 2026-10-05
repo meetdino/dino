@@ -159,6 +159,20 @@ pub enum Request {
     },
     /// Start the agent of a session that ended again, in place, continuing its conversation.
     Resume { id: String },
+    /// Fork session `id`: a new session on a copy of its conversation, made by the agent's own
+    /// fork (see `LauncherInfo::forks`), with its mode, model, flags and account. The original
+    /// conversation stays as it is. With `worktree`, in a new git worktree off the session's
+    /// checkout, its uncommitted edits carried over. `prompt` is the fork's first message.
+    /// Answers `Created`.
+    Fork {
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        worktree: bool,
+        #[serde(default)]
+        prompt: Option<String>,
+    },
     Shutdown,
     /// Which dino this dinod is, and any newer one it installed that it starts once sessions are idle.
     Version,
@@ -710,6 +724,9 @@ pub struct LauncherInfo {
     /// (to run on, or fall back to).
     #[serde(default)]
     pub formats: Vec<crate::providers::Format>,
+    /// Its conversations can be forked (`Request::Fork`), by the agent's own fork.
+    #[serde(default)]
+    pub forks: bool,
 }
 
 /// The process group leading a session's terminal, when it isn't the session's own program.
@@ -881,6 +898,21 @@ pub struct SessionInfo {
     /// Started with this agent instead of the one asked for, which was at its limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instead_of: Option<InsteadOf>,
+    /// Its conversation is a fork of another session's: one dino forked (`Request::Fork`), or
+    /// one the agent forked itself (Claude's `/branch`, Codex's `/fork`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkedFrom>,
+}
+
+/// The session a fork was made from.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ForkedFrom {
+    /// The session's id; it may since have been closed.
+    pub session: String,
+    /// What it was called when the fork was made.
+    pub name: String,
+    /// Its conversation, the one forked.
+    pub conversation: String,
 }
 
 /// A session on a fallback route, and why.

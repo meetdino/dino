@@ -80,6 +80,12 @@ impl Agent for Claude {
         self.free
     }
 
+    // After `--`: an option before it that takes several values (`--add-dir`, `--disallowedTools`)
+    // would otherwise take the prompt as one more.
+    fn prompt_args(&self, prompt: String) -> Vec<String> {
+        vec!["--".into(), prompt]
+    }
+
     // `claude [options] [prompt]`, as Claude Code 2.1's own help lists its options.
     fn launch_prompt(&self, args: &[String]) -> Option<(Vec<String>, String)> {
         super::positional_prompt(args, &CLI)
@@ -254,6 +260,28 @@ impl Agent for Claude {
         // Claude only saves a transcript after the first prompt; resuming an unused id fails.
         let flag = if restoring && crate::transcript::claude_path(&uuid).is_some() { "--resume" } else { "--session-id" };
         (vec![], vec![flag.into(), uuid])
+    }
+
+    // `--resume <parent> --fork-session` copies the conversation into a new one (Claude Code 2.1),
+    // given its id up front with `--session-id`. The copy starts without the original's "allow for
+    // this session" grants.
+    fn fork_args(&self, parent: &str, _cwd: &Path, session: &mut Option<String>) -> Option<(Vec<String>, Vec<String>)> {
+        // Kept when it starts again before the copy is saved.
+        let uuid = session.get_or_insert_with(crate::new_uuid).clone();
+        Some((vec![], strings(&["--resume", parent, "--fork-session", "--session-id", &uuid])))
+    }
+
+    // `/branch` writes the copy with each entry's `forkedFrom` naming the original (Claude Code
+    // 2.1.289); `--fork-session` doesn't say.
+    fn forked_from(&self, session: &str) -> Option<String> {
+        let path = crate::transcript::claude_path(session)?;
+        history::claude_forked_from(&history::read_range(&path, 0, 512 * 1024)?).filter(|parent| parent != session)
+    }
+
+    // Its live session file names the conversation it's on now: `/clear`, `/resume` and `/branch`
+    // change it.
+    fn conversation_of(&self, pid: u32) -> Option<String> {
+        live(pid)?["sessionId"].as_str().map(String::from)
     }
 
     fn statusline(&self) -> bool {

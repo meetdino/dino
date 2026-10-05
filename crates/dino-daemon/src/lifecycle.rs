@@ -122,6 +122,8 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         route: s.route.clone(),
         instead_of: s.instead_of.clone(),
         account: s.account.clone(),
+        forked_from: s.forked_from.lock().unwrap().clone(),
+        fork_pending: s.fork_pending.load(Ordering::Relaxed),
     };
     let w = if s.host.is_some() { None } else { session_worktree(d, &s.cwd) };
     kill(d, id);
