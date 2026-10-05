@@ -827,7 +827,7 @@ Setup
   dino login [--email | --device] | logout | sync [status|now|resolve|undo]
   dino login openrouter|chatgpt     connect a provider in your browser
   dino login <plan> [--base <url>]  connect a coding plan with its key, read from stdin
-  dino claude-token [status|create|set|remove]
+  dino claude-token [status|create|set|remove|add-account|remove-account <n>]
   dino fallback [<agent> [<provider>:<model>... | off] [--outages] [--new-sessions <agent>[:<model>]]]
                                     where an agent goes when it hits a limit
   dino power [status|setup|remove]  keep agents running with the lid closed
@@ -862,7 +862,7 @@ fn dino() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("power") => return cmd_power(cli.get(1).map(String::as_str).unwrap_or("status")),
-        Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status")),
+        Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status"), cli.get(2).map(String::as_str)),
         Some("fallback") => return cmd_fallback(&cli[1..]),
         Some("attach") => {
             let fresh = cli.iter().any(|a| a == "--fresh");
@@ -1548,12 +1548,18 @@ fn show_fallback(settings: &dino_core::settings::Settings, agent: &str, provider
 
 /// The Claude subscription token (`claude setup-token`), for the Claude Code dino starts where it
 /// isn't signed in. `set` reads the token from stdin, so it never sits on a command line.
-fn cmd_claude_token(action: &str) -> anyhow::Result<()> {
+fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
+    // Another of your Claude accounts, for when the one Claude Code signed in with is at its limit.
+    if action == "add-account" || action == "remove-account" {
+        return cmd_claude_account(action, arg);
+    }
     if !matches!(action, "status" | "create" | "set" | "remove") {
         println!(
-            "usage: dino claude-token [status|create|set|remove]\n\n\
+            "usage: dino claude-token [status|create|set|remove|add-account|remove-account]\n\n\
              create runs `claude setup-token` in a dino shell and keeps the token it prints; set reads one from stdin.\n\
-             Only Claude Code gets it: on SSH environments, and on this Mac when Claude Code here isn't signed in (Settings → Agents)."
+             Only Claude Code gets it: on SSH environments, and on this Mac when Claude Code here isn't signed in (Settings → Agents).\n\n\
+             add-account reads a `claude setup-token` token of another of your Claude accounts from stdin: when the one Claude Code\n\
+             signed in with reaches its limit, its calls go on with that account until the limit resets. remove-account <n> forgets one."
         );
         return Ok(());
     }
@@ -1591,7 +1597,53 @@ fn cmd_claude_token(action: &str) -> anyhow::Result<()> {
     if let Some(e) = t.error {
         rows.push(("Error", printable(&e)));
     }
+    let others = claude_accounts(&dino_core::load_keys());
+    if !others.is_empty() {
+        let list: Vec<String> = others.iter().map(|(n, _)| n.to_string()).collect();
+        rows.push(("Other accounts", format!("{} (answer in turn when Claude Code's own is at its limit)", list.join(", "))));
+    }
     print!("{}", out::fields(&rows));
+    Ok(())
+}
+
+/// The key store's names for your other Claude accounts: `CLAUDE_ACCOUNT_<n>`, n from 2.
+const CLAUDE_ACCOUNT: &str = "CLAUDE_ACCOUNT_";
+
+/// Your other Claude accounts in the key store: their number and token, in order.
+fn claude_accounts(keys: &std::collections::HashMap<String, String>) -> Vec<(u32, String)> {
+    let mut v: Vec<(u32, String)> = keys.iter().filter_map(|(k, t)| Some((k.strip_prefix(CLAUDE_ACCOUNT)?.parse().ok()?, t.trim().to_string()))).collect();
+    v.sort();
+    v
+}
+
+/// `dino claude-token add-account` (token on stdin) and `remove-account <n>`: your other Claude
+/// accounts, kept in dino's key store as `CLAUDE_ACCOUNT_<n>`, never synced or shown.
+fn cmd_claude_account(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
+    let taken = claude_accounts(&dino_core::load_keys());
+    let (n, value) = if action == "add-account" {
+        let mut t = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)?;
+        let t = dino_core::claude_token::find(&t).ok_or_else(|| anyhow::anyhow!("that isn't a Claude token: paste what `claude setup-token` printed"))?;
+        if let Some((n, _)) = taken.iter().find(|(_, have)| *have == t) {
+            println!("That's Claude account {n} already.");
+            return Ok(());
+        }
+        ((2..).find(|n| !taken.iter().any(|(t, _)| t == n)).unwrap_or(2), Some(t))
+    } else {
+        let n: u32 = arg.and_then(|a| a.parse().ok()).ok_or_else(|| anyhow::anyhow!("usage: dino claude-token remove-account <n>"))?;
+        anyhow::ensure!(taken.iter().any(|(t, _)| *t == n), "there's no Claude account {n}");
+        (n, None)
+    };
+    match client::request(&Request::SetKey { name: format!("{CLAUDE_ACCOUNT}{n}"), value: value.clone() })? {
+        Response::Ok => {}
+        Response::Error { message } => return Err(hinted(message)),
+        _ => return Err(unexpected()),
+    }
+    if value.is_some() {
+        println!("Claude account {n} added: when Claude Code's own account is at its limit, its calls go on with this one until that resets.");
+    } else {
+        println!("Claude account {n} removed.");
+    }
     Ok(())
 }
 

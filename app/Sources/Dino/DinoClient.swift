@@ -120,6 +120,17 @@ struct FallbackInfo: Codable, Equatable {
     var retry_at: UInt64?
     var since: UInt64
 
+    /// Answered by another of the user's Claude accounts ("Claude account 2"), not a fallback route.
+    var isAccount: Bool { provider == "anthropic" }
+
+    /// What the session shows: "On fallback: GLM Coding Plan · Claude limit resets 14:00", or for
+    /// another Claude account "Claude account 2 · resets 14:00".
+    var label: String {
+        guard isAccount else { return "On fallback: \(name) · \(why)" }
+        if let t = resets_at { return "\(name) · resets \(Clock.short(t))" }
+        return "\(name) · \(from) at its limit"
+    }
+
     /// "Claude limit resets 14:00", "GLM out of balance", "Claude down".
     var why: String {
         switch reason {

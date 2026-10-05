@@ -113,12 +113,13 @@ impl Seen {
     }
 }
 
-/// Agents at their limit (not merely down), and what their new sessions start with meanwhile.
+/// Agents at their limit (not merely down; Claude Code not while another of the user's Claude
+/// accounts answers), and what their new sessions start with meanwhile.
 /// Looked at with every state a client asks for: the settings are only read when one is.
 pub(crate) fn limits(d: &Daemon) -> Vec<AgentLimit> {
     let spent: Vec<(String, dino_proxy::fallback::Limited)> = {
         let seen = d.fallback_seen.lock().unwrap();
-        seen.0.iter().filter_map(|(agent_id, keys)| Some((agent_id.clone(), keys.iter().filter_map(|k| d.proxy.stats.limited(k)).find(|l| l.kind != Kind::Outage)?))).collect()
+        seen.0.iter().filter_map(|(agent_id, keys)| Some((agent_id.clone(), keys.iter().filter_map(|k| d.proxy.spent(k)).find(|l| l.kind != Kind::Outage)?))).collect()
     };
     if spent.is_empty() {
         return vec![];
