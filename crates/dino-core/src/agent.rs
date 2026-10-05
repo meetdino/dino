@@ -229,6 +229,18 @@ pub trait Agent: Sync {
     fn resumed(&self, _session: &str, c: Controls) -> Controls {
         c
     }
+    /// Arguments that start a new conversation as a copy of conversation `parent`, which stays as
+    /// it is, working in `cwd`: the agent's own fork. Those before dino's other arguments, and those after;
+    /// `session` is set to the new conversation's id when the agent takes one up front. `None`
+    /// when it can't fork from its command line, or dino hasn't seen its way of doing it work.
+    fn fork_args(&self, _parent: &str, _cwd: &Path, _session: &mut Option<String>) -> Option<(Vec<String>, Vec<String>)> {
+        None
+    }
+    /// The conversation `session` was forked from, as the agent's own record of it says: a fork
+    /// made in the agent (Claude's `/branch`, Codex's `/fork`).
+    fn forked_from(&self, _session: &str) -> Option<String> {
+        None
+    }
     /// It reports its context window to a `statusLine` dino can wrap.
     fn statusline(&self) -> bool {
         false
@@ -765,6 +777,27 @@ mod tests {
             assert_eq!(env(&shell, crate::SHELL_CLAUDE_BASE_URL), Some(base("anthropic").as_str()));
         }
         assert_eq!(crate::proxy_wiring("shell", false, &base, None), (vec![], vec![]));
+    }
+
+    /// Claude Code and Codex fork by their own commands (checked against Claude Code 2.1.289 and
+    /// Codex 0.160); the others aren't offered it until dino has seen theirs work.
+    #[test]
+    fn only_agents_whose_fork_dino_has_seen_work_fork() {
+        let forks: Vec<&str> = all().into_iter().filter(|a| a.fork_args("p", Path::new("/r"), &mut None).is_some()).map(|a| a.id()).collect();
+        assert_eq!(forks, ["claude", "codex"]);
+        let mut session = None;
+        let (before, after) = agent("claude").unwrap().fork_args("parent-id", Path::new("/r/wt"), &mut session).unwrap();
+        let new = session.clone().unwrap();
+        assert!(before.is_empty());
+        assert_eq!(after, strings(&["--resume", "parent-id", "--fork-session", "--session-id", &new]));
+        // Started again before the copy is saved: the same new id.
+        assert_eq!(agent("claude").unwrap().fork_args("parent-id", Path::new("/r/wt"), &mut session).unwrap().1[4], new);
+        let mut none = None;
+        let (before, after) = agent("codex").unwrap().fork_args("parent-id", Path::new("/r/wt"), &mut none).unwrap();
+        assert_eq!(before, ["fork"]);
+        // In the folder it's started in: asked, Codex would offer the original's.
+        assert_eq!(after[..3], ["-C", "/r/wt", "parent-id"]);
+        assert!(none.is_none(), "Codex names the fork's id in its rollout");
     }
 
     #[test]

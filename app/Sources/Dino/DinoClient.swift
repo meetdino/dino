@@ -90,6 +90,9 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     /// Its terminal reads a password (echo off in line mode), as of its last output or keystroke;
     /// nil when not, and from an older dinod.
     var password: Bool?
+    /// The session its conversation was forked from: by dino (Fork Session), or in the agent
+    /// (Claude's /branch, Codex's /fork).
+    var forked_from: ForkedFrom?
 
     /// All its turn left running is a server: the ports it listens on ("3000, 8080").
     var serving: String? {
@@ -156,6 +159,15 @@ struct RouteUsage: Codable, Equatable {
 }
 
 /// The agent a session was asked for, at its limit when it started.
+/// The session a fork was made from (see crates/dino-core/src/ipc.rs).
+struct ForkedFrom: Codable, Equatable {
+    /// Its id; it may since have been closed.
+    var session: String
+    /// What it was called when the fork was made.
+    var name: String
+    var conversation: String
+}
+
 struct InsteadOf: Codable, Equatable {
     var agent_id: String
     /// The route that was spent: "Claude".
@@ -337,6 +349,8 @@ struct LauncherInfo: Codable, Identifiable, Equatable {
     var answers_once: Bool?
     /// The APIs it talks to a provider's model in ("anthropic", "chat", "responses"); nil from an older dinod.
     var formats: [String]?
+    /// Its conversations can be forked, by the agent's own fork; nil from an older dinod.
+    var forks: Bool?
     var id: String { short }
 }
 
