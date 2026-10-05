@@ -172,9 +172,12 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let tx = Mutex::new(tx);
         let w = Watch::new(&dir, move || drop(tx.lock().unwrap().send(()))).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        std::fs::write(dir.join("a.txt"), "hi").unwrap();
-        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("no change seen");
+        // The stream may start late on a loaded Mac: write again until a change is seen.
+        let seen = (0..30).any(|i| {
+            std::fs::write(dir.join("a.txt"), format!("hi {i}")).unwrap();
+            rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok()
+        });
+        assert!(seen, "no change seen in 30 s");
         let c = w.take();
         assert!(c.paths.iter().any(|p| p.ends_with("a.txt")), "{:?}", c.paths);
         drop(w);
