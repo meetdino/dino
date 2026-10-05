@@ -6,7 +6,7 @@
 #   app/build.sh --install   the dino you use every day, from this checkout: built as a release is,
 #                            with the dino CLI and dinod inside it and dinod as its launch agent,
 #                            and put in ~/Applications/Dino.app ($DINO_APP: elsewhere) once it's
-#                            whole. .git/hooks/dino-rebuild runs this when main moves.
+#                            whole. scripts/dev-rebuild.sh runs this when main moves.
 #
 # Both are signed with $DEVELOPER_ID_APP, else the keychain's Developer ID Application identity,
 # else ad hoc ("-" asks for ad hoc). macOS keeps a privacy grant (Screen Recording, Accessibility…)
