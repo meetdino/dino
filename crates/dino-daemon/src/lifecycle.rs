@@ -228,6 +228,8 @@ fn unarchive(d: &Daemon, id: &str) -> anyhow::Result<String> {
         // A new id: the old one may be a live session's by now.
         SavedSession { id: d.next_id.fetch_add(1, Ordering::Relaxed).to_string(), name, cwd: cwd.display().to_string(), ..a.saved.clone() }
     };
+    // Its usage so far, under the id it had: before it starts, so the start finds it metered.
+    crate::stats::seed(d, &saved.id, Some(id), saved.started_at, saved.agent_session.as_deref());
     let new = spawn(d, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) })?;
     let mut archived = d.archived.lock().unwrap();
     archived.retain(|o| o.saved.id != id);

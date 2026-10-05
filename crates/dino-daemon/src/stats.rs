@@ -39,6 +39,27 @@ fn describe(s: &Session) -> (String, Option<String>, Option<String>) {
     (agent, s.agent_session.lock().unwrap().clone(), cwd)
 }
 
+/// A session carried over from before (dinod restarted, or it was unarchived as `before`): what
+/// the proxy already carried for it goes back into its meter, so its tokens and its budget don't
+/// start again from zero.
+pub(crate) fn seed(d: &Daemon, id: &str, before: Option<&str>, started_at: u64, conversation: Option<&str>) {
+    let guard = store().lock().unwrap();
+    let Some(store) = guard.as_ref() else { return };
+    let since_ms = (started_at as i64).saturating_mul(1000);
+    match store.session_routes(id, before, since_ms, conversation.filter(|c| !c.is_empty())) {
+        Ok(routes) => {
+            let routes: Vec<(String, dino_proxy::Usage)> = routes
+                .into_iter()
+                .map(|(route, [input, cache_read, cache_write, output])| (route, dino_proxy::Usage { input, cache_read, cache_write, output }))
+                .collect();
+            if !routes.is_empty() {
+                d.proxy.stats.seed(id, &routes);
+            }
+        }
+        Err(e) => eprintln!("dinod: couldn't read {id}'s usage so far: {e}"),
+    }
+}
+
 /// Write the proxy's finished calls down; cheap when there are none. Called every few seconds by
 /// dinod's save loop, and before a report.
 pub(crate) fn flush(d: &Daemon) {
