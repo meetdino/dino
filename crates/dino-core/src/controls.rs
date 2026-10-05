@@ -63,6 +63,9 @@ pub struct Knobs {
     /// What a conversation it resumes keeps as it was, whatever dino asks: "model", or a mode id.
     /// A running session's can't be changed; a new session's can.
     pub resume_keeps: Vec<String>,
+    /// Its mode switches in place, with its own key (Claude's Shift+Tab), where that key reaches
+    /// it: no restart.
+    pub live_modes: bool,
 }
 
 impl Knobs {
@@ -97,7 +100,8 @@ pub fn knobs(agent_id: &str, allow_bypass: bool, catalog: Option<&Catalog>) -> K
     let modes: Vec<String> = a.modes().iter().filter(|m| allow_bypass || **m != "bypass").map(|m| m.to_string()).collect();
     let mode_labels = modes.iter().filter_map(|m| a.mode_label(m).map(|l| (m.clone(), l.to_string()))).collect();
     let resume_keeps = a.resume_keeps().iter().map(|k| k.to_string()).collect();
-    Knobs { modes, model: a.picks_model(), efforts: catalog.map(Catalog::efforts).unwrap_or_default(), restart: true, mode_labels, resume_keeps, ..listed }
+    let live_modes = a.mode_cycle(&[]).is_some();
+    Knobs { modes, model: a.picks_model(), efforts: catalog.map(Catalog::efforts).unwrap_or_default(), restart: true, mode_labels, resume_keeps, live_modes, ..listed }
 }
 
 /// Command-line arguments that apply `c` to an agent offering `k` (see `knobs`). Values it

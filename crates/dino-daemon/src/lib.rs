@@ -38,6 +38,7 @@ mod fsevents;
 mod github;
 mod lid;
 mod lifecycle;
+mod mode;
 mod peers;
 mod preview;
 mod providers;
@@ -100,8 +101,13 @@ struct Session {
     auto: Mutex<AutoState>,
     /// Mode, model and effort it was started with.
     controls: Controls,
-    /// Asked for mid-turn: `restart` with these once the turn is over.
+    /// Asked for and not yet in effect: switched to in place (see `mode`) or restarted with
+    /// once the turn is over.
     pending: Mutex<Option<Controls>>,
+    /// The permission mode its agent has shown since it started (see `mode`).
+    mode_seen: Mutex<mode::Seen>,
+    /// Its mode is being switched in place.
+    switching: AtomicBool,
     /// Being replaced by a restart (see `restart`): its program is stopped, and clients wait for
     /// the one taking its place rather than attach to it.
     replaced: AtomicBool,
@@ -1806,6 +1812,8 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         auto: Mutex::new(restore.as_ref().map(|r| r.auto.clone()).unwrap_or_default()),
         controls,
         pending: Mutex::default(),
+        mode_seen: Mutex::default(),
+        switching: AtomicBool::new(false),
         replaced: AtomicBool::new(false),
         scheduled: restore.as_ref().map_or(scheduled, |r| r.scheduled.clone()),
         started_by: restore.as_ref().map_or(started_by, |r| r.started_by.clone()),
@@ -2126,19 +2134,27 @@ fn repo_env(settings: &Settings, dir: &Path) -> Vec<(String, String)> {
     settings.repos.iter().filter(|(k, r)| !r.env.is_empty() && repo(k)).flat_map(|(_, r)| r.env.clone()).collect()
 }
 
-/// Change session `id`'s controls: now if nothing of its own is running, else once it's done.
+/// Change session `id`'s controls: a mode its agent switches in place (Claude's Shift+Tab) as
+/// soon as that's safe, anything else by restarting it, now if nothing of its own is running,
+/// else once it's done. Until then it's pending, never shown as in effect.
 fn set_controls(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
     let settings = Settings::load();
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-    if s.controls.mode != controls.mode {
+    // What it runs with now: its mode as the agent says it is, which may not be the one it was
+    // started in (switched in the agent itself, or in place since).
+    let have = mode::current(d, &s);
+    if have.mode != controls.mode {
         check_bypass(&controls, &settings)?;
     }
     kept_on_resume(&s, &controls)?;
-    // Switched in the agent itself (Claude's Shift+Tab): choosing the mode dino has on file still restarts it into that mode.
-    let agent_mode = d.proxy.stats.session(id).agent_mode.as_deref().and_then(|m| controls::reported_mode(&s.agent_id, m));
-    let switched = controls.mode.is_some() && agent_mode.is_some() && agent_mode != controls.mode;
-    if controls == s.controls && !switched {
+    if controls == have {
         *s.pending.lock().unwrap() = None;
+        return Ok(());
+    }
+    // `apply_pending` switches it in place, mid-turn too where no step on the way lets more
+    // through: nothing it runs is cut short.
+    if in_place(&s, &have, &controls) {
+        *s.pending.lock().unwrap() = Some(controls);
         return Ok(());
     }
     // An ended session keeps them for when it's resumed: it doesn't start again on its own.
@@ -2149,6 +2165,12 @@ fn set_controls(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> 
         *s.pending.lock().unwrap() = Some(controls);
         Ok(())
     }
+}
+
+/// `want` differs from what `s` runs with (`have`) only in a mode its agent can switch to in place.
+fn in_place(s: &Session, have: &Controls, want: &Controls) -> bool {
+    let mode_only = Controls { mode: have.mode.clone(), ..want.clone() } == *have;
+    mode_only && want.mode.as_deref().is_some_and(|m| mode::switchable(s, m))
 }
 
 /// A change session `s`'s agent would ignore on resuming its conversation (see
@@ -2550,6 +2572,7 @@ fn state(d: &Daemon) -> Response {
             fallbacks::note(d, s, &st);
             let (context_tokens, context_limit) = context_use(s, &st);
             let label = s.label.lock().unwrap().clone();
+            let agent_mode = mode::now(s, st.agent_mode.as_deref());
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
             let (inside, running, tmux, foreground) = {
                 let i = s.inside.lock().unwrap();
@@ -2567,6 +2590,21 @@ fn state(d: &Daemon) -> Response {
             // A server isn't work to wait on: once it's all that runs, the turn is over.
             let serving_waited = serving.iter().filter(|x| st.waits_on(&x.task)).count();
             let (fallback, usage_by_route) = (fallbacks::info(&st), fallbacks::usage(&st));
+            // Read before the struct below: a lock taken in it is held to its end, and the pane's
+            // reader takes some of them (`last_output`) holding the screen this reads.
+            // Before its first hook, Claude can already be waiting on you: its folder trust
+            // prompt, its login, its first-run setup, its bypass warning. Shown, so it isn't "idle".
+            let activity = on_screen(s, claude_setup(s, st.activity.as_ref()).map(|what| format!("needs:{what}")).or_else(|| st.activity.clone().map(|a| match a {
+                Activity::Working => "working".into(),
+                Activity::Done => match (waiting.0, waiting.1.saturating_sub(serving_waited)) {
+                    (0, 0) if serving_waited > 0 => format!("server:{}", ports(&serving)),
+                    (0, 0) => "done".into(),
+                    (agents, commands) => format!("waiting:{}", waiting_words(agents, commands)),
+                },
+                Activity::NeedsPermission(what) => format!("needs:{what}"),
+            }))
+            .or_else(|| (s.agent_id == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))));
+            let output_ms_ago = s.last_output.lock().unwrap().map(|t| t.elapsed().as_millis() as u64);
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
@@ -2574,7 +2612,7 @@ fn state(d: &Daemon) -> Response {
                 title: label.clone().or_else(|| s.pane.title().and_then(|t| agent(&s.agent_id).map_or(Some(t.clone()), |a| a.shown_title(&t)))),
                 exited: s.pane.is_exited(),
                 exit_code: s.pane.exit_code(),
-                output_ms_ago: s.last_output.lock().unwrap().map(|t| t.elapsed().as_millis() as u64),
+                output_ms_ago,
                 bells: s.pane.shared.bells.load(Ordering::Relaxed),
                 requests: st.requests,
                 in_flight: st.in_flight,
@@ -2582,18 +2620,7 @@ fn state(d: &Daemon) -> Response {
                 output_tokens: st.usage.output,
                 last_model: st.last_model,
                 tier: st.tier,
-                // Before its first hook, Claude can already be waiting on you: its folder trust
-                // prompt, its login, its first-run setup, its bypass warning. Shown, so it isn't "idle".
-                activity: on_screen(s, claude_setup(s, st.activity.as_ref()).map(|what| format!("needs:{what}")).or_else(|| st.activity.clone().map(|a| match a {
-                    Activity::Working => "working".into(),
-                    Activity::Done => match (waiting.0, waiting.1.saturating_sub(serving_waited)) {
-                        (0, 0) if serving_waited > 0 => format!("server:{}", ports(&serving)),
-                        (0, 0) => "done".into(),
-                        (agents, commands) => format!("waiting:{}", waiting_words(agents, commands)),
-                    },
-                    Activity::NeedsPermission(what) => format!("needs:{what}"),
-                }))
-                .or_else(|| (s.agent_id == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}")))),
+                activity,
                 group: group_of(&s.id),
                 error: st.last_error,
                 cwd: if s.host.is_some() { s.cwd.display().to_string() } else { real(&s.cwd) },
@@ -2602,9 +2629,11 @@ fn state(d: &Daemon) -> Response {
                 auto: s.auto.lock().unwrap().pr.clone(),
                 previews: previews.iter().filter(|p| p.session == s.id).map(|p| p.info()).collect(),
                 local_url: s.local_url.lock().unwrap().clone(),
-                controls: s.controls.clone(),
+                // What it runs with as its agent says (its screen, else its hooks), never what's
+                // only asked for: that's `pending` until it's in effect.
+                controls: Controls { mode: agent_mode.clone().or_else(|| s.controls.mode.clone()), ..s.controls.clone() },
                 pending: s.pending.lock().unwrap().clone(),
-                agent_mode: st.agent_mode.as_deref().and_then(|m| controls::reported_mode(&s.agent_id, m)),
+                agent_mode,
                 context_tokens,
                 context_limit,
                 scheduled: s.scheduled.clone(),
@@ -2843,7 +2872,7 @@ fn save(d: &Daemon) {
         return;
     }
     let sessions = d.sessions.lock().unwrap().clone();
-    let saved: Vec<SavedSession> = sessions.iter().map(|s| snapshot(s)).collect();
+    let saved: Vec<SavedSession> = sessions.iter().map(|s| snapshot(d, s)).collect();
     let dir = screens_dir();
     for s in sessions.iter().filter(|s| s.pane.is_exited() && !s.screen_saved.load(Ordering::Relaxed)) {
         use std::os::unix::fs::OpenOptionsExt;
@@ -2879,7 +2908,11 @@ fn resume_folder(s: &Session) -> String {
     s.cwd.display().to_string()
 }
 
-fn snapshot(s: &Session) -> SavedSession {
+/// Holds no lock of `s`'s while it reads its screen: the pane's reader takes them holding the
+/// screen's.
+fn snapshot(d: &Daemon, s: &Session) -> SavedSession {
+    // The mode it's in, which it may have switched to since it started: what it resumes in.
+    let controls = mode::current(d, s);
     let mut agent_session = s.agent_session.lock().unwrap();
     if agent_session.is_none() {
         *agent_session = conversation_of(s);
@@ -2893,7 +2926,7 @@ fn snapshot(s: &Session) -> SavedSession {
         started_at: s.started_at,
         agent_session: agent_session.clone(),
         auto: s.auto.lock().unwrap().clone(),
-        controls: s.controls.clone(),
+        controls,
         scheduled: s.scheduled.clone(),
         started_by: s.started_by.clone(),
         messaged_by: s.messaged_by.lock().unwrap().clone(),
@@ -2934,12 +2967,9 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
 
 /// Stop session `id`'s agent and start it again as `change` makes what it was started with.
 fn restart_with(d: &Daemon, id: &str, change: impl FnOnce(&mut SavedSession)) -> anyhow::Result<()> {
-    let (s, mut saved) = {
-        let sessions = d.sessions.lock().unwrap();
-        let s = sessions.iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-        let saved = snapshot(&s);
-        (s, saved)
-    };
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    // Not holding the sessions' lock: it reads the screen (see `snapshot`).
+    let mut saved = snapshot(d, &s);
     // Starting the new agent can take seconds on a busy Mac. A client reattaching meanwhile
     // waits for it: attached to this one, it would see it end, gone from the list by then,
     // and take that for the session's removal, closing its terminal.
@@ -2983,24 +3013,37 @@ fn resume(d: &Daemon, id: &str) -> anyhow::Result<()> {
     if let Some(other) = s.agent_session.lock().unwrap().clone().and_then(|c| holder(d, &c, Some(id))).filter(|o| !o.pane.is_exited()) {
         anyhow::bail!("its conversation is running in {} already", other.name);
     }
-    let controls = s.pending.lock().unwrap().take().unwrap_or_else(|| s.controls.clone());
+    // Else in the mode it was last in, which it may have switched to since it started.
+    let pending = s.pending.lock().unwrap().take();
+    let controls = pending.unwrap_or_else(|| mode::current(d, &s));
     restart(d, id, controls)
 }
 
-/// Apply controls asked for mid-turn, now that the turn is over.
+/// Apply controls asked for and not yet in effect: a mode switched in place as soon as that's
+/// safe, the rest by restarting once the agent is done.
 fn apply_pending(d: &Daemon) {
-    let ready: Vec<(String, Controls)> = d
-        .sessions
-        .lock()
-        .unwrap()
-        .clone()
-        .iter()
-        .filter(|s| !s.pane.is_exited() && s.pending.lock().unwrap().is_some() && restartable(d, s))
-        .filter_map(|s| s.pending.lock().unwrap().take().map(|c| (s.id.clone(), c)))
-        .collect();
-    for (id, controls) in ready {
-        if let Err(e) = restart(d, &id, controls) {
-            eprintln!("restart {id}: {e}");
+    let sessions: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| !s.pane.is_exited() && s.pending.lock().unwrap().is_some()).cloned().collect();
+    for s in sessions {
+        let Some(want) = s.pending.lock().unwrap().clone() else { continue };
+        let have = mode::current(d, &s);
+        if in_place(&s, &have, &want) {
+            // Kept on disk by the next `save`, which takes the mode it's in.
+            if want.mode.as_deref().is_some_and(|m| mode::switch(d, &s, m)) {
+                // Unless something else was chosen meanwhile.
+                s.pending.lock().unwrap().take_if(|p| *p == want);
+            }
+            continue;
+        }
+        if want == have {
+            s.pending.lock().unwrap().take_if(|p| *p == want);
+            continue;
+        }
+        if !restartable(d, &s) {
+            continue;
+        }
+        let Some(want) = s.pending.lock().unwrap().take() else { continue };
+        if let Err(e) = restart(d, &s.id, want) {
+            eprintln!("restart {}: {e}", s.id);
         }
     }
 }
@@ -3411,12 +3454,21 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
     // Read before it's stopped: what it was started with goes with it.
     let account = account_of(&f.agent, pid);
     let tty = tty_of(pid);
+    // And the mode it's in, which its flags may not say (switched with Claude's Shift+Tab):
+    // resumed without it, it would start in whatever its own settings say instead. As its flags
+    // say, else as its screen shows it, else as its hooks last said.
+    let hooked = d.proxy.stats.session(id).agent_mode.and_then(|m| a.reported_mode(&m));
+    let mode = controls::from_args(&f.agent, &f.args).mode.or_else(|| a.screen_mode(&s.pane.text(0))).or(hooked);
     waiting.done()?;
     stop(pid)?;
     if let Some(h) = held {
         restart_with(d, &h.id, |saved| {
             saved.args = f.args.clone();
             saved.account = account;
+            // In the mode it was in by hand, not the one the session had before.
+            if mode.is_some() {
+                saved.controls.mode = mode;
+            }
         })?;
         if let Some(tty) = tty {
             moved_note(&tty, &f.title, &h.id);
@@ -3432,8 +3484,8 @@ fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
         started_at: now_secs(),
         agent_session: Some(f.session_id.clone()),
         auto: AutoState::default(),
-        // It keeps whatever the conversation ran with.
-        controls: Controls::default(),
+        // Its flags say the rest.
+        controls: Controls { mode, ..Controls::default() },
         scheduled: s.scheduled.clone(),
         started_by: s.started_by.clone(),
         messaged_by: s.messaged_by.lock().unwrap().clone(),
@@ -4667,6 +4719,98 @@ mod tests {
         assert!(d.moves.lock().unwrap().is_empty());
     }
 
+    /// A stand-in for Claude Code's prompt: its footer says its mode, and Shift+Tab steps it
+    /// through manual → accept edits → plan, as Claude 2.1 does on a model without auto mode and
+    /// bypass not allowed.
+    const FAKE_CLAUDE: &str = r#"#!/usr/bin/perl
+system("stty raw -echo");
+binmode(STDOUT, ":utf8");
+$| = 1;
+my @modes = ("\x{23F8} manual mode on \x{B7} ? for shortcuts", "\x{23F5}\x{23F5} accept edits on (shift+tab to cycle)",
+    "\x{23F8} plan mode on (shift+tab to cycle)");
+my $i = 0;
+sub draw { print "\e[2J\e[H\x{276F} \r\n\r\n  $modes[$i]\r\n"; }
+draw();
+my $buf = "";
+while (sysread(STDIN, my $c, 1)) {
+    $buf .= $c;
+    if ($buf =~ /\e\[Z$/) { $i = ($i + 1) % @modes; draw(); $buf = ""; }
+}
+"#;
+
+    /// A mode chosen for Claude is switched to in place with its Shift+Tab, read off its footer,
+    /// the same process going on; one Shift+Tab doesn't reach waits as pending (never shown as
+    /// in effect), and the mode it's in is what it resumes with.
+    #[test]
+    fn claudes_mode_switches_in_place_and_shows_only_what_it_is_in() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_home().join("fake-claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("claude");
+        std::fs::write(&program, FAKE_CLAUDE).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let claude = LauncherInfo { short: "claude".into(), agent_id: "claude".into(), label: "Claude Code".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![] };
+        let d = new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![claude]);
+        let id = spawn(&d, Launch::new("claude", vec![], Some(dir.display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        let pid = s.pane.pid();
+        let wait = |what: &str, f: &dyn Fn() -> bool| {
+            let t = Instant::now();
+            while !f() {
+                assert!(t.elapsed() < std::time::Duration::from_secs(10), "{what}: {}", s.pane.text(0));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        wait("its footer", &|| mode::now(&s, None).as_deref() == Some("ask"));
+        assert_eq!(s.controls.mode, None, "started without a mode flag");
+
+        let want = |m: &str| Controls { mode: Some(m.into()), ..s.controls.clone() };
+        set_controls(&d, &id, want("plan")).unwrap();
+        assert_eq!(s.pending.lock().unwrap().as_ref().and_then(|c| c.mode.as_deref()), Some("plan"), "on its way, not in effect");
+        assert_eq!(mode::now(&s, None).as_deref(), Some("ask"));
+        apply_pending(&d);
+        assert_eq!(mode::now(&s, None).as_deref(), Some("plan"), "{}", s.pane.text(0));
+        assert!(s.pending.lock().unwrap().is_none());
+        assert_eq!(session(&d, &id).pane.pid(), pid, "the same process: no restart");
+        // What it resumes with after a dinod restart or unarchive is the mode it's in.
+        assert_eq!(snapshot(&d, &s).controls.mode.as_deref(), Some("plan"));
+        // Round the end of its cycle: plan → manual.
+        set_controls(&d, &id, want("ask")).unwrap();
+        apply_pending(&d);
+        assert_eq!(mode::now(&s, None).as_deref(), Some("ask"));
+
+        // The user's own Shift+Tab: the mode shown follows it.
+        s.pane.write(b"\x1b[Z".to_vec());
+        wait("its own switch", &|| mode::now(&s, None).as_deref() == Some("edits"));
+        assert_eq!(mode::current(&d, &s).mode.as_deref(), Some("edits"));
+
+        // Not in its cycle: bypass, without it allowed, isn't tried; auto, which this one turns
+        // out not to have, is gone round once, then left for a restart, never claimed.
+        assert!(!mode::switchable(&s, "bypass"));
+        assert!(mode::switchable(&s, "auto"));
+        assert!(!mode::switch(&d, &s, "auto"));
+        assert_eq!(mode::now(&s, None).as_deref(), Some("edits"), "back where it was");
+        assert!(!mode::switchable(&s, "auto"), "not tried again");
+
+        // Mid-turn, a tool call could come any moment: on through modes that let less through
+        // (accept edits → plan → manual), but never through one that lets more through than both
+        // ends (manual → accept edits → plan): that waits for the turn to end.
+        d.proxy.stats.reports_turns(&id);
+        d.proxy.stats.report(&id, Activity::Working);
+        set_controls(&d, &id, want("ask")).unwrap();
+        apply_pending(&d);
+        assert_eq!(mode::now(&s, None).as_deref(), Some("ask"), "{}", s.pane.text(0));
+        set_controls(&d, &id, want("plan")).unwrap();
+        apply_pending(&d);
+        assert_eq!(mode::now(&s, None).as_deref(), Some("ask"), "not through accept edits mid-turn");
+        assert!(s.pending.lock().unwrap().is_some());
+        d.proxy.stats.end_turn(&id);
+        apply_pending(&d);
+        assert_eq!(mode::now(&s, None).as_deref(), Some("plan"));
+        assert_eq!(session(&d, &id).pane.pid(), pid, "the same process throughout");
+        s.pane.kill();
+    }
+
     /// Claude's settings carry the proxy's secret (its hook URL): they leave the command line for
     /// a file only this user can read.
     #[test]
@@ -4716,7 +4860,7 @@ mod tests {
         let early = io::Read::read(&mut client, &mut b);
         assert!(early.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock), "answered before the new program was there: {early:?}");
 
-        let mut saved = snapshot(&old);
+        let mut saved = snapshot(&d, &old);
         saved.ended = false;
         saved.exit_code = None;
         spawn(&d, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) }).unwrap();
@@ -4989,7 +5133,7 @@ mod tests {
         assert!(s.args.is_empty(), "Claude's arguments aren't Codex's");
         assert_eq!(s.instead_of, Some(ipc::InsteadOf { agent_id: "claude".into(), name: "Claude".into(), resets_at: Some(resets) }));
         assert_eq!(session(&d, &start(true)).agent_id, "claude", "asked to stay");
-        let saved = snapshot(&s);
+        let saved = snapshot(&d, &s);
         assert_eq!(saved.instead_of, s.instead_of, "it says so after a restart too");
 
         // A spent route that's merely down isn't a limit.
@@ -5075,7 +5219,7 @@ mod tests {
         assert_eq!(file.metadata().unwrap().len(), size);
 
         // dinod gone without stopping it (a crash): a new one starts the session again.
-        let saved = snapshot(&s);
+        let saved = snapshot(&d, &s);
         let d2 = shell_daemon();
         let again = spawn(&d2, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) }).unwrap();
         assert_eq!(again, id);

@@ -126,6 +126,17 @@ pub trait Agent: Sync {
     fn reported_mode(&self, _mode: &str) -> Option<String> {
         None
     }
+    /// The permission mode its own screen shows it in now (Claude's footer), in dino's words;
+    /// `None` when the screen doesn't say (a dialog over it, a mode dino has no word for).
+    fn screen_mode(&self, _screen: &str) -> Option<String> {
+        None
+    }
+    /// The key that steps it to its next permission mode in place, without a restart (Claude's
+    /// Shift+Tab), and the modes it steps through in order as far as dino knows, for a session
+    /// started with `args` (its mode flags included). `None` when it has no such key.
+    fn mode_cycle(&self, _args: &[String]) -> Option<(&'static str, Vec<&'static str>)> {
+        None
+    }
 
     // ---- Models ----
 
@@ -764,5 +775,34 @@ mod tests {
         for p in ["fix the tests", "  fix -- the tests", "why does `-x` fail?", "", "   "] {
             assert!(check_prompt(p).is_ok(), "{p:?}");
         }
+    }
+
+    /// Claude's footer, as Claude Code 2.1.289 draws it (from a real session's screen).
+    #[test]
+    fn claudes_mode_is_read_off_its_footer() {
+        let claude = agent("claude").unwrap();
+        let screen = |footer: &str| format!("❯ Say hi\n⏺ Hey there!\n\n{}\n❯ \n{}\n  {footer}\n", "─".repeat(40), "─".repeat(40));
+        let mode = |footer: &str| claude.screen_mode(&screen(footer));
+        assert_eq!(mode("⏸ manual mode on · ? for shortcuts · ← for agents").as_deref(), Some("ask"));
+        assert_eq!(mode("⏵⏵ accept edits on (shift+tab to cycle) · ← for agents").as_deref(), Some("edits"));
+        assert_eq!(mode("⏸ plan mode on (shift+tab to cycle) · esc to interrupt").as_deref(), Some("plan"));
+        assert_eq!(mode("⏵⏵ auto mode on (shift+tab to cycle) · ← for agents").as_deref(), Some("auto"));
+        assert_eq!(mode("⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents").as_deref(), Some("bypass"));
+        assert_eq!(mode("? for shortcuts").as_deref(), Some("ask"), "an older Claude names no mode in its default one");
+        assert_eq!(mode("⏵⏵ some new mode on"), None, "one dino has no word for");
+        // A dialog over the prompt: no footer, nothing said; nor in what it wrote higher up.
+        assert_eq!(claude.screen_mode("⏵⏵ accept edits on\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel"), None);
+        assert_eq!(agent("codex").unwrap().screen_mode(&screen("⏵⏵ accept edits on")), None);
+    }
+
+    #[test]
+    fn claude_steps_through_bypass_only_when_started_with_it_allowed() {
+        let claude = agent("claude").unwrap();
+        let cycle = |args: &[&str]| claude.mode_cycle(&strings(args)).map(|(key, order)| (key, order.join(" ")));
+        assert_eq!(cycle(&["--model", "haiku"]), Some(("\x1b[Z", "ask edits plan auto".into())));
+        assert_eq!(cycle(&["--permission-mode", "bypassPermissions"]).unwrap().1, "ask edits plan bypass auto");
+        assert_eq!(cycle(&["--allow-dangerously-skip-permissions"]).unwrap().1, "ask edits plan bypass auto");
+        assert_eq!(cycle(&["--permission-mode", "plan"]).unwrap().1, "ask edits plan auto");
+        assert_eq!(agent("codex").unwrap().mode_cycle(&[]), None);
     }
 }
