@@ -1082,8 +1082,17 @@ enum DinoEnvironment {
         return NSString(string: "~/.local/bin/dino").expandingTildeInPath
     }()
 
-    /// `$DINO_HOME` points the app at a second, isolated dinod (as it does the CLI).
-    static let home = ProcessInfo.processInfo.environment["DINO_HOME"] ?? NSString(string: "~/.config/dino").expandingTildeInPath
+    /// `$DINO_HOME` points the app at a second, isolated dinod (as it does the CLI). A build made
+    /// for one (scripts/release.sh's `DINO_AGENT_HOME`) says which in Info.plist, so it uses that
+    /// one however it's opened (Finder, a relaunch after an update), as do the programs it starts.
+    static let home: String = {
+        if let home = ProcessInfo.processInfo.environment["DINO_HOME"] { return home }
+        if let home = Bundle.main.object(forInfoDictionaryKey: "DinoHome") as? String, !home.isEmpty {
+            setenv("DINO_HOME", home, 1)
+            return home
+        }
+        return NSString(string: "~/.config/dino").expandingTildeInPath
+    }()
     static let socketPath = "\(home)/dinod.sock"
 
     /// `dino ping` starts dinod (with the login PATH) if it isn't running.

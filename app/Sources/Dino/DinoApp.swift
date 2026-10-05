@@ -10,6 +10,11 @@ struct DinoApp: App {
     @AppStorage(Appearance.key) private var appearance = Appearance.system.rawValue
     @Environment(\.openWindow) private var openWindow
 
+    init() {
+        // Before anything starts a program: a build for an isolated dino passes its $DINO_HOME on.
+        _ = DinoEnvironment.home
+    }
+
     var body: some Scene {
         WindowGroup("dino", id: "main") {
             ContentView()
@@ -43,8 +48,7 @@ struct DinoApp: App {
                 SecureInputCommand()
                 Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
                     .keyboardShortcut("u", modifiers: [.command, .shift])
-                Button("Check for Updates…") { Updates.shared.checkNow() }
-                    .disabled(!Updates.shared.available)
+                UpdateMenuItem()
                 Button("Ask Before Quitting") { quitChoice = "" }
                     .disabled(quitChoice.isEmpty)
                     .help("Show the keep-running question again when you quit")
@@ -305,11 +309,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         didSet {
             services.model = model
             QuickTerminal.shared.model = model
+            Updates.shared.model = model
         }
     }
 
     /// Agents run in dinod, not in the app, so quitting leaves them running unless you say otherwise.
+    /// Quitting to install an update restarts dinod instead, into the new dino (Updates.swift).
     func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
+        if let model, let quit = Updates.shared.quitForUpdate(model) {
+            return quit ? .terminateNow : .terminateCancel
+        }
         guard let model, !model.daemonDown, !model.sessions.isEmpty, !QuitChoice.systemIsGoingDown else {
             return .terminateNow
         }
@@ -422,6 +431,7 @@ struct ContentView: View {
                     TabStrip()
                     TmuxSuggestion()
                     ComputerUseBanner()
+                    UpdateBanner()
                     Terminals()
                 }
                 if let pane = model.sidePane {
