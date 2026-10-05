@@ -218,7 +218,9 @@ final class DinoModel: ObservableObject {
         Task.detached {
             do {
                 // Before dinod starts: `dino ping` starts it through the agent, once registered.
-                DinodAgent.setUp()
+                // Not running (stopped as dino quit for an update, say): the agent can be
+                // registered again if an update changed it.
+                DinodAgent.setUp(stopped: (try? DinoConnection(path: DinoEnvironment.socketPath)) == nil)
                 try DinoEnvironment.ensureDaemon()
                 let conn = try DinoConnection(path: DinoEnvironment.socketPath)
                 let launchers = try conn.request(["type": "launchers"]).launchers ?? []
@@ -528,8 +530,11 @@ final class DinoModel: ObservableObject {
             let open = tabs.first { live.contains($0) }
             select(shownOne ? open : last ?? recent?.id ?? next.first?.id)
         }
+        // An update waiting for quiet installs now, restarting dino and dinod both (Updates.swift).
         // After an update: into the new dinod once nothing would be cut off.
-        if daemonOutdated || daemonUnmanaged, !restartedForUpdate, restartIsQuiet {
+        if Updates.shared.pending?.whenIdle == true {
+            Updates.shared.sessionsChanged(quiet: restartIsQuiet)
+        } else if daemonOutdated || daemonUnmanaged, !restartedForUpdate, restartIsQuiet {
             restartedForUpdate = true
             restartDaemon()
         }
