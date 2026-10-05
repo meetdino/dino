@@ -77,6 +77,7 @@ struct WorktreesPane: View {
             } footer: {
                 Footnote("When a session's PR merges or is closed, dino archives it once its agent is idle, so the conversation can be picked up again. After a merge, the worktree dino made for it is removed too if nothing in it would be lost; after a close it stays (see Storage below), since the work never landed. Unarchive it to pick up where it left off, worktree and all. Sessions outside a dino worktree stay open.")
             }
+            BuildCacheSection()
             Section {
                 if let stored {
                     if stored.isEmpty {

@@ -39,6 +39,8 @@ struct DinoSettings: Codable, Equatable {
         var claude_token: ClaudeTokenUse?
         /// Look for updates once a day; nil from an older dinod (on there).
         var check_updates: Bool?
+        /// One compiler cache for every session's builds; nil from an older dinod.
+        var build_cache: BuildCache?
     }
     struct ClaudeTokenUse: Codable, Equatable {
         var ssh: Bool
@@ -1345,6 +1347,8 @@ private struct ManagedPane: View {
         case ("machine", "awake_while_working"): return make("Keep the Mac awake while agents work", "Power", .power)
         case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", "Power", .power)
         case ("worktrees", "location"): return make("Worktree location", "Workspaces → Worktrees", .workspaces, .worktrees)
+        case ("machine", "build_cache"), ("machine", "build_cache.enabled"): return make("Share one build cache across worktrees", "Workspaces → Worktrees", .workspaces, .worktrees)
+        case ("machine", "build_cache.size_gb"): return make("Build cache size", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("worktrees", "branch_prefix"): return make("Branch prefix", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("experimental", let id):
             let title = ExperimentalFeature.all.first { $0.id == id }?.title ?? id
@@ -1384,6 +1388,7 @@ private struct ManagedPane: View {
         case ("policies.allowed_agents", let a as [String]):
             return a.map { s in store.agents.first { $0.short == s }?.label ?? s }.joined(separator: ", ")
         case ("policies.default_agent", let s as String): return store.agents.first { $0.short == s }?.label ?? s
+        case ("machine.build_cache.size_gb", let n as NSNumber): return "\(n.intValue) GB"
         default: return Self.format(v)
         }
     }

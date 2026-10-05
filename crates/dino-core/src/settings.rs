@@ -325,6 +325,38 @@ pub struct Machine {
     /// Look for a new dino once a day and install it: the app through Sparkle, a `dino` installed
     /// with install.sh by dinod itself. Homebrew installs are left to `brew upgrade`.
     pub check_updates: bool,
+    /// One compiler cache shared by every session's builds on this Mac (see [`BuildCache`]).
+    pub build_cache: BuildCache,
+}
+
+/// One compiler cache for the whole Mac: every agent dino starts, and every dino shell, builds Rust
+/// through sccache (when it's installed), so a new worktree compiles only what no other worktree
+/// has compiled before. Each worktree keeps its own `target/`. A broken or full cache never fails a
+/// build: it compiles as if there were none (see `crate::build_cache`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct BuildCache {
+    /// On unless turned off; it does nothing until sccache is installed.
+    pub enabled: bool,
+    /// The most the cache keeps on disk, in GB; the least recently used goes first.
+    pub size_gb: u32,
+}
+
+impl BuildCache {
+    pub const DEFAULT_SIZE_GB: u32 = 10;
+    /// What `size_gb` is held to.
+    pub const SIZES_GB: std::ops::RangeInclusive<u32> = 1..=500;
+
+    /// `size_gb`, held to [`Self::SIZES_GB`].
+    pub fn size(&self) -> u32 {
+        self.size_gb.clamp(*Self::SIZES_GB.start(), *Self::SIZES_GB.end())
+    }
+}
+
+impl Default for BuildCache {
+    fn default() -> Self {
+        Self { enabled: true, size_gb: Self::DEFAULT_SIZE_GB }
+    }
 }
 
 /// Which Claude Code sessions the Claude subscription token goes to, beyond the rule that only
@@ -347,7 +379,7 @@ impl Default for ClaudeTokenUse {
 
 impl Default for Machine {
     fn default() -> Self {
-        Self { onboarded: false, keep_awake: false, awake_while_working: true, shell_integration: true, shell_agents: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default(), check_updates: true }
+        Self { onboarded: false, keep_awake: false, awake_while_working: true, shell_integration: true, shell_agents: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default(), check_updates: true, build_cache: BuildCache::default() }
     }
 }
 
