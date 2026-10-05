@@ -5,14 +5,14 @@ accounts and synced settings, so we take reports seriously.
 
 ## Reporting a vulnerability
 
-Please don't open a public issue. Report it privately:
-
-- through GitHub: the **Security** tab of this repository → **Report a vulnerability**, or
-- by email to security@meetdino.com (TODO: set up this address before going public).
+Please don't open a public issue, pull request or discussion. Report it privately, through
+GitHub: [**Report a vulnerability**](https://github.com/asdf9384/dino/security/advisories/new)
+(the repository's **Security** tab → **Report a vulnerability**). Only the maintainers see it, and
+we work on the fix with you there, in a private fork when it needs one.
 
 Include what you found, how to reproduce it, and what an attacker could do with it. We'll confirm
-we got it within a few days, keep you posted while we fix it, and credit you when it's released if
-you'd like.
+we got it within a few days, keep you posted while we fix it, and publish an advisory crediting
+you when the fix is released, if you'd like.
 
 ## Supported versions
 

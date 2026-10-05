@@ -1,41 +1,169 @@
 name: CI
 
-# The account server in cloud/ has its own workflow (cloud.yml).
+# What a pull request has to pass, from this repository or a fork. Every job name here is a
+# required check on main (see CONTRIBUTING.md); a job that has nothing to check for a pull request
+# (the app, when only crates/ changed) is skipped, which counts as passed. `changes` decides that,
+# and is required itself, so a failure there can't skip the rest into passing.
+#
+# Runs on pull_request only, never pull_request_target: a fork's code runs with a read-only token
+# and no secrets. No job here needs either.
 on:
+  pull_request:
   push:
     branches: [main]
-    paths-ignore: ["cloud/**", ".github/workflows/cloud.yml"]
-  pull_request:
-    paths-ignore: ["cloud/**", ".github/workflows/cloud.yml"]
+  workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  rust:
-    # dino-core calls proc_pidinfo, so the workspace only builds on macOS.
-    # macOS runners are free for public repositories only; until launch, scripts/check.sh gates every push.
-    if: ${{ !github.event.repository.private }}
-    runs-on: macos-latest
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.paths.outputs.rust }}
+      app: ${{ steps.paths.outputs.app }}
+      cloud: ${{ steps.paths.outputs.cloud }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # A pull request checks out its merge with the base, whose first parent is the base.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: What changed
+        id: paths
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            files=$(git diff --name-only HEAD^1 HEAD)
+          else
+            files=everything
+          fi
+          changed() {
+            if [ "$files" = everything ] || printf '%s\n' "$files" | grep -Eq "$1"; then
+              echo "$2=true" >>"$GITHUB_OUTPUT"
+              echo "$2: yes"
+            else
+              echo "$2: no"
+            fi
+          }
+          ci='|^\.github/workflows/ci\.yml$'
+          changed "^crates/|^Cargo\.(toml|lock)\$|^rust-toolchain(\.toml)?\$$ci" rust
+          changed "^app/$ci" app
+          # cloud/ builds crates/dino-sync, which takes its version from the root Cargo.toml.
+          changed "^cloud/|^crates/dino-sync/|^Cargo\.toml\$$ci" cloud
+      - name: Tree checks
+        run: scripts/lint.sh
+
+  rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    # dino-core calls proc_pidinfo, so the workspace only builds on macOS.
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Pull requests read main's cache and don't write their own: the cache stays small and
+          # what a fork builds never lands in what main uses.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --workspace --all-targets --locked
       - run: cargo test --workspace --locked
 
-  app:
-    if: ${{ !github.event.repository.private }}
-    runs-on: macos-latest
+  clippy:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: maxim-lobanov/setup-xcode@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --component clippy --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Clippy's errors (the correctness lints) fail the check; its warnings are shown on the pull
+      # request without failing it.
+      - run: cargo clippy --workspace --all-targets --locked
+
+  app:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
           xcode-version: latest-stable
+      # The packages, libghostty's framework among them, from SwiftPM's own cache.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('app/Package.resolved') }}
+          restore-keys: swiftpm-${{ runner.os }}-
       - name: swift build
         working-directory: app
         run: swift build -c release
+
+  cloud:
+    needs: changes
+    if: needs.changes.outputs.cloud == 'true'
+    # The account server, cloud/: a workspace of its own, which builds on Linux.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: dino
+          POSTGRES_PASSWORD: dino
+          POSTGRES_DB: dino_cloud
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U dino"
+          --health-interval 2s
+          --health-retries 30
+    env:
+      DINO_TEST_DATABASE_URL: postgres://dino:dino@127.0.0.1:55432/postgres
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cloud/rust-toolchain.toml picks the version.
+      - run: rustup toolchain install --no-self-update && rustup component add clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: cloud
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo clippy --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
