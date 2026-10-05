@@ -5,3 +5,7 @@ error.log
 .build/
 site/
 dist/
+.DS_Store
+*.pid
+*.dmg
+.env
