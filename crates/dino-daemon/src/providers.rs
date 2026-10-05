@@ -28,7 +28,13 @@ const HOSTED_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 #[derive(Default)]
 struct Cache {
+    /// Each provider, with when it was last asked what it serves.
     providers: HashMap<String, (Instant, ProviderInfo)>,
+    /// When OpenRouter's account was last read.
+    account_at: Option<Instant>,
+    /// Local runtimes whose port something else answers on (a dev server on 8000), and when that
+    /// was found: that server is asked one GET, then nothing for `LOCAL_EVERY`.
+    others: HashMap<String, Instant>,
     models: HashMap<String, Fetched>,
     /// Being fetched now.
     busy: HashSet<String>,
@@ -137,11 +143,14 @@ pub fn refresh(now: bool) {
     };
 
     // OpenRouter: what it serves rarely changes; the account, every minute while there's a key.
-    let mut or = seen("openrouter", HOSTED_EVERY).unwrap_or_else(|| ProviderInfo { formats: probe(OPENROUTER), ..openrouter_bare() });
+    let kept = seen("openrouter", HOSTED_EVERY);
+    let asked = kept.is_none();
+    let mut or = kept.unwrap_or_else(|| ProviderInfo { formats: probe(OPENROUTER), ..openrouter_bare() });
     let had_key = or.connected;
     or.connected = key.is_some();
     or.account = match &key {
-        Some(k) if now || !had_key || cache().lock().unwrap().providers.get("openrouter").is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(60)) => {
+        Some(k) if now || !had_key || cache().lock().unwrap().account_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) => {
+            cache().lock().unwrap().account_at = Some(Instant::now());
             match account(k) {
                 Ok(a) => {
                     or.error = None;
@@ -160,7 +169,7 @@ pub fn refresh(now: bool) {
             None
         }
     };
-    store(or);
+    store(or, asked);
 
     // Signed in with ChatGPT: what the key store says, and the last error until the next try.
     let keys = dino_core::load_keys();
@@ -180,26 +189,29 @@ pub fn refresh(now: bool) {
             c.models.remove("chatgpt");
         }
     }
-    store(chatgpt);
+    store(chatgpt, false);
 
     for (id, _, _) in LOCAL {
         let Some((name, base)) = dino_proxy::local::runtime(id) else { continue };
         let addr = base.split_once("://").map_or(base, |(_, a)| a);
         let up = addr.to_socket_addrs().ok().and_then(|mut a| a.next()).is_some_and(|a| TcpStream::connect_timeout(&a, Duration::from_millis(200)).is_ok());
-        let p = if !up {
-            local_bare(id, name, base)
+        let other = cache().lock().unwrap().others.get(*id).is_some_and(|at| at.elapsed() < LOCAL_EVERY);
+        let (p, asked) = if !up {
+            cache().lock().unwrap().others.remove(*id);
+            (local_bare(id, name, base), false)
         } else if let Some(p) = seen(id, LOCAL_EVERY).filter(|p| p.connected) {
-            p
+            (p, false)
+        } else if other {
+            (local_bare(id, name, base), false)
+        } else if !is(id, base) {
+            // Something else on the port (a dev server on 8000): asked what it is, nothing more.
+            cache().lock().unwrap().others.insert(id.to_string(), Instant::now());
+            (local_bare(id, name, base), false)
         } else {
-            let mut p = ProviderInfo { formats: probe(base), connected: true, version: version(id, base), ..local_bare(id, name, base) };
-            // Something else on the port (a dev server on 8000): not this one.
-            if !is(id, base) {
-                p = local_bare(id, name, base);
-            }
-            p
+            (ProviderInfo { formats: probe(base), connected: true, version: version(id, base), ..local_bare(id, name, base) }, true)
         };
         let running = p.connected;
-        store(p);
+        store(p, asked);
         if !running {
             cache().lock().unwrap().models.remove(*id);
         }
@@ -225,7 +237,7 @@ pub fn refresh(now: bool) {
         if !p.connected {
             cache().lock().unwrap().models.remove(&id);
         }
-        store(p);
+        store(p, false);
     }
 }
 
@@ -393,10 +405,12 @@ pub fn disconnect_plan(id: &str, save: impl Fn(&str, Option<&str>) -> anyhow::Re
     Ok(())
 }
 
-fn store(p: ProviderInfo) {
+/// Keep `p`. `asked`: it's what the provider just said, so its age starts again; otherwise it's
+/// what was kept (or nothing was asked), and keeps its age.
+fn store(p: ProviderInfo, asked: bool) {
     let mut c = cache().lock().unwrap();
-    let keep = c.providers.get(&p.id).filter(|(_, old)| old.formats == p.formats && old.connected == p.connected && old.version == p.version).map(|(at, _)| *at);
-    c.providers.insert(p.id.clone(), (keep.unwrap_or_else(Instant::now), p));
+    let at = c.providers.get(&p.id).filter(|_| !asked).map_or_else(Instant::now, |(at, _)| *at);
+    c.providers.insert(p.id.clone(), (at, p));
 }
 
 fn openrouter_bare() -> ProviderInfo {
@@ -658,6 +672,22 @@ fn fetch_models(id: &str) {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    /// A provider's age starts again each time it's asked, even when it says the same; what's
+    /// only kept keeps its age, so it's asked again once that's up.
+    #[test]
+    fn age_starts_again_when_asked() {
+        let p = ProviderInfo { id: "test-age".into(), ..Default::default() };
+        let at = || cache().lock().unwrap().providers["test-age"].0;
+        store(p.clone(), true);
+        let first = at();
+        std::thread::sleep(Duration::from_millis(5));
+        store(p.clone(), false);
+        assert_eq!(at(), first, "kept, not asked");
+        store(p, true);
+        assert!(at() > first, "asked again, the same answer");
+        cache().lock().unwrap().providers.remove("test-age");
+    }
 
     /// OpenRouter's key exchange, as a local stand-in: answers once and says what it was sent.
     fn exchange_server() -> (String, std::sync::mpsc::Receiver<Value>) {
