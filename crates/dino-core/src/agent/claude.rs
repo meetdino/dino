@@ -391,6 +391,25 @@ impl Agent for Claude {
         out
     }
 
+    // Its config folder holds its sign-in and its conversations; Bedrock and Vertex pick a cloud
+    // account instead of Anthropic's.
+    fn account_vars(&self) -> &'static [&'static str] {
+        &[
+            "CLAUDE_CONFIG_DIR",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "CLOUD_ML_REGION",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_BEARER_TOKEN_BEDROCK",
+        ]
+    }
+
     fn login(&self) -> Option<String> {
         let account = crate::discover::read_json(home().join(".claude.json")).map(|v| v["oauthAccount"].clone()).filter(|a| a.is_object());
         Some(match account {

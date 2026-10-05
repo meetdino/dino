@@ -383,12 +383,40 @@ pub trait Agent: Sync {
         vec![]
     }
 
+    /// Variables besides keys, tokens and base URLs (see [`account_env`]) that pick the account,
+    /// endpoint or config it runs with: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`.
+    fn account_vars(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     // ---- This Mac ----
 
     /// How it's signed in: "Claude Max", "ChatGPT login", "signed out".
     fn login(&self) -> Option<String> {
         None
     }
+}
+
+/// What in `env` (a process's `NAME=value` environment, as `procinfo::args_and_env` reads it)
+/// chose the account an agent of `agent_id` talks to: its keys and tokens, base URLs, and its own
+/// `account_vars`. A conversation dino continues for someone (one started by hand, `claude
+/// --resume` with another account's token) keeps them, or it falls back to the user's own login.
+/// Never dino's own variables, nor a base URL of a dino proxy (dino wires its own), nor what a
+/// parent agent sets.
+pub fn account_env(agent_id: &str, env: &[String]) -> Vec<(String, String)> {
+    const SUFFIXES: &[&str] = &["_API_KEY", "_AUTH_TOKEN", "_OAUTH_TOKEN", "_BASE_URL"];
+    let own = agent(agent_id).map(|a| a.account_vars()).unwrap_or_default();
+    let mut out: Vec<(String, String)> = env
+        .iter()
+        .filter_map(|kv| kv.split_once('='))
+        .filter(|(k, v)| !v.is_empty() && !k.starts_with("DINO_") && !crate::PARENT_AGENT_ENV.contains(k))
+        .filter(|(k, _)| SUFFIXES.iter().any(|s| k.ends_with(s)) || own.contains(k))
+        .filter(|(k, v)| !(k.ends_with("_BASE_URL") && crate::is_proxy_url(v)))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    out.sort();
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
 }
 
 static CLAUDE: claude::Claude = claude::Claude { free: false };
@@ -551,6 +579,36 @@ pub(crate) fn control_args(a: &dyn Agent, mode: Option<&str>, model: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hand_run_agents_account_comes_from_its_keys_tokens_and_endpoints() {
+        let env: Vec<String> = [
+            "PATH=/usr/bin",
+            "HOME=/Users/x",
+            "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-second",
+            "ANTHROPIC_API_KEY=",
+            "ANTHROPIC_AUTH_TOKEN=gateway-token",
+            "ANTHROPIC_BASE_URL=http://127.0.0.1:4100/k/secret/s/7/anthropic",
+            "OPENAI_BASE_URL=https://gateway.example/v1",
+            "OPENAI_API_KEY=sk-openai",
+            "CLAUDE_CONFIG_DIR=/Users/x/.claude-work",
+            "DINO_CLAUDE_BASE_URL=http://127.0.0.1:4100/k/secret/s/7/anthropic",
+            "DINO_PROXY_KEY=secret",
+            "CODEX_HOME=/Users/x/.codex-work",
+            "not a variable",
+        ]
+        .map(String::from)
+        .to_vec();
+        let names = |agent: &str| account_env(agent, &env).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        // Keys, tokens and its own config folder; never dino's, an empty one, or a dino proxy's URL.
+        assert_eq!(names("claude"), ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "OPENAI_API_KEY", "OPENAI_BASE_URL"]);
+        assert_eq!(names("codex"), ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"]);
+        assert_eq!(account_env("claude", &env).iter().find(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN").map(|(_, v)| v.as_str()), Some("sk-ant-oat01-second"));
+        // A base URL of the user's own is theirs to keep.
+        let own = vec!["ANTHROPIC_BASE_URL=https://gateway.example".to_string()];
+        assert_eq!(account_env("claude", &own), [("ANTHROPIC_BASE_URL".to_string(), "https://gateway.example".to_string())]);
+        assert!(account_env("shell", &["PATH=/bin".to_string()]).is_empty());
+    }
 
     #[test]
     fn the_prompt_among_an_agents_arguments_is_found_as_its_parser_would() {

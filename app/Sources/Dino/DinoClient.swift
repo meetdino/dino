@@ -57,6 +57,10 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var host: String?
     /// A shell's: the agent someone started in it by hand, while it runs.
     var inside: FoundSession?
+    /// A shell whose agent waits for its turn to end to continue in dino (Cancel stops it).
+    var taking_over: Bool?
+    /// The agent's own conversation id: one conversation is one row.
+    var conversation: String?
     /// A shell's, from its shell integration: where it is now (`cwd` is where it started), and
     /// how its last command ended.
     var shell_cwd: String?
@@ -1009,6 +1013,12 @@ final class DinoConnection: @unchecked Sendable {
     /// Continue the agent started by hand in shell `session` as a dino session, in the shell's place.
     func takeOver(session: String) throws {
         _ = try send(["type": "take_over", "id": session])
+    }
+
+    /// Stop waiting to continue in dino: `id` is the shell's session id (take over), or the
+    /// conversation's id (adopt).
+    func cancelTakeOver(id: String) throws {
+        _ = try send(["type": "cancel_take_over", "id": id])
     }
 
     /// One request/response exchange; throws dinod's error message as-is.
