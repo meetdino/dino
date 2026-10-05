@@ -91,7 +91,7 @@ fn sessions() -> (Vec<Item>, Vec<Item>) {
     (live, past)
 }
 
-fn tilde(p: &str) -> String {
+pub(crate) fn tilde(p: &str) -> String {
     match std::env::var("HOME") {
         Ok(h) if !h.is_empty() && p.starts_with(&h) => format!("~{}", &p[h.len()..]),
         _ => p.to_string(),

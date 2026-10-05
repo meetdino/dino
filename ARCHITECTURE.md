@@ -63,6 +63,12 @@ Accessibility…), whoever asked for it to start. A client starts it with `launc
 (crates/dino/src/launchd.rs, app/Sources/Dino/LaunchAgent.swift). Without the app it is forked as
 before.
 
+Builds share one compiler cache per machine. dinod starts every local session (agents and shells)
+with `RUSTC_WRAPPER` set to a script of its own that runs rustc through sccache, and runs the one
+sccache server, on its own socket, while sessions use it. Each worktree keeps its own `target/`. A
+missing, broken or full cache falls back to plain rustc; a wrapper the repo or the user set up wins
+(crates/dino-core/src/build_cache.rs).
+
 Agent traffic goes through the proxy inside dinod and never leaves the machine except to the
 provider the agent talks to. dino-cloud sees only synced settings (over TLS, readable by the
 service so the account page can show them); API keys and tokens never leave the Mac.
