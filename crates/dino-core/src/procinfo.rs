@@ -372,9 +372,11 @@ mod tests {
         let later = rusage(me).unwrap();
         assert!(after.children_ns > before.children_ns + 50_000_000, "{before:?} {after:?}");
         // Same clock, same units: getrusage rounds to microseconds and adds its time up a little
-        // differently (a fraction of a percent apart over many children). Bracketed, as other
-        // tests may be ending children of their own meanwhile.
-        let near = |n: u64| n + n / 50 + 1_000_000;
+        // differently, a fraction of a percent apart over many children and a few percent on a
+        // busy Mac (2.5% seen while the whole workspace's tests ran). What this guards is the
+        // units: unconverted ticks would be 41× off on Apple silicon. Bracketed, as other tests
+        // may be ending children of their own meanwhile.
+        let near = |n: u64| n + n / 10 + 1_000_000;
         assert!(after.children_ns <= near(children) && children <= near(later.children_ns), "{} ≤ {children} ≤ {}", after.children_ns, later.children_ns);
         assert!(after.footprint > 0 && after.cpu_ns > 0 && after.started_ns < now_ns());
         assert_eq!(rusage(me).unwrap().started_ns, after.started_ns);

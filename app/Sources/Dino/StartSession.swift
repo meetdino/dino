@@ -9,9 +9,35 @@ struct StartRequest: Identifiable, Equatable {
 }
 
 extension DinoModel {
-    /// ⌘N, the toolbar's +, the empty window: one way to start work, where first, then which agent.
+    /// The sidebar's +, New Session…, the empty window: one way to start work anywhere, where
+    /// first, then which agent.
     func startSession(in folder: String? = nil, worktree: Bool = false) {
         startRequest = StartRequest(folder: folder, worktree: worktree)
+    }
+
+    /// ⌘N: the agent Settings → Agents says ⌘N starts, right where you are, like a new tab in a
+    /// terminal; no picker. dinod lists that agent first (none chosen: Claude Code, or the first
+    /// allowed one).
+    func newSessionHere() {
+        guard let l = launchers.first(where: { $0.agent_id != "shell" }) ?? launchers.first else { return }
+        let dir = hereFolder
+        if folder.path != dir { folder = URL(fileURLWithPath: dir) }
+        rememberLocalFolder(dir)
+        newSession(l, in: dir)
+    }
+
+    /// Where ⌘N starts: the selected session's folder or worktree (a shell's, wherever it has
+    /// `cd`d), a selected folder row, else the folder last used. A session on another host says
+    /// nothing about this Mac's folders.
+    var hereFolder: String {
+        func isDir(_ path: String) -> Bool {
+            var dir: ObjCBool = false
+            return FileManager.default.fileExists(atPath: path, isDirectory: &dir) && dir.boolValue
+        }
+        if let s = selectedSession, s.host == nil, let here = s.here, isDir(here) { return here }
+        if let path = Self.folderPath(selected), isDir(path) { return path }
+        if isDir(folder.path) { return folder.path }
+        return FileManager.default.homeDirectoryForCurrentUser.path
     }
 
     /// ⌘O: a folder from the Finder's panel, then the agent to run there.
@@ -85,6 +111,43 @@ enum GitHubCLI {
     }
 }
 
+/// One of the picker's rows. Drawn here rather than in a List: a List takes the keyboard when it's
+/// clicked or tabbed into, and then keeps Return and clicks for its own selection, so nothing was
+/// picked. These rows never take focus: the search field keeps it and its ↑↓ move the highlight,
+/// Return (the sheet's default button) takes it, and a click picks the row whatever has the keyboard.
+private struct PickRow<Label: View>: View {
+    var highlighted: Bool
+    var action: () -> Void
+    @ViewBuilder var label: Label
+
+    var body: some View {
+        label
+            .labelStyle(TintedIcon())
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(highlighted ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor) : .clear)
+            )
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(highlighted ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction { action() }
+    }
+}
+
+/// A row's icon in the accent colour, as a List's sidebar-style rows have it.
+private struct TintedIcon: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 6) {
+            configuration.icon.foregroundStyle(.tint).frame(width: 18)
+            configuration.title
+        }
+    }
+}
+
 /// One row in the picker's first step.
 private enum Place: Hashable, Identifiable {
     case folder(String, current: Bool)
@@ -115,8 +178,9 @@ private enum Place: Hashable, Identifiable {
     }
 }
 
-/// The picker behind ⌘N: where first (here, recent folders, your GitHub repositories, a folder or a
-/// URL to clone, a new project), then which agent. Typing narrows both; Return takes the first.
+/// The new-session picker (the sidebar's +, New Session…): where first (here, recent folders, your
+/// GitHub repositories, a folder or a URL to clone, a new project), then which agent. Typing
+/// narrows both; ↑↓ move the highlight, Return or a click takes it.
 struct StartSessionSheet: View {
     @EnvironmentObject var model: DinoModel
     @Environment(\.dismiss) private var dismiss
@@ -160,7 +224,6 @@ struct StartSessionSheet: View {
             TextField(folder == nil ? "Search folders, repositories, or paste a URL to clone" : "Search agents", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .focused($searching)
-                .onSubmit(takeHighlighted)
                 .onKeyPress(.downArrow) { move(1); return .handled }
                 .onKeyPress(.upArrow) { move(-1); return .handled }
                 .disabled(cloning != nil)
@@ -217,23 +280,27 @@ struct StartSessionSheet: View {
 
     private var placeList: some View {
         ScrollViewReader { proxy in
-            List(selection: Binding(get: { highlighted }, set: { highlighted = $0 })) {
-                ForEach(places) { p in
-                    row(p).tag(p.id).id(p.id)
-                        .contentShape(Rectangle())
-                        .onTapGesture(count: 2) { pick(p) }
-                        .onTapGesture { highlighted = p.id; pick(p) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(places) { p in
+                        PickRow(highlighted: highlighted == p.id) { highlighted = p.id; pick(p) } label: { row(p) }
+                            .id(p.id)
+                    }
+                    Group {
+                        if !githubLoaded {
+                            Label("Looking for your GitHub repositories…", systemImage: "hourglass").foregroundStyle(.secondary).font(.callout)
+                        } else if github == nil {
+                            Text(GitHubCLI.path == nil
+                                 ? "To pick from your GitHub repositories here, install the GitHub CLI (brew install gh) and run gh auth login. Or paste a repository's URL above."
+                                 : "To pick from your GitHub repositories here, run gh auth login. Or paste a repository's URL above.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 4)
                 }
-                if !githubLoaded {
-                    Label("Looking for your GitHub repositories…", systemImage: "hourglass").foregroundStyle(.secondary).font(.callout)
-                } else if github == nil {
-                    Text(GitHubCLI.path == nil
-                         ? "To pick from your GitHub repositories here, install the GitHub CLI (brew install gh) and run gh auth login. Or paste a repository's URL above."
-                         : "To pick from your GitHub repositories here, run gh auth login. Or paste a repository's URL above.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                .padding(4)
             }
-            .listStyle(.inset)
             .frame(height: 340)
             .onChange(of: highlighted) { _, id in if let id { proxy.scrollTo(id) } }
         }
@@ -275,21 +342,23 @@ struct StartSessionSheet: View {
 
     private func agentList(in folder: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            List(selection: Binding(get: { highlighted }, set: { highlighted = $0 })) {
-                ForEach(agents) { l in
-                    HStack {
-                        Text(l.label)
-                        Spacer()
-                        if l.short == model.launchers.first?.short {
-                            Text("⌘N").font(.caption).foregroundStyle(.tertiary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(agents) { l in
+                        PickRow(highlighted: highlighted == l.short) { highlighted = l.short; startAgent(l.short) } label: {
+                            HStack {
+                                Text(l.label)
+                                Spacer()
+                                if l.short == model.launchers.first?.short {
+                                    Text("⌘N").font(.caption).foregroundStyle(.tertiary)
+                                        .help("⌘N starts this agent where you are, without this picker")
+                                }
+                            }
                         }
                     }
-                    .tag(l.short)
-                    .contentShape(Rectangle())
-                    .onTapGesture { highlighted = l.short; startAgent(l.short) }
                 }
+                .padding(4)
             }
-            .listStyle(.inset)
             .frame(height: 220)
             HStack {
                 if isRepo(folder) {
@@ -315,6 +384,11 @@ struct StartSessionSheet: View {
             Spacer()
             Button("Cancel", role: .cancel) { cancelClone(); dismiss() }
                 .keyboardShortcut(.cancelAction)
+            // Return, wherever the keyboard is in the sheet: the search field, or a control Tab
+            // reached. (So the field has no onSubmit: Return would take the row twice.)
+            Button(folder == nil ? "Choose" : "Start", action: takeHighlighted)
+                .keyboardShortcut(.defaultAction)
+                .disabled(cloning != nil || (folder == nil ? places.isEmpty : agents.isEmpty))
         }
     }
 
@@ -328,6 +402,7 @@ struct StartSessionSheet: View {
     }
 
     private func takeHighlighted() {
+        guard cloning == nil else { return }
         if folder != nil {
             if let id = highlighted ?? agents.first?.short { startAgent(id) }
         } else if let p = places.first(where: { $0.id == highlighted }) ?? places.first {
