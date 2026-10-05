@@ -58,7 +58,7 @@ pub(crate) fn cached(p: &Path, parse: fn(&Path) -> Meta) -> Meta {
 }
 
 /// The whole lines in bytes `from..to` of `p`. A range starting mid-line drops that fragment.
-fn read_range(p: &Path, from: u64, to: u64) -> Option<String> {
+pub(crate) fn read_range(p: &Path, from: u64, to: u64) -> Option<String> {
     let mut f = std::fs::File::open(p).ok()?;
     f.seek(SeekFrom::Start(from)).ok()?;
     let mut buf = vec![];
@@ -381,6 +381,26 @@ fn codex_meta_in(jsonl: &str) -> Meta {
     Meta { title: first, cwd: payload["cwd"].as_str().map(String::from), hidden }
 }
 
+/// The conversation a Claude transcript's first lines say it was forked from (`forkedFrom`, which
+/// `/branch` puts on every entry it copies).
+pub(crate) fn claude_forked_from(jsonl: &str) -> Option<String> {
+    jsonl
+        .lines()
+        .take(50)
+        .filter(|l| l.contains("\"forkedFrom\""))
+        .find_map(|l| serde_json::from_str::<Value>(l).ok()?["forkedFrom"]["sessionId"].as_str().map(String::from))
+}
+
+/// The conversation a Codex rollout was forked from (`forked_from_id` in its `session_meta`).
+pub fn codex_forked_from(rollout: &Path) -> Option<String> {
+    codex_forked_from_in(&read_range(rollout, 0, PEEK)?)
+}
+
+fn codex_forked_from_in(jsonl: &str) -> Option<String> {
+    let meta: Value = serde_json::from_str(jsonl.lines().next()?).ok()?;
+    (meta["type"] == "session_meta").then(|| meta["payload"]["forked_from_id"].as_str().map(String::from)).flatten()
+}
+
 /// "busy" while Codex is on a turn, else "idle", from the rollout's last turn event.
 pub fn codex_status(rollout: &Path) -> Option<String> {
     let len = rollout.metadata().ok()?.len();
@@ -608,6 +628,24 @@ pub(crate) fn short(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As Claude Code 2.1.289's `/branch` and Codex 0.160's `/fork` write them (from real ones).
+    #[test]
+    fn a_fork_names_the_conversation_it_came_from() {
+        let branch = concat!(
+            r#"{"parentUuid":null,"type":"user","uuid":"9fa5","sessionId":"d26b","forkedFrom":{"sessionId":"0a87","messageUuid":"9fa5"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"1fa0","sessionId":"d26b"}"#,
+            "\n"
+        );
+        assert_eq!(claude_forked_from(branch).as_deref(), Some("0a87"));
+        // `--fork-session` copies the entries without saying where from; a plain one never says.
+        assert_eq!(claude_forked_from(r#"{"type":"user","uuid":"9d08","sessionId":"e46f"}"#), None);
+        let rollout = r#"{"type":"session_meta","payload":{"id":"01a1-7bd0","forked_from_id":"01a1-5eb6","forked_from_ordinal_exclusive":13,"source":"cli"}}
+{"type":"event_msg","payload":{"type":"task_started"}}"#;
+        assert_eq!(codex_forked_from_in(rollout).as_deref(), Some("01a1-5eb6"));
+        assert_eq!(codex_forked_from_in(r#"{"type":"session_meta","payload":{"id":"01a1"}}"#), None);
+    }
 
     #[test]
     fn claude_titles_prefer_a_rename_then_its_own_title() {

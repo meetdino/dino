@@ -60,6 +60,8 @@ const USAGE: &str = "Sessions
   dino new [--worktree] [--stay] <agent> [--on <provider> <model>] [args...]
                                     start one in the background; prints its id
   dino attach | resume | kill <id>
+  dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]
+                                    a new session on a copy of its conversation
   dino rm [--force] <id>            delete it, and the worktree dino made for it
   dino found [--all] [--json]       agents dino didn't start, to continue here
   dino continue <id>                continue one of those in dino
@@ -236,6 +238,7 @@ fn dino() -> anyhow::Result<()> {
             say(&format!("Resumed session {id}. `dino attach {id}` opens it here.", id = printable(&id)));
             return Ok(());
         }
+        Some("fork") => return cmd_fork(&cli[1..]),
         Some("stop") => {
             if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
                 println!("dinod isn't running.");
@@ -1021,6 +1024,43 @@ yours, is never removed. The agent's own conversation stays: `dino found --all` 
   -f, --force   delete it even when its worktree has uncommitted changes, which are lost
 
 A branch with commits that aren't merged stays, pushed or not.";
+
+/// `dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]`: a new session on a copy of session
+/// `id`'s conversation, by the agent's own fork, in a new worktree unless told otherwise.
+fn cmd_fork(args: &[String]) -> anyhow::Result<()> {
+    const USAGE: &str = "usage: dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]\n\
+        A new session on a copy of session <id>'s conversation, made by its agent's own fork (Claude Code,\n\
+        Codex), with its mode, model and account; the original stays as it is. It starts in a new git\n\
+        worktree off the session's checkout unless --no-worktree. Words after -- are its first prompt.";
+    let (opts, prompt) = match args.iter().position(|a| a == "--") {
+        Some(i) => (&args[..i], Some(args[i + 1..].join(" ")).filter(|p| !p.trim().is_empty())),
+        None => (args, None),
+    };
+    let (mut id, mut name, mut worktree) = (None, None, true);
+    let mut it = opts.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            "--no-worktree" => worktree = false,
+            "--name" => name = Some(it.next().ok_or_else(|| anyhow::anyhow!("--name takes a name\n{USAGE}"))?.clone()),
+            other if other.starts_with('-') => anyhow::bail!("unknown option {}\n{USAGE}", printable(other)),
+            other if id.is_none() => id = Some(other.to_string()),
+            _ => anyhow::bail!("{USAGE}"),
+        }
+    }
+    let id = id.ok_or_else(|| anyhow::anyhow!("{USAGE}\n`dino ls` lists the sessions."))?;
+    let new = created(client::request(&Request::Fork { id: id.clone(), name, worktree, prompt })?)?;
+    if out::tty() {
+        let place = if worktree { " in a new worktree" } else { "" };
+        println!("Forked session {} as session {new}{place}. `dino attach {new}` opens it here.", printable(&id));
+    } else {
+        println!("{new}");
+    }
+    Ok(())
+}
 
 /// `dino rm [--force] <id>`: delete a session, and the worktree dino made for it.
 fn cmd_rm(args: &[String]) -> anyhow::Result<()> {
