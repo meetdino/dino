@@ -1,14 +1,24 @@
 import SwiftUI
 
+/// dinod's power state, observed apart from `DinoModel`: other apps take and drop power assertions
+/// all the time (a chat app finishing a task, a video playing), and each would otherwise redraw the
+/// whole window. Only the views that show it (here and in Settings → Power) observe this.
+@MainActor
+final class PowerState: ObservableObject {
+    static let shared = PowerState()
+    @Published var info: PowerInfo?
+}
+
 /// What keeps the Mac awake, at the foot of the sidebar: one line saying what's true now
 /// ("Staying awake · 2 agents working"), opening to every process that does. Hidden when nothing
 /// you'd care about keeps it awake.
 struct AwakeStatus: View {
     @EnvironmentObject var model: DinoModel
+    @ObservedObject private var state = PowerState.shared
     @State private var showing = false
 
     var body: some View {
-        if let power = model.power, let line = power.awakeLine(session: model.awakeSessionName) {
+        if let power = state.info, let line = power.awakeLine(session: model.awakeSessionName) {
             Button { showing.toggle() } label: {
                 Label {
                     Text(line).lineLimit(1).truncationMode(.tail)
@@ -42,6 +52,7 @@ extension DinoModel {
 /// Everything keeping the Mac awake, with the way to Settings → Power.
 private struct AwakePopover: View {
     @EnvironmentObject var model: DinoModel
+    @ObservedObject private var state = PowerState.shared
     @Environment(\.openWindow) private var openWindow
     @AppStorage("settingsTab") private var settingsPane: SettingsPane = .general
     let close: () -> Void
@@ -49,7 +60,7 @@ private struct AwakePopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Keeping the Mac awake").font(.headline)
-            if model.power?.holding == true {
+            if state.info?.holding == true {
                 Label("Awake with the lid closed: dino turned system sleep off while agents work", systemImage: "laptopcomputer")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -79,10 +90,11 @@ private struct AwakePopover: View {
 /// dimmed. `open` goes to a session, when one is named.
 struct AwakeList: View {
     @EnvironmentObject var model: DinoModel
+    @ObservedObject private var state = PowerState.shared
     var open: ((String) -> Void)?
 
     private var holders: [AwakeHolder] {
-        let all = model.power?.awake ?? []
+        let all = state.info?.awake ?? []
         return all.filter { !$0.system } + all.filter(\.system)
     }
 
@@ -155,11 +167,11 @@ struct AwakeList: View {
 
 /// Settings → Power: what keeps the Mac awake right now.
 struct AwakeNow: View {
-    @EnvironmentObject var model: DinoModel
+    @ObservedObject private var state = PowerState.shared
     @State private var open = false
 
     var body: some View {
-        let all = model.power?.awake ?? []
+        let all = state.info?.awake ?? []
         let count = all.filter { !$0.system }.count
         DisclosureGroup(isExpanded: $open) {
             AwakeList()

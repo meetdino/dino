@@ -60,8 +60,9 @@ final class DinoModel: ObservableObject {
     @Published var quotas: [QuotaInfo] = []
     /// Agents at their limit, and what new sessions start with meanwhile (Settings → Agents).
     @Published var limits: [AgentLimit] = []
-    /// Kept awake with the lid closed, and why sleep came back last; nil from an older dinod.
-    @Published var power: PowerInfo?
+    /// Kept awake with the lid closed, why sleep came back last, and what keeps the Mac awake; nil
+    /// from an older dinod. Views observe `PowerState` for it (see there).
+    var power: PowerInfo? { PowerState.shared.info }
     @Published var launchers: [LauncherInfo] = []
     @Published var selected: String? {
         // Remembered per dinod, so reopening the app comes back to the same session.
@@ -388,7 +389,7 @@ final class DinoModel: ObservableObject {
         if let note = next?.note, let at = next?.note_at, power != nil, at != power?.note_at {
             Notifier.post(key: "lid", title: "Closing the lid sleeps the Mac again", body: note)
         }
-        power = next
+        PowerState.shared.info = next
     }
 
     private func apply(_ next: [SessionInfo], _ quotas: [QuotaInfo]) {
