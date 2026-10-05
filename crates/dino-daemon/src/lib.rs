@@ -1852,6 +1852,10 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let session = sessions.last().cloned();
     drop(sessions);
     if let Some(s) = session {
+        if restore.is_some() {
+            let conversation = s.agent_session.lock().unwrap().clone();
+            stats::seed(d, &s.id, None, s.started_at, conversation.as_deref());
+        }
         fallbacks::set(d, &settings, &s);
         sync_shell_agents(d, &s, &Settings::load());
         if s.server.is_some() && !s.pane.is_exited() {
