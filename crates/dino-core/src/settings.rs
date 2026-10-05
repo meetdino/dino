@@ -641,13 +641,21 @@ pub fn key_status() -> Vec<KeyInfo> {
 
 /// Store (or with `None`, remove) a key in the 600 key store, keeping the others.
 pub fn set_key(name: &str, value: Option<&str>) -> anyhow::Result<()> {
-    let valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-    anyhow::ensure!(valid, "key names are like NVIDIA_API_KEY");
-    let value = value.map(str::trim).filter(|v| !v.is_empty());
-    anyhow::ensure!(value.is_none_or(|v| !v.contains(['\n', '\r', '='])), "that doesn't look like a key");
-    let mut keys: Vec<_> = stored().into_iter().filter(|(k, _)| k != name).collect();
-    if let Some(v) = value {
-        keys.push((name.to_string(), v.to_string()));
+    set_keys(&[(name, value)])
+}
+
+/// Several keys at once (each kept, or removed with no value), all or none.
+pub fn set_keys(changes: &[(&str, Option<&str>)]) -> anyhow::Result<()> {
+    let mut keys = stored();
+    for &(name, value) in changes {
+        let valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        anyhow::ensure!(valid, "key names are like NVIDIA_API_KEY");
+        let value = value.map(str::trim).filter(|v| !v.is_empty());
+        anyhow::ensure!(value.is_none_or(|v| !v.contains(['\n', '\r', '='])), "that doesn't look like a key");
+        keys.retain(|(k, _)| k != name);
+        if let Some(v) = value {
+            keys.push((name.to_string(), v.to_string()));
+        }
     }
     std::fs::create_dir_all(config_dir())?;
     let tmp = keys_file().with_extension("tmp");

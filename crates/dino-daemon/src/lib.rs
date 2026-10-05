@@ -28,6 +28,7 @@ mod agentlog;
 mod agentserver;
 mod awake;
 mod chatgpt;
+mod claude_accounts;
 mod clients;
 mod cloud;
 mod codex;
@@ -751,7 +752,7 @@ fn save_chatgpt(d: &Daemon, t: &chatgpt::Tokens) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn keys_changed(d: &Daemon) {
+pub(crate) fn keys_changed(d: &Daemon) {
     let keys = load_keys();
     *d.launchers.write().unwrap() = launchers(free_tier(&keys));
     d.proxy.set_plans(providers::plan_routes(&keys));
@@ -1076,6 +1077,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             },
             Request::ClaudeToken { action, value } => match subtoken::serve(d, &action, value) {
                 Ok(token) => Response::ClaudeToken { token },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::ClaudeAccounts { action, value, account, order } => match claude_accounts::serve(d, &action, value, account, order) {
+                Ok(accounts) => Response::ClaudeAccounts { accounts },
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Power { action } => match lid::serve(d, &action) {
@@ -4642,6 +4647,43 @@ mod tests {
             instead_of: None,
             account: vec![],
         }
+    }
+
+    /// Your other Claude accounts through dinod: added from what `claude setup-token` printed (once
+    /// each), reordered by moving their tokens between the same numbers, removed; listed with Claude
+    /// Code's own first, answering while nothing is spent, and never with a token.
+    #[test]
+    fn claude_accounts_are_added_ordered_and_removed() {
+        let d = shell_daemon();
+        let a = "sk-ant-oat01-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let b = "sk-ant-oat01-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        let serve = |action: &str, value: Option<&str>, account: Option<u32>, order: Vec<u32>| claude_accounts::serve(&d, action, value.map(String::from), account, order);
+        let numbers = |i: &dino_core::ipc::ClaudeAccountsInfo| i.accounts.iter().map(|a| (a.number, a.answering, a.spent)).collect::<Vec<_>>();
+        let kept = || dino_core::claude_token::accounts(&load_keys());
+
+        assert!(serve("add", Some("not a token"), None, vec![]).unwrap_err().to_string().contains("isn't a Claude token"));
+        let i = serve("add", Some(&format!("Your OAuth token (valid for 1 year):\n\n{a}\n\nStore this token securely.")), None, vec![]).unwrap();
+        assert_eq!(i.added, Some(2));
+        assert!(serve("add", Some(a), None, vec![]).unwrap_err().to_string().contains("Account 2 already"));
+        let i = serve("add", Some(b), None, vec![]).unwrap();
+        assert_eq!((i.added, numbers(&i)), (Some(3), vec![(1, true, false), (2, false, false), (3, false, false)]));
+        assert!(!serde_json::to_string(&i).unwrap().contains("sk-ant"), "never a token");
+
+        assert!(serve("order", None, None, vec![3]).is_err(), "every account, or nothing moves");
+        serve("order", None, None, vec![3, 2]).unwrap();
+        assert_eq!(kept(), [(2, b.to_string()), (3, a.to_string())]);
+        assert_eq!(d.proxy.claude_accounts(&[b, a]).1.len(), 2);
+
+        assert!(serve("remove", None, Some(9), vec![]).is_err());
+        let i = serve("remove", None, Some(2), vec![]).unwrap();
+        assert_eq!(numbers(&i), [(1, true, false), (3, false, false)]);
+        assert_eq!(kept(), [(3, a.to_string())]);
+        // The first number free again.
+        assert_eq!(serve("add", Some(b), None, vec![]).unwrap().added, Some(2));
+        for n in [2, 3] {
+            serve("remove", None, Some(n), vec![]).unwrap();
+        }
+        assert!(kept().is_empty());
     }
 
     /// dino never runs two processes on one conversation: a second start of it is refused, an

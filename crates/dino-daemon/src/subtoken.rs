@@ -17,10 +17,11 @@ const CREATE_WITHIN: Duration = Duration::from_secs(10 * 60);
 /// How often to ask whether Claude Code on this Mac is signed in, while there's a token.
 const RECHECK: Duration = Duration::from_secs(15 * 60);
 
+/// A `claude setup-token` shell dinod waits on, and what went wrong with the last one.
 #[derive(Default)]
-struct State {
-    creating: Option<String>,
-    error: Option<String>,
+pub(crate) struct State {
+    pub(crate) creating: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State { creating: None, error: None });
@@ -122,22 +123,32 @@ fn keep(t: &str, created: Option<u64>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A shell that runs `claude setup-token`, in front of the user: they sign in in the browser, and
-/// when the token shows up dinod keeps it and closes the shell, so it doesn't stay on screen.
 fn create(d: &Arc<Daemon>) -> anyhow::Result<()> {
+    setup_token_shell(d, "Claude subscription token", &STATE, |t| keep(t, Some(crate::now_secs())))
+}
+
+/// A shell that runs `claude setup-token`, in front of the user: they sign in in the browser, and
+/// when the token shows up dinod hands it to `keep` and closes the shell, so it doesn't stay on
+/// screen. `state` says meanwhile which shell it is, and after, what went wrong.
+pub(crate) fn setup_token_shell(
+    d: &Arc<Daemon>,
+    label: &str,
+    state: &'static Mutex<State>,
+    keep: impl FnOnce(&str) -> anyhow::Result<()> + Send + 'static,
+) -> anyhow::Result<()> {
     anyhow::ensure!(dino_core::which("claude").is_some(), "Claude Code isn't installed: install it first (Settings → Agents)");
-    if let Some(open) = STATE.lock().unwrap().creating.clone() {
+    if let Some(open) = state.lock().unwrap().creating.clone() {
         if d.sessions.lock().unwrap().iter().any(|s| s.id == open && !s.pane.is_exited()) {
             return Ok(());
         }
     }
     let id = crate::spawn(d, Launch::new("shell", vec![], Some(crate::home().display().to_string())))?;
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("the shell went away"))?;
-    *s.label.lock().unwrap() = Some("Claude subscription token".into());
+    *s.label.lock().unwrap() = Some(label.into());
     // No token from anywhere else in the shell that makes one.
     crate::type_at_prompt(s.clone(), format!("unset {KEY}; claude setup-token"));
     {
-        let mut st = STATE.lock().unwrap();
+        let mut st = state.lock().unwrap();
         st.creating = Some(id.clone());
         st.error = None;
     }
@@ -150,7 +161,7 @@ fn create(d: &Arc<Daemon>) -> anyhow::Result<()> {
                 break Err("the shell closed before claude setup-token printed a token".to_string());
             }
             if let Some(t) = token::find(&s.pane.text(200)) {
-                break keep(&t, Some(crate::now_secs())).map_err(|e| e.to_string());
+                break keep(&t).map_err(|e| e.to_string());
             }
             if started.elapsed() > CREATE_WITHIN {
                 break Err("claude setup-token didn't print a token within 10 minutes".to_string());
@@ -158,7 +169,7 @@ fn create(d: &Arc<Daemon>) -> anyhow::Result<()> {
         };
         let ok = outcome.is_ok();
         {
-            let mut st = STATE.lock().unwrap();
+            let mut st = state.lock().unwrap();
             st.creating = None;
             st.error = outcome.err();
         }

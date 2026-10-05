@@ -256,6 +256,20 @@ pub enum Request {
         #[serde(default)]
         value: Option<String>,
     },
+    /// Your other Claude accounts, which Claude Code goes on with when the one it signed in with
+    /// is at its limit: `status`, `add` (`value`: a token `claude setup-token` printed, or text
+    /// holding one), `create` (runs `claude setup-token` in a new shell and adds the token it
+    /// prints), `remove` (`account`: its number) or `order` (`order`: every account's number, in
+    /// the order to try them). Replies `ClaudeAccounts`; never with a token.
+    ClaudeAccounts {
+        action: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        account: Option<u32>,
+        #[serde(default)]
+        order: Vec<u32>,
+    },
     /// The dino account and settings sync. `action`: `status`, `login` (sign in with GitHub;
     /// `value`: the server, else the configured one), `login_email` (`value`: the address to send a
     /// sign-in link to), `login_device`, `cancel_login`, `resolve` (`value`: `cloud`, `local` or
@@ -413,6 +427,7 @@ pub enum Response {
     Sync { status: SyncStatus },
     Power { power: PowerInfo },
     ClaudeToken { token: ClaudeTokenInfo },
+    ClaudeAccounts { accounts: ClaudeAccountsInfo },
     /// `loading`: dinod is asking the provider now; ask again for what it says.
     Models { provider: String, models: Vec<ModelRow>, loading: bool, error: Option<String> },
     PrDraft { draft: PrDraft },
@@ -1152,6 +1167,39 @@ pub struct ClaudeTokenInfo {
     pub creating: Option<String>,
     /// What went wrong with the last attempt.
     pub error: Option<String>,
+}
+
+/// Your Claude accounts as dinod holds them: never their tokens.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct ClaudeAccountsInfo {
+    /// Claude Code's own sign-in first (number 1), then your other accounts in the order they're tried.
+    pub accounts: Vec<ClaudeAccountInfo>,
+    /// The account `add` or `create` just added.
+    #[serde(default)]
+    pub added: Option<u32>,
+    /// The shell running `claude setup-token`, while dinod waits for the token it prints.
+    #[serde(default)]
+    pub creating: Option<String>,
+    /// What went wrong with the last `create`.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One of your Claude accounts.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct ClaudeAccountInfo {
+    /// 1 for the account Claude Code signed in with, 2 on for the others (`CLAUDE_ACCOUNT_<n>`).
+    pub number: u32,
+    /// Claude Code's calls go to this one now: the first that isn't spent.
+    pub answering: bool,
+    /// Found at its subscription limit, and not tried again yet.
+    pub spent: bool,
+    /// When its limit resets (unix seconds), when Anthropic said so.
+    #[serde(default)]
+    pub resets_at: Option<u64>,
+    /// When it's tried again (unix seconds): its reset, or a while after it was found spent.
+    #[serde(default)]
+    pub retry_at: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
