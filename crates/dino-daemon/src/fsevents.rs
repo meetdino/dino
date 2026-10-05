@@ -101,15 +101,26 @@ fn queue() -> *mut c_void {
     QUEUE.get_or_init(|| Q(unsafe { dispatch_queue_create(c"dino.automations.files".as_ptr(), std::ptr::null()) })).0
 }
 
+// The stream's own reference to `Shared`, taken and given back by FSEvents itself: it gives it back
+// once no callback can come (after the last one ends, even when the stream is released during it),
+// and also when it fails to make the stream at all (no paths given, say). So `stream` never gives
+// back what FSEvents took: that was a double free whenever a stream couldn't be made.
+extern "C" fn retain(info: *const c_void) -> *const c_void {
+    // SAFETY: `info` is `Arc::as_ptr` of a `Shared` that `stream` holds while FSEvents retains it,
+    // and that this reference keeps alive after.
+    unsafe { Arc::increment_strong_count(info as *const Shared) };
+    info
+}
+
 extern "C" fn release(info: *const c_void) {
-    // SAFETY: `info` is the `Arc<Shared>` given to the stream in `watch`, released once, here.
-    unsafe { drop(Arc::from_raw(info as *const Shared)) };
+    // SAFETY: gives back the reference `retain` took, once per retain.
+    unsafe { Arc::decrement_strong_count(info as *const Shared) };
 }
 
 extern "C" fn changed(_stream: *const c_void, info: *mut c_void, count: usize, paths: *mut c_void, flags: *const u32, _ids: *const u64) {
     // SAFETY: FSEvents passes back the context's `info` (a live `Shared`: the stream holds a
-    // reference until it's released) and, without kFSEventStreamCreateFlagUseCFTypes, `count`
-    // C strings and as many flags.
+    // reference until no callback can come) and, without kFSEventStreamCreateFlagUseCFTypes,
+    // `count` C strings and as many flags.
     let shared = unsafe { &*(info as *const Shared) };
     let paths = unsafe { std::slice::from_raw_parts(paths as *const *const c_char, count) };
     let flags = unsafe { std::slice::from_raw_parts(flags, count) };
@@ -123,13 +134,15 @@ extern "C" fn changed(_stream: *const c_void, info: *mut c_void, count: usize, p
 
 /// A started stream over `roots` (canonical), or why not.
 fn stream(roots: &[PathBuf], latency: f64, flags: u32, on: OnChanges) -> anyhow::Result<Stream> {
+    let what = || roots.first().map_or_else(|| "no folders".to_string(), |r| r.display().to_string());
     let shared = Arc::new(Shared { on });
-    // SAFETY: plain CoreFoundation/FSEvents calls with valid arguments; the array and strings
-    // are released once the stream has its own copies.
+    let paths = roots.iter().map(|r| CString::new(r.to_string_lossy().as_bytes())).collect::<Result<Vec<_>, _>>()?;
+    // SAFETY: plain CoreFoundation/FSEvents calls with valid arguments. The strings and the array
+    // are released once the stream has its own copies. FSEvents retains `shared` through the
+    // context's callbacks for as long as it needs it, made or not; ours drops on return.
     unsafe {
         let mut strings = Vec::new();
-        for r in roots {
-            let c = CString::new(r.to_string_lossy().as_bytes())?;
+        for (c, r) in paths.iter().zip(roots) {
             let s = CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), UTF8);
             if s.is_null() {
                 strings.iter().for_each(|&s| CFRelease(s));
@@ -139,18 +152,16 @@ fn stream(roots: &[PathBuf], latency: f64, flags: u32, on: OnChanges) -> anyhow:
         }
         let arr = CFArrayCreate(std::ptr::null(), strings.as_ptr(), strings.len() as isize, &kCFTypeArrayCallBacks);
         strings.iter().for_each(|&s| CFRelease(s));
-        let ctx = Context { version: 0, info: Arc::into_raw(shared) as *mut c_void, retain: None, release: Some(release), describe: None };
+        anyhow::ensure!(!arr.is_null(), "can't watch {}", what());
+        let ctx = Context { version: 0, info: Arc::as_ptr(&shared) as *mut c_void, retain: Some(retain), release: Some(release), describe: None };
         let stream = FSEventStreamCreate(std::ptr::null(), changed, &ctx, arr, SINCE_NOW, latency, flags);
         CFRelease(arr);
-        if stream.is_null() {
-            release(ctx.info);
-            anyhow::bail!("macOS won't watch {}", roots.first().map_or_else(String::new, |r| r.display().to_string()));
-        }
+        anyhow::ensure!(!stream.is_null(), "macOS won't watch {}", what());
         FSEventStreamSetDispatchQueue(stream, queue());
         if FSEventStreamStart(stream) == 0 {
             FSEventStreamInvalidate(stream);
             FSEventStreamRelease(stream);
-            anyhow::bail!("macOS won't watch {}", roots.first().map_or_else(String::new, |r| r.display().to_string()));
+            anyhow::bail!("macOS won't watch {}", what());
         }
         Ok(stream)
     }
@@ -234,16 +245,125 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let tx = Mutex::new(tx);
-        let w = Watch::new(&dir, move || drop(tx.lock().unwrap().send(()))).unwrap();
-        // The stream may start late on a loaded Mac: write again until a change is seen.
+        let w = Watch::new(&dir, move || {
+            let _ = tx.lock().unwrap().send(());
+        })
+        .unwrap();
+        // The stream may start late on a loaded Mac, and the folder being made can come first:
+        // write again until the file's change is seen.
+        let mut paths = Vec::new();
         let seen = (0..30).any(|i| {
             std::fs::write(dir.join("a.txt"), format!("hi {i}")).unwrap();
-            rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok()
+            if rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok() {
+                paths.extend(w.take().paths);
+            }
+            paths.iter().any(|p| p.ends_with("a.txt"))
         });
-        assert!(seen, "no change seen in 30 s");
-        let c = w.take();
-        assert!(c.paths.iter().any(|p| p.ends_with("a.txt")), "{:?}", c.paths);
+        assert!(seen, "a.txt not seen in 30 s: {paths:?}");
         drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Streams made and dropped many at a time, from several threads, while files change under
+    /// them (some dropped during a callback), and streams macOS won't make (no folders): what
+    /// each one's callback holds is freed exactly once, after its last callback. A stream that
+    /// couldn't be made once freed it twice, corrupting the heap (dinod crashed in a fresh repo).
+    #[test]
+    fn streams_made_and_dropped_while_files_change() {
+        use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        /// What a callback holds: counted while alive, so a double free shows as a count below 0.
+        struct Held(Arc<AtomicIsize>);
+        impl Held {
+            fn new(live: &Arc<AtomicIsize>) -> Held {
+                live.fetch_add(1, Ordering::SeqCst);
+                Held(live.clone())
+            }
+        }
+        impl Drop for Held {
+            fn drop(&mut self) {
+                assert!(self.0.fetch_sub(1, Ordering::SeqCst) > 0, "freed twice");
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("dino-fsevents-churn-{}", std::process::id()));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let roots = [std::fs::canonicalize(&a).unwrap(), std::fs::canonicalize(&b).unwrap()];
+        let live = Arc::new(AtomicIsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (roots, stop) = (roots.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut i = 0usize;
+                while !stop.load(Ordering::Relaxed) {
+                    let f = roots[i % 2].join(format!("{}.txt", i % 40));
+                    std::fs::write(&f, format!("{i}")).unwrap();
+                    if i % 7 == 0 {
+                        let _ = std::fs::remove_file(&f);
+                    }
+                    i += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+        };
+        // Callbacks that take a moment, so drops land during them too.
+        let on = |live: &Arc<AtomicIsize>, calls: &Arc<AtomicUsize>| {
+            let (held, calls) = (Held::new(live), calls.clone());
+            move |batch: &[(PathBuf, u32)]| {
+                let _ = &held;
+                assert!(!batch.is_empty());
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(3));
+            }
+        };
+        // One kept throughout: the changes are seen at all.
+        let kept = Folders::files(&roots, on(&live, &calls)).unwrap();
+        std::thread::scope(|sc| {
+            for t in 0..4u64 {
+                let (live, calls, roots) = (&live, &calls, &roots);
+                sc.spawn(move || {
+                    let mut held: Vec<Box<dyn Send>> = Vec::new();
+                    for i in 0..60u64 {
+                        assert!(Folders::new(&[], on(live, calls)).is_err(), "no folders, no stream");
+                        let made: Box<dyn Send> = match (t + i) % 3 {
+                            0 => Box::new(Folders::new(roots, on(live, calls)).unwrap()),
+                            1 => Box::new(Folders::files(&roots[..1], on(live, calls)).unwrap()),
+                            _ => {
+                                let (h, c) = (Held::new(live), calls.clone());
+                                Box::new(Watch::new(&roots[1], move || {
+                                    let _ = &h;
+                                    c.fetch_add(1, Ordering::SeqCst);
+                                }).unwrap())
+                            }
+                        };
+                        held.push(made);
+                        // Dropped soon, a few together, or after a callback or two.
+                        if i % 4 == 0 {
+                            held.clear();
+                        }
+                        std::thread::sleep(Duration::from_millis((i * 7 + t * 13) % 40));
+                    }
+                });
+            }
+        });
+        let since = Instant::now();
+        while calls.load(Ordering::SeqCst) == 0 && since.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(kept);
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(calls.load(Ordering::SeqCst) > 0, "no change seen in 30 s");
+        // FSEvents lets go of each stream once its queue is done with it.
+        let since = Instant::now();
+        while live.load(Ordering::SeqCst) != 0 && since.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(live.load(Ordering::SeqCst), 0, "every callback's state freed once");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
