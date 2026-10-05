@@ -669,7 +669,7 @@ struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
 
-    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, limits, launchers, id, message, version, dino, installed, launchd, build, exe }
+    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, limits, leftovers, launchers, id, message, version, dino, installed, launchd, build, exe }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -679,6 +679,7 @@ struct Response: Decodable {
         quotas = try c.decodeIfPresent([QuotaInfo].self, forKey: .quotas)
         power = try c.decodeIfPresent(PowerInfo.self, forKey: .power)
         limits = try c.decodeIfPresent([AgentLimit].self, forKey: .limits)
+        leftovers = try c.decodeIfPresent([Leftover].self, forKey: .leftovers)
         launchers = try c.decodeIfPresent([LauncherInfo].self, forKey: .launchers)
         id = try c.decodeIfPresent(String.self, forKey: .id)
         message = try c.decodeIfPresent(String.self, forKey: .message)
@@ -693,6 +694,8 @@ struct Response: Decodable {
     var power: PowerInfo?
     /// Agents at their limit; nil when none is (and from an older dinod).
     var limits: [AgentLimit]?
+    /// Builds running for no session, found as dinod started; nil when none are (and from an older dinod).
+    var leftovers: [Leftover]?
     var launchers: [LauncherInfo]?
     var id: String?
     var message: String?
@@ -974,6 +977,11 @@ final class DinoConnection: @unchecked Sendable {
     /// Stop a server the session's agent left running in the background.
     func stopServer(session: String, task: String) throws {
         _ = try send(["type": "stop_server", "id": session, "task": task])
+    }
+
+    /// Stop builds left running for no session, by pid; none named: all of them.
+    func stopLeftovers(pids: [UInt32] = []) throws {
+        _ = try send(["type": "stop_leftovers", "pids": pids])
     }
 
     /// Start a session whose program ended again, in place: the agent resumes its conversation.
