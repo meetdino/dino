@@ -307,7 +307,9 @@ mod tests {
                     assert!(n > 0, "the request ended early");
                 };
                 tx.send(body).unwrap();
-                write!(s, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len()).unwrap();
+                // Closed after one reply: said so, or the shared client keeps the connection to send the
+                // next request on, and that fails ("error sending request") once this end has closed it.
+                write!(s, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{reply}", reply.len()).unwrap();
             }
         });
         (url, rx)

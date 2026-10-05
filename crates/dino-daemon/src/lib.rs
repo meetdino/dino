@@ -248,6 +248,9 @@ impl Daemon {
 }
 
 struct Daemon {
+    /// The folder dinod keeps its own files in (sessions, screens, groups, worktrees, archived):
+    /// dino's folder; in tests each daemon's own, so tests running at once never write each other's.
+    home: PathBuf,
     proxy: Proxy,
     /// Rebuilt when keys change: the free tier needs one.
     launchers: RwLock<Vec<LauncherInfo>>,
@@ -342,7 +345,8 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(stopped_mark());
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    let saved = load_saved();
+    let home = dino_core::config_dir();
+    let saved = load_saved(&home);
 
     let keys = load_keys();
     let free_tier = free_tier(&keys);
@@ -352,7 +356,7 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     proxy.set_budget(Settings::load().policies.session_token_budget);
     proxy.set_free_models(Settings::load().experimental.free_models);
     proxy.keep_free_models(dino_core::config_dir().join("free-models.json"));
-    let daemon = new_daemon(proxy, launchers(free_tier));
+    let daemon = new_daemon(home, proxy, launchers(free_tier));
     // Before sessions restart, so they get the efforts their models take.
     let mut stamps = CatalogStamps::new();
     read_catalogs(&daemon, &mut stamps, true);
@@ -714,26 +718,27 @@ fn watch_catalogs(d: &Daemon, mut seen: CatalogStamps) {
 }
 
 /// The daemon's state, with what was saved of it (all but the sessions, see `restore`).
-fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
+fn new_daemon(home: PathBuf, proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
     let daemon = Arc::new(Daemon {
+        groups: Mutex::new(load_groups(&home)),
+        worktrees: Mutex::new(load_worktrees(&home)),
+        subagents: Mutex::new(load_subagents(&home)),
+        archived: Mutex::new(lifecycle::load_archived(&home)),
+        home,
         proxy,
         launchers: RwLock::new(launchers),
         catalogs: RwLock::default(),
         sessions: Mutex::default(),
-        groups: Mutex::new(load_groups()),
-        worktrees: Mutex::new(load_worktrees()),
         prs: Mutex::default(),
         pr_poll: Mutex::default(),
         closing: Mutex::default(),
         closed: Mutex::default(),
         previews: Mutex::default(),
-        subagents: Mutex::new(load_subagents()),
         summaries: Mutex::default(),
         git: gitstate::State::default(),
         schedule: schedule::Scheduler::load(),
         lid: lid::Lid::default(),
         awake: awake::Awake::default(),
-        archived: Mutex::new(lifecycle::load_archived()),
         sizes: Mutex::default(),
         pushed: Mutex::default(),
         measuring: AtomicBool::new(false),
@@ -1818,11 +1823,11 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     };
     let pane = match spec {
         Some(spec) => Pane::spawn(spec, cols.max(20), rows.max(5), tap)?,
-        None => Pane::ended(&load_screen(&id), cols.max(20), rows.max(5), ended.and_then(|r| r.exit_code)),
+        None => Pane::ended(&load_screen(&d.home, &id), cols.max(20), rows.max(5), ended.and_then(|r| r.exit_code)),
     };
     // Resumed after dinod stopped or crashed: what its pane showed then, above the agent's resume.
     if restore.is_some() && !pane.is_exited() {
-        if let Some(before) = std::fs::read(live_screens_dir().join(&id)).ok().filter(|b| !b.is_empty()) {
+        if let Some(before) = std::fs::read(live_screens_dir(&d.home).join(&id)).ok().filter(|b| !b.is_empty()) {
             pane.feed(&without_restart_marks(&before));
             // Back on the normal screen (it may have been saved with a full-screen program up),
             // and a line between then and now.
@@ -2898,26 +2903,26 @@ struct SavedSession {
     fork_pending: bool,
 }
 
-fn saved_path() -> PathBuf {
-    dino_core::config_dir().join("sessions.json")
+fn saved_path(home: &Path) -> PathBuf {
+    home.join("sessions.json")
 }
 
-fn load_saved() -> Vec<SavedSession> {
-    std::fs::read(saved_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+fn load_saved(home: &Path) -> Vec<SavedSession> {
+    std::fs::read(saved_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 /// Where an ended session's last screen is kept, to show it again after dinod restarts.
-fn screens_dir() -> PathBuf {
-    dino_core::config_dir().join("screens")
+fn screens_dir(home: &Path) -> PathBuf {
+    home.join("screens")
 }
 
-fn load_screen(id: &str) -> Vec<u8> {
-    std::fs::read(screens_dir().join(id)).unwrap_or_default()
+fn load_screen(home: &Path, id: &str) -> Vec<u8> {
+    std::fs::read(screens_dir(home).join(id)).unwrap_or_default()
 }
 
 /// Running sessions' screens, kept so a dinod that crashes doesn't take them along.
-fn live_screens_dir() -> PathBuf {
-    screens_dir().join("live")
+fn live_screens_dir(home: &Path) -> PathBuf {
+    screens_dir(home).join("live")
 }
 
 /// How much of a running session's screen is kept: its last lines, enough to see where it was.
@@ -2930,7 +2935,7 @@ const LIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 /// it was before the agent resumes. Screens of sessions that are gone go.
 fn save_live_screens(d: &Daemon, all: bool) {
     let sessions = d.sessions.lock().unwrap().clone();
-    let dir = live_screens_dir();
+    let dir = live_screens_dir(&d.home);
     for s in sessions.iter().filter(|s| s.host.is_none() && !s.pane.is_exited()) {
         let printed = *s.last_output.lock().unwrap();
         let mut saved = s.live_saved.lock().unwrap();
@@ -2977,7 +2982,7 @@ fn save(d: &Daemon) {
     }
     let sessions = d.sessions.lock().unwrap().clone();
     let saved: Vec<SavedSession> = sessions.iter().map(|s| snapshot(d, s)).collect();
-    let dir = screens_dir();
+    let dir = screens_dir(&d.home);
     for s in sessions.iter().filter(|s| s.pane.is_exited() && !s.screen_saved.load(Ordering::Relaxed)) {
         use std::os::unix::fs::OpenOptionsExt;
         let _ = std::fs::create_dir_all(&dir);
@@ -2997,7 +3002,7 @@ fn save(d: &Daemon) {
             let _ = std::fs::remove_file(f.path());
         }
     }
-    let _ = write_private(&saved_path(), &serde_json::to_vec_pretty(&saved).unwrap_or_default());
+    let _ = write_private(&saved_path(&d.home), &serde_json::to_vec_pretty(&saved).unwrap_or_default());
 }
 
 /// What it takes to bring `s` back.
@@ -3827,16 +3832,16 @@ struct Member {
     worktree: PathBuf,
 }
 
-fn groups_path() -> PathBuf {
-    dino_core::config_dir().join("groups.json")
+fn groups_path(home: &Path) -> PathBuf {
+    home.join("groups.json")
 }
 
-fn load_groups() -> Vec<Group> {
-    std::fs::read(groups_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+fn load_groups(home: &Path) -> Vec<Group> {
+    std::fs::read(groups_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-fn save_groups(groups: &[Group]) {
-    let _ = write_private(&groups_path(), &serde_json::to_vec_pretty(groups).unwrap_or_default());
+fn save_groups(home: &Path, groups: &[Group]) {
+    let _ = write_private(&groups_path(home), &serde_json::to_vec_pretty(groups).unwrap_or_default());
 }
 
 /// `route`: run the agents that can on a provider's model (an automation's), the rest on their own accounts.
@@ -3877,7 +3882,7 @@ fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>, r
     }
     let mut groups = d.groups.lock().unwrap();
     groups.push(group);
-    save_groups(&groups);
+    save_groups(&d.home, &groups);
     Ok(id)
 }
 
@@ -4166,19 +4171,19 @@ struct SubagentWorktree {
     running: bool,
 }
 
-fn subagents_path() -> PathBuf {
-    dino_core::config_dir().join("subagents.json")
+fn subagents_path(home: &Path) -> PathBuf {
+    home.join("subagents.json")
 }
 
 /// A restart stops every agent, so none is running any more; worktrees removed since are gone.
-fn load_subagents() -> Vec<SubagentWorktree> {
+fn load_subagents(home: &Path) -> Vec<SubagentWorktree> {
     let all: Vec<SubagentWorktree> =
-        std::fs::read(subagents_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        std::fs::read(subagents_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     all.into_iter().filter(|a| Path::new(&a.worktree).exists()).map(|a| SubagentWorktree { running: false, ..a }).collect()
 }
 
-fn save_subagents(all: &[SubagentWorktree]) {
-    let _ = write_private(&subagents_path(), &serde_json::to_vec_pretty(all).unwrap_or_default());
+fn save_subagents(home: &Path, all: &[SubagentWorktree]) {
+    let _ = write_private(&subagents_path(home), &serde_json::to_vec_pretty(all).unwrap_or_default());
 }
 
 /// Worktree path → who made it: takes in what the sessions' hooks reported since last time.
@@ -4208,7 +4213,7 @@ pub(crate) fn subagent_owners(d: &Daemon) -> Vec<(String, worktree::Owner)> {
         }
     }
     if *all != before {
-        save_subagents(&all);
+        save_subagents(&d.home, &all);
     }
     all.iter()
         .map(|a| {
@@ -4587,7 +4592,7 @@ fn close_group(d: &Daemon, id: &str) -> anyhow::Result<()> {
         let mut groups = d.groups.lock().unwrap();
         let i = groups.iter().position(|g| g.id == id).ok_or_else(|| anyhow::anyhow!("no fan-out {id}"))?;
         let g = groups.remove(i);
-        save_groups(&groups);
+        save_groups(&d.home, &groups);
         g
     };
     for m in &group.members {
@@ -4636,18 +4641,18 @@ struct SessionWorktree {
     base: String,
 }
 
-fn worktrees_path() -> PathBuf {
-    dino_core::config_dir().join("worktrees.json")
+fn worktrees_path(home: &Path) -> PathBuf {
+    home.join("worktrees.json")
 }
 
-fn load_worktrees() -> Vec<SessionWorktree> {
-    let all: Vec<SessionWorktree> = std::fs::read(worktrees_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+fn load_worktrees(home: &Path) -> Vec<SessionWorktree> {
+    let all: Vec<SessionWorktree> = std::fs::read(worktrees_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     // Ones removed by hand are gone.
     all.into_iter().filter(|w| w.path.exists()).collect()
 }
 
-fn save_worktrees(worktrees: &[SessionWorktree]) {
-    let _ = write_private(&worktrees_path(), &serde_json::to_vec_pretty(worktrees).unwrap_or_default());
+fn save_worktrees(home: &Path, worktrees: &[SessionWorktree]) {
+    let _ = write_private(&worktrees_path(home), &serde_json::to_vec_pretty(worktrees).unwrap_or_default());
 }
 
 fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
@@ -4668,7 +4673,7 @@ fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         Ok(id) => {
             let mut worktrees = d.worktrees.lock().unwrap();
             worktrees.push(SessionWorktree { path: wt, branch, repo, checkout, base });
-            save_worktrees(&worktrees);
+            save_worktrees(&d.home, &worktrees);
             Ok(id)
         }
         Err(e) => {
@@ -4706,7 +4711,7 @@ fn remove_worktree(d: &Daemon, path: &str, apply: bool) -> anyhow::Result<()> {
     let _ = trust::claude_forget(&w.path);
     let mut worktrees = d.worktrees.lock().unwrap();
     worktrees.retain(|o| o.path != w.path);
-    save_worktrees(&worktrees);
+    save_worktrees(&d.home, &worktrees);
     Ok(())
 }
 
@@ -4769,10 +4774,26 @@ mod tests {
         })
     }
 
+    /// A daemon with files of its own (sessions, screens, worktrees, ...): tests run at once, and
+    /// one's save would otherwise overwrite what another just saved and is about to read back.
+    fn test_daemon(launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let home = test_home().join(format!("daemon-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&home).unwrap();
+        new_daemon(home, Proxy::start(HashMap::new()).unwrap(), launchers)
+    }
+
+    fn shell() -> LauncherInfo {
+        LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false }
+    }
+
     fn shell_daemon() -> Arc<Daemon> {
-        test_home();
-        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
-        new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![shell])
+        test_daemon(vec![shell()])
+    }
+
+    /// `d`'s dinod started again: a new daemon on the same files.
+    fn restarted(d: &Daemon) -> Arc<Daemon> {
+        new_daemon(d.home.clone(), Proxy::start(HashMap::new()).unwrap(), vec![shell()])
     }
 
     fn session(d: &Daemon, id: &str) -> Arc<Session> {
@@ -4915,8 +4936,8 @@ mod tests {
         let again = session(&d, &id);
         assert_eq!(again.account, account);
         save(&d);
-        assert_eq!(load_saved().iter().find(|x| x.id == id).map(|x| x.account.clone()), Some(account));
-        assert_eq!(std::fs::metadata(saved_path()).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load_saved(&d.home).iter().find(|x| x.id == id).map(|x| x.account.clone()), Some(account));
+        assert_eq!(std::fs::metadata(saved_path(&d.home)).unwrap().permissions().mode() & 0o777, 0o600);
         // Never in what clients are shown.
         let Response::State { sessions, .. } = state(&d) else { panic!() };
         assert!(!serde_json::to_string(&sessions).unwrap().contains("second-account-42"));
@@ -4976,7 +4997,7 @@ while (sysread(STDIN, my $c, 1)) {
         std::fs::write(&program, FAKE_CLAUDE).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let claude = LauncherInfo { short: "claude".into(), agent_id: "claude".into(), label: "Claude Code".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
-        let d = new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![claude]);
+        let d = test_daemon(vec![claude]);
         let id = spawn(&d, Launch::new("claude", vec![], Some(dir.display().to_string()))).unwrap();
         let s = session(&d, &id);
         let pid = s.pane.pid();
@@ -5143,14 +5164,14 @@ while (sysread(STDIN, my $c, 1)) {
         assert!(s.pending.lock().unwrap().is_some());
 
         save(&d);
-        let saved = load_saved();
+        let saved = load_saved(&d.home);
         assert_eq!(saved.len(), 1);
         assert!(saved[0].ended);
         assert_eq!(saved[0].exit_code, Some(3));
-        assert!(screens_dir().join(&id).exists());
+        assert!(screens_dir(&d.home).join(&id).exists());
 
         // dinod restarts: it comes back ended, its last screen up.
-        let d2 = shell_daemon();
+        let d2 = restarted(&d);
         restore(&d2, saved);
         let back = session(&d2, &id);
         assert!(back.pane.is_exited());
@@ -5163,19 +5184,19 @@ while (sysread(STDIN, my $c, 1)) {
         assert_eq!(d2.sessions.lock().unwrap().len(), 1);
         assert!(resume(&d2, &id).is_err(), "only an ended session resumes");
         save(&d2);
-        assert!(!load_saved()[0].ended);
-        assert!(!screens_dir().join(&id).exists());
+        assert!(!load_saved(&d2.home)[0].ended);
+        assert!(!screens_dir(&d2.home).join(&id).exists());
 
         // A shell comes back where it last was, not where it started (a crash loses only the screen).
         let sub = home.join("deeper");
         std::fs::create_dir_all(&sub).unwrap();
         *live.pane.shared.cwd.lock().unwrap() = Some(sub.display().to_string());
         save(&d2);
-        assert_eq!(load_saved()[0].cwd, sub.display().to_string());
+        assert_eq!(load_saved(&d2.home)[0].cwd, sub.display().to_string());
         // A folder since removed: back to where it started, rather than not starting at all.
         std::fs::remove_dir_all(&sub).unwrap();
         save(&d2);
-        assert_eq!(load_saved()[0].cwd, live.cwd.display().to_string());
+        assert_eq!(load_saved(&d2.home)[0].cwd, live.cwd.display().to_string());
 
         // Removed: attached clients are told it's gone, not that it ended.
         kill(&d2, &id);
@@ -5201,7 +5222,7 @@ while (sysread(STDIN, my $c, 1)) {
         git(&repo, &["commit", "-qm", "init"]);
         let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
         let agent = LauncherInfo { short: "agent".into(), agent_id: "agent".into(), label: "Agent".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
-        let d = new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![shell, agent]);
+        let d = test_daemon(vec![shell, agent]);
         let start = || spawn_in_worktree(&d, Launch::new("agent", vec![], Some(repo.display().to_string()))).unwrap();
         let wt_of = |id: &str| d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == real(&session(&d, id).cwd)).cloned().unwrap();
 
@@ -5223,10 +5244,10 @@ while (sysread(STDIN, my $c, 1)) {
         let pid = session(&d, &id).pane.pid().unwrap();
         lifecycle::delete_session(&d, &id, false).unwrap();
         assert!(!d.sessions.lock().unwrap().iter().any(|s| s.id == id));
-        assert!(!load_saved().iter().any(|s| s.id == id));
+        assert!(!load_saved(&d.home).iter().any(|s| s.id == id));
         assert!(unsafe { libc::kill(pid as i32, 0) } != 0, "its agent stopped");
         assert!(!w.path.exists());
-        assert!(load_worktrees().is_empty());
+        assert!(load_worktrees(&d.home).is_empty());
         assert!(git(&repo, &["branch", "--list", &w.branch]).is_empty(), "an empty branch goes");
 
         // A commit that isn't merged: the branch stays.
@@ -5430,7 +5451,7 @@ while (sysread(STDIN, my $c, 1)) {
         assert!(fallbacks::chain(&settings, "shell", None, None).is_none());
 
         let sh = |agent: &str| LauncherInfo { short: agent.into(), agent_id: agent.into(), label: agent.into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
-        let d = new_daemon(Proxy::start(HashMap::new()).unwrap(), vec![sh("shell"), sh("claude"), sh("codex")]);
+        let d = test_daemon(vec![sh("shell"), sh("claude"), sh("codex")]);
         let start = |stay: bool| spawn(&d, Launch { stay, ..Launch::new("claude", vec!["--verbose".into()], Some(test_home().display().to_string())) }).unwrap();
         let first = session(&d, &start(false));
         assert_eq!((first.agent_id.as_str(), first.instead_of.is_none()), ("claude", true), "not at its limit: as asked");
@@ -5491,7 +5512,7 @@ while (sysread(STDIN, my $c, 1)) {
         assert!(close(&d, &id, 60_000));
         assert_eq!(listed(&d), [first.clone(), last.clone()]);
         save(&d);
-        assert!(!load_saved().iter().any(|saved| saved.id == id), "not brought back by a restart");
+        assert!(!load_saved(&d.home).iter().any(|saved| saved.id == id), "not brought back by a restart");
         assert!(!s.pane.is_exited(), "kept running");
         assert!(!close(&d, &id, 60_000), "closed once");
 
@@ -5535,7 +5556,7 @@ while (sysread(STDIN, my $c, 1)) {
         s.pane.write(b"echo kept-$((6*7))\r".to_vec());
         wait_for("the output", || s.pane.text(0).contains("kept-42") && s.last_output.lock().unwrap().is_some());
         save_live_screens(&d, true);
-        let file = live_screens_dir().join(&id);
+        let file = live_screens_dir(&d.home).join(&id);
         assert!(file.exists());
         let size = file.metadata().unwrap().len();
         // Nothing printed since: not written again.
@@ -5544,7 +5565,7 @@ while (sysread(STDIN, my $c, 1)) {
 
         // dinod gone without stopping it (a crash): a new one starts the session again.
         let saved = snapshot(&d, &s);
-        let d2 = shell_daemon();
+        let d2 = restarted(&d);
         let again = spawn(&d2, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) }).unwrap();
         assert_eq!(again, id);
         let back = session(&d2, &id);
@@ -5570,8 +5591,10 @@ while (sysread(STDIN, my $c, 1)) {
         let d = shell_daemon();
         let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
         let s = session(&d, &id);
+        // The dialog as printed, never as typed: on a busy Mac the shell echoes a command well
+        // before it runs it, and the echo of one with the dialog's words in it is a dialog to dino.
         let dialog = |s: &Session| {
-            s.pane.write(b"clear; printf 'Do you want to proceed?\\n  Esc to cancel\\n'\r".to_vec());
+            s.pane.write(b"clear; printf 'Do you want to proceed?\\n  Esc to \\143ancel\\n'\r".to_vec());
             wait_for("the dialog", || s.pane.text(0).contains("Esc to cancel"));
         };
         dialog(&s);

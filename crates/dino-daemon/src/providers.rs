@@ -702,7 +702,9 @@ mod tests {
             let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
             tx.send(serde_json::from_str::<Value>(body).unwrap_or(Value::Null)).unwrap();
             let reply = r#"{"key":"sk-or-v1-test","user_id":"u"}"#;
-            write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len()).unwrap();
+            // Closed after one reply: said so, or the shared client keeps the connection to send the
+            // next request on, and that fails ("error sending request") once this end has closed it.
+            write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{reply}", reply.len()).unwrap();
         });
         (url, rx)
     }
