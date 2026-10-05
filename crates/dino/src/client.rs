@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -204,10 +204,18 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
         let _ = out.write_all(b"\x1b[H\x1b[2J\x1b[3J");
         let _ = out.flush();
     }
+    // This terminal reports its focus (mode 1004) to dinod, not to the program: the session's size
+    // follows the client the user is looking at, and dinod tells the program if it asked. Kept on
+    // whatever the program turns off. The terminal answers at once with the focus it has.
+    let mut out = io::stdout();
+    out.write_all(FOCUS_ON)?;
+    out.flush()?;
+    // As this terminal last reported it: 0 not yet, 1 lost, 2 gained. Told again after a reattach.
+    let focus = Arc::new(AtomicU8::new(0));
     // The session's program has ended: keys don't go to it, Enter resumes it.
     let ended = Arc::new(AtomicBool::new(false));
 
-    let (w, end, sid) = (writer.clone(), ended.clone(), id.to_string());
+    let (w, end, sid, fo) = (writer.clone(), ended.clone(), id.to_string(), focus.clone());
     std::thread::spawn(move || {
         let mut stdin = io::stdin();
         let mut buf = [0u8; 8192];
@@ -221,8 +229,16 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
             if n == 0 {
                 break;
             }
+            let (keys, focused) = take_focus(&buf[..n]);
+            if let Some(on) = focused {
+                fo.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+                let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::FOCUS, &[on as u8]);
+            }
+            if keys.is_empty() {
+                continue;
+            }
             if end.load(Ordering::Relaxed) {
-                if buf[..n].contains(&b'\r') && end.swap(false, Ordering::Relaxed) {
+                if keys.contains(&b'\r') && end.swap(false, Ordering::Relaxed) {
                     // The reader below is already waiting for it to come back.
                     if let Ok(Response::Error { message }) = request(&Request::Resume { id: sid.clone() }) {
                         end.store(true, Ordering::Relaxed);
@@ -233,7 +249,7 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
                 continue;
             }
             // A failed write means the socket dropped; the reader below reconnects, so keep going.
-            let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::DATA, &buf[..n]);
+            let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::DATA, &keys);
         }
     });
     let w = writer.clone();
@@ -290,6 +306,9 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
                     } else {
                         stdout.write_all(&payload)?;
                     }
+                    if memchr::memmem::find(&payload, FOCUS_OFF).is_some() {
+                        stdout.write_all(FOCUS_ON)?;
+                    }
                     stdout.flush()?;
                 }
                 // Removed (killed, archived): nothing to come back to.
@@ -328,18 +347,55 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
         };
         reader = stream.try_clone()?;
         *writer.lock().unwrap() = stream;
+        if let f @ 1..=2 = focus.load(Ordering::Relaxed) {
+            let _ = ipc::write_frame(&mut *writer.lock().unwrap(), ipc::FOCUS, &[(f == 2) as u8]);
+        }
         ended.store(false, Ordering::Relaxed);
         held = Some((Vec::new(), Instant::now()));
     }
     crossterm::terminal::disable_raw_mode()?;
     // Leave the terminal usable: undo modes the app may have left on.
-    stdout.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[<u\x1b[0m\r\n")?;
+    stdout.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1049l\x1b[?1004l\x1b[?25h\x1b[<u\x1b[0m\r\n")?;
     Ok(())
+}
+
+const FOCUS_ON: &[u8] = b"\x1b[?1004h";
+const FOCUS_OFF: &[u8] = b"\x1b[?1004l";
+
+/// Input from this terminal without its focus reports (`ESC [ I`, `ESC [ O`), and the focus the
+/// last of them reported.
+fn take_focus(input: &[u8]) -> (Vec<u8>, Option<bool>) {
+    let mut keys = Vec::with_capacity(input.len());
+    let mut focused = None;
+    let mut i = 0;
+    while i < input.len() {
+        match input[i..] {
+            [0x1b, b'[', f @ (b'I' | b'O'), ..] => {
+                focused = Some(f == b'I');
+                i += 3;
+            }
+            _ => {
+                keys.push(input[i]);
+                i += 1;
+            }
+        }
+    }
+    (keys, focused)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::visible;
+    use super::{take_focus, visible};
+
+    #[test]
+    fn focus_reports_are_taken_out_of_the_keys() {
+        assert_eq!(take_focus(b"ab"), (b"ab".to_vec(), None));
+        assert_eq!(take_focus(b"\x1b[I"), (vec![], Some(true)));
+        assert_eq!(take_focus(b"a\x1b[Ob\x1b[Ic"), (b"abc".to_vec(), Some(true)));
+        assert_eq!(take_focus(b"\x1b[I\x1b[O"), (vec![], Some(false)));
+        // Keys that only look alike stay keys: arrows, Escape, SS3.
+        assert_eq!(take_focus(b"\x1b[A\x1b\x1bOP\x1b["), (b"\x1b[A\x1b\x1bOP\x1b[".to_vec(), None));
+    }
 
     #[test]
     fn only_drawn_text_is_visible() {

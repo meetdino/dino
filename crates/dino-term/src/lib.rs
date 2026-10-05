@@ -591,6 +591,13 @@ impl Pane {
         }
     }
 
+    /// Tell the program its terminal gained or lost focus, if it asked to be told (mode 1004).
+    pub fn report_focus(&self, focused: bool) {
+        if self.term.lock().mode().contains(TermMode::FOCUS_IN_OUT) {
+            write_to(&self.shared, if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
+        }
+    }
+
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {
         write_to(&self.shared, bytes.into());
         // Echo can go off with nothing printed after it (a prompt printed first, `stty -echo`):

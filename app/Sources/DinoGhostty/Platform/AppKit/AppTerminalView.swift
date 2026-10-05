@@ -81,6 +81,10 @@
             setupTrackingArea()
 
             core.isAttached = { [weak self] in self?.window != nil }
+            core.hasKeyFocus = { [weak self] in
+                guard let self, let window else { return false }
+                return window.isKeyWindow && window.firstResponder === self
+            }
             core.scaleFactor = { [weak self] in
                 Double(
                     self?.window?.backingScaleFactor

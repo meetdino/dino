@@ -2,7 +2,8 @@
 //!
 //! Every message is a frame: `[kind: u8][len: u32 BE][payload]`. Control traffic is JSON
 //! request/response frames. After a successful `Attach`, the connection also carries raw
-//! terminal bytes (`Data`) both ways, client `Resize`s, and a final server `Exit`. The `Exit`'s
+//! terminal bytes (`Data`) both ways, client `Resize`s and `Focus` changes, and a final server
+//! `Exit`. The `Exit`'s
 //! payload, when there is one, says the session ended but is kept, and can be resumed (text to
 //! show the user); an empty one means it's gone.
 
@@ -17,6 +18,8 @@ pub const JSON: u8 = 0;
 pub const DATA: u8 = 1;
 pub const RESIZE: u8 = 2;
 pub const EXIT: u8 = 3;
+/// The client's terminal gained (payload `[1]`) or lost (`[0]`) focus.
+pub const FOCUS: u8 = 4;
 
 pub fn socket_path() -> PathBuf {
     crate::config_dir().join("dinod.sock")

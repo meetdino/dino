@@ -602,6 +602,7 @@ dependencies = [
  "dino-daemon",
  "dino-term",
  "libc",
+ "memchr",
  "ratatui",
  "serde_json",
  "unicode-width",
