@@ -2,63 +2,118 @@ import AppKit
 import DinoGhostty
 import SwiftUI
 
-/// Two sessions in one view: an agent and a shell next to it, or two agents. The pair belongs to
-/// neither: selecting either session shows both, with that one focused.
-struct Split: Codable, Equatable {
-    var first: String
-    var second: String
-    /// Stacked rather than side by side.
-    var vertical = false
-    /// How much of the view `first` takes.
-    var fraction = 0.5
-    /// A shell dino started for this split (⌘D): it goes when its pane closes.
-    var helper: String?
+/// Ghostty's split settings, as the user's config last said.
+@MainActor
+final class SplitChrome: ObservableObject {
+    static let shared = SplitChrome()
 
-    func contains(_ id: String?) -> Bool { first == id || second == id }
-    func other(_ id: String) -> String { first == id ? second : first }
+    /// How far an unfocused pane sits back: 1 − `unfocused-split-opacity` (0.15…1).
+    @Published private(set) var dim = 0.3
+    /// What it sits back under: `unfocused-split-fill`, else the pane's background.
+    @Published private(set) var fill = NSColor.black
+    /// `split-divider-color`, else a shade of the background, as Ghostty picks it.
+    @Published private(set) var divider = NSColor.separatorColor
+    /// `focus-follows-mouse`: the pane under the pointer takes the keyboard.
+    private(set) var followsMouse = false
+    /// `split-preserve-zoom = navigation`: moving to another pane zooms that one instead.
+    private(set) var zoomFollowsNavigation = false
+    /// `split-inherit-working-directory`: a new pane starts where the one it splits is.
+    private(set) var inheritDirectory = true
 
-    private static let key = "splits"
+    func read(_ c: TerminalController, background: NSColor) {
+        let opacity = min(max(c.configNumber("unfocused-split-opacity") ?? 0.7, 0.15), 1)
+        let fill = c.configColor("unfocused-split-fill").map(NSColor.init(ghostty:)) ?? background
+        let divider = c.configColor("split-divider-color").map(NSColor.init(ghostty:)) ?? NSColor(name: nil) { look in
+            // Ghostty's: a little darker on a light background, much darker on a dark one.
+            var bg = background
+            look.performAsCurrentDrawingAppearance { bg = background.usingColorSpace(.sRGB) ?? background }
+            return bg.darkened(by: bg.isLight ? 0.08 : 0.4)
+        }
+        if 1 - opacity != dim { dim = 1 - opacity }
+        if fill != self.fill { self.fill = fill }
+        if divider != self.divider { self.divider = divider }
+        followsMouse = c.configFlag("focus-follows-mouse") ?? false
+        zoomFollowsNavigation = (c.configBits("split-preserve-zoom") ?? 0) & 1 != 0
+        inheritDirectory = c.configFlag("split-inherit-working-directory") ?? true
+    }
+}
 
-    /// Splits outlive the app, like the sessions in them.
-    static func saved() -> [Split] {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
-        return (try? JSONDecoder().decode([Split].self, from: data)) ?? []
+extension NSColor {
+    convenience init(ghostty c: (red: UInt8, green: UInt8, blue: UInt8)) {
+        self.init(srgbRed: CGFloat(c.red) / 255, green: CGFloat(c.green) / 255, blue: CGFloat(c.blue) / 255, alpha: 1)
     }
 
-    static func save(_ splits: [Split]) {
-        UserDefaults.standard.set(try? JSONEncoder().encode(splits), forKey: key)
+    /// Ghostty's `isLightColor`.
+    var isLight: Bool {
+        guard let c = usingColorSpace(.sRGB) else { return false }
+        return 0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent > 0.5
+    }
+
+    /// Ghostty's `darken(by:)`: the same hue, `amount` less bright.
+    func darkened(by amount: CGFloat) -> NSColor {
+        guard let c = usingColorSpace(.sRGB) else { return self }
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        c.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        return NSColor(hue: h, saturation: s, brightness: min(b * (1 - amount), 1), alpha: a)
+    }
+}
+
+extension SplitTree.NewDirection {
+    init(_ d: TerminalHostAction.SplitDirection) {
+        self = switch d {
+        case .right: .right
+        case .down: .down
+        case .left: .left
+        case .up: .up
+        }
     }
 }
 
 extension DinoModel {
-    /// The split on screen: the selected session's, once both of its sessions are running.
-    var shownSplit: Split? {
-        guard let s = splits.first(where: { $0.contains(selected) }),
-              [s.first, s.second].allSatisfy({ id in sessions.contains { $0.id == id } })
-        else { return nil }
-        return s
+    /// The split tree session `id` is in.
+    func split(of id: String?) -> SplitTree? {
+        guard let id else { return nil }
+        return splits.first { $0.contains(id) }
+    }
+
+    /// The panes on screen: the selected session's tree, with the sessions dinod lists, while that
+    /// still leaves two or more.
+    var shownSplit: SplitTree? {
+        guard let t = split(of: selected) else { return nil }
+        let live = t.panes.filter { id in sessions.contains { $0.id == id } }
+        if live.count == t.panes.count { return t }
+        return t.pruned { live.contains($0) }
+    }
+
+    /// The sessions on screen, the selected one first.
+    var shownSessions: [String] {
+        let shown = shownSplit?.shownPanes ?? selected.map { [$0] } ?? []
+        return shown.filter { $0 == selected } + shown.filter { $0 != selected }
     }
 
     /// The session you're looking at, if it's a session (not a folder or a fan-out).
     var selectedSession: SessionInfo? { sessions.first { $0.id == selected } }
 
-    /// ⌘D: a shell in the selected session's folder, next to it; `leading`: before it (left or
-    /// above), as Ghostty's `new_split:left` and `:up`.
-    func splitWithShell(vertical: Bool, leading: Bool = false) {
-        guard let s = selectedSession else { return }
-        let cwd = s.here ?? folder.path
+    /// ⌘D and Ghostty's `new_split`: a shell next to session `at` (the selected one), in its
+    /// folder unless `split-inherit-working-directory` is off.
+    func splitWithShell(_ direction: SplitTree.NewDirection, at id: String? = nil) {
+        guard let s = id.flatMap({ id in sessions.first { $0.id == id } }) ?? selectedSession else { return }
+        var request: [String: Any] = ["type": "new", "launcher": "shell", "args": [String](), "cols": 120, "rows": 40]
+        if SplitChrome.shared.inheritDirectory {
+            request["cwd"] = s.here ?? folder.path
+        } else if s.host == nil {
+            request["cwd"] = FileManager.default.homeDirectoryForCurrentUser.path
+        }
         // A shell beside a session on an SSH host runs on that host too.
-        var request: [String: Any] = ["type": "new", "launcher": "shell", "args": [String](), "cwd": cwd, "cols": 120, "rows": 40]
         if let host = s.host { request["host"] = host }
+        let req = request
         Task {
             do {
                 guard let conn = connection else { return }
-                let resp = try await Task.detached {
-                    try conn.request(request)
-                }.value
+                let resp = try await Task.detached { try conn.request(req) }.value
                 guard let id = resp.id else { return }
                 awaited.insert(id)
-                pair(leading ? id : s.id, leading ? s.id : id, vertical: vertical, helper: id)
+                insertPane(id, at: s.id, direction, helper: true)
                 pendingSelect = id
             } catch {
                 self.error = error.localizedDescription
@@ -69,7 +124,7 @@ extension DinoModel {
     /// Show `id` next to the selected session.
     func openBeside(_ id: String, vertical: Bool = false) {
         guard let s = selectedSession, s.id != id else { return }
-        pair(s.id, id, vertical: vertical, helper: nil)
+        insertPane(id, at: s.id, vertical ? .down : .right, helper: false)
         select(id)
     }
 
@@ -79,10 +134,9 @@ extension DinoModel {
     func placeHandedOff(_ next: [SessionInfo]) {
         for s in next where !sessions.contains(where: { $0.id == s.id }) {
             guard let by = s.started_by, by == selected,
-                  sessions.first(where: { $0.id == by })?.agent_id == "shell",
-                  !splits.contains(where: { $0.contains(by) })
+                  sessions.first(where: { $0.id == by })?.agent_id == "shell"
             else { continue }
-            pair(by, s.id, vertical: true, helper: nil)
+            insertPane(s.id, at: by, .down, helper: false)
             pendingSelect = s.id
         }
     }
@@ -103,31 +157,48 @@ extension DinoModel {
         Task.detached { try? conn.sendKeys(session: id, text: text) }
     }
 
-    /// A session is in one split at most: pairing it again ends its old pair.
-    private func pair(_ a: String, _ b: String, vertical: Bool, helper: String?) {
-        splits.removeAll { $0.contains(a) || $0.contains(b) }
-        splits.append(Split(first: a, second: b, vertical: vertical, helper: helper))
-    }
-
-    /// ⌘W in a split: the pane goes, its session keeps running unless it was the split's own shell,
-    /// which asks first when something runs in it.
-    func closePane(_ id: String) {
-        guard let s = splits.first(where: { $0.contains(id) }) else { return }
-        if s.helper == id, let shell = sessions.first(where: { $0.id == id }), !confirmEnding([shell], in: "pane") { return }
-        dropPane(id, from: s)
-    }
-
-    /// Split `s` without pane `id`, without asking; ⌘Z puts the pane back.
-    private func dropPane(_ id: String, from s: Split) {
-        let before = layoutBefore()
-        splits.removeAll { $0 == s }
-        let shells = s.helper == id ? [id] : []
-        closed(since: before, members: [id], shells: shells, name: "Close Pane") { [weak self] in
-            guard let self, let s = self.splits.first(where: { $0.contains(id) }) else { return }
-            self.dropPane(id, from: s)
+    /// Pane `new` next to pane `at`, in `at`'s tree or a new one. A session is in one split at
+    /// most: one already in another leaves it.
+    private func insertPane(_ new: String, at: String, _ direction: SplitTree.NewDirection, helper: Bool) {
+        guard new != at else { return }
+        var trees = splits
+        if let i = trees.firstIndex(where: { $0.contains(new) }) {
+            if let rest = trees[i].removing(new) { trees[i] = rest } else { trees.remove(at: i) }
         }
-        if s.helper == id { endShell(id) }
-        select(s.other(id))
+        if let i = trees.firstIndex(where: { $0.contains(at) }), let t = trees[i].inserting(new, at: at, direction) {
+            trees[i] = t
+            if helper { trees[i].helpers.append(new) }
+        } else {
+            let before = direction == .left || direction == .up
+            trees.append(SplitTree(before ? new : at, before ? at : new, vertical: direction == .down || direction == .up,
+                                   helpers: helper ? [new] : []))
+        }
+        splits = trees
+    }
+
+    /// ⌘W in a split: the pane goes, its session keeps running unless it was a shell dino started
+    /// for the split, which asks first when something runs in it.
+    func closePane(_ id: String) {
+        guard let t = split(of: id) else { return }
+        if t.isHelper(id), let shell = sessions.first(where: { $0.id == id }), !confirmEnding([shell], in: "pane") { return }
+        dropPane(id)
+    }
+
+    /// The tree without pane `id`, without asking; ⌘Z puts the pane back. Focus goes where
+    /// Ghostty sends it: the pane before, or after the first one.
+    private func dropPane(_ id: String) {
+        guard let i = splits.firstIndex(where: { $0.contains(id) }) else { return }
+        let t = splits[i]
+        let next = t.afterClosing(id)
+        let helper = t.isHelper(id)
+        let before = layoutBefore()
+        if let rest = t.removing(id) { splits[i] = rest } else { splits.remove(at: i) }
+        closed(since: before, members: [id], shells: helper ? [id] : [], name: "Close Pane") { [weak self] in
+            guard let self, self.split(of: id) != nil else { return }
+            self.dropPane(id)
+        }
+        if helper { endShell(id) }
+        if selected == id, let next { select(next) }
     }
 
     /// ⌘\ (Claude desktop's key): the pane with focus goes, a split's or else the side pane, never the window.
@@ -139,14 +210,74 @@ extension DinoModel {
         }
     }
 
-    /// ⌃` (Claude desktop's terminal toggle): a shell below the session, or its shell gone again.
+    /// ⌃` (Claude desktop's terminal toggle): a shell below the session, or the split's shell gone
+    /// again (the one you're in, else the newest).
     func toggleTerminal() {
-        if let shell = shownSplit?.helper { closePane(shell) } else { splitWithShell(vertical: true) }
+        if let t = shownSplit, let shell = t.isHelper(selected ?? "") ? selected : t.helpers.last(where: t.contains) {
+            closePane(shell)
+        } else {
+            splitWithShell(.down)
+        }
     }
 
-    func updateSplit(_ s: Split, _ change: (inout Split) -> Void) {
-        guard let i = splits.firstIndex(of: s) else { return }
-        change(&splits[i])
+    /// The tree session `id` is in, changed.
+    func updateSplit(of id: String, _ change: (SplitTree) -> SplitTree?) {
+        guard let i = splits.firstIndex(where: { $0.contains(id) }), let t = change(splits[i]), t != splits[i] else { return }
+        splits[i] = t
+    }
+
+    /// Ghostty's `goto_split` from pane `id`: false when there's no pane that way.
+    @discardableResult
+    func gotoSplit(_ focus: SplitTree.Focus, from id: String? = nil) -> Bool {
+        guard let id = id ?? selected, let t = shownSplit, t.contains(id), let next = t.focusTarget(focus, from: id) else { return false }
+        // Zoomed: the zoom goes along (`split-preserve-zoom = navigation`) or ends.
+        if t.zoomed != nil {
+            updateSplit(of: id) { t in
+                var t = t
+                t.zoomed = SplitChrome.shared.zoomFollowsNavigation ? next : nil
+                return t
+            }
+        }
+        select(next)
+        return true
+    }
+
+    /// Ghostty's `resize_split` from pane `id`: false when no divider runs that way.
+    @discardableResult
+    func resizeSplit(_ direction: SplitTree.Spatial, by points: Double, from id: String? = nil) -> Bool {
+        guard let id = id ?? selected, let t = shownSplit, t == split(of: id),
+              let r = t.resizing(id, by: points, direction, in: paneArea) else { return false }
+        updateSplit(of: id) { _ in r }
+        return true
+    }
+
+    /// Ghostty's `equalize_splits`: every pane of the tab `id` is in at its share.
+    @discardableResult
+    func equalizeSplits(from id: String? = nil) -> Bool {
+        guard let id = id ?? selected, split(of: id) != nil else { return false }
+        updateSplit(of: id) { $0.equalized() }
+        return true
+    }
+
+    /// Ghostty's `toggle_split_zoom`: pane `id` takes the whole tab, or gives it back.
+    @discardableResult
+    func toggleSplitZoom(_ id: String? = nil) -> Bool {
+        guard let id = id ?? selected, shownSplit?.contains(id) == true else { return false }
+        updateSplit(of: id) { $0.togglingZoom(id) }
+        if selected != id { select(id) } else { terminals[id]?.requestFocus() }
+        return true
+    }
+
+    /// A divider dragged: the branch at `path` of the tree on screen.
+    func setRatio(_ ratio: Double, at path: SplitTree.Path) {
+        guard let id = selected, let t = shownSplit, t == split(of: id) else { return }
+        updateSplit(of: id) { $0.setting(ratio: ratio, at: path) }
+    }
+
+    /// `focus-follows-mouse`: the pointer moved over pane `id`'s terminal.
+    func pointerEntered(_ id: String) {
+        guard SplitChrome.shared.followsMouse, selected != id, !showPalette, shownSplit?.shownPanes.contains(id) == true else { return }
+        select(id)
     }
 }
 
@@ -158,37 +289,33 @@ struct PaneLayout {
     static let header: CGFloat = 26
     static let gap: CGFloat = 1
 
-    let split: Split?
+    let split: SplitTree?
     let selected: String?
     let size: CGSize
+    /// Each pane on screen, header included.
+    let frames: [String: CGRect]
+    let dividers: [SplitTree.Divider]
+
+    init(split: SplitTree?, selected: String?, size: CGSize) {
+        self.split = split
+        self.selected = selected
+        self.size = size
+        if let split {
+            (frames, dividers) = split.layout(in: size, gap: Self.gap)
+        } else {
+            frames = selected.map { [$0: CGRect(origin: .zero, size: size)] } ?? [:]
+            dividers = []
+        }
+    }
 
     /// The whole pane, header included; nil when the session isn't on screen.
-    func frame(_ id: String) -> CGRect? {
-        guard let split else { return id == selected ? CGRect(origin: .zero, size: size) : nil }
-        guard split.contains(id) else { return nil }
-        let first = id == split.first
-        if split.vertical {
-            let h = (size.height - Self.gap) * split.fraction
-            return first ? CGRect(x: 0, y: 0, width: size.width, height: h)
-                : CGRect(x: 0, y: h + Self.gap, width: size.width, height: size.height - h - Self.gap)
-        }
-        let w = (size.width - Self.gap) * split.fraction
-        return first ? CGRect(x: 0, y: 0, width: w, height: size.height)
-            : CGRect(x: w + Self.gap, y: 0, width: size.width - w - Self.gap, height: size.height)
-    }
+    func frame(_ id: String) -> CGRect? { frames[id] }
 
     /// The terminal inside a pane: below the pane's header when split.
     func surface(_ id: String) -> CGRect? {
         guard let f = frame(id) else { return nil }
         guard split != nil else { return f }
         return CGRect(x: f.minX, y: f.minY + Self.header, width: f.width, height: max(f.height - Self.header, 0))
-    }
-
-    /// The draggable line between the panes.
-    var divider: CGRect? {
-        guard let split, let f = frame(split.first) else { return nil }
-        return split.vertical ? CGRect(x: 0, y: f.maxY - 3, width: size.width, height: Self.gap + 6)
-            : CGRect(x: f.maxX - 3, y: 0, width: Self.gap + 6, height: size.height)
     }
 }
 
@@ -205,11 +332,12 @@ extension View {
 struct PaneHeader: View {
     @EnvironmentObject var model: DinoModel
     let session: SessionInfo
-    let split: Split
+    let split: SplitTree
     let focused: Bool
 
     var body: some View {
         let status = model.status(of: session)
+        let zoomed = split.zoomed == session.id
         HStack(spacing: 7) {
             StatusDot(status: status)
             Text(session.display).font(.system(.callout, design: .monospaced).weight(.semibold))
@@ -219,14 +347,26 @@ struct PaneHeader: View {
             Spacer(minLength: 4)
             if let f = session.inside, f.continuable { TakeOverButton(session: session, found: f) }
             Text(status.label).font(.caption).foregroundStyle(status.color)
-            Button {
-                model.updateSplit(split) { $0.vertical.toggle() }
-            } label: {
-                Image(systemName: split.vertical ? "rectangle.split.2x1" : "rectangle.split.1x2")
+            if zoomed {
+                Text(split.panes.count == 2 ? "1 more pane" : "\(split.panes.count - 1) more panes").font(.caption).foregroundStyle(.secondary)
+            } else {
+                let stacked = split.stacked(session.id) ?? false
+                Button {
+                    model.updateSplit(of: session.id) { $0.turning(session.id) }
+                } label: {
+                    Image(systemName: stacked ? "rectangle.split.2x1" : "rectangle.split.1x2")
+                }
+                .help(stacked ? "Side by side" : "Stacked")
+                .accessibilityLabel(stacked ? "Side by Side" : "Stacked")
             }
-            .help(split.vertical ? "Side by side" : "Stacked")
+            Button { model.toggleSplitZoom(session.id) } label: {
+                Image(systemName: zoomed ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+            }
+            .help(zoomed ? "Show every pane again (⇧⌘↩)" : "Zoom: this pane takes the whole tab (⇧⌘↩)")
+            .accessibilityLabel(zoomed ? "Unzoom Split" : "Zoom Split")
             Button { model.closePane(session.id) } label: { Image(systemName: "xmark") }
-                .help(split.helper == session.id ? "Close this shell (⌘W)" : "Close this pane; the session keeps running (⌘W)")
+                .help(split.isHelper(session.id) ? "Close this shell (⌘W)" : "Close this pane; the session keeps running (⌘W)")
+                .accessibilityLabel("Close Pane")
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 10)
@@ -240,31 +380,45 @@ struct PaneHeader: View {
     }
 }
 
-/// Drag to resize the split.
+/// The line between a branch's two sides: drag it to resize them, double-click it to give every
+/// pane its share again (Ghostty's `equalize_splits`).
 struct SplitDivider: View {
     @EnvironmentObject var model: DinoModel
-    let split: Split
-    let size: CGSize
-    @State private var start: Double?
+    @ObservedObject var chrome = SplitChrome.shared
+    let divider: SplitTree.Divider
+
+    /// Neither side smaller than this while dragging: a pane's header and a line or so.
+    private static let least: CGFloat = PaneLayout.header + 14
 
     var body: some View {
+        let d = divider
         ZStack {
             Color.clear.contentShape(Rectangle())
-            Rectangle().fill(Color(nsColor: .separatorColor))
-                .frame(width: split.vertical ? nil : PaneLayout.gap, height: split.vertical ? PaneLayout.gap : nil)
+            Rectangle().fill(Color(nsColor: chrome.divider))
+                .frame(width: d.vertical ? nil : PaneLayout.gap, height: d.vertical ? PaneLayout.gap : nil)
         }
         .onHover { inside in
             if inside {
-                (split.vertical ? NSCursor.resizeUpDown : NSCursor.resizeLeftRight).push()
+                (d.vertical ? NSCursor.resizeUpDown : NSCursor.resizeLeftRight).push()
             } else {
                 NSCursor.pop()
             }
         }
         .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named(Terminals.space)).onChanged { g in
-            let length = split.vertical ? size.height : size.width
-            let at = split.vertical ? g.location.y : g.location.x
-            model.updateSplit(split) { $0.fraction = min(max(Double(at / length), 0.15), 0.85) }
+            if let r = d.ratio(at: g.location, least: Self.least, gap: PaneLayout.gap) { model.setRatio(r, at: d.path) }
         })
+        .onTapGesture(count: 2) { model.equalizeSplits() }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(d.vertical ? "Vertical split divider" : "Horizontal split divider")
+        .accessibilityValue("\(Int((d.ratio * 100).rounded()))%")
+        .accessibilityHint(d.vertical ? "Drag to resize the top and bottom panes" : "Drag to resize the left and right panes")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: model.setRatio(min(d.ratio + 0.025, 0.9), at: d.path)
+            case .decrement: model.setRatio(max(d.ratio - 0.025, 0.1), at: d.path)
+            @unknown default: break
+            }
+        }
     }
 }
 
@@ -279,7 +433,7 @@ struct SessionMenu: View {
             Button("Open Beside \(current.name)") { model.openBeside(session.id) }
             Button("Open Below \(current.name)") { model.openBeside(session.id, vertical: true) }
         }
-        if model.splits.contains(where: { $0.contains(session.id) }) {
+        if model.split(of: session.id) != nil {
             Button("Close Pane") { model.closePane(session.id) }
         }
         ForEach(session.servers ?? [], id: \.self) { server in
@@ -316,18 +470,25 @@ struct SessionMenu: View {
 }
 
 /// The Split menu: in the Session menu, and in the toolbar without shortcuts (a toolbar menu
-/// answers its shortcuts too, and ⌘D would start two shells).
+/// answers its shortcuts too, and ⌘D would start two shells). The keys after ⌘D's are Ghostty's
+/// own defaults: in a pane, Ghostty's keybinds (the user's, if rebound) take them first and come
+/// back to dino as the same actions.
 struct SplitMenuItems: View {
     @EnvironmentObject var model: DinoModel
     var shortcuts = true
 
     var body: some View {
         let session = model.selectedSession
-        Button("Split Right with Shell") { model.splitWithShell(vertical: false) }
+        let split = model.shownSplit
+        Button("Split Right with Shell") { model.splitWithShell(.right) }
             .keyboardShortcut(shortcuts ? KeyboardShortcut("d") : nil)
             .disabled(session == nil)
-        Button("Split Down with Shell") { model.splitWithShell(vertical: true) }
+        Button("Split Down with Shell") { model.splitWithShell(.down) }
             .keyboardShortcut(shortcuts ? KeyboardShortcut("d", modifiers: [.command, .option]) : nil)
+            .disabled(session == nil)
+        Button("Split Left with Shell") { model.splitWithShell(.left) }
+            .disabled(session == nil)
+        Button("Split Up with Shell") { model.splitWithShell(.up) }
             .disabled(session == nil)
         Menu("Open Beside") {
             ForEach(model.sessions.filter { $0.id != session?.id }) { s in
@@ -335,12 +496,47 @@ struct SplitMenuItems: View {
             }
         }
         .disabled(session == nil || model.sessions.count < 2)
-        Button(model.shownSplit?.helper == nil ? "Show Terminal" : "Hide Terminal") { model.toggleTerminal() }
+        Button(split.map { t in t.isHelper(model.selected ?? "") || t.helpers.contains(where: t.contains) } == true ? "Hide Terminal" : "Show Terminal") { model.toggleTerminal() }
             .keyboardShortcut(shortcuts ? KeyboardShortcut("`", modifiers: .control) : nil)
             .disabled(session == nil)
         Button("Close Pane") { model.closeFocusedPane() }
             .keyboardShortcut(shortcuts ? KeyboardShortcut("\\") : nil)
-            .disabled(model.shownSplit == nil && model.sidePane == nil)
+            .disabled(split == nil && model.sidePane == nil)
+        Divider()
+        Button(split?.zoomed == nil ? "Zoom Split" : "Unzoom Split") { model.toggleSplitZoom() }
+            .keyboardShortcut(shortcuts ? KeyboardShortcut(.return, modifiers: [.command, .shift]) : nil)
+            .disabled(split == nil)
+        Button("Select Previous Split") { model.gotoSplit(.previous) }
+            .keyboardShortcut(shortcuts ? KeyboardShortcut("[") : nil)
+            .disabled(split == nil)
+        Button("Select Next Split") { model.gotoSplit(.next) }
+            .keyboardShortcut(shortcuts ? KeyboardShortcut("]") : nil)
+            .disabled(split == nil)
+        Menu("Select Split") {
+            Button("Select Split Above") { model.gotoSplit(.spatial(.up)) }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut(.upArrow, modifiers: [.command, .option]) : nil)
+            Button("Select Split Below") { model.gotoSplit(.spatial(.down)) }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut(.downArrow, modifiers: [.command, .option]) : nil)
+            Button("Select Split Left") { model.gotoSplit(.spatial(.left)) }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut(.leftArrow, modifiers: [.command, .option]) : nil)
+            Button("Select Split Right") { model.gotoSplit(.spatial(.right)) }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut(.rightArrow, modifiers: [.command, .option]) : nil)
+        }
+        .disabled(split == nil)
+        Menu("Resize Split") {
+            Button("Equalize Splits") { model.equalizeSplits() }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut("=", modifiers: [.command, .control]) : nil)
+            Divider()
+            Button("Move Divider Up") { model.resizeSplit(.up, by: 10) }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut(.upArrow, modifiers: [.command, .control]) : nil)
+            Button("Move Divider Down") { model.resizeSplit(.down, by: 10) }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut(.downArrow, modifiers: [.command, .control]) : nil)
+            Button("Move Divider Left") { model.resizeSplit(.left, by: 10) }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut(.leftArrow, modifiers: [.command, .control]) : nil)
+            Button("Move Divider Right") { model.resizeSplit(.right, by: 10) }
+                .keyboardShortcut(shortcuts ? KeyboardShortcut(.rightArrow, modifiers: [.command, .control]) : nil)
+        }
+        .disabled(split == nil)
     }
 }
 
@@ -400,7 +596,7 @@ extension DinoModel {
     func closeTab(_ s: SessionInfo) {
         let shell = s.agent_id == "shell"
         if shell {
-            let members = splits.first(where: { $0.contains(s.id) }).map { [$0.first, $0.second] } ?? [s.id]
+            let members = split(of: s.id)?.panes ?? [s.id]
             let ending = members.compactMap { m in sessions.first { $0.id == m && $0.agent_id == "shell" } }
             guard confirmEnding(ending, in: "tab") else { return }
         }

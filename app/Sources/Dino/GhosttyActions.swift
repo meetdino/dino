@@ -2,7 +2,7 @@ import AppKit
 import DinoGhostty
 
 /// Ghostty's own actions, from the user's keybinds or the engine, done the dino way: `new_tab` is a
-/// new shell tab, `goto_split` moves between the two panes of a split, `prompt_surface_title`
+/// new shell tab, `goto_split` moves between a split's panes, `prompt_surface_title`
 /// renames the session. An action dino has no equivalent for yet is logged once and left alone.
 @MainActor
 enum GhosttyActions {
@@ -80,7 +80,7 @@ enum GhosttyActions {
     /// notices dino has no use for.
     private static func supports(_ action: TerminalHostAction) -> Bool {
         switch action {
-        case .newWindow, .closeAllWindows, .toggleSplitZoom, .moveTab, .inspector, .presentTerminal,
+        case .newWindow, .closeAllWindows, .moveTab, .inspector, .presentTerminal,
              .progressReport, .desktopNotification, .commandFinished, .ringBell, .other:
             false
         default:
@@ -111,29 +111,36 @@ enum GhosttyActions {
             guard let id = session else { return nil }
             return {
                 if model.selected != id { model.select(id) }
-                model.splitWithShell(vertical: direction == .down || direction == .up, leading: direction == .left || direction == .up)
+                model.splitWithShell(SplitTree.NewDirection(direction), at: id)
             }
+        // The split ones only when there's something to do, so a key bound to one passes on
+        // otherwise, as in Ghostty.
         case .gotoSplit(let to):
-            guard let id = session, let split = model.shownSplit, split.contains(id) else { return nil }
-            // Two panes: every direction that has a pane leads to the other one.
-            let first = split.first == id
-            let moves: Bool = switch to {
-            case .previous, .next: true
-            case .left, .up: !first && (to == .left) != split.vertical
-            case .right, .down: first && (to == .right) != split.vertical
+            let focus: SplitTree.Focus = switch to {
+            case .previous: .previous
+            case .next: .next
+            case .left: .spatial(.left)
+            case .right: .spatial(.right)
+            case .up: .spatial(.up)
+            case .down: .spatial(.down)
             }
-            guard moves else { return nil }
-            return { model.select(split.other(id)) }
+            guard let id = session, let t = model.shownSplit, t.contains(id), t.focusTarget(focus, from: id) != nil else { return nil }
+            return { model.gotoSplit(focus, from: id) }
         case .resizeSplit(let amount, let direction):
-            guard let id = session, let split = model.shownSplit, split.contains(id),
-                  (direction == .up || direction == .down) == split.vertical else { return nil }
-            let length = split.vertical ? window?.contentView?.bounds.height : window?.contentView?.bounds.width
-            let step = Double(amount) / Double(max(length ?? 800, 1))
-            let sign: Double = direction == .right || direction == .down ? 1 : -1
-            return { model.updateSplit(split) { $0.fraction = min(max($0.fraction + sign * step, 0.15), 0.85) } }
+            let way: SplitTree.Spatial = switch direction {
+            case .up: .up
+            case .down: .down
+            case .left: .left
+            case .right: .right
+            }
+            guard let id = session, let t = model.shownSplit, t.resizing(id, by: Double(amount), way, in: model.paneArea) != nil else { return nil }
+            return { model.resizeSplit(way, by: Double(amount), from: id) }
         case .equalizeSplits:
-            guard let id = session, let split = model.shownSplit, split.contains(id) else { return nil }
-            return { model.updateSplit(split) { $0.fraction = 0.5 } }
+            guard let id = session, model.shownSplit?.contains(id) == true else { return nil }
+            return { model.equalizeSplits(from: id) }
+        case .toggleSplitZoom:
+            guard let id = session, model.shownSplit?.contains(id) == true else { return nil }
+            return { model.toggleSplitZoom(id) }
         case .gotoTab(let to):
             guard !quick else { return nil }
             let shown = model.shownTabs
@@ -207,7 +214,7 @@ enum GhosttyActions {
         case .redo:
             guard let manager = model.undoManager, manager.canRedo else { return nil }
             return { manager.redo() }
-        case .newWindow, .closeAllWindows, .toggleSplitZoom, .moveTab,
+        case .newWindow, .closeAllWindows, .moveTab,
              .startSearch, .endSearch, .searchTotal, .searchSelected, .mouseVisibility, .keySequence,
              .keyTable, .inspector, .presentTerminal, .progressReport, .desktopNotification, .commandFinished,
              .ringBell, .other:

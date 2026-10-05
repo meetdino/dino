@@ -42,7 +42,7 @@ extension DinoModel {
         var seen = Set<String>()
         return tabs.filter { id in
             guard !seen.contains(id) else { return false }
-            if let split = splits.first(where: { $0.contains(id) }) { seen.formUnion([split.first, split.second]) }
+            if let split = split(of: id) { seen.formUnion(split.panes) }
             seen.insert(id)
             return true
         }
@@ -51,8 +51,8 @@ extension DinoModel {
     /// The tab showing `id`: its own, or its split's.
     func tab(of id: String?) -> String? {
         guard let id else { return nil }
-        if let split = splits.first(where: { $0.contains(id) }) {
-            return shownTabs.first { $0 == split.first || $0 == split.second }
+        if let split = split(of: id) {
+            return shownTabs.first { split.contains($0) }
         }
         return shownTabs.contains(id) ? id : nil
     }
@@ -70,7 +70,7 @@ extension DinoModel {
     func dropTab(_ id: String, ending: Bool) {
         let shown = shownTabs
         let at = shown.firstIndex(of: tab(of: id) ?? id) ?? 0
-        let members = splits.first(where: { $0.contains(id) }).map { [$0.first, $0.second] } ?? [id]
+        let members = split(of: id)?.panes ?? [id]
         let before = layoutBefore()
         tabs.removeAll { members.contains($0) }
         let shells = ending ? members.filter { m in sessions.first { $0.id == m }?.agent_id == "shell" } : []
@@ -143,15 +143,15 @@ private struct TabItem: View {
     }
 
     var body: some View {
-        let split = model.splits.first { $0.contains(session.id) }
-        let partner = split.flatMap { s in model.sessions.first { $0.id == s.other(session.id) } }
+        // A split's tab names each of its panes.
+        let panes = model.split(of: session.id).map { t in t.panes.compactMap { id in model.sessions.first { $0.id == id } } } ?? []
         let status = model.status(of: session)
         HStack(spacing: 5) {
             if !session.plainShell {
                 Circle().fill(status.color).frame(width: 5, height: 5)
             }
             BellTitleMark(signal: PaneSignals.of(session.id))
-            Text(partner.map { "\(model.tabName(session)) | \(model.tabName($0))" } ?? model.tabName(session))
+            Text(panes.count > 1 ? panes.map { model.tabName($0) }.joined(separator: " | ") : model.tabName(session))
                 .lineLimit(1)
                 .truncationMode(.middle)
             let unseen = model.tmuxUnseen(session)

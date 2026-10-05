@@ -10,7 +10,7 @@ final class ClosedLayout: NSObject {
     /// The tabs it took away, with where each was.
     let tabs: [(id: String, at: Int)]
     /// The splits they were in.
-    let splits: [Split]
+    let splits: [SplitTree]
     /// The shells dinod keeps for now, to bring back.
     let shells: [String]
     let selected: String?
@@ -23,7 +23,7 @@ final class ClosedLayout: NSObject {
 
     @objc func act(_: Any?) { perform?() }
 
-    init(tabs: [(id: String, at: Int)], splits: [Split], shells: [String], selected: String?, name: String, again: @escaping () -> Void) {
+    init(tabs: [(id: String, at: Int)], splits: [SplitTree], shells: [String], selected: String?, name: String, again: @escaping () -> Void) {
         self.tabs = tabs
         self.splits = splits
         self.shells = shells
@@ -53,12 +53,12 @@ extension DinoModel {
     }
 
     /// What a close is about to take away, to undo it: call before, then `closed(_:)` after.
-    func layoutBefore() -> (tabs: [String], splits: [Split], selected: String?) {
+    func layoutBefore() -> (tabs: [String], splits: [SplitTree], selected: String?) {
         (tabs, splits, selected)
     }
 
     /// A close happened since `before`: it can be undone for `undo-timeout`.
-    func closed(since before: (tabs: [String], splits: [Split], selected: String?), members: [String], shells: [String], name: String, again: @escaping () -> Void) {
+    func closed(since before: (tabs: [String], splits: [SplitTree], selected: String?), members: [String], shells: [String], name: String, again: @escaping () -> Void) {
         guard undoTimeout > 0, let manager = undoManager else { return }
         let gone = before.tabs.enumerated().filter { !tabs.contains($0.element) }.map { (id: $0.element, at: $0.offset) }
         let splits = before.splits.filter { s in members.contains { s.contains($0) } }
@@ -136,9 +136,10 @@ extension DinoModel {
         }
         knownTabless.subtract(r.tabs.map(\.id))
         if t != tabs { tabs = t }
-        for s in r.splits where !splits.contains(s) && live.contains(s.first) && live.contains(s.second) {
-            splits.removeAll { $0.contains(s.first) || $0.contains(s.second) }
-            splits.append(s)
+        for s in r.splits where !splits.contains(s) && s.panes.allSatisfy(live.contains) {
+            var trees = splits.filter { t in !t.panes.contains(where: s.contains) }
+            trees.append(s)
+            splits = trees
         }
         if let id = r.selected, live.contains(id) { select(id) }
     }
