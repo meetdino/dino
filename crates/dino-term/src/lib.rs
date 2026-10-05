@@ -660,6 +660,26 @@ impl Pane {
         lines.join("\n")
     }
 
+    /// The screen's last `n` lines with something on them, top to bottom: a look at its bottom
+    /// (an agent's footer) without the rest of it.
+    pub fn last_lines(&self, n: usize) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let cols = grid.columns();
+        let mut lines: Vec<String> = Vec::with_capacity(n);
+        for line in (0..grid.screen_lines() as i32).rev() {
+            if lines.len() == n {
+                break;
+            }
+            let row = plain_row(&grid[Line(line)], cols);
+            if !row.trim().is_empty() {
+                lines.push(row);
+            }
+        }
+        lines.reverse();
+        lines.join("\n")
+    }
+
     fn replay_of(&self, term: &Term<Listener>, history: usize) -> Vec<u8> {
         let grid = term.grid();
         let mode = *term.mode();

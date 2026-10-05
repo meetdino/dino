@@ -234,12 +234,21 @@ struct ControlFields: View {
 }
 
 extension SessionInfo {
-    /// What the session runs with: what's about to apply, else the mode the agent says it's in.
+    /// What the session runs with now: the mode the agent says it's in. Never what's only asked
+    /// for (`pending`): that's shown as on its way.
     var shownControls: Controls {
-        if let pending { return pending }
         var c = controls ?? Controls()
         c.mode = agent_mode ?? c.mode
         return c
+    }
+
+    /// What's been chosen: what's on its way, else what it runs with. A choice builds on it.
+    var wantedControls: Controls { pending ?? shownControls }
+
+    /// A control chosen that isn't in effect yet, when it differs from what is.
+    func pending(_ kind: ControlKind) -> String?? {
+        guard let pending, kind.value(pending) != kind.value(shownControls) else { return nil }
+        return .some(kind.value(pending))
     }
 
     /// Tokens in the context window and the window's size; nil until dino knows both.
@@ -315,7 +324,9 @@ struct SessionControlsBar: View {
         let c = session.shownControls
         HStack(spacing: 2) {
             if ControlKind.mode.offered(by: knobs) {
-                chip(.mode, knobs, icon: ControlKind.icon(mode: c.mode), text: knobs.modeLabel(c.mode),
+                // The mode it's in, and the one chosen on its way: "Auto → Bypass".
+                let next = session.pending(.mode).map { " → " + knobs.modeLabel($0) } ?? ""
+                chip(.mode, knobs, icon: ControlKind.icon(mode: c.mode), text: knobs.modeLabel(c.mode) + next,
                      tint: c.mode == "bypass" ? .red : nil)
             }
             if knobs.keeps("model"), session.route != nil || ControlKind.model.offered(by: knobs) {
@@ -349,11 +360,13 @@ struct SessionControlsBar: View {
                 }
             } else if ControlKind.model.offered(by: knobs) {
                 let text = c.model.map(knobs.label) ?? (session.last_model ?? knobs.default_model).map(knobs.label) ?? "Default"
-                chip(.model, knobs, icon: "cpu", text: text, tint: session.otherModel == nil ? nil : .orange)
+                let next = session.pending(.model).map { " → " + ($0.map(knobs.label) ?? "Default") } ?? ""
+                chip(.model, knobs, icon: "cpu", text: text + next, tint: session.otherModel == nil ? nil : .orange)
             }
             // A model without effort levels (Haiku) has none to show.
             if ControlKind.effort.offered(by: knobs), !knobs.efforts(for: c.model).isEmpty {
-                chip(.effort, knobs, icon: "gauge.with.dots.needle.50percent", text: c.effort?.capitalized ?? "Default")
+                let next = session.pending(.effort).map { " → " + ($0?.capitalized ?? "Default") } ?? ""
+                chip(.effort, knobs, icon: "gauge.with.dots.needle.50percent", text: (c.effort?.capitalized ?? "Default") + next)
             }
             if let f = session.fallback {
                 FallbackChip(fallback: f, usage: session.usage_by_route ?? [])
@@ -363,7 +376,7 @@ struct SessionControlsBar: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .padding(.horizontal, 3)
-                    .help("Applies once the agent is idle and its subagents and background commands are done: it restarts with it, keeping its conversation")
+                    .help(Self.pendingHelp(knobs, only: session.pending(.model) == nil && session.pending(.effort) == nil))
             }
             if let ctx = session.contextUse {
                 ContextRing(used: ctx.used, limit: ctx.limit).padding(.horizontal, 5)
@@ -390,6 +403,14 @@ struct SessionControlsBar: View {
         }
     }
 
+    /// When a choice not in effect yet applies; `mode` when only the mode is on its way.
+    static func pendingHelp(_ knobs: Knobs, only mode: Bool) -> String {
+        if mode, knobs.live_modes == true {
+            return "Not in effect yet: the agent switches to it as soon as it safely can (mid-turn only when no mode on the way lets more through), else it restarts with it once idle, keeping its conversation"
+        }
+        return "Not in effect yet: applies once the agent is idle and its subagents and background commands are done. It restarts with it, keeping its conversation"
+    }
+
     /// Why a session's model can't be changed from here.
     static func keptModel(_ s: SessionInfo) -> String {
         "\(AgentNames.of(s.agent_id)) keeps a conversation's model; start a new session to change it"
@@ -405,7 +426,8 @@ struct SessionControlsBar: View {
             return "Model: \(session.last_model.map { "answering with \($0)" } ?? "the agent's default") (\(key))"
         case .mode:
             let k = model.knobs(for: session) ?? .none
-            return "\(k.modeLabel(session.shownControls.mode)): \(session.shownControls.mode.map(Mode.help) ?? "the agent's own setting") (\(key))"
+            let next = session.pending(.mode).map { "; switching to \(k.modeLabel($0))" } ?? ""
+            return "\(k.modeLabel(session.shownControls.mode)): \(session.shownControls.mode.map(Mode.help) ?? "the agent's own setting")\(next) (\(key))"
         case .effort:
             return "How hard the model thinks (\(key))"
         }
@@ -492,12 +514,20 @@ struct ControlPopover: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.bottom, 4)
             }
-            Text(model.busy(session)
+            Text(kind == .mode && knobs.live_modes == true
+                ? "The agent switches to it in place, as its own Shift+Tab would. Mid-turn it waits if a mode on the way lets more through; one Shift+Tab can't reach restarts the agent once idle, keeping its conversation."
+                : model.busy(session)
                 ? "Applies once the agent is idle and its subagents and background commands are done. It restarts with it and keeps its conversation."
                 : "The agent restarts with it and keeps its conversation.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if let next = session.pending(kind) {
+                Text("Chosen, not in effect yet: \(next.map { kind == .mode ? knobs.modeLabel($0) : kind == .model ? knobs.label($0) : $0.capitalized } ?? "Default").")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if kind == .model, let other = session.otherModel {
                 Text("Its last reply came from \(other).")
                     .font(.caption)
@@ -512,9 +542,11 @@ struct ControlPopover: View {
     @ViewBuilder private func row(_ i: Int, _ o: (String?, String, String?)) -> some View {
         let button = Button { choose(o.0) } label: {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "checkmark")
+                // In effect: a check; chosen and on its way: a clock.
+                Image(systemName: session.pending(kind).map { $0 == o.0 } == true ? "clock" : "checkmark")
                     .font(.caption.weight(.semibold))
-                    .opacity(o.0 == current ? 1 : 0)
+                    .foregroundStyle(session.pending(kind).map { $0 == o.0 } == true ? Color.orange : Color.primary)
+                    .opacity(o.0 == current || session.pending(kind).map { $0 == o.0 } == true ? 1 : 0)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(o.1)
                     if let help = o.2 {
@@ -545,7 +577,7 @@ struct ControlPopover: View {
     }
 
     private func choose(_ value: String?) {
-        var c = session.shownControls
+        var c = session.wantedControls
         if kind == .model {
             c = c.choosing(model: value, in: knobs)
         } else {
@@ -610,7 +642,7 @@ struct ProviderModelPopover: View {
     private func row(_ m: ProviderModel) -> some View {
         let v = m.agents.first { $0.agent == session.agent_id }
         return Button {
-            var c = session.shownControls
+            var c = session.wantedControls
             c.model = m.id
             model.controlPicker = nil
             model.setControls(session.id, c)
