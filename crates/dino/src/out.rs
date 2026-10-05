@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn paths_give_way_in_the_middle() {
-        let p = "~/priv/dino-app-poc/.claude/worktrees/cli";
+        let p = "~/src/dino-terminal/.claude/worktrees/cli";
         assert_eq!(fit_path(p, 60), p);
         assert_eq!(fit_path(p, 24), "~/…/worktrees/cli");
         assert_eq!(fit_path("/tmp/a-long-folder/with/levels/payments-service", 30), "/tmp/…/levels/payments-service");
@@ -362,11 +362,11 @@ mod tests {
     fn tables_fit_and_stay_aligned() {
         let cols = [Column::keep("ID"), Column::end("NAME", 6), Column::path("FOLDER", 8)];
         let rows = vec![
-            vec![Cell::new("1"), Cell::new("Dinosaurs essay"), Cell::new("~/priv/dino-app-poc/work")],
+            vec![Cell::new("1"), Cell::new("Dinosaurs essay"), Cell::new("~/src/dino-terminal/work")],
             vec![Cell::new("12"), Cell::new("shell"), Cell::new("/tmp")],
         ];
         let wide = render(&cols, &rows, true, 80, false);
-        assert_eq!(wide, "ID  NAME             FOLDER\n1   Dinosaurs essay  ~/priv/dino-app-poc/work\n12  shell            /tmp\n");
+        assert_eq!(wide, "ID  NAME             FOLDER\n1   Dinosaurs essay  ~/src/dino-terminal/work\n12  shell            /tmp\n");
         let narrow = render(&cols, &rows, true, 30, false);
         assert!(narrow.lines().all(|l| l.width() <= 30), "{narrow}");
         assert!(narrow.contains("~/…/work"), "{narrow}");
