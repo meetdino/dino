@@ -189,6 +189,12 @@ final class DinoModel: ObservableObject {
     /// The search field is up; set to put the cursor in it.
     @Published var findingSessions = false
 
+    /// Sessions whose computer-use banner was closed: hidden until their agent's next separate
+    /// burst of using the Mac or a browser (see `noteUsing`).
+    @Published var usingHidden: Set<String> = []
+    /// When each session's agent was last seen using the Mac or a browser.
+    var usingSeen: [String: Date] = [:]
+
     /// Rang the bell or finished while in the background; cleared when selected.
     @Published private(set) var attention: Set<String> = []
     /// Kept across relaunch, so a session that finished while dino was closed still says Done.
@@ -416,6 +422,7 @@ final class DinoModel: ObservableObject {
         // it adds nothing, and this runs on every state, which redrew the window four times a second.
         let tmuxNeeds = noteTmux(next) { appActive && $0.id == self.selected }
         if !Set(tmuxNeeds).isSubset(of: attention) { attention.formUnion(tmuxNeeds) }
+        noteUsing(next)
         for s in next {
             // Started with another agent, its own at its limit: said once, as it appears (a
             // scheduled task, ⌘N, an agent that started it, as well as New Session).
@@ -453,7 +460,7 @@ final class DinoModel: ObservableObject {
                     Notifier.post(session: s, title: "\(s.display) needs you", body: needs)
                 }
                 // Not in front of you: say an agent started using the Mac or the browser.
-                if let sentence = s.usingSentence, prev.reach == nil, s.needs == nil, !appActive {
+                if let sentence = s.usingSentence, prev.reach == nil, s.needs == nil, !appActive, UsingDisplay.current != .off {
                     Notifier.post(session: s, title: sentence, body: "\(s.display) · Open it to watch or stop it")
                 }
             }

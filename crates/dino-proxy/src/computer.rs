@@ -47,9 +47,25 @@ const STALE: Duration = Duration::from_secs(120);
 const GENERIC_AFTER: Duration = Duration::from_secs(600);
 
 /// What a tool's name says it reaches, if anything. `known` says the session called a
-/// computer-use tool by its distinctive bare name not long ago.
+/// computer-use tool by its distinctive bare name not long ago. Only the tool's name counts, never
+/// what it was asked to do: a Bash `screencapture` or a Read of a screenshot isn't computer use.
 pub fn reach_of(tool: &str, known: bool) -> Option<Reach> {
     let name = tool.to_ascii_lowercase().replace('-', "_");
+    // `mcp__<server>__<tool>`: the server by its whole name (`browser_history` isn't `browser`),
+    // or a plugin's (`plugin_<plugin>_<server>`).
+    if let Some((server, tool)) = name.strip_prefix("mcp__").and_then(|r| r.split_once("__")) {
+        let is = |servers: &[&str]| {
+            servers.iter().any(|s| server == *s || (server.starts_with("plugin_") && server.strip_suffix(s).is_some_and(|p| p.ends_with('_'))))
+        };
+        return if is(COMPUTER_SERVERS) {
+            Some(Reach::Computer)
+        } else if is(BROWSER_SERVERS) || playwright(tool) {
+            Some(Reach::Browser)
+        } else {
+            None
+        };
+    }
+    // `mcp_<server>_<tool>` (Hermes), `<server>_<tool>` (OpenCode), or a bare name.
     let rest = name.strip_prefix("mcp__").or_else(|| name.strip_prefix("mcp_")).unwrap_or(&name);
     let server = |servers: &[&str]| {
         servers.iter().any(|s| rest.strip_prefix(s).is_some_and(|after| after.starts_with('_') && after.len() > 1))
@@ -67,11 +83,12 @@ pub fn reach_of(tool: &str, known: bool) -> Option<Reach> {
     if known && GENERIC.contains(&rest) {
         return Some(Reach::Computer);
     }
-    // Playwright's tools, wherever its server is registered under another name.
-    if rest.starts_with("browser_") && rest.len() > 8 {
-        return Some(Reach::Browser);
-    }
-    None
+    playwright(rest).then_some(Reach::Browser)
+}
+
+/// Playwright's tools (`browser_click`), wherever its server is registered under another name.
+fn playwright(tool: &str) -> bool {
+    tool.starts_with("browser_") && tool.len() > 8
 }
 
 /// The agent's use of the Mac or a browser, as its tool calls say.
@@ -197,7 +214,26 @@ mod tests {
         assert_eq!(reach_of("click", false), None, "a bare click could be anything");
         assert_eq!(reach_of("click", true), Some(Reach::Computer), "after get_app_state it's the Mac");
         // Everything else.
-        for other in ["Bash", "Read", "mcp__linear__save_issue", "mcp__dino__list_sessions", "WebFetch", "browser", "mcp__computer-use", "computer_user_lookup"] {
+        // Claude Code's plugins: mcp__plugin_<plugin>_<server>__<tool>; Playwright under any name.
+        assert_eq!(reach_of("mcp__plugin_playwright_playwright__browser_click", false), Some(Reach::Browser));
+        assert_eq!(reach_of("mcp__pw__browser_navigate", false), Some(Reach::Browser));
+        // Everything else: other servers whose names only start like one, and tools that merely
+        // look at the screen or files (`screencapture` in Bash, a Read of a screenshot).
+        for other in [
+            "Bash",
+            "Read",
+            "mcp__linear__save_issue",
+            "mcp__dino__list_sessions",
+            "WebFetch",
+            "browser",
+            "mcp__computer-use",
+            "computer_user_lookup",
+            "mcp__browser-history__search",
+            "mcp__computer-use-docs__search",
+            "mcp__playwright-docs__search",
+            "mcp__heroku__list_apps",
+            "mcp__ide__getDiagnostics",
+        ] {
             assert_eq!(reach_of(other, false), None, "{other}");
         }
     }

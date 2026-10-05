@@ -168,13 +168,19 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
 
     // Younger than MIN_AGE: nothing yet.
     let first = lab.scan();
-    if t0.elapsed() < MIN_AGE - Duration::from_millis(300) {
+    // On a loaded Mac the first scan can end after MIN_AGE, having seen some old enough already:
+    // the next one may then list them, as it should.
+    let young = t0.elapsed() < MIN_AGE - Duration::from_millis(300);
+    if young {
         assert_eq!(lab::ids(&first), vec![], "listed before {MIN_AGE:?}");
     }
     // Every process older than MIN_AGE (the last started as `spawned` ended).
     std::thread::sleep((spawned + MIN_AGE + Duration::from_millis(300)).saturating_sub(t0.elapsed()));
     // Old enough, but found by one scan only.
-    assert_eq!(lab::ids(&lab.scan()), vec![], "listed after one scan");
+    let second = lab.scan();
+    if young {
+        assert_eq!(lab::ids(&second), vec![], "listed after one scan");
+    }
 
     // From the second scan on: exactly these, newest first, the same every time.
     let procs = procinfo::processes();

@@ -1191,6 +1191,7 @@ private struct ExperimentalFeature: Identifiable {
 /// Settings → Experimental: one switch per feature being tried out.
 private struct ExperimentalPane: View {
     @EnvironmentObject var store: SettingsStore
+    @AppStorage(UsingDisplay.key) private var usingDisplay = UsingDisplay.banner.rawValue
 
     private func on(_ f: ExperimentalFeature) -> Binding<Bool> {
         let id = f.id
@@ -1235,6 +1236,13 @@ private struct ExperimentalPane: View {
                 }
             } footer: {
                 Footnote("Features still being tried out. Each is off until you turn it on, and only on this Mac, except Cross-session communication, which syncs with your other agent settings.")
+            }
+            Section {
+                Picker("Show when an agent uses your Mac", selection: $usingDisplay) {
+                    ForEach(UsingDisplay.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+            } footer: {
+                Footnote("When any agent sees your screen, clicks in your apps or drives a browser (its own computer use, Claude in Chrome, open-computer-use, Playwright and the like). A banner you close stays hidden until the agent's next burst of it. Whatever you pick, the session's menu says so and has Stop.")
             }
         }
         .formStyle(.grouped)
