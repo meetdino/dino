@@ -1793,7 +1793,7 @@ private struct ReposPane: View {
         .formStyle(.grouped)
         .disabled(store.settings == nil)
         .task {
-            known = await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).tree(folders: [])) ?? [] }.value
+            known = await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).tree(folders: []))?.repos ?? [] }.value
                 .filter { !$0.worktrees.isEmpty }
         }
     }

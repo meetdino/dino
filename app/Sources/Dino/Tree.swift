@@ -17,10 +17,13 @@ struct Worktree: Codable, Equatable, Identifiable {
     /// Something works in it (a program, a subagent, a change in the last few minutes): Clean Up
     /// leaves it alone.
     var inUse: Bool?
+    /// dinod is still reading its git state (a repo with a thousand worktrees, read for the
+    /// first time): `git` is nil till then.
+    var reading: Bool?
     var id: String { path }
 
     enum CodingKeys: String, CodingKey {
-        case path, branch, dino, git, owner, users
+        case path, branch, dino, git, owner, users, reading
         case madeBy = "made_by"
         case inUse = "in_use"
     }
@@ -96,11 +99,20 @@ enum FolderLook {
 
 struct TreeResponse: Decodable {
     var repos: [RepoInfo]
+    /// Changes when the tree does; a dinod from before versions sends none.
+    var version: String?
+    /// It's the version asked with (`known`): `repos` is empty, what's shown stands.
+    var same: Bool?
 }
 
 extension DinoConnection {
-    func tree(folders: [String]) throws -> [RepoInfo] {
-        try JSONDecoder().decode(TreeResponse.self, from: send(["type": "tree", "folders": folders])).repos
+    /// The tree, or nil when it's still `known` (a repo with a thousand worktrees isn't sent and
+    /// decoded again every few seconds for nothing).
+    func tree(folders: [String], known: String? = nil) throws -> (repos: [RepoInfo], version: String?)? {
+        var body: [String: Any] = ["type": "tree", "folders": folders]
+        if let known { body["known"] = known }
+        let r = try JSONDecoder().decode(TreeResponse.self, from: send(body))
+        return r.same == true ? nil : (r.repos, r.version)
     }
 }
 
@@ -118,6 +130,8 @@ struct PlaceNode: Identifiable, Equatable {
     var madeBy: String?
     var users: [String] = []
     var inUse = false
+    /// Its git state is still being read (see `Worktree.reading`).
+    var reading = false
     var id: String { path }
     /// Its identity as a sidebar row: a plain row and one that opens to sessions aren't the same row.
     var rowID: String { sessions.isEmpty ? path : sessions.count == 1 ? path + "#one" : path + "#open" }
@@ -149,6 +163,21 @@ struct RepoNode: Identifiable, Equatable {
     var isGit: Bool { !repo.worktrees.isEmpty }
     /// Of `others`, the ones whose work landed with nothing to lose: ready to clean up.
     var merged: [PlaceNode] { others.filter(\.mergedAndClean) }
+
+    /// "Other worktrees" lists this many at first: a repo can have a thousand (agents make one
+    /// per task), and the rest are a click away.
+    static let othersShown = 50
+
+    /// `others` as listed: all, as they are, when there are few; else the ones in use first, then
+    /// the latest changed, `othersShown` of them unless `all`.
+    func othersListed(all: Bool) -> [PlaceNode] {
+        guard others.count > Self.othersShown else { return others }
+        let sorted = others.sorted { a, b in
+            if a.removable != b.removable { return !a.removable }
+            return (a.git?.changed ?? 0) > (b.git?.changed ?? 0)
+        }
+        return all ? sorted : Array(sorted.prefix(Self.othersShown))
+    }
     /// Has something to show: agents, fan-outs, worktrees dino made or merged, or it's the folder
     /// new sessions start in. Other worktrees alone don't count.
     func worthShowing(here: String) -> Bool {
@@ -196,7 +225,7 @@ enum SessionTree {
                         path: $0.path,
                         label: $0.git?.label ?? $0.branch ?? URL(fileURLWithPath: $0.path).lastPathComponent,
                         sessions: [], dino: $0.dino, git: $0.git, owner: $0.owner,
-                        madeBy: $0.madeBy, users: $0.users ?? [], inUse: $0.inUse ?? false
+                        madeBy: $0.madeBy, users: $0.users ?? [], inUse: $0.inUse ?? false, reading: $0.reading ?? false
                     )
                 }
             return RepoNode(repo: r, places: places, groups: groups.filter { $0.repo == r.path })
@@ -618,6 +647,8 @@ struct RepoRows: View {
     let node: RepoNode
     var filter = SessionFilter.all
     @Binding var collapsed: Set<String>
+    /// "Show All" was clicked under Other worktrees.
+    @State private var allOthers = false
 
     var body: some View {
         OpeningRows(open: expanded(node.id), tag: "repo:\(node.repo.path)") {
@@ -667,10 +698,22 @@ struct RepoRows: View {
                     OtherWorktreesHeader(others: node.others)
                         .contextMenu { cleanUpItems(node.others) }
                 } content: {
-                    ForEach(node.others) { place in
+                    let listed = node.othersListed(all: allOthers)
+                    ForEach(listed) { place in
                         OtherWorktreeRow(place: place)
                             .tag("dir:\(place.path)")
                             .contextMenu { otherMenu(place) }
+                    }
+                    if listed.count < node.others.count {
+                        Button { allOthers = true } label: {
+                            Text("Show All \(node.others.count)")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .padding(.leading, 22)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Listed: the \(listed.count) in use or changed most recently")
                     }
                 }
             }
@@ -902,8 +945,10 @@ struct OtherWorktreesHeader: View {
     let others: [PlaceNode]
 
     var body: some View {
-        let busy = others.filter { !$0.removable }.count
-        PlaceRow(icon: "square.stack.3d.up", title: "Other worktrees", detail: busy > 0 ? "\(others.count) · \(busy) in use" : "\(others.count)")
+        let busy = others.filter { !$0.removable && !$0.reading }.count
+        let reading = others.filter(\.reading).count
+        let detail = ["\(others.count)", busy > 0 ? "\(busy) in use" : nil, reading > 0 ? "reading \(reading)" : nil].compactMap { $0 }
+        PlaceRow(icon: "square.stack.3d.up", title: "Other worktrees", detail: detail.joined(separator: " · "))
             .help("""
                 Worktrees of this repo with no dino session in them: left by a dino session, made by \
                 Claude Code or Codex, or by hand. In use: a program works in it, or it changed in the \
@@ -926,7 +971,9 @@ struct OtherWorktreeRow: View {
                     .accessibilityHidden(true)
                 Text(place.owner?.description ?? place.label).lineLimit(1).truncationMode(.tail).layoutPriority(1)
                 Spacer(minLength: 4)
-                if !place.removable {
+                if place.reading && place.users.isEmpty {
+                    // Not known yet: neither in use nor free to clean up.
+                } else if !place.removable {
                     Text("In use").font(.caption).foregroundStyle(SessionStatus.working.color).fixedSize()
                 } else if place.git?.state == "merged" {
                     Image(systemName: "arrow.triangle.merge").font(.caption).foregroundStyle(.secondary)
@@ -970,7 +1017,10 @@ struct OtherWorktreeRow: View {
         var out = [maker(place, long: long)]
         let use = usage(place)
         if let use { out.append(long ? use.prefix(1).uppercased() + use.dropFirst() : use) }
-        guard let git = place.git else { return out }
+        guard let git = place.git else {
+            if place.reading { out.append(long ? "Reading what's in it…" : "reading…") }
+            return out
+        }
         let uncommitted = git.uncommitted ?? (git.dirty ? 1 : 0)
         let unpushed = git.unpushed ?? 0
         if uncommitted > 0 {

@@ -36,6 +36,7 @@ mod computer_use;
 mod cost;
 mod fallbacks;
 mod fsevents;
+mod gitstate;
 mod github;
 mod lid;
 mod lifecycle;
@@ -258,8 +259,10 @@ struct Daemon {
     previews: Mutex<Vec<Arc<preview::Server>>>,
     /// Subagents that run in a worktree of their own, and whose session started them.
     subagents: Mutex<Vec<SubagentWorktree>>,
-    /// Worktree path → its git summary and when it was read; git is too slow for every tree poll.
-    summaries: Mutex<HashMap<String, (Instant, Option<worktree::Summary>)>>,
+    /// Worktree path → its git summary and what it was read at; git is too slow for every tree poll.
+    summaries: Mutex<HashMap<String, gitstate::Known>>,
+    /// Which worktrees changed, and each repo's worktrees as last listed (see `gitstate`).
+    git: gitstate::State,
     schedule: schedule::Scheduler,
     /// Keeping agents running with the lid closed.
     lid: lid::Lid,
@@ -709,6 +712,7 @@ fn new_daemon(proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
         previews: Mutex::default(),
         subagents: Mutex::new(load_subagents()),
         summaries: Mutex::default(),
+        git: gitstate::State::default(),
         schedule: schedule::Scheduler::load(),
         lid: lid::Lid::default(),
         awake: awake::Awake::default(),
@@ -1359,7 +1363,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::Groups => Response::Groups { groups: groups(d) },
-            Request::Tree { folders } => Response::Tree { repos: cached_tree(d, folders) },
+            Request::Tree { folders, known } => {
+                let (repos, version) = cached_tree(d, folders);
+                if known.as_ref() == Some(&version) {
+                    Response::Tree { repos: Vec::new(), version: Some(version), same: true }
+                } else {
+                    Response::Tree { repos: (*repos).clone(), version: Some(version), same: false }
+                }
+            }
             Request::Diff { session } => match member_diff(d, &session) {
                 Ok((stat, text)) => Response::Diff { stat, text },
                 Err(e) => Response::Error { message: e.to_string() },
@@ -3775,9 +3786,30 @@ fn real(p: &Path) -> String {
 
 /// Every repo a session runs in (or a fan-out came from), and each extra folder, once.
 struct TreeCache {
-    repos: Vec<ipc::RepoInfo>,
+    repos: Arc<Vec<ipc::RepoInfo>>,
+    /// Changes when the tree does (see `Request::Tree`).
+    version: String,
     at: Instant,
     refreshing: bool,
+}
+
+impl TreeCache {
+    /// The tree for `folders`, reading worktrees for `max` at most. Some still to read: the next
+    /// ask reads more, off the request, so the sidebar fills in a few seconds at a time.
+    fn read(d: &Daemon, folders: Vec<String>, max: std::time::Duration) -> TreeCache {
+        let mut fresh = TreeCache::new(tree_until(d, folders, Some(Instant::now() + max)));
+        if fresh.repos.iter().any(|r| r.worktrees.iter().any(|w| w.reading)) {
+            fresh.at = Instant::now().checked_sub(TREE_FRESH).unwrap_or(fresh.at);
+        }
+        fresh
+    }
+
+    fn new(repos: Vec<ipc::RepoInfo>) -> TreeCache {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_vec(&repos).unwrap_or_default().hash(&mut h);
+        TreeCache { repos: Arc::new(repos), version: format!("{:016x}", h.finish()), at: Instant::now(), refreshing: false }
+    }
 }
 
 /// How old a tree may be before a request starts reading a new one. The app asks every few
@@ -3788,6 +3820,8 @@ const TREE_FRESH: std::time::Duration = std::time::Duration::from_millis(1500);
 /// the next ask reads git again instead of the cache, so a new session is filed under its repo and
 /// worktree at once rather than listed loose until the cache's next read.
 pub(crate) fn reshaped(d: &Daemon) {
+    // dino may have made or removed a worktree: listed again now, not when the watch says.
+    d.git.relist();
     let mut trees = d.trees.lock().unwrap();
     d.tree_gen.fetch_add(1, Ordering::Relaxed);
     trees.clear();
@@ -3795,8 +3829,8 @@ pub(crate) fn reshaped(d: &Daemon) {
 
 /// The tree for `folders`, from the last read: git runs (worktree lists, summaries) take tens to
 /// hundreds of ms while agents make worktrees, so they happen off the request. The first ask for a
-/// set of folders reads it in place.
-fn cached_tree(d: &Arc<Daemon>, mut folders: Vec<String>) -> Vec<ipc::RepoInfo> {
+/// set of folders reads it in place, for `TREE_FIRST` at most.
+fn cached_tree(d: &Arc<Daemon>, mut folders: Vec<String>) -> (Arc<Vec<ipc::RepoInfo>>, String) {
     folders.sort();
     let stale = {
         let mut trees = d.trees.lock().unwrap();
@@ -3806,44 +3840,56 @@ fn cached_tree(d: &Arc<Daemon>, mut folders: Vec<String>) -> Vec<ipc::RepoInfo> 
                 if stale {
                     c.refreshing = true;
                 }
-                Some((c.repos.clone(), stale))
+                Some((c.repos.clone(), c.version.clone(), stale))
             }
             None => None,
         }
     };
     match stale {
-        Some((repos, refresh)) => {
+        Some((repos, version, refresh)) => {
             if refresh {
                 let d = d.clone();
                 let asked = d.tree_gen.load(Ordering::Relaxed);
                 std::thread::spawn(move || {
-                    let repos = tree(&d, folders.clone());
+                    let fresh = TreeCache::read(&d, folders.clone(), TREE_MORE);
                     let mut trees = d.trees.lock().unwrap();
                     if d.tree_gen.load(Ordering::Relaxed) == asked {
-                        trees.insert(folders, TreeCache { repos, at: Instant::now(), refreshing: false });
+                        trees.insert(folders, fresh);
                     }
                 });
             }
-            repos
+            (repos, version)
         }
         None => {
             let asked = d.tree_gen.load(Ordering::Relaxed);
-            let repos = tree(d, folders.clone());
+            let fresh = TreeCache::read(d, folders.clone(), TREE_FIRST);
+            let answer = (fresh.repos.clone(), fresh.version.clone());
             let mut trees = d.trees.lock().unwrap();
             if d.tree_gen.load(Ordering::Relaxed) != asked {
-                return repos;
+                return answer;
             }
             // Only the folders asked about lately: the app's current one and a few others.
             if trees.len() > 16 {
                 trees.retain(|_, c| c.at.elapsed() < std::time::Duration::from_secs(60));
             }
-            trees.insert(folders, TreeCache { repos: repos.clone(), at: Instant::now(), refreshing: false });
-            repos
+            trees.insert(folders, fresh);
+            answer
         }
     }
 }
 
+/// How long the first look at a set of folders reads git before answering: the rest of a repo
+/// with a thousand worktrees is read by the looks after it, the app's sidebar is up meanwhile.
+const TREE_FIRST: std::time::Duration = std::time::Duration::from_millis(1500);
+/// How long each look after it reads (off the request) before the tree is shown again.
+const TREE_MORE: std::time::Duration = std::time::Duration::from_secs(4);
+
 fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
+    tree_until(d, folders, None)
+}
+
+/// `tree`, reading worktrees until `until` at most (see `gitstate::summaries`).
+fn tree_until(d: &Daemon, folders: Vec<String>, until: Option<Instant>) -> Vec<ipc::RepoInfo> {
     // A shell is where it has `cd`d to (already resolved), not where it started.
     let mut dirs: Vec<String> = d
         .sessions
@@ -3864,14 +3910,31 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
     // Shallowest first, so a folder comes before the folders inside it.
     dirs.sort_by_key(|d| d.len());
     dirs.dedup();
-    let inside = |dir: &str, p: &str| dir == p || dir.starts_with(&format!("{p}/"));
-    // What's working where, read once and only when there's a worktree to ask about.
+    let inside = |dir: &str, p: &str| dir == p || dir.strip_prefix(p).is_some_and(|r| r.starts_with('/'));
+    // What's working where, read once and only when there's a worktree to ask about: each
+    // program's folder and the folders above it, to look a worktree up in (a repo may have
+    // a thousand).
     let me = std::process::id();
     let procs = std::sync::OnceLock::new();
     let working_in = |path: &str| -> Vec<String> {
-        let all: &Vec<(u32, String, String)> =
-            procs.get_or_init(|| dino_core::procinfo::working_dirs().into_iter().filter(|p| p.0 != me).collect());
-        let mut names: Vec<String> = all.iter().filter(|p| inside(&p.2, path)).map(|p| p.1.clone()).collect();
+        let by_dir: &HashMap<String, Vec<String>> = procs.get_or_init(|| {
+            let mut by_dir: HashMap<String, Vec<String>> = HashMap::new();
+            for (pid, name, cwd) in dino_core::procinfo::working_dirs() {
+                if pid == me {
+                    continue;
+                }
+                let mut p = cwd.as_str();
+                loop {
+                    by_dir.entry(p.to_string()).or_default().push(name.clone());
+                    match p.rfind('/') {
+                        Some(i) if i > 0 => p = &p[..i],
+                        _ => break,
+                    }
+                }
+            }
+            by_dir
+        });
+        let mut names = by_dir.get(path).cloned().unwrap_or_default();
         names.sort();
         names.dedup();
         names
@@ -3882,38 +3945,29 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
         if repos.iter().any(|r| r.worktrees.iter().any(|w| inside(&dir, &w.path))) {
             continue;
         }
-        match worktree::list(Path::new(&dir)) {
-            Ok(mut w) if !w.is_empty() => {
+        match gitstate::list(d, &dir) {
+            Ok((mut w, paths)) if !w.is_empty() => {
                 // Compared with what the main checkout has out.
                 let base = w[0].branch.clone().unwrap_or_else(|| "HEAD".into());
                 let base = if base == "HEAD" { worktree::head(Path::new(&w[0].path)) } else { base };
-                // Each summary waits on git, so they're read side by side.
-                std::thread::scope(|sc| {
-                    let reads: Vec<_> = w
-                        .iter()
-                        .skip(1)
-                        .map(|w| {
-                            let (path, branch, base) = (real(Path::new(&w.path)), w.branch.clone(), &base);
-                            // Fan-out members show their own stat.
-                            (!fanned.contains(&path)).then(|| sc.spawn(move || summary(d, &path, branch.as_deref(), base)))
-                        })
-                        .collect();
-                    let dino_dir = real(&worktree::worktrees_dir(Path::new(&w[0].path)));
-                    for (w, read) in w.iter_mut().skip(1).zip(reads) {
-                        let path = real(Path::new(&w.path));
-                        w.dino = made.contains(&path);
-                        let by_dino = w.dino || fanned.contains(&path) || inside(&path, &dino_dir);
-                        w.made_by = if by_dino { Some("dino".into()) } else { worktree::made_by_path(&path).map(String::from) };
-                        w.users = working_in(&path);
-                        if let Some(read) = read {
-                            w.git = read.join().unwrap_or_default();
-                            w.owner = owners.iter().find(|o| o.0 == path).map(|o| o.1.clone());
-                        }
-                        w.in_use = !w.users.is_empty()
-                            || w.owner.as_ref().is_some_and(|o| o.running)
-                            || worktree::recently(w.git.as_ref().and_then(|g| g.changed), now_secs());
+                // Fan-out members show their own stat.
+                let read = gitstate::summaries(d, &w, &paths, &base, |p| !fanned.contains(p), until);
+                let dino_dir = real(&worktree::worktrees_dir(Path::new(&w[0].path)));
+                let now = now_secs();
+                for ((w, path), (git, reading)) in w.iter_mut().zip(&paths).skip(1).zip(read) {
+                    w.dino = made.contains(path);
+                    let by_dino = w.dino || fanned.contains(path) || inside(path, &dino_dir);
+                    w.made_by = if by_dino { Some("dino".into()) } else { worktree::made_by_path(path).map(String::from) };
+                    w.users = working_in(path);
+                    if !fanned.contains(path) {
+                        w.git = git;
+                        w.reading = reading;
+                        w.owner = owners.iter().find(|o| &o.0 == path).map(|o| o.1.clone());
                     }
-                });
+                    w.in_use = !w.users.is_empty()
+                        || w.owner.as_ref().is_some_and(|o| o.running)
+                        || worktree::recently(w.git.as_ref().and_then(|g| g.changed), now);
+                }
                 let default_branch = default_branch(&w[0]);
                 let path = w[0].path.clone();
                 repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w, default_branch: Some(default_branch) });
@@ -3950,14 +4004,13 @@ fn default_branch(main: &worktree::Worktree) -> String {
 
 /// A worktree's git summary, read again when older than a few seconds.
 fn summary(d: &Daemon, path: &str, branch: Option<&str>, base: &str) -> Option<worktree::Summary> {
-    const FRESH: std::time::Duration = std::time::Duration::from_secs(8);
-    if let Some((at, s)) = d.summaries.lock().unwrap().get(path) {
-        if at.elapsed() < FRESH {
-            return s.clone();
+    if let Some(k) = d.summaries.lock().unwrap().get(path) {
+        if k.at.elapsed() < gitstate::FRESH {
+            return k.summary.clone();
         }
     }
     let s = worktree::summary(Path::new(path), branch, base).ok();
-    d.summaries.lock().unwrap().insert(path.to_string(), (Instant::now(), s.clone()));
+    d.summaries.lock().unwrap().insert(path.to_string(), gitstate::Known::unstamped(s.clone()));
     s
 }
 
@@ -5111,6 +5164,69 @@ while (sysread(STDIN, my $c, 1)) {
         assert!(git(&repo, &["branch", "--list", "fix"]).is_empty(), "nothing on it but main's commits: it goes");
         assert!(lifecycle::clean_up(&d, &repo.display().to_string(), true).is_err(), "never the main checkout");
         assert!(repo.join("a.txt").exists());
+    }
+
+    /// A repo with many worktrees (agents make one per task): reading the tree again with nothing
+    /// changed runs no git at all, not a status per worktree nor even the worktree list; a change
+    /// in one worktree reads that one again, a commit in another that one.
+    #[test]
+    fn a_tree_read_runs_git_only_where_something_changed() {
+        let repo = test_home().join(format!("many-worktrees-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let wts: Vec<PathBuf> = (0..30).map(|i| repo.join(format!(".claude/worktrees/w{i}"))).collect();
+        for (i, wt) in wts.iter().enumerate() {
+            git(&repo, &["worktree", "add", "-q", "-b", &format!("w{i}"), &wt.to_string_lossy()]);
+        }
+        let d = shell_daemon();
+        let find = |trees: &[ipc::RepoInfo], wt: &Path| {
+            trees.iter().flat_map(|r| &r.worktrees).find(|w| real(Path::new(&w.path)) == real(wt)).cloned().unwrap()
+        };
+        let ask = || tree(&d, vec![repo.display().to_string()]);
+        // The watch is macOS's: on a busy Mac it can take a while to say.
+        let wait_for = |what: &str, mut done: Box<dyn FnMut() -> bool + '_>| {
+            let since = Instant::now();
+            while !done() {
+                assert!(since.elapsed() < std::time::Duration::from_secs(40), "timed out waiting for {what}");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let counts = || (d.git.reads.load(Ordering::Relaxed), d.git.listings.load(Ordering::Relaxed));
+        let first = ask();
+        assert_eq!(counts().0, 30, "each worktree read once");
+        assert!(wts.iter().all(|w| find(&first, w).git.is_some_and(|g| g.state == "empty")));
+        wait_for("a read with nothing changed to run no git", Box::new(|| {
+            let before = counts();
+            ask();
+            counts() == before
+        }));
+
+        // Which worktrees were read again since `then`.
+        let read_since = |then: Instant| -> Vec<String> {
+            let known = d.summaries.lock().unwrap();
+            let mut read: Vec<String> = wts.iter().map(|w| real(w)).filter(|w| known.get(w).is_some_and(|k| k.at > then)).collect();
+            read.sort();
+            read
+        };
+        let then = Instant::now();
+        std::fs::write(wts[7].join("draft.txt"), "draft\n").unwrap();
+        wait_for("the new file to show", Box::new(|| find(&ask(), &wts[7]).git.is_some_and(|g| g.uncommitted == 1)));
+        assert_eq!(read_since(then), [real(&wts[7])], "only the worktree that changed is read again");
+
+        // Its files, then its HEAD (the watch may say so one after the other): it alone.
+        let then = Instant::now();
+        git(&wts[3], &["commit", "-q", "--allow-empty", "-m", "Fix the parser"]);
+        wait_for("the commit to show", Box::new(|| find(&ask(), &wts[3]).git.is_some_and(|g| g.ahead == 1 && g.label == "Fix the parser")));
+        assert_eq!(read_since(then), [real(&wts[3])], "only the worktree whose HEAD moved");
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// An agent's fallbacks as the proxy gets them: only routes that serve the API it talks in,

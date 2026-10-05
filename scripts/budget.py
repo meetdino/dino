@@ -4,6 +4,8 @@
     scripts/budget.py [REPO]            # REPO: the checkout to test (default: this checkout)
     scripts/budget.py REPO --no-build   # use REPO's existing release builds
     scripts/budget.py REPO --no-claude  # skip the real Claude session (no network, no tokens)
+    scripts/budget.py REPO --only worktrees   # just these parts (comma-separated): latency,
+                                              # throughput, proxy, found, worktrees; no app
 
 It builds dinod and the app from REPO, starts an isolated test dinod (its own DINO_HOME) and a
 test copy of the app (its own bundle id, registered for nothing), with a realistic load: six
@@ -20,6 +22,9 @@ shells and two Claude Code sessions (haiku). Then it measures, and fails (exit 1
     proxy, 500-event answer added   median <= 3 ms
     100 MB streamed through proxy   <= 0.6 dinod CPU-seconds
     "On this Mac", 150+ agents      a scan <= 20 ms (median), scans at idle <= 0.2 % (one every 3 s)
+    a repo with 1,000 worktrees     the tree's first answer <= 2 s, all of them read <= 15 s; tree
+                                    reads at idle (one every 3 s, as the app asks) <= 0.5 % of a
+                                    core, dinod and its git runs
 
 Never touches the real dinod, ~/.local/bin/dino or your Dino.app; kills only its own processes.
 The app window must stay visible (not minimized or hidden) while it runs: a hidden window doesn't
@@ -29,6 +34,8 @@ Claude's trust entry for its test folder is removed from ~/.claude.json afterwar
 import fcntl, glob, re, http.client, http.server, json, os, pty, select, shutil, socket, socketserver, statistics, struct, subprocess, sys, termios, threading, time
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
+ONLY = next((sys.argv[i + 1].split(",") for i, a in enumerate(sys.argv[:-1]) if a == "--only"), None)
+args = [a for a in args if ONLY is None or a != ",".join(ONLY)]
 REPO = os.path.abspath(args[0]) if args else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = "--no-build" not in sys.argv
 CLAUDE = "--no-claude" not in sys.argv
@@ -41,7 +48,7 @@ SAFE = ["--model", "haiku", "--disallowedTools", "Artifact,Write,Edit,WebFetch,W
 
 BUDGET = {"idle": 1.0, "cat_s": 2.0, "cat_cpu": 2.5, "ws_delta": 5.0, "shell": 10.0, "claude": 10.0, "settings": 2.0, "lat_median": 1.0, "lat_p95": 2.0,
           "proxy_ttfb_median": 1.0, "proxy_ttfb_p95": 3.0, "proxy_total": 3.0, "proxy_cpu": 0.6,
-          "found_ms": 20.0, "found_idle": 0.2}
+          "found_ms": 20.0, "found_idle": 0.2, "wt_first": 2.0, "wt_all": 15.0, "wt_idle": 0.5}
 results, failures, warnings = [], [], []
 
 
@@ -427,10 +434,98 @@ def found_scan():
     check('"On this Mac": its scans at idle, one every 3 s', float(m[2]), BUDGET["found_idle"])
 
 
+# ---- a repo with 1,000 worktrees -----------------------------------------------------------------
+
+def worktrees():
+    """A repo with 1,000 worktrees (a user's has 1,066: agents make one per task, few get cleaned
+    up) and dinod reading its tree as the app does, every 3 s: the first read, and what the reads
+    after it cost while nothing changes, dinod's CPU and its git runs' (ps -S counts them)."""
+    root = "/tmp/dino-budget-wt"
+    shutil.rmtree(root, ignore_errors=True)
+    repo = root + "/repo"
+    os.makedirs(repo + "/src")
+    os.makedirs(root + "/dino")
+    g = lambda *a, cwd=repo: subprocess.run(["git", "-c", "user.name=b", "-c", "user.email=b@b", *a], cwd=cwd, capture_output=True, text=True)
+    g("init", "-q", "-b", "main")
+    for i in range(60):
+        open(f"{repo}/src/f{i}.rs", "w").write(f"fn f{i}() {{}}\n" * 40)
+    g("add", ".")
+    g("commit", "-qm", "init")
+
+    def add(i):
+        for _ in range(5):  # side by side, git now and then finds another's lock
+            if g("worktree", "add", "-q", "-b", f"w{i}", f"{repo}/.claude/worktrees/w{i}").returncode == 0:
+                return
+            g("worktree", "prune")
+            shutil.rmtree(f"{repo}/.claude/worktrees/w{i}", ignore_errors=True)
+            g("branch", "-D", f"w{i}")
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(8) as ex:
+        list(ex.map(add, range(1000)))
+    for i in range(0, 1000, 10):  # some with work in them
+        open(f"{repo}/.claude/worktrees/w{i}/src/f1.rs", "a").write("// wip\n")
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ZDOTDIR"))}
+    env = dict(base, DINO_HOME=root + "/dino")
+    d = subprocess.Popen([BIN, "daemon"], env=env, stdout=open(root + "/dinod.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        end = time.time() + 10
+        while not os.path.exists(root + "/dino/dinod.sock") and time.time() < end:
+            time.sleep(0.1)
+
+        def tree(known=None):
+            s = socket.socket(socket.AF_UNIX)
+            s.connect(root + "/dino/dinod.sock")
+            send(s, 0, json.dumps({"type": "tree", "folders": [repo], **({"known": known} if known else {})}).encode())
+            r = json.loads(rd(s, struct.unpack(">I", rd(s, 5)[1:])[0]))
+            s.close()
+            return r
+        t0 = time.perf_counter()
+        r = tree()
+        first = time.perf_counter() - t0
+        seen = sum(len(x["worktrees"]) for x in r["repos"])
+        # The rest are read in the background, the app's sidebar up meanwhile.
+        reading = lambda r: any(w.get("reading") for x in r["repos"] for w in x["worktrees"])
+        while reading(r) and time.perf_counter() - t0 < 120:
+            time.sleep(0.5)
+            r = tree()
+        whole = time.perf_counter() - t0
+        # The app's poll, from then on (the first ones settle what's watched).
+        known = r.get("version")
+        for _ in range(3):
+            known = tree(known).get("version", known)
+            time.sleep(3)
+        c0, t0 = cpu_secs_all(d.pid), time.time()
+        while time.time() - t0 < 30:
+            known = tree(known).get("version", known)
+            time.sleep(3)
+        idle = 100 * (cpu_secs_all(d.pid) - c0) / (time.time() - t0)
+    finally:
+        d.kill(); d.wait()
+        shutil.rmtree(root, ignore_errors=True)
+    log(f"     worktrees: {seen} in the tree, first answer {first:.2f} s, all read {whole:.2f} s, then {idle:.2f} % of a core while the app asks every 3 s")
+    if seen < 1000:
+        log(f"FAIL worktrees: only {seen} of 1,001 in the tree")
+        failures.append("worktrees")
+    check("1,000 worktrees: the tree's first answer", first, BUDGET["wt_first"], " s")
+    check("1,000 worktrees: all of them read", whole, BUDGET["wt_all"], " s")
+    check("1,000 worktrees: tree reads at idle, one every 3 s", idle, BUDGET["wt_idle"])
+
+
+def cpu_secs_all(pid):
+    """CPU seconds of `pid` and of its children that have exited (its git runs)."""
+    t = subprocess.run(["ps", "-S", "-o", "time=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    secs = 0.0
+    for p in t.replace("-", ":").split(":"):
+        if p:
+            secs = secs * 60 + float(p)
+    return secs
+
+
 def build():
     log("building dinod and the app…")
     subprocess.run(["cargo", "build", "--release", "-q"], cwd=REPO, check=True)
-    subprocess.run(["swift", "build", "-c", "release"], cwd=REPO + "/app", check=True, capture_output=True)
+    if ONLY is None:
+        subprocess.run(["swift", "build", "-c", "release"], cwd=REPO + "/app", check=True, capture_output=True)
 
 
 def mkapp():
@@ -496,7 +591,23 @@ def untrust():
         os.replace(t, p)
 
 
+def only():
+    """Just the parts asked for, without the app."""
+    parts = {"latency": latency, "throughput": throughput, "proxy": proxy, "found": found_scan, "worktrees": worktrees}
+    unknown = [p for p in ONLY if p not in parts]
+    if unknown:
+        sys.exit(f"no such part: {', '.join(unknown)} (there are {', '.join(parts)})")
+    if BUILD:
+        build()
+    for p in ONLY:
+        parts[p]()
+    log("\nBUDGET MET" if not failures else "\nOVER BUDGET: " + ", ".join(failures))
+    sys.exit(1 if failures else 0)
+
+
 def main():
+    if ONLY is not None:
+        only()
     if BUILD:
         build()
     mkapp()
@@ -599,6 +710,7 @@ def main():
     throughput()
     proxy()
     found_scan()
+    worktrees()
     shutil.rmtree(HOME, ignore_errors=True)
     shutil.rmtree(os.path.dirname(APP), ignore_errors=True)
     for w in warnings:

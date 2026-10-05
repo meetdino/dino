@@ -186,7 +186,12 @@ pub enum Request {
     Fanout { prompt: String, launchers: Vec<String>, cwd: Option<String> },
     Groups,
     /// Repos (with their worktrees) and folders where sessions run, plus `folders` the app shows.
-    Tree { folders: Vec<String> },
+    /// `known`: the version of the tree the asker has; the same one is answered with `same`.
+    Tree {
+        folders: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        known: Option<String>,
+    },
     /// A fan-out member's changes as a patch.
     Diff { session: String },
     /// Any session's changes, per file, for review: a fan-out member's since its fan-out began,
@@ -403,7 +408,15 @@ pub enum Response {
     Conversation { page: crate::history::Page },
     Stats { report: Box<crate::usage::Report> },
     Groups { groups: Vec<GroupInfo> },
-    Tree { repos: Vec<RepoInfo> },
+    /// `same`: it's the version the asker has (`repos` is left empty, a thousand worktrees
+    /// aren't sent and decoded again every few seconds for nothing).
+    Tree {
+        repos: Vec<RepoInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        same: bool,
+    },
     Diff { stat: DiffStat, text: String },
     /// `root` is the checkout the paths are in, `base` what they're compared with (for people).
     /// No repo: no files, and `note` says why.
