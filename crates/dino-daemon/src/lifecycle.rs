@@ -30,16 +30,16 @@ pub(crate) struct Archived {
     pub worktree_removed: bool,
 }
 
-fn archived_path() -> PathBuf {
-    dino_core::config_dir().join("archived.json")
+fn archived_path(home: &Path) -> PathBuf {
+    home.join("archived.json")
 }
 
-pub(crate) fn load_archived() -> Vec<Archived> {
-    std::fs::read(archived_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+pub(crate) fn load_archived(home: &Path) -> Vec<Archived> {
+    std::fs::read(archived_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-fn save_archived(all: &[Archived]) {
-    let _ = super::write_private(&archived_path(), &serde_json::to_vec_pretty(all).unwrap_or_default());
+fn save_archived(home: &Path, all: &[Archived]) {
+    let _ = super::write_private(&archived_path(home), &serde_json::to_vec_pretty(all).unwrap_or_default());
 }
 
 /// Answer a lifecycle request.
@@ -139,14 +139,14 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
             worktree_removed = true;
             let mut worktrees = d.worktrees.lock().unwrap();
             worktrees.retain(|o| o.path != w.path);
-            save_worktrees(&worktrees);
+            save_worktrees(&d.home, &worktrees);
             d.summaries.lock().unwrap().remove(&target);
             d.sizes.lock().unwrap().remove(&target);
         }
     }
     let mut archived = d.archived.lock().unwrap();
     archived.insert(0, Archived { saved, archived_at: now_secs(), worktree: w, worktree_removed });
-    save_archived(&archived);
+    save_archived(&d.home, &archived);
     Ok(())
 }
 
@@ -200,7 +200,7 @@ fn unarchive(d: &Daemon, id: &str) -> anyhow::Result<String> {
         }
         let mut archived = d.archived.lock().unwrap();
         archived.retain(|o| o.saved.id != id);
-        save_archived(&archived);
+        save_archived(&d.home, &archived);
         return Ok(h.id.clone());
     }
     d.allowed_launcher(&a.saved.launcher)?;
@@ -210,7 +210,7 @@ fn unarchive(d: &Daemon, id: &str) -> anyhow::Result<String> {
         if !worktrees.iter().any(|o| o.path == w.path) {
             worktrees.push(w.clone());
         }
-        save_worktrees(&worktrees);
+        save_worktrees(&d.home, &worktrees);
     }
     // Where it ran, or the nearest place still there.
     let cwd = if a.saved.host.is_some() {
@@ -235,7 +235,7 @@ fn unarchive(d: &Daemon, id: &str) -> anyhow::Result<String> {
     let new = spawn(d, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) })?;
     let mut archived = d.archived.lock().unwrap();
     archived.retain(|o| o.saved.id != id);
-    save_archived(&archived);
+    save_archived(&d.home, &archived);
     drop(archived);
     save(d);
     Ok(new)
@@ -247,7 +247,7 @@ fn delete(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let mut archived = d.archived.lock().unwrap();
     let i = archived.iter().position(|a| a.saved.id == id).ok_or_else(|| anyhow::anyhow!("nothing archived as {id}"))?;
     let a = archived.remove(i);
-    save_archived(&archived);
+    save_archived(&d.home, &archived);
     dino_core::agent::qwen::forget(id);
     crate::forget_session_files(id);
     if let (Some(w), true) = (&a.worktree, a.worktree_removed) {
@@ -308,14 +308,14 @@ pub(crate) fn delete_session(d: &Daemon, id: &str, dry_run: bool) -> anyhow::Res
                 g.members.retain(|m| m.session != id);
             }
             groups.retain(|g| !g.members.is_empty());
-            save_groups(&groups);
+            save_groups(&d.home, &groups);
         }
     }
     {
         let mut archived = d.archived.lock().unwrap();
         if archived.iter().any(|a| a.saved.id == id) {
             archived.retain(|a| a.saved.id != id);
-            save_archived(&archived);
+            save_archived(&d.home, &archived);
         }
     }
     save(d);
@@ -336,7 +336,7 @@ pub(crate) fn delete_session(d: &Daemon, id: &str, dry_run: bool) -> anyhow::Res
     {
         let mut worktrees = d.worktrees.lock().unwrap();
         worktrees.retain(|o| o.path != w.path);
-        save_worktrees(&worktrees);
+        save_worktrees(&d.home, &worktrees);
     }
     d.summaries.lock().unwrap().remove(&target);
     d.sizes.lock().unwrap().remove(&target);
@@ -347,7 +347,7 @@ pub(crate) fn delete_session(d: &Daemon, id: &str, dry_run: bool) -> anyhow::Res
         for a in archived.iter_mut().filter(|a| a.worktree.as_ref().is_some_and(|o| o.path == w.path)) {
             a.worktree_removed = true;
         }
-        save_archived(&archived);
+        save_archived(&d.home, &archived);
     }
     Ok(out)
 }
@@ -470,7 +470,7 @@ fn forget_stored(d: &Daemon, w: &SessionWorktree, target: &str, ended: Vec<Arc<s
     {
         let mut worktrees = d.worktrees.lock().unwrap();
         worktrees.retain(|o| o.path != w.path);
-        save_worktrees(&worktrees);
+        save_worktrees(&d.home, &worktrees);
     }
     d.summaries.lock().unwrap().remove(target);
     d.sizes.lock().unwrap().remove(target);
@@ -482,7 +482,7 @@ fn forget_stored(d: &Daemon, w: &SessionWorktree, target: &str, ended: Vec<Arc<s
         a.worktree_removed = true;
         kept = true;
     }
-    save_archived(&archived);
+    save_archived(&d.home, &archived);
     if !kept {
         let _ = trust::claude_forget(&w.path);
     }
