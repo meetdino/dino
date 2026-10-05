@@ -25,7 +25,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="docs/images/screenshot-light.png">
-    <img src="docs/images/screenshot-light.png" width="900" alt="The dino window: Claude Code sessions on Opus 5.5 grouped by project in the sidebar, one of them needing you, and Claude Code in the terminal asking to apply its edit">
+    <img src="docs/images/screenshot-light.png" width="900" alt="The dino window: Claude Code sessions on Opus 5.5 grouped by project in the sidebar, and one of them working in Bypass permissions mode, its edits shown as diffs in the terminal">
   </picture>
 </p>
 
