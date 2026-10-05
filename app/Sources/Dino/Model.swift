@@ -152,6 +152,8 @@ final class DinoModel: ObservableObject {
     @Published var showPalette = false
     /// The session the side chat is asking about.
     @Published var askingAbout: SessionInfo?
+    /// The session Fork Session… is forking.
+    @Published var forking: SessionInfo?
     /// PRs dino just opened or merged, until dinod's poller reports them.
     @Published private var acted: [String: PrInfo] = [:]
 
@@ -675,7 +677,7 @@ final class DinoModel: ObservableObject {
     /// keybinds for the same thing, and stay the user's to change). Ghostty's ⌘K (clear) is ⌥⌘K.
     static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "alt+k", "j", "o", "n", "t", "shift+n", "alt+n", "ctrl+n", "alt+shift+n",
                              "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t", "shift+p", "shift+bracket_left",
-                             "shift+bracket_right", "shift+semicolon", "backslash", "shift+m", "shift+i", "shift+e"]
+                             "shift+bracket_right", "shift+semicolon", "backslash", "shift+m", "shift+i", "shift+e", "alt+b"]
         + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
         .map { "super+\($0)" }
         // Ctrl+Tab cycles sessions, ⌃` swaps split panes, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F

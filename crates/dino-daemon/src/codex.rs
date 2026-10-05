@@ -50,18 +50,25 @@ pub(crate) struct Rollout {
 pub(crate) fn watch(d: &Daemon) {
     let sessions: Vec<_> = d.sessions.lock().unwrap().iter().filter(|s| super::watched(s) && !s.pane.is_exited()).cloned().collect();
     for s in sessions {
-        track(d, &s);
+        // Another conversation: followed once its rollout's lock is let go (a fork made in Codex
+        // starts a session for the original).
+        if let Some((known, now)) = track(d, &s) {
+            super::fork::moved(d, &s, known, now);
+        }
     }
 }
 
-fn track(d: &Daemon, s: &Session) {
+/// The conversation it was on and the one it's on now, when it has moved to another.
+fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
+    let mut moved = None;
     let mut r = s.rollout.lock().unwrap();
     // Until its first prompt makes one, look every poll: a short first turn is over in seconds.
     if r.path.is_none() || r.looked.is_none_or(|t| t.elapsed() >= RELOOK) {
         r.looked = Some(Instant::now());
         if let Some(path) = s.pane.pid().and_then(open_rollout).filter(|p| r.path.as_ref() != Some(p)) {
             // Its first prompt, or another conversation: pick up where that one is.
-            *s.agent_session.lock().unwrap() = history::rollout_id(&path);
+            let known = s.agent_session.lock().unwrap().clone();
+            moved = history::rollout_id(&path).filter(|now| known.as_ref() != Some(now)).map(|now| (known, now));
             r.turn = history::codex_status(&path).as_deref() == Some("busy");
             r.offset = path.metadata().map_or(0, |m| m.len());
             r.needs = None;
@@ -71,7 +78,7 @@ fn track(d: &Daemon, s: &Session) {
             r.path = Some(path);
         }
     }
-    let Some(path) = r.path.clone() else { return };
+    let Some(path) = r.path.clone() else { return moved };
     for v in new_events(&path, &mut r.offset) {
         if let Some(call) = tool_call(&v) {
             count(&mut r, call, |tool, phase| d.proxy.stats.tool_call(&s.id, tool, phase));
@@ -132,6 +139,7 @@ fn track(d: &Daemon, s: &Session) {
         d.proxy.stats.report(&s.id, now.clone());
         r.reported = Some(now);
     }
+    moved
 }
 
 /// The whole lines written since `offset`, moving it past them.

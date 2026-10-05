@@ -458,6 +458,11 @@ struct SessionMenu: View {
             .disabled(session.exited)
             .help("Show it under Needs you until you look at it again")
         Button("Rename…") { model.renaming = Renaming(id: session.id, place: .sidebar) }
+        if session.agent_id != "shell" {
+            Button("Fork Session…") { model.forking = session }
+                .disabled(!model.canFork(session))
+                .help(model.whyNoFork(session) ?? "A new session on a copy of its conversation; the original stays as it is (⌥⌘B)")
+        }
         if model.canArchive(session.id) {
             Button("Archive") { model.archive(session.id) }
                 .help("Stop it and keep it in Archived, to pick up again later")

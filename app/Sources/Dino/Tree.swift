@@ -132,6 +132,8 @@ struct PlaceNode: Identifiable, Equatable {
     var inUse = false
     /// Its git state is still being read (see `Worktree.reading`).
     var reading = false
+    /// It held only forks, now shown under the sessions they came from (see `RepoNode.forks`).
+    var heldForks = false
     var id: String { path }
     /// Its identity as a sidebar row: a plain row and one that opens to sessions aren't the same row.
     var rowID: String { sessions.isEmpty ? path : sessions.count == 1 ? path + "#one" : path + "#open" }
@@ -157,6 +159,10 @@ struct RepoNode: Identifiable, Equatable {
     var groups: [GroupInfo]
     /// Session id → the worktrees its subagents made, shown under that session.
     var subagents: [String: [PlaceNode]] = [:]
+    /// Session id → the forks of its conversation (and their forks), shown under that session.
+    var forks: [String: [SessionInfo]] = [:]
+    /// A fork's id → the place it was filed in, for its branch and worktree menu.
+    var forkPlaces: [String: PlaceNode] = [:]
     /// Worktrees no dino session runs in: dino's left behind, other tools', made by hand.
     var others: [PlaceNode] = []
     var id: String { repo.path }
@@ -192,10 +198,10 @@ struct RepoNode: Identifiable, Equatable {
         if tag == "others:\(id)", !others.isEmpty { return ("open:\(tag)", false) }
         if tag.hasPrefix("group:"), groups.contains(where: { "group:\($0.id)" == tag }) { return (tag, true) }
         if tag.hasPrefix("dir:"), let p = worktreePlaces.first(where: { "dir:\($0.path)" == tag }),
-           p.sessions.count > 1 || p.sessions.contains(where: { subagents[$0.id] != nil }) {
+           p.sessions.count > 1 || p.sessions.contains(where: { subagents[$0.id] != nil || forks[$0.id] != nil }) {
             return (p.path, true)
         }
-        if subagents[tag] != nil { return ("subagents:\(tag)", true) }
+        if subagents[tag] != nil || forks[tag] != nil { return ("subagents:\(tag)", true) }
         return nil
     }
 
@@ -245,6 +251,31 @@ enum SessionTree {
             }
             if let best { nodes[best.repo].places[best.place].sessions.append(s) } else { unfiled.append(s) }
         }
+        // A fork goes under the session it came from (the first of its line still here) when that's
+        // in the same repo, out of the place its own folder files it in.
+        for i in nodes.indices {
+            let filed = nodes[i].places.flatMap { place in place.sessions.map { (place, $0) } }
+            let byID = Dictionary(filed.map { ($0.1.id, $0.1) }, uniquingKeysWith: { a, _ in a })
+            var moved = Set<String>()
+            for (place, s) in filed {
+                var top = s
+                var seen: Set<String> = [s.id]
+                while let up = top.forked_from?.session, let parent = byID[up], !seen.contains(up) {
+                    seen.insert(up)
+                    top = parent
+                }
+                guard top.id != s.id else { continue }
+                nodes[i].forks[top.id, default: []].append(s)
+                nodes[i].forkPlaces[s.id] = place
+                moved.insert(s.id)
+            }
+            guard !moved.isEmpty else { continue }
+            for pi in nodes[i].places.indices {
+                let had = nodes[i].places[pi].sessions.count
+                nodes[i].places[pi].sessions.removeAll { moved.contains($0.id) }
+                if had > 0, nodes[i].places[pi].sessions.isEmpty { nodes[i].places[pi].heldForks = true }
+            }
+        }
         let ids = Set(sessions.map(\.id))
         for i in nodes.indices {
             var kept: [PlaceNode] = []
@@ -255,6 +286,8 @@ enum SessionTree {
                 // where it can be opened again or cleaned up.
                 if pi == 0 || !place.sessions.isEmpty {
                     kept.append(place)
+                } else if place.heldForks {
+                    // Shown with its fork.
                 } else if let owner = place.owner, ids.contains(owner.session) {
                     nodes[i].subagents[owner.session, default: []].append(place)
                 } else {
@@ -776,7 +809,7 @@ struct RepoRows: View {
 
     /// Its only session, when nothing else hangs under it (subagents' worktrees keep the header).
     private func sole(_ place: PlaceNode) -> SessionInfo? {
-        guard place.sessions.count == 1, let s = place.sessions.first, node.subagents[s.id] == nil else { return nil }
+        guard place.sessions.count == 1, let s = place.sessions.first, node.subagents[s.id] == nil, node.forks[s.id] == nil else { return nil }
         return s
     }
 
@@ -820,20 +853,40 @@ struct RepoRows: View {
     /// A session's rows, each with the worktrees its subagents made under it.
     private func sessionRows(_ sessions: [SessionInfo], root: String) -> some View {
         // With or without subagents' worktrees under it, as for folders.
-        ForEach(sessions.map { (key: node.subagents[$0.id] == nil ? $0.id : "\($0.id)#sub", session: $0) }, id: \.key) { row in
+        ForEach(sessions.map { (key: node.subagents[$0.id] == nil && node.forks[$0.id] == nil ? $0.id : "\($0.id)#sub", session: $0) }, id: \.key) { row in
             let s = row.session
-            if let children = node.subagents[s.id] {
+            if node.subagents[s.id] != nil || node.forks[s.id] != nil {
                 OpeningRows(open: expanded("subagents:\(s.id)"), tag: s.id) {
                     SessionRow(session: s, index: 0, root: root)
                         .contextMenu { SessionMenu(session: s) }
                 } content: {
-                    worktreeRows(children)
+                    worktreeRows(node.subagents[s.id] ?? [])
+                    forkRows(node.forks[s.id] ?? [], parentRoot: root)
                 }
             } else {
                 SessionRow(session: s, index: 0, root: root)
                     .tag(s.id)
                     .contextMenu { SessionMenu(session: s) }
             }
+        }
+    }
+
+    /// The forks under a session: each with its worktree's branch when it has one of its own, and
+    /// that worktree's menu; their subagents' worktrees under them.
+    private func forkRows(_ forks: [SessionInfo], parentRoot: String) -> some View {
+        ForEach(forks) { f in
+            let place = node.forkPlaces[f.id]
+            let own = place.flatMap { $0.path == parentRoot || $0.path == node.repo.path ? nil : $0 }
+            SessionRow(session: f, index: 0, branch: own.map(branchName), root: place?.path)
+                .tag(f.id)
+                .contextMenu {
+                    SessionMenu(session: f)
+                    if let own {
+                        Divider()
+                        placeMenu(own)
+                    }
+                }
+            worktreeRows(node.subagents[f.id] ?? [])
         }
     }
 

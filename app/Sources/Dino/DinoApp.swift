@@ -137,6 +137,9 @@ struct DinoApp: App {
                 Button("Ask About This Session…") { model.askingAbout = model.selectedSession }
                     .keyboardShortcut(";", modifiers: [.command, .shift])
                     .disabled(model.selectedSession == nil)
+                Button("Fork Session…") { model.forking = model.selectedSession }
+                    .keyboardShortcut("b", modifiers: [.command, .option])
+                    .disabled(!(model.selectedSession.map(model.canFork) ?? false))
                 Button("Create Pull Request…") { model.showCreatePR = true }
                     .disabled(model.selectedSession.map { $0.host != nil || model.pr(of: $0) != nil } ?? true)
                 OpenInMenuItems().environmentObject(model)
@@ -468,6 +471,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showShortcuts) { ShortcutSheet() }
         .sheet(isPresented: $model.showPalette) { CommandPalette() }
         .sheet(item: $model.askingAbout) { AskSheet(session: $0) }
+        .sheet(item: $model.forking) { ForkSheet(session: $0) }
         .sheet(item: $model.editingTask) { ScheduleSheet(task: $0) }
         .alert(
             "Delete “\(model.deletingTask?.name ?? "")”?",
@@ -1186,6 +1190,9 @@ struct SessionRow: View {
                     Text(status.label).font(.caption).foregroundStyle(status.color).lineLimit(1).fixedSize()
                         .help(status.detail ?? status.label)
                 }
+            }
+            if let from = session.forked_from {
+                ForkedFromLine(from: from)
             }
             if let f = session.inside {
                 // The row's name is already the agent's title: the badge says what it is and where.
