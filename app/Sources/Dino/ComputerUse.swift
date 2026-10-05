@@ -25,7 +25,7 @@ extension SessionInfo {
     }
 }
 
-/// How dino shows an agent using the Mac or a browser (Settings → Experimental). Whatever it is,
+/// How dino shows an agent using the Mac or a browser (Settings → Agents). Whatever it is,
 /// the session's menu says so and has Stop.
 enum UsingDisplay: String, CaseIterable, Identifiable {
     /// A banner over its terminal, and a mark on its sidebar row.
