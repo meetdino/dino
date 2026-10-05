@@ -46,6 +46,10 @@ final class TerminalSurfaceCoordinator {
     // MARK: - Platform Hooks
 
     var isAttached: () -> Bool = { false }
+    /// Whether the view has keyboard focus in the key window, told to a new surface: Ghostty
+    /// takes one as focused until told otherwise, and says so to a program that asks for focus
+    /// reports. Nil leaves Ghostty's default.
+    var hasKeyFocus: (() -> Bool)?
     var scaleFactor: () -> Double = { 2.0 }
     var viewSize: () -> (width: Double, height: Double) = { (0, 0) }
     var platformSetup: ((inout ghostty_surface_config_s) -> Void)?
@@ -204,6 +208,9 @@ final class TerminalSurfaceCoordinator {
         surface = newSurface
         surfaceSession = configuration.inMemorySession
         newSurface.setOcclusion(effectiveSurfaceVisible)
+        if let focused = hasKeyFocus?() {
+            newSurface.setFocus(focused)
+        }
         // Wakeups must keep draining while the surface is merely occluded:
         // the app mailbox (titles, pwd, bell, child-exit) only empties in
         // ghostty_app_tick, and a full mailbox blocks the session's write

@@ -33,6 +33,12 @@ models. Changes from upstream:
 - `Resources/Ghostty/themes`: Ghostty 1.3.1's color themes (from iTerm2-Color-Schemes, MIT, see
   `Resources/Ghostty/LICENSE-themes`), so `theme = Name` resolves without Ghostty.app. Taken from
   Ghostty 1.3.1's `Contents/Resources/ghostty/themes`.
+- Focus (`Platform/AppKit/AppTerminalView+Lifecycle.swift`, `TerminalSurfaceCoordinator.hasKeyFocus`):
+  a surface is focused only as the first responder of the key window, and a new one is told
+  whether it is: Ghostty takes a surface as focused until told otherwise, and says so to a program
+  that turns on focus reports. Upstream focused the first responder of any window, key or not,
+  so a pane in a hidden or background window reported itself focused (and `dino attach`, which
+  follows focus to decide a session's size, took it for the one the user was looking at).
 - `TerminalController.reapplyConfig(to:)`: Ghostty's soft `reload_config`, the loaded config given
   again to a surface or the app, so a `light:…,dark:…` theme follows each surface's light or dark.
 

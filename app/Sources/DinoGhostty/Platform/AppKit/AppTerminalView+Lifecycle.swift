@@ -42,7 +42,10 @@
 
         override open func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()
-            core.setFocus(true)
+            // Focused, for Ghostty and the focus reports a program asks for, only in the key
+            // window: a pane in a window the user isn't in (a hidden app's, one behind) isn't
+            // looked at. The window becoming key focuses it (`windowDidBecomeKey`).
+            core.setFocus(window?.isKeyWindow == true)
             focusBridge.onFocusChange?(true)
             return result
         }

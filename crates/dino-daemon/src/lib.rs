@@ -28,6 +28,7 @@ mod agentlog;
 mod agentserver;
 mod awake;
 mod chatgpt;
+mod clients;
 mod cloud;
 mod codex;
 mod computer_use;
@@ -94,6 +95,8 @@ struct Session {
     /// The last local web address the agent printed.
     local_url: Arc<Mutex<Option<String>>>,
     attached: AtomicUsize,
+    /// Its attached clients' sizes and focus: which of them its size follows.
+    clients: Mutex<clients::Clients>,
     auto: Mutex<AutoState>,
     /// Mode, model and effort it was started with.
     controls: Controls,
@@ -1759,6 +1762,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         poked,
         local_url,
         attached: AtomicUsize::new(0),
+        clients: Mutex::default(),
         auto: Mutex::new(restore.as_ref().map(|r| r.auto.clone()).unwrap_or_default()),
         controls,
         pending: Mutex::default(),
@@ -2129,6 +2133,31 @@ impl Session {
     fn poke(&self) {
         *self.poked.lock().unwrap() = Some(Instant::now());
     }
+
+    /// Its size, as the client the user is looking at has it (see `clients`).
+    fn fit(&self) {
+        // Held while it's applied, so two clients' changes at once can't land out of order.
+        let clients = self.clients.lock().unwrap();
+        if let Some((cols, rows)) = clients.size() {
+            self.pane.resize(cols, rows);
+        }
+    }
+
+    /// After `f` changed which clients are focused: the size they decide now, then the agent told
+    /// whether the user is looking at it, if that changed (or `f` was a client gaining focus,
+    /// which its terminal would have said too).
+    fn focus_changed(&self, f: impl FnOnce(&mut clients::Clients), gained: bool) {
+        let (was, now) = {
+            let mut c = self.clients.lock().unwrap();
+            let was = c.focused();
+            f(&mut c);
+            (was, c.focused())
+        };
+        self.fit();
+        if (gained || was != now) && !self.pane.is_exited() {
+            self.pane.report_focus(now);
+        }
+    }
 }
 
 /// Whether the client on `stream` hung up. Only for a client that sends nothing meanwhile.
@@ -2164,13 +2193,14 @@ fn ended_note(d: &Daemon, s: &Arc<Session>) -> Vec<u8> {
 fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, rows: u16) -> io::Result<()> {
     ipc::write_json(&mut stream, &Response::Ok)?;
     s.poke();
-    // The most recent client decides the size, like tmux's "latest".
-    s.pane.resize(cols, rows);
+    let sub_id = d.next_sub.fetch_add(1, Ordering::Relaxed);
+    // Its size, unless another client is the one being looked at (see `clients`).
+    s.clients.lock().unwrap().join(sub_id, (cols, rows));
+    s.fit();
     // The client's terminal answers queries now; the daemon's emulator must stay quiet.
     s.attached.fetch_add(1, Ordering::Relaxed);
     s.pane.shared.answer_queries.store(false, Ordering::Relaxed);
 
-    let sub_id = d.next_sub.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = channel::<Vec<u8>>();
     let replay = s.pane.replay_then(REPLAY_HISTORY, |bytes| {
         s.subscribers.lock().unwrap().push((sub_id, tx));
@@ -2215,19 +2245,28 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
     while let Ok((kind, payload)) = ipc::read_frame(&mut stream) {
         match kind {
             ipc::DATA => {
-                // Includes the focus in/out reports agents ask for: Claude repaints on those.
+                // From an older client, includes the focus in/out reports agents ask for: Claude
+                // repaints on those.
                 s.poke();
                 s.pane.write(payload)
             }
             ipc::RESIZE => {
                 s.poke();
                 if let Some((c, r)) = ipc::parse_resize(&payload) {
-                    s.pane.resize(c, r);
+                    s.clients.lock().unwrap().resize(sub_id, (c, r));
+                    s.fit();
                 }
+            }
+            ipc::FOCUS => {
+                // Claude repaints on a focus report: what it draws then isn't its work.
+                s.poke();
+                let on = payload.first() == Some(&1);
+                s.focus_changed(|c| c.focus(sub_id, on), on);
             }
             _ => {}
         }
     }
+    s.focus_changed(|c| c.leave(sub_id), false);
     s.subscribers.lock().unwrap().retain(|(id, _)| *id != sub_id);
     if s.attached.fetch_sub(1, Ordering::Relaxed) == 1 {
         s.pane.shared.answer_queries.store(true, Ordering::Relaxed);
