@@ -83,7 +83,7 @@ final class CostCard {
                     return
                 }
                 let result = await Task.detached { () -> Result<SessionCost, Error> in
-                    guard let conn else { return .failure(DinoError.socket("can't reach dinod")) }
+                    guard let conn else { return .failure(DinoError.socket("Can't reach dino's background service.")) }
                     return Result { try conn.sessionCost(session: id) }
                 }.value
                 guard !Task.isCancelled else { return }
@@ -204,7 +204,7 @@ struct CostCardView: View {
             .font(.callout.monospacedDigit())
             Divider()
             VStack(alignment: .leading, spacing: 1) {
-                Text("Biggest under it").font(.caption).foregroundStyle(.secondary)
+                Text("Largest child process").font(.caption).foregroundStyle(.secondary)
                 if let top = c?.top_child, let name = top.name {
                     Text("\(name)  \(CostFormat.memory(top.mem_bytes)) · \(CostFormat.cpu(top.cpu_pct))")
                         .font(.callout.monospacedDigit()).lineLimit(1).truncationMode(.middle)
@@ -224,8 +224,8 @@ struct CostCardView: View {
 
     private static func count(_ n: UInt32?) -> String {
         switch n ?? 0 {
-        case 0, 1: "Its own process only"
-        case let n: "\(n) processes together"
+        case 0, 1: "No other processes"
+        case let n: "\(n) processes in total"
         }
     }
 

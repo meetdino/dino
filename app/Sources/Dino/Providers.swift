@@ -248,7 +248,7 @@ struct ProvidersPane: View {
             } header: {
                 Text("Providers")
             } footer: {
-                Footnote("Connect opens OpenRouter's sign-in in your browser; the key it makes is yours (see openrouter.ai/keys), stays on this Mac, and dino never shows it. Sign in with ChatGPT lets agents in dino use your ChatGPT plan, up to the weekly cap you set for dino in ChatGPT; nothing is billed beyond it. dino reads model servers on this Mac at their usual ports, and asks every provider which APIs it serves and what its models can do: nothing here comes from a list dino keeps.")
+                Footnote("Connect signs you in to OpenRouter in your browser and creates a key in your account (see openrouter.ai/keys). The key stays on this Mac. Sign in with ChatGPT lets your agents use your ChatGPT plan, up to the weekly cap you set for dino in ChatGPT. Nothing is billed beyond that cap. Model servers running on this Mac are found automatically.")
             }
             CodingPlans(store: store, editing: $editingPlan)
             Section {
@@ -279,7 +279,7 @@ struct ProvidersPane: View {
             } header: {
                 Text("Models")
             } footer: {
-                Footnote("Each model shows the agents it works in, the recommended one first. ✓ works, ~ works with a caveat (hover for why), ✗ doesn't. What providers don't say comes from dino's curated notes, with their sources.")
+                Footnote("Each model lists the agents it works with, recommended first: ✓ works, ~ works with caveats (hover for details), ✗ doesn't work. Where a provider doesn't say, dino uses its own notes and shows their sources.")
             }
         }
         .formStyle(.grouped)
@@ -345,7 +345,7 @@ private struct ProviderRow: View {
         .confirmationDialog(chatgpt ? "Sign out of ChatGPT?" : "Disconnect \(provider.name)?", isPresented: $confirming) {
             Button(chatgpt ? "Sign Out" : "Disconnect", role: .destructive, action: disconnect)
         } message: {
-            Text(chatgpt ? "dino forgets its sign-in. Agents stop using your ChatGPT plan through dino." : "dino forgets the key. It stays on your \(provider.plan?.custom == true ? "provider's" : provider.name) account until you delete it there.")
+            Text(chatgpt ? "Your agents will stop using your ChatGPT plan." : "dino deletes its copy of the key. The key stays active in your \(provider.plan?.custom == true ? "provider" : provider.name) account until you delete it there.")
         }
     }
 
@@ -364,7 +364,7 @@ private struct ProviderRow: View {
     private var detail: String {
         var parts: [String] = []
         if provider.local {
-            parts.append(provider.connected ? URL(string: provider.base)?.host.map { "\($0):\(URL(string: provider.base)?.port ?? 0)" } ?? provider.base : "Looked for at \(provider.base.replacingOccurrences(of: "http://", with: ""))")
+            parts.append(provider.connected ? URL(string: provider.base)?.host.map { "\($0):\(URL(string: provider.base)?.port ?? 0)" } ?? provider.base : "Not found at \(provider.base.replacingOccurrences(of: "http://", with: ""))")
         }
         if provider.plan?.custom == true, !provider.base.isEmpty { parts.append(provider.base) }
         if let v = provider.version { parts.append("Version \(v)") }
@@ -403,12 +403,12 @@ private struct CodingPlans: View {
                         ForEach(unconnected) { p in Button(p.name) { editing = p.id } }
                     }
                     .fixedSize()
-                    .help("Use a coding plan's key: any agent dino runs can then use the plan")
+                    .help("Add a coding plan's key so your agents can use the plan")
                 }
             } header: {
-                Text("Coding plans")
+                Text("Coding Plans")
             } footer: {
-                Footnote("Paste a plan's key and any agent dino runs can use the plan, in the API it speaks: Claude Code over Anthropic Messages, Codex over the Responses API where the plan serves it. Keys stay in dino's key store on this Mac and never sync. When a plan's limit is reached, the agent gets the plan's own answer and dino says so; it never switches to other billing. A Claude subscription is for Claude Code alone, so it can't be added here.")
+                Footnote("Add a plan's key, and any agent that speaks an API the plan supports can use it: Claude Code with Anthropic's API, Codex with the Responses API. Keys stay on this Mac and never sync. When you reach the plan's limit, the agent shows the plan's message and dino says so. dino never switches you to other billing. Claude subscriptions work only with Claude Code, so they can't be added here.")
             }
         }
     }
@@ -435,7 +435,7 @@ private struct PlanEditor: View {
             if let terms = plan?.terms { Text(terms).font(.callout).foregroundStyle(.secondary) }
             HStack(spacing: 14) {
                 if let page = plan?.keys_page.flatMap(URL.init(string:)) { Link("Get a key…", destination: page) }
-                if let docs = plan.flatMap({ URL(string: $0.docs) }), !(plan?.docs.isEmpty ?? true) { Link("Its docs", destination: docs) }
+                if let docs = plan.flatMap({ URL(string: $0.docs) }), !(plan?.docs.isEmpty ?? true) { Link("Documentation", destination: docs) }
             }
             .font(.callout)
             if plan?.custom == true {
@@ -535,8 +535,8 @@ private struct ModelRowView: View {
 
     /// Why `v` can't be started from here, if it can't.
     private func why(_ v: Verdict) -> String? {
-        if dino.launchers.first(where: { $0.agent_id == v.agent }) == nil { return "\(v.name) isn't installed: get it in Settings → Agents" }
-        if v.translated { return "\(v.name) would need dino to translate its API for this provider, which starting a session doesn't do yet" }
+        if dino.launchers.first(where: { $0.agent_id == v.agent }) == nil { return "\(v.name) isn't installed. Install it in Settings → Agents." }
+        if v.translated { return "\(v.name) can't use this provider's API yet" }
         return nil
     }
 
@@ -610,7 +610,7 @@ private struct VerdictChip: View {
 
     private var help: String {
         var lines = verdict.reasons.map { r in r.source.map { "\(r.text) (\($0))" } ?? r.text }
-        if let via = verdict.via { lines.append("Talks to it in \(formatName(via))\(verdict.translated ? ", translated by dino" : "")") }
+        if let via = verdict.via { lines.append("Uses the \(formatName(via)) API\(verdict.translated ? ", translated by dino" : "")") }
         return lines.isEmpty ? "\(verdict.name) works with it" : lines.joined(separator: "\n")
     }
 }

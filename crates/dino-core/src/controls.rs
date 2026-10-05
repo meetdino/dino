@@ -37,7 +37,7 @@ pub const MODES: &[(&str, &str, &str)] = &[
     ("ask", "Ask", "Asks before editing files or running commands"),
     ("edits", "Accept edits", "Edits files freely, asks before running commands"),
     ("plan", "Plan", "Reads and plans, changes nothing"),
-    ("auto", "Auto", "Decides for itself what needs asking"),
+    ("auto", "Auto", "Decides for itself when to ask"),
     ("bypass", "Bypass", "Never asks. Only for sandboxes and throwaway machines"),
 ];
 

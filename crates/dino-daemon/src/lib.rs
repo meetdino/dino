@@ -850,14 +850,14 @@ fn launcher_for(d: &Daemon, id: &str, pid: Option<u32>) -> anyhow::Result<()> {
     if d.launcher(id).is_some() || (rediscover(d).iter().any(|a| a.kind.id == id) && d.launcher(id).is_some()) {
         return Ok(());
     }
-    let Some(kind) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id) else { anyhow::bail!("dino doesn't know how to run {id}, so it's left running where it is") };
+    let Some(kind) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id) else { anyhow::bail!("dino can't run {id}, so it keeps running where it is") };
     if let Some(program) = pid.and_then(|p| dino_core::program_of(kind, p)) {
         let program = program.display().to_string();
         d.launchers.write().unwrap().push(LauncherInfo { short: id.into(), agent_id: id.into(), label: kind.name.into(), program, knobs: Default::default(), answers_once: agent(id).is_some_and(|a| a.answers_once()), formats: vec![], forks: false });
         return Ok(());
     }
     anyhow::bail!(
-        "dino couldn't find {name}'s `{bin}`: it isn't on your login shell's PATH or in the folders installers use (~/.local/bin, ~/.npm-global/bin, /opt/homebrew/bin…), and the running {name} doesn't say where it is. So it's left running where it is. In the terminal it runs in, `command -v {bin}` shows its folder: add that folder to PATH in your shell's login profile (~/.zprofile for zsh), then try again.",
+        "dino can't find the `{bin}` command: it isn't on your login shell's PATH or in the usual install folders (~/.local/bin, ~/.npm-global/bin, /opt/homebrew/bin…). {name} keeps running where it is. To fix this, run `command -v {bin}` in the terminal where {name} runs, add that folder to PATH in your login profile (~/.zprofile for zsh), and try again.",
         name = kind.name,
         bin = kind.bin
     )
@@ -905,9 +905,9 @@ fn agent_action(d: &Daemon, id: &str, action: &str) -> anyhow::Result<String> {
         "sign_in" => (dino_core::discover::setup(id).sign_in.unwrap_or_default(), format!("Sign in to {}", kind.name)),
         _ => anyhow::bail!("unknown action {action}"),
     };
-    anyhow::ensure!(!command.is_empty(), "dino doesn't know how to {} {}", action.replace('_', " "), kind.name);
+    anyhow::ensure!(!command.is_empty(), "dino can't {} {}", action.replace('_', " "), kind.name);
     let session = spawn(d, Launch::new("shell", vec![], Some(home().display().to_string())))?;
-    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == session).cloned().ok_or_else(|| anyhow::anyhow!("the shell went away"))?;
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == session).cloned().ok_or_else(|| anyhow::anyhow!("the shell has closed"))?;
     *s.label.lock().unwrap() = Some(label);
     type_at_prompt(s, command.to_string());
     Ok(session)
@@ -917,7 +917,7 @@ fn agent_action(d: &Daemon, id: &str, action: &str) -> anyhow::Result<String> {
 /// without being asked.
 fn install_sccache(d: &Daemon) -> anyhow::Result<String> {
     let session = spawn(d, Launch::new("shell", vec![], Some(home().display().to_string())))?;
-    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == session).cloned().ok_or_else(|| anyhow::anyhow!("the shell went away"))?;
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == session).cloned().ok_or_else(|| anyhow::anyhow!("the shell has closed"))?;
     *s.label.lock().unwrap() = Some("Install sccache".into());
     type_at_prompt(s, dino_core::build_cache::install_command().to_string());
     Ok(session)
@@ -928,10 +928,10 @@ fn install_sccache(d: &Daemon) -> anyhow::Result<String> {
 /// by hand is interrupted the same way; a plain shell has no turn to interrupt.
 fn interrupt(d: &Daemon, s: &Session) -> anyhow::Result<()> {
     let id = match s.agent_id.as_str() {
-        "shell" => s.inside.lock().unwrap().found.as_ref().map(|f| f.agent.clone()).ok_or_else(|| anyhow::anyhow!("no agent runs in this shell"))?,
+        "shell" => s.inside.lock().unwrap().found.as_ref().map(|f| f.agent.clone()).ok_or_else(|| anyhow::anyhow!("no agent is running in this shell"))?,
         id => id.to_string(),
     };
-    let a = agent(&id).ok_or_else(|| anyhow::anyhow!("dino doesn't know how to interrupt {id}"))?;
+    let a = agent(&id).ok_or_else(|| anyhow::anyhow!("dino can't interrupt {id}"))?;
     let keys = a.interrupt_keys();
     // Ctrl+C at its prompt would quit it: only mid-turn.
     if keys == b"\x03" && matches!(d.proxy.stats.session(&s.id).activity, None | Some(Activity::Done)) {
@@ -1240,10 +1240,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Err(e) => Response::Error { message: e.to_string() },
             },
             Request::ConnectProvider { provider } if provider.starts_with(dino_core::plans::PREFIX) => {
-                Response::Error { message: "a coding plan connects with its key: paste it in Settings → Models & Providers, or `dino login <plan>`".into() }
+                Response::Error { message: "connect a coding plan with its API key: paste it in Settings → Models & Providers, or run `dino login <plan>`".into() }
             }
             Request::ConnectProvider { provider } | Request::DisconnectProvider { provider } => {
-                Response::Error { message: format!("{provider} doesn't sign in: dino finds it on this Mac") }
+                Response::Error { message: format!("{provider} doesn't need signing in: dino finds it on your Mac") }
             }
             Request::Providers => {
                 let mut list = providers::list();
@@ -1449,7 +1449,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 };
                 match found {
                     Some(subagent) => Response::Subagent { subagent },
-                    None => Response::Error { message: "dino doesn't know that subagent".into() },
+                    None => Response::Error { message: "dino can't find that subagent".into() },
                 }
             }
             Request::Message { id, text, by } => peers::ipc_result(peers::message(d, &id, &text, by)),
@@ -1501,7 +1501,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 None => Response::Error { message: format!("no session {id}") },
             },
             Request::SessionCost { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
-                Some(s) if s.host.is_some() => Response::Error { message: format!("{id} runs on {}: dino sees only its connection here", s.host.as_deref().unwrap_or_default()) },
+                Some(s) if s.host.is_some() => Response::Error { message: format!("{id} runs on {}, so dino can't measure it from this Mac", s.host.as_deref().unwrap_or_default()) },
                 Some(s) => match s.pane.pid().filter(|_| !s.pane.is_exited()) {
                     Some(pid) => Response::SessionCost { cost: d.costs.measure(&id, pid) },
                     None => Response::Error { message: format!("{id} has exited") },
@@ -1746,7 +1746,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         Some(r) => r.route.clone(),
         None => route.map(|r| provider_route(&l, r)).transpose()?,
     };
-    anyhow::ensure!(route.is_none() || host.is_none(), "a provider's model runs through dino on this Mac; start it here instead");
+    anyhow::ensure!(route.is_none() || host.is_none(), "a provider's model runs through dino on this Mac; start the session here instead");
     let id = match &restore {
         Some(r) => r.id.clone(),
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
@@ -2160,7 +2160,7 @@ fn remote_spec(
             d.proxy.stats.reports_turns(id);
             ssh::Program::Claude { session: agent_session.get_or_insert_with(new_uuid), resume: restoring }
         }
-        _ if agent(&l.agent_id).is_some_and(|a| a.free()) => anyhow::bail!("{} runs through dino on this Mac; start it here instead", l.label),
+        _ if agent(&l.agent_id).is_some_and(|a| a.free()) => anyhow::bail!("{} runs through dino on this Mac; start the session here instead", l.label),
         "shell" => ssh::Program::Shell,
         _ => ssh::Program::Agent { bin: &bin, name: &l.label },
     };
@@ -2190,17 +2190,17 @@ fn provider_route(l: &LauncherInfo, r: ProviderRoute) -> anyhow::Result<Provider
         // dino's own: it answers Anthropic Messages and Chat Completions.
         "free" => ("free models".to_string(), vec![Format::Anthropic, Format::Chat]),
         id => {
-            let p = providers::find(id).ok_or_else(|| anyhow::anyhow!("dino doesn't know a provider called {id}"))?;
+            let p = providers::find(id).ok_or_else(|| anyhow::anyhow!("there's no provider called {id}"))?;
             anyhow::ensure!(!p.local || p.connected, "{} isn't running on this Mac", p.name);
             anyhow::ensure!(p.plan.is_none() || p.connected, "{} isn't connected: add its key in Settings → Models & Providers", p.name);
-            anyhow::ensure!(!p.formats.is_empty(), "dino hasn't asked {} which APIs it serves yet: try again in a moment", p.name);
+            anyhow::ensure!(!p.formats.is_empty(), "dino is still checking which APIs {} supports; try again in a moment", p.name);
             (p.name, p.formats)
         }
     };
     let speaks = a.provider_formats();
     let format = pick_format(speaks, &serves).ok_or_else(|| {
         let wants: Vec<&str> = speaks.iter().map(|f| f.label()).collect();
-        anyhow::anyhow!("{} needs {}, which {name} doesn't serve", l.label, wants.join(" or "))
+        anyhow::anyhow!("{} needs {}, which {name} doesn't support", l.label, wants.join(" or "))
     })?;
     Ok(ProviderRoute { format: Some(format), name, ..r })
 }
@@ -2275,7 +2275,7 @@ fn kept_on_resume(s: &Session, controls: &Controls) -> anyhow::Result<()> {
     anyhow::ensure!(!keeps.contains(&"model") || controls.model == s.controls.model, "{name} keeps a conversation's model; start a new session to change it");
     if let Some(m) = controls.mode.as_deref().filter(|m| keeps.contains(m) && s.controls.mode.as_deref() != Some(*m)) {
         let label = a.mode_label(m).unwrap_or(m);
-        anyhow::bail!("{name} drops {label} when it resumes a conversation; start a new session in {label}");
+        anyhow::bail!("{name} can't resume a conversation in {label} mode; start a new session in {label} mode instead");
     }
     Ok(())
 }
@@ -3250,7 +3250,7 @@ fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
 /// resumed here with the same conversation, folder, flags and account; its old terminal gets a
 /// note. A conversation a dino session already has continues in that session, not a second one.
 fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<String> {
-    let Some(a) = agent(&f.agent) else { anyhow::bail!("don't know how to continue {} sessions yet", f.agent) };
+    let Some(a) = agent(&f.agent) else { anyhow::bail!("dino can't continue {} sessions yet", f.agent) };
     let launcher = a.id().to_string();
     if f.source == Source::Cloud {
         return spawn(d, Launch::new(&launcher, a.cloud_args(&f.session_id), cwd.or(f.cwd.clone())));
@@ -3423,7 +3423,7 @@ impl Drop for Waiting<'_> {
 /// Stop waiting to continue conversation or shell `key` in dino (see `Waiting`).
 fn cancel_move(d: &Daemon, key: &str) -> anyhow::Result<()> {
     let moves = d.moves.lock().unwrap();
-    let flag = moves.get(key).ok_or_else(|| anyhow::anyhow!("nothing is waiting to continue in dino there"))?;
+    let flag = moves.get(key).ok_or_else(|| anyhow::anyhow!("nothing there is waiting to move into dino"))?;
     flag.store(true, Ordering::SeqCst);
     Ok(())
 }
@@ -3799,7 +3799,7 @@ fn preview_start(d: &Daemon, id: &str, name: &str, approved: Option<&dino_core::
         .into_iter()
         .find(|c| c.name == name)
         .ok_or_else(|| anyhow::anyhow!("no dev server named {name} in .dino/launch.json or .claude/launch.json"))?;
-    let approved = approved.ok_or_else(|| anyhow::anyhow!("start dev servers from dino's preview, which shows what they run first"))?;
+    let approved = approved.ok_or_else(|| anyhow::anyhow!("start dev servers from dino's preview, so you can see what they run first"))?;
     anyhow::ensure!(*approved == config, "{} changed since you approved {name}: start it again to see what it runs now", config.source);
     let mut previews = d.previews.lock().unwrap();
     if let Some(i) = previews.iter().position(|p| p.session == id && p.config.name == name) {
@@ -4656,7 +4656,7 @@ fn save_worktrees(home: &Path, worktrees: &[SessionWorktree]) {
 }
 
 fn spawn_in_worktree(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    anyhow::ensure!(launch.host.is_none(), "Worktrees are made on this Mac; for a session on {}, start one in a folder there", launch.host.as_deref().unwrap_or_default());
+    anyhow::ensure!(launch.host.is_none(), "worktrees are made on this Mac; for a session on {}, start it in a folder there", launch.host.as_deref().unwrap_or_default());
     let l = d.allowed_launcher(&launch.launcher)?;
     let dir = work_dir(launch.cwd.as_deref());
     let checkout = worktree::repo_root(&dir)?;

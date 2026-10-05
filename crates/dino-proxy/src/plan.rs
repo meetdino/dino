@@ -34,7 +34,7 @@ pub(crate) fn url(plan: &Plan, rest: &str) -> Result<String, String> {
     let model = rest.strip_prefix("v1/models/").is_some_and(|m| !m.is_empty() && !m.contains('/'));
     let openai = matches!(rest, "v1/chat/completions" | "v1/responses" | "v1/models") || model;
     if anthropic {
-        let base = plan.anthropic.as_deref().ok_or_else(|| format!("{} doesn't serve Anthropic Messages", plan.name))?;
+        let base = plan.anthropic.as_deref().ok_or_else(|| format!("{} doesn't support Anthropic Messages", plan.name))?;
         return Ok(format!("{base}/{rest}"));
     }
     if !openai {
@@ -44,7 +44,7 @@ pub(crate) fn url(plan: &Plan, rest: &str) -> Result<String, String> {
         (Some(base), _) => Ok(format!("{base}/{}", &rest[3..])),
         // A plan that only serves Anthropic Messages lists its models there.
         (None, Some(base)) if rest.starts_with("v1/models") => Ok(format!("{base}/{rest}")),
-        _ => Err(format!("{} doesn't serve the OpenAI APIs", plan.name)),
+        _ => Err(format!("{} doesn't support the OpenAI APIs", plan.name)),
     }
 }
 
@@ -126,7 +126,7 @@ mod tests {
             assert!(url(&p, not).is_err(), "{not}");
         }
         let only_anthropic = plan(Some("https://a.example/anthropic"), None);
-        assert!(url(&only_anthropic, "v1/chat/completions").unwrap_err().contains("doesn't serve the OpenAI"));
+        assert!(url(&only_anthropic, "v1/chat/completions").unwrap_err().contains("doesn't support the OpenAI"));
         assert_eq!(url(&only_anthropic, "v1/models").unwrap(), "https://a.example/anthropic/v1/models");
         assert!(url(&plan(None, Some("https://o.example/v1")), "v1/messages").unwrap_err().contains("Anthropic"));
     }

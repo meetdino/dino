@@ -143,7 +143,7 @@ pub(crate) fn setup_token_shell(
         }
     }
     let id = crate::spawn(d, Launch::new("shell", vec![], Some(crate::home().display().to_string())))?;
-    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("the shell went away"))?;
+    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("the shell has closed"))?;
     *s.label.lock().unwrap() = Some(label.into());
     // No token from anywhere else in the shell that makes one.
     crate::type_at_prompt(s.clone(), format!("unset {KEY}; claude setup-token"));

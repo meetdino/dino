@@ -53,7 +53,7 @@ struct WorktreesPane: View {
                 }
                 .orgLocked("worktrees.branch_prefix")
             } footer: {
-                Footnote("A relative location is inside each repo, and dino keeps it out of git status. An absolute one gets a folder per repo. Both apply to worktrees dino makes from now on: sessions, fan-outs and automations. Branches are named like \(prefixShown)claude-3f2a, or after the automation for its runs.")
+                Footnote("A relative location is created inside each repo and kept out of git status. An absolute location gets one folder per repo. Changes apply to new worktrees. Branches are named like \(prefixShown)claude-3f2a; an automation's runs are named after the automation.")
             }
             Section {
                 Toggle("Trust fan-out worktrees when the repo is trusted", isOn: Binding(
@@ -64,7 +64,7 @@ struct WorktreesPane: View {
             } header: {
                 Text("Fan-out")
             } footer: {
-                Footnote("Claude asks whether to trust each new folder, and every fan-out worktree is one. When you've trusted the repo, dino tells Claude its worktrees are trusted too, and forgets them when the fan-out closes. Codex does this on its own.")
+                Footnote("Claude Code asks whether to trust every new folder, including each fan-out worktree. If you already trust the repo, dino marks its fan-out worktrees as trusted too, and removes them again when the fan-out closes. Codex handles this itself.")
             }
             Section {
                 Toggle("Archive sessions after their PR merges or closes", isOn: Binding(
@@ -75,13 +75,13 @@ struct WorktreesPane: View {
             } header: {
                 Text("Pull Requests")
             } footer: {
-                Footnote("When a session's PR merges or is closed, dino archives it once its agent is idle, so the conversation can be picked up again. After a merge, the worktree dino made for it is removed too if nothing in it would be lost; after a close it stays (see Storage below), since the work never landed. Unarchive it to pick up where it left off, worktree and all. Sessions outside a dino worktree stay open.")
+                Footnote("When a session's pull request is merged or closed, dino archives the session once its agent is idle. After a merge, dino also removes the session's worktree if nothing in it would be lost. After a close, the worktree is kept, since the work wasn't merged. Unarchive a session to pick up where it left off, worktree included. Sessions outside a dino worktree aren't archived.")
             }
             BuildCacheSection()
             Section {
                 if let stored {
                     if stored.isEmpty {
-                        Text("dino hasn't made any worktrees that are still on disk.").foregroundStyle(.secondary)
+                        Text("There are no worktrees made by dino on disk.").foregroundStyle(.secondary)
                     }
                     ForEach(stored) { w in row(w) }
                 } else {
@@ -97,13 +97,13 @@ struct WorktreesPane: View {
                     } else {
                         Button(reclaimableSize.map { "Free Up \($0)…" } ?? "Free Up Space…") { confirmFree = true }
                             .disabled(reclaimable.isEmpty)
-                            .help("Remove every worktree nothing would be lost from: no session running in it, no uncommitted changes, and its commits merged or pushed")
+                            .help("Removes worktrees that are safe to delete: no running session, no uncommitted changes, and all commits merged or pushed")
                     }
                 }
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
                     if let freed { Text(freed).font(.callout).foregroundStyle(.secondary) }
-                    Footnote("Only worktrees dino made. dino never removes one with uncommitted changes, and keeps each branch that isn't merged. A session that ended or was archived gets its worktree back from its branch when you start it again.")
+                    Footnote("Lists only worktrees dino made. dino never removes a worktree with uncommitted changes, and keeps branches that aren't merged. When you restart an ended or archived session, dino recreates its worktree from its branch.")
                 }
             }
             if let error {
@@ -132,7 +132,7 @@ struct WorktreesPane: View {
         .confirmationDialog("Remove \(reclaimable.count) worktree\(reclaimable.count == 1 ? "" : "s")?", isPresented: $confirmFree) {
             Button("Remove \(reclaimable.count)", role: .destructive) { freeUpSpace() }
         } message: {
-            Text("Nothing runs in them, and their work is merged or pushed, so nothing is lost. Sessions that ended in them are archived. Branches git sees as merged go too.")
+            Text("No sessions are running in them, and their work is merged or pushed, so nothing is lost. Ended sessions in them are archived. Their merged branches are deleted too.")
         }
     }
 
@@ -178,13 +178,13 @@ struct WorktreesPane: View {
     }
 
     private func removeHelp(_ w: StoredWorktree) -> String {
-        if w.fanout { return "It belongs to a fan-out: keep or discard the fan-out instead" }
+        if w.fanout { return "Part of a fan-out. Keep or discard the fan-out instead." }
         if let s = w.session { return "\(s) is running in it" }
-        if w.session_state == "ended" { return "Remove it; the session that ended in it is archived, and gets it back from \(w.branch) when you start it again" }
-        if w.dirty { return "It has uncommitted changes, so dino won't remove it" }
+        if w.session_state == "ended" { return "Remove it. Its ended session is archived, and gets the worktree back from \(w.branch) when you restart it." }
+        if w.dirty { return "Has uncommitted changes, so dino won't remove it" }
         return w.archived
-            ? "Remove it; its archived session gets it back from \(w.branch) when you unarchive it"
-            : "Remove it, and its branch if git sees it merged"
+            ? "Remove it. Its archived session gets the worktree back from \(w.branch) when you unarchive it."
+            : "Remove it, and its branch if it's merged"
     }
 
     private func remove(_ list: [StoredWorktree]) {
@@ -226,7 +226,7 @@ struct WorktreesPane: View {
             case .success(let f):
                 let n = f.removed.count
                 freed = n == 0
-                    ? "Nothing to remove: every worktree left has work in it or a session running."
+                    ? "Nothing to remove. Every remaining worktree has unmerged work or a running session."
                     : "Removed \(n) worktree\(n == 1 ? "" : "s"), freeing \(ByteCountFormatter.string(fromByteCount: Int64(f.bytes), countStyle: .file))."
             case .failure(let e):
                 error = e.localizedDescription
@@ -263,7 +263,7 @@ struct WorktreesPane: View {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = "Use Folder"
-        panel.message = "dino puts each repo's worktrees in a folder of its own here."
+        panel.message = "dino creates a folder here for each repo's worktrees."
         if panel.runModal() == .OK, let url = panel.url {
             location = (url.path as NSString).abbreviatingWithTildeInPath
             saveLocation()
