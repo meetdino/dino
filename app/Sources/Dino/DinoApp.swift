@@ -2,7 +2,15 @@ import AppKit
 import DinoGhostty
 import SwiftUI
 
+/// The app, or, run by dinod's launch agent, what keeps dinod (LaunchAgent.swift: `DinodHost`).
 @main
+enum Launch {
+    static func main() {
+        DinodHost.runIfAsked()
+        DinoApp.main()
+    }
+}
+
 struct DinoApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @StateObject private var model = DinoModel()
