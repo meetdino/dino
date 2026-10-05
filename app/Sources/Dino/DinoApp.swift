@@ -246,9 +246,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let services = ServiceProvider()
 
     /// Back at the app: settings may have changed on another Mac, so sync looks now rather than at
-    /// its next minute.
+    /// its next minute; and the app may have been rebuilt in place (Restart to Update).
     func applicationDidBecomeActive(_: Notification) {
         Task.detached { _ = try? DinoConnection(path: DinoEnvironment.socketPath).send(["type": "sync", "action": "now"]) }
+        Updates.shared.checkRebuilt()
     }
 
     /// Folders, scripts and man-page links opened with dino (Finder, `open -a`, a default

@@ -28,9 +28,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+. scripts/bundle.sh
 
 VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+BUILD_ID="$(dino_build_id "$ROOT")"
 RELEASES_REPO="${RELEASES_REPO:-asdf9384/dino-releases}"
 BUNDLE_ID="${DINO_BUNDLE_ID:-dev.dino.app}"
 ARCHS="${ARCHS:-$(uname -m)}"
@@ -59,7 +61,7 @@ for a in "${arch_list[@]}"; do
     t="$(rust_target "$a")"
     # No build machine paths (home folder, checkout) in what ships.
     # dinod checks the updates it installs with the release key's public half, and only with it.
-    DINO_UPDATE_PUBLIC_KEY="$PUBKEY" DINO_UPDATE_FEED_URL="$FEED_URL" \
+    DINO_UPDATE_PUBLIC_KEY="$PUBKEY" DINO_UPDATE_FEED_URL="$FEED_URL" DINO_BUILD="$BUILD_ID" \
     RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME/.cargo=cargo --remap-path-prefix=$PWD=dino" \
         cargo build --release -q -p dino --target "$t"
     bins+=("target/$t/release/dino")
@@ -91,76 +93,19 @@ cp app/Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :SUFeedURL $FEED_URL" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :DinoBuild string $BUILD_ID" "$APP/Contents/Info.plist"
 
-# dinod as the app's launch agent, registered with SMAppService (app/Sources/Dino/LaunchAgent.swift):
-# what it runs then has the permissions given to the app. Restarted by launchd if it crashes, not
-# otherwise (`dino stop` stays stopped), and not started at login: dino starts it when used, as before.
-# Started again 2 s after it last started at the soonest, not launchd's 10: `dino stop` then a start.
-LABEL_AGENT="$BUNDLE_ID.dinod"
-AGENT_ENV=""
-if [ -n "${DINO_AGENT_HOME:-}" ]; then
-    LABEL_AGENT="$LABEL_AGENT.$(printf %s "$DINO_AGENT_HOME" | shasum -a 256 | cut -c1-8)"
-    AGENT_ENV="<key>DINO_HOME</key><string>$DINO_AGENT_HOME</string>"
-    # The app runs with it too, however it's opened: from Finder, or relaunched by an update.
-    /usr/libexec/PlistBuddy -c "Add :DinoHome string $DINO_AGENT_HOME" "$APP/Contents/Info.plist"
-fi
-mkdir -p "$APP/Contents/Library/LaunchAgents"
-cat > "$APP/Contents/Library/LaunchAgents/$LABEL_AGENT.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>$LABEL_AGENT</string>
-    <key>BundleProgram</key><string>Contents/Helpers/dino</string>
-    <key>ProgramArguments</key><array><string>dino</string><string>daemon</string></array>
-    <key>AssociatedBundleIdentifiers</key><array><string>$BUNDLE_ID</string></array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>DINO_LAUNCHD</key><string>$LABEL_AGENT</string>$AGENT_ENV
-    </dict>
-    <key>KeepAlive</key><dict><key>Crashed</key><true/></dict>
-    <key>ThrottleInterval</key><integer>2</integer>
-    <key>ProcessType</key><string>Interactive</string>
-    <key>AbandonProcessGroup</key><true/>
-</dict>
-</plist>
-PLIST
-plutil -lint -s "$APP/Contents/Library/LaunchAgents/$LABEL_AGENT.plist"
+# dinod as the app's launch agent (scripts/bundle.sh).
+dino_agent "$APP" "$BUNDLE_ID" "${DINO_AGENT_HOME:-}"
 if [ -n "$PUBKEY" ]; then
     /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $PUBKEY" "$APP/Contents/Info.plist"
 else
     say "no DINO_RELEASE_KEY: this build won't update itself"
 fi
 
-# Signing: inside out, never --deep (Apple's guidance), always with the hardened runtime as
-# app/build.sh does (no library injection into dino); a Developer ID and a timestamp when given,
-# ad hoc otherwise.
-sign() {
-    if [ -n "${DEVELOPER_ID_APP:-}" ]; then
-        codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID_APP" "$@"
-    else
-        codesign --force --options runtime --sign - "$@"
-    fi
-}
+# Signing (scripts/bundle.sh): a Developer ID and a timestamp when given, ad hoc otherwise.
 say "signing (${DEVELOPER_ID_APP:-ad hoc})"
-while IFS= read -r -d '' f; do
-    if file -b "$f" | grep -q 'Mach-O'; then sign "$f"; fi
-done < <(find "$APP/Contents/Resources" -type f -print0)
-# Sparkle, inside out, as its documentation lists.
-SPK="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
-sign "$SPK/XPCServices/Installer.xpc"
-sign --preserve-metadata=entitlements "$SPK/XPCServices/Downloader.xpc"
-sign "$SPK/Autoupdate"
-sign "$SPK/Updater.app"
-sign "$APP/Contents/Frameworks/Sparkle.framework"
-sign "$APP/Contents/Helpers/dino"
-if [ -n "${DEVELOPER_ID_APP:-}" ]; then
-    sign "$APP"
-else
-    # Ad hoc: no Team ID for the framework to share with the app (app/AdHoc.entitlements).
-    sign --entitlements app/AdHoc.entitlements "$APP"
-fi
-codesign --verify --strict --verbose=1 "$APP"
+dino_sign "$APP" "${DEVELOPER_ID_APP:--}" --timestamp app/AdHoc.entitlements
 
 # The DMG: the app beside a link to /Applications.
 say "DMG"
@@ -248,6 +193,10 @@ cp "$DMG" "$DIST/$TAR" "$DIST/SHA256SUMS" "$D/"
 if [ -n "$KEY" ]; then cp "$DIST/$ZIP" "$DIST/appcast.xml" "$D/"; fi
 echo "$VERSION" > "$DIST/download/dino/latest"
 cp scripts/install.sh "$DIST/download/install.sh"
+
+# The app stays here for publish.sh to check, but isn't one LaunchServices opens: `open -b`,
+# Open With and dino's own links go to the dino you use (app/build.sh --install), not this one.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP" 2>/dev/null || true
 
 say "done: dino $VERSION"
 ls -lh "$DMG" "$DIST/$TAR" | awk '{print "  " $5 "  " $9}'

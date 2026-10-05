@@ -13,9 +13,12 @@ import SwiftUI
 /// Installing restarts dinod too, into the dino the new app carries: the app stops it as it quits
 /// for the update (every session saved) and the new one starts it, which resumes them. Before that,
 /// if anything would be cut off, dino says what (`RestartImpact`) and lets you choose: now, once
-/// nothing is working, or when you next quit dino. A dinod left from before an update (an older
-/// dino quit without stopping it) is restarted once no agent is working and no shell is running a
-/// command.
+/// nothing is working, or when you next quit dino.
+///
+/// Nothing restarts by itself. A dino rebuilt in place (app/build.sh --install, while it runs)
+/// offers Restart to Update the same way, relaunching into the new build and its dinod; so does a
+/// dinod from another build than this app's (an older dino quit without stopping it), restarting
+/// dinod alone.
 @MainActor
 final class Updates: ObservableObject {
     static let shared = Updates()
@@ -34,7 +37,11 @@ final class Updates: ObservableObject {
         var version: String
         var whenIdle: Bool
         var install: (() -> Void)?
+        /// Not a download: this app rebuilt on disk (relaunch into it), or dinod from another build
+        /// than this app's (restart dinod alone).
+        var local: Local?
     }
+    enum Local { case rebuilt, daemon }
     @Published private(set) var pending: Pending?
     /// dino is quitting so an update can install and relaunch it.
     private(set) var relaunching = false
@@ -94,6 +101,7 @@ final class Updates: ObservableObject {
             let can = updater.canCheckForUpdates
             Task { @MainActor in Updates.shared.canCheck = can }
         }
+        watchFolder()
     }
 
     var available: Bool { controller != nil }
@@ -108,11 +116,108 @@ final class Updates: ObservableObject {
 
     func checkNow() { controller?.checkForUpdates(nil) }
 
-    /// Install the waiting update now: dino quits, the update installs, dino opens again.
+    /// Install the waiting update now: dino quits, the update installs, dino opens again. A build
+    /// already here asks first if anything would be cut off, unless it was waiting for quiet.
     func installNow() {
         guard let pending else { return }
+        if let local = pending.local { return restart(local, ask: !pending.whenIdle) }
         self.pending = nil
         if let install = pending.install { install() } else { checkNow() }
+    }
+
+    // MARK: Builds already on this Mac
+
+    /// The app on disk is a newer build than the one running (the rebuild hook replaced it):
+    /// Restart to Update. Looked at when dino comes forward and when its folder changes.
+    func checkRebuilt() {
+        guard pending?.local != .rebuilt, let running = Updates.bundledBuild,
+              let onDisk = Updates.diskInfo["DinoBuild"] as? String, onDisk != running else { return }
+        pending = Pending(version: onDisk, whenIdle: false, install: nil, local: .rebuilt)
+    }
+
+    /// dinod is from another build than this app's, or runs outside its launch agent: Restart to
+    /// Update restarts it into this app's (`checkDaemonVersion`), unless something else waits.
+    func daemonMismatch(_ mismatch: Bool, version: String) {
+        if mismatch, pending == nil {
+            pending = Pending(version: version, whenIdle: false, install: nil, local: .daemon)
+        } else if !mismatch, pending?.local == .daemon {
+            pending = nil
+        }
+    }
+
+    private func restart(_ local: Local, ask: Bool) {
+        guard let model else { return }
+        if ask, !model.daemonDown, !model.restartIsQuiet {
+            switch askToRestart("Restart dino to update?", impact: RestartImpact(model)) {
+            case .now: break
+            case .whenIdle:
+                pending?.whenIdle = true
+                return
+            case .later: return
+            }
+        }
+        pending = nil
+        switch local {
+        case .daemon:
+            model.restartDaemon()
+        case .rebuilt:
+            // Quitting stops dinod (`quitForUpdate`); the new build opens and starts its own.
+            relaunching = true
+            Self.reopenAfterQuit()
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// The app opens again from where it is once this one has quit: opened while this one runs,
+    /// LaunchServices would bring this one forward instead. In front only if this one was: a
+    /// restart once agents are idle doesn't take over what you're doing elsewhere.
+    private static func reopenAfterQuit() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "while /bin/kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec /usr/bin/open $3 \"$2\"", "dino-reopen",
+                       String(getpid()), Bundle.main.bundlePath, NSApp.isActive ? "" : "-g"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+    }
+
+    /// The folder the app is in, watched for the rebuild putting a new one in its place.
+    private var folderWatch: DispatchSourceFileSystemObject?
+
+    private func watchFolder() {
+        guard Updates.bundledBuild != nil else { return }
+        let fd = open(Bundle.main.bundleURL.deletingLastPathComponent().path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
+        source.setEventHandler { MainActor.assumeIsolated { Updates.shared.checkRebuilt() } }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        folderWatch = source
+    }
+
+    /// The app's Info.plist as it is on disk now, not as it was when this one started.
+    nonisolated static var diskInfo: NSDictionary {
+        NSDictionary(contentsOf: Bundle.main.bundleURL.appendingPathComponent("Contents/Info.plist")) ?? [:]
+    }
+
+    private enum Choice { case now, whenIdle, later }
+
+    /// What restarting would cut off, said plainly, and the choice: now, once nothing is working,
+    /// or later (when dino next quits).
+    private func askToRestart(_ title: String, impact: RestartImpact) -> Choice {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = impact.sentence + "\n\n"
+            + "Or install it once nothing is working, or the next time you quit dino."
+        alert.addButton(withTitle: "Restart Now")
+        alert.addButton(withTitle: impact.working > 0 ? "When Agents Are Idle" : "When Commands Finish")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .now
+        case .alertSecondButtonReturn: return .whenIdle
+        default: return .later
+        }
     }
 
     // MARK: Sparkle's questions (through UpdaterDelegate)
@@ -128,21 +233,12 @@ final class Updates: ObservableObject {
     /// restarting would interrupt, and install now, once it's quiet, or when dino quits.
     fileprivate func shouldPostpone(_ item: SUAppcastItem, install: @escaping () -> Void) -> Bool {
         guard let model, !model.daemonDown, !model.restartIsQuiet else { return false }
-        let impact = RestartImpact(model)
-        let alert = NSAlert()
-        alert.messageText = "Restart dino to install \(item.displayVersionString)?"
-        alert.informativeText = impact.sentence + "\n\n"
-            + "Or install it once nothing is working, or the next time you quit dino."
-        alert.addButton(withTitle: "Restart Now")
-        alert.addButton(withTitle: impact.working > 0 ? "When Agents Are Idle" : "When Commands Finish")
-        alert.addButton(withTitle: "Later")
-        NSApp.activate(ignoringOtherApps: true)
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
+        switch askToRestart("Restart dino to install \(item.displayVersionString)?", impact: RestartImpact(model)) {
+        case .now:
             return false
-        case .alertSecondButtonReturn:
+        case .whenIdle:
             pending = Pending(version: item.displayVersionString, whenIdle: true, install: install)
-        default:
+        case .later:
             pending = Pending(version: item.displayVersionString, whenIdle: false, install: install)
         }
         // Sparkle's "Ready to Install" window would stay up, its button doing nothing: dino has it now.
@@ -216,7 +312,8 @@ final class Updates: ObservableObject {
             if !model.daemonDown { Self.stopDaemon(model) }
             return true
         }
-        guard let pending else { return nil }
+        // dinod from another build stays as it is: quitting doesn't stop it otherwise either.
+        guard let pending, pending.local != .daemon else { return nil }
         if !QuitChoice.systemIsGoingDown, !model.daemonDown, !model.restartIsQuiet {
             let alert = NSAlert()
             alert.messageText = "Quit and install dino \(pending.version)?"
@@ -227,7 +324,8 @@ final class Updates: ObservableObject {
         }
         guard !model.daemonDown else { return true }
         Self.stopDaemon(model)
-        Self.startDaemonAfterInstall()
+        // Rebuilt in place, the new app is already there: no waiting for it.
+        Self.startDaemonAfterInstall(waiting: pending.local == nil)
         return true
     }
 
@@ -243,13 +341,13 @@ final class Updates: ObservableObject {
     /// Once this app has quit and Sparkle has put the new one in its place, start dinod from it,
     /// which resumes the sessions: they don't wait for dino to be opened again. Gives up waiting
     /// for the new app after two minutes (the update failed) and starts the one that's there.
-    private static func startDaemonAfterInstall() {
+    private static func startDaemonAfterInstall(waiting: Bool) {
         let bundle = Bundle.main.bundlePath
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        let build = waiting ? Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "" : ""
         let script = """
         while /bin/kill -0 "$1" 2>/dev/null; do sleep 0.2; done
         i=0
-        while [ $i -lt 600 ]; do
+        while [ -n "$3" ] && [ $i -lt 600 ]; do
             v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$2/Contents/Info.plist" 2>/dev/null)
             [ -n "$v" ] && [ "$v" != "$3" ] && [ -x "$2/Contents/Helpers/dino" ] && break
             sleep 0.2; i=$((i+1))
@@ -268,7 +366,8 @@ final class Updates: ObservableObject {
         try? p.run()
     }
 
-    /// The dino this app carries, as `dino --version` says it; nil in a development build.
+    /// The dino this app carries, as `dino --version` says it ("dino 0.2.0 (c1ddaea2f)": the
+    /// version); nil in a build without one (app/build.sh without --install).
     nonisolated static let bundledVersion: String? = {
         guard let bin = DinoEnvironment.bundledDino else { return nil }
         let p = Process()
@@ -280,8 +379,34 @@ final class Updates: ObservableObject {
         guard (try? p.run()) != nil else { return nil }
         p.waitUntilExit()
         let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return text.split(separator: " ").last.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let words = text.split(whereSeparator: \.isWhitespace)
+        return words.count > 1 ? String(words[1]) : nil
     }()
+
+    /// The build of dino this app carries: the commit it was built from (`DinoBuild`, from
+    /// app/build.sh and scripts/release.sh), as its dinod says it with `build`.
+    nonisolated static let bundledBuild = Bundle.main.object(forInfoDictionaryKey: "DinoBuild") as? String
+
+    /// The binary at `path` with every link resolved, as dinod says which it runs from.
+    nonisolated static func realPath(_ path: String) -> String {
+        guard let resolved = realpath(path, nil) else { return path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    /// dinod isn't the dino this app carries: another build (a rebuilt dino you use, a release
+    /// beside it, an update), or another binary. The build is the one on disk now, which a restart
+    /// starts: an app still running when its rebuild replaced it doesn't take the new dinod for an
+    /// old one. An older dinod says only its version, and an app from before builds were told
+    /// apart has only that to go by.
+    nonisolated static func fromAnotherBuild(version: String?, build: String?, exe: String?) -> Bool {
+        guard let own = DinoEnvironment.bundledDino else { return false }
+        if let exe, realPath(exe) != realPath(own) { return true }
+        if let current = diskInfo["DinoBuild"] as? String ?? bundledBuild {
+            return build != current
+        }
+        return version != bundledVersion
+    }
 }
 
 /// Sparkle's delegate, handing each question to `Updates`.
@@ -366,21 +491,24 @@ struct RestartImpact {
     private func count(_ n: Int, _ word: String) -> String { "\(n) \(word)\(n == 1 ? "" : "s")" }
 }
 
-/// Above the terminals while an update waits for quiet: it installs by itself then, or now.
+/// Above the terminals while an update waits for quiet (it installs by itself then, or now), and
+/// while a build already on this Mac waits for Restart to Update.
 struct UpdateBanner: View {
     @ObservedObject private var updates = Updates.shared
 
     var body: some View {
-        if let pending = updates.pending, pending.whenIdle {
+        if let pending = updates.pending, pending.whenIdle || pending.local != nil {
             HStack(spacing: 10) {
                 Image(systemName: "arrow.down.circle")
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
-                Text("dino \(pending.version) installs once nothing is working")
+                Text(pending.local == nil ? "dino \(pending.version) installs once nothing is working"
+                    : pending.whenIdle ? "dino restarts into the new build once nothing is working"
+                    : pending.local == .rebuilt ? "A new build of dino is ready" : "dinod needs a restart to run this dino")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
-                Button("Restart Now") { updates.installNow() }
+                Button(pending.whenIdle ? "Restart Now" : "Restart to Update") { updates.installNow() }
                     .controlSize(.small)
                     .help("Restart dino and its background service now; working agents are interrupted and resume afterwards")
             }
@@ -396,7 +524,9 @@ struct UpdateMenuItem: View {
     @ObservedObject private var updates = Updates.shared
 
     var body: some View {
-        if let pending = updates.pending {
+        if let pending = updates.pending, pending.local != nil {
+            Button("Restart to Update") { updates.installNow() }
+        } else if let pending = updates.pending {
             Button("Restart to Install dino \(pending.version)") { updates.installNow() }
         } else {
             Button("Check for Updates…") { updates.checkNow() }
@@ -406,18 +536,21 @@ struct UpdateMenuItem: View {
 }
 
 extension DinoModel {
-    /// After connecting: is dinod the dino this app carries? A dinod from before an update (or
-    /// too old to say) is marked, and restarted once nothing is busy.
+    /// After connecting: is dinod the dino this app carries? A dinod from before an update, from
+    /// another build (the dino you use, rebuilt; a release beside it) or too old to say is marked,
+    /// and Restart to Update offers to restart it.
     func checkDaemonVersion() {
-        guard let want = Updates.bundledVersion, let conn = connection else { return }
+        guard DinoEnvironment.bundledDino != nil, let conn = connection else { return }
         Task.detached {
             let reply = try? conn.request(["type": "version"])
             let running = reply?.dino
+            let outdated = Updates.fromAnotherBuild(version: running, build: reply?.build, exe: reply?.exe)
             let unmanaged = DinodAgent.enabled && (reply?.launchd != DinodAgent.bundled?.label || DinodAgent.stale)
             await MainActor.run {
-                self.daemonVersion = running ?? "an older dino"
-                self.daemonOutdated = running != want
+                self.daemonVersion = running.map { v in reply?.build.map { "\(v) (\($0))" } ?? v } ?? "an older dino"
+                self.daemonOutdated = outdated
                 self.daemonUnmanaged = unmanaged
+                Updates.shared.daemonMismatch(outdated || unmanaged, version: Updates.bundledBuild ?? Updates.bundledVersion ?? "")
             }
         }
     }
@@ -471,7 +604,9 @@ struct UpdatesSection: View {
                 }
             ))
             .disabled(store.settings == nil)
-            LabeledContent("dino \(Updates.bundledVersion ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""))") {
+            // A build that isn't a release says which commit it is.
+            LabeledContent("dino \(Updates.bundledVersion ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""))"
+                + (updates.available ? "" : Updates.bundledBuild.map { " (\($0))" } ?? "")) {
                 Button("Check Now") { updates.checkNow() }
                     .disabled(!updates.available || !updates.canCheck)
             }
