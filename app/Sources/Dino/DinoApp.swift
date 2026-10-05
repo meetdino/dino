@@ -805,6 +805,9 @@ struct Sidebar: View {
     static let elsewhereKey = "section:elsewhere"
     /// How many of its agents "On this Mac" shows before "N more…".
     static let elsewhereShown = 5
+    /// The row the keyboard is on when it has nothing of its own to show (see the list's
+    /// selection): highlighted while the main area keeps the selected session.
+    @State private var highlighted: String?
 
     private var collapsed: Binding<Set<String>> {
         Binding(
@@ -818,12 +821,32 @@ struct Sidebar: View {
     }
 
     private var list: some View {
-        List(selection: Binding(get: { model.selected }, set: { tag in
+        List(selection: Binding(get: { highlighted ?? model.selected }, set: { tag in
             // Rows outside "Agents" carry a `move:` tag: ask before handing that session over.
             // Anything else that isn't a session (or deselecting) leaves the selection alone.
             guard let tag else { return }
             // Arrowed onto: the keyboard stays in the list. Clicked: the terminal takes it.
             let keys = NSApp.currentEvent?.type == .keyDown
+            if !model.showsSomething(tag) {
+                // A row with nothing of its own to show ("Other worktrees", a repo's, a worktree's
+                // over its sessions) never becomes the selection: the session stays on screen.
+                // Arrowed onto, it's only highlighted (Return, → and ← open and close it); clicked,
+                // it opens or closes, and the highlight goes back to the session. After the table's
+                // own selection callback: rows coming and going from inside it is a reentrant
+                // update NSTableView can crash on.
+                if keys {
+                    highlighted = tag
+                } else {
+                    model.startHere(tag)
+                    highlighted = tag
+                    DispatchQueue.main.async {
+                        setOpen(tag, nil)
+                        highlighted = nil
+                    }
+                }
+                return
+            }
+            highlighted = nil
             if tag.hasPrefix("tmux:") || tag.hasPrefix("move:") {
                 // Another terminal's agent: a click acts on it; arrowing past it only highlights
                 // it (Return acts, see primaryAction below), so no question pops up on the way.
@@ -947,6 +970,9 @@ struct Sidebar: View {
                 if returnKey { DispatchQueue.main.async { model.toggleRuns(task) } }
             } else if tags.count == 1, let tag = tags.first, tag.hasPrefix("run:") {
                 if returnKey { model.openRun(String(tag.dropFirst(4))) }
+            } else if tags.count == 1, let tag = tags.first, !model.showsSomething(tag) {
+                // Return opens or closes it, as → and ← do; a click already did (see above).
+                if returnKey { DispatchQueue.main.async { setOpen(tag, nil) } }
             } else if tags.count == 1, let id = tags.first, model.sessions.contains(where: { $0.id == id }) {
                 if returnKey { model.select(id) } else { model.renaming = Renaming(id: id, place: .sidebar) }
             }
@@ -958,16 +984,27 @@ struct Sidebar: View {
         // → opens the selected row's group and ← closes it, as in an outline.
         .onKeyPress(.rightArrow) { openSelected(true) }
         .onKeyPress(.leftArrow) { openSelected(false) }
+        // A header highlighted from the keyboard gives way to whatever is selected next, and to
+        // the terminal when it takes the keyboard back.
+        .onChange(of: model.selected) { highlighted = nil }
+        .onChange(of: model.focusedTerminal) { _, id in if id != nil { highlighted = nil } }
     }
 
     private func openSelected(_ open: Bool) -> KeyPress.Result {
-        guard filter != .archived, let tag = model.selected else { return .ignored }
+        guard filter != .archived, let tag = highlighted ?? model.selected else { return .ignored }
+        return setOpen(tag, open)
+    }
+
+    /// Opens (true), closes (false) or flips (nil) the row tagged `tag`, if it's one that opens.
+    @discardableResult
+    private func setOpen(_ tag: String, _ open: Bool?) -> KeyPress.Result {
         let tree = SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups)
         guard let (key, startsOpen) = tree.repos.lazy.compactMap({ $0.opening(tag) }).first else { return .ignored }
         var set = collapsed.wrappedValue
         let isOpen = startsOpen != set.contains(key)
-        guard isOpen != open else { return .ignored }
-        if open == startsOpen { set.remove(key) } else { set.insert(key) }
+        let want = open ?? !isOpen
+        guard isOpen != want else { return .ignored }
+        if want == startsOpen { set.remove(key) } else { set.insert(key) }
         collapsed.wrappedValue = set
         return .handled
     }
