@@ -611,7 +611,8 @@ extension OpeningRows {
     static var chevron: CGFloat { 10 }
 }
 
-/// Rows for one repo or folder: a row that opens, which you can select to start work there.
+/// Rows for one repo or folder: a row that opens; a click on it opens or closes it, and new
+/// sessions start there.
 struct RepoRows: View {
     @EnvironmentObject var model: DinoModel
     let node: RepoNode

@@ -523,9 +523,8 @@ final class DinoModel: ObservableObject {
                 startingShell = newShell()
             }
         }
-        // Rows that aren't sessions (folders, worktree lists, fan-outs, subagents, tasks, sessions on
-        // this Mac) carry a "kind:" prefix: one of those stays selected. Only a session that's gone
-        // falls back to another, or a click on "Other worktrees" would jump straight back.
+        // Rows that aren't sessions (fan-outs, subagents, runs) carry a "kind:" prefix: one of
+        // those stays selected. Only a session that's gone falls back to another.
         let sessionGone = selected.map { !$0.contains(":") && !live.contains($0) } ?? true
         if !startingShell, sessionGone, !(shownOne && tabs.isEmpty) {
             // The one selected when the app last quit, else the one that last did something; once
@@ -606,6 +605,21 @@ final class DinoModel: ObservableObject {
         if attention.contains(id) { attention.remove(id) }
         if unseenDone.contains(id) { unseenDone.remove(id) }
         if !keepKeyboard { terminals[id]?.requestFocus() }
+    }
+
+    /// Whether the main area has something of its own for a sidebar row: a session's terminal, a
+    /// fan-out's comparison, a subagent's conversation, an automation's run. A repo's row, a
+    /// worktree's over its sessions, "Other worktrees" and a worktree in it have none: selected,
+    /// they left the main area empty, so they open and close instead and the session stays.
+    func showsSomething(_ tag: String) -> Bool {
+        if tag.hasPrefix("repo:") || tag.hasPrefix("others:") { return false }
+        if tag.hasPrefix("dir:") { return worktree(at: String(tag.dropFirst(4)))?.owner != nil }
+        return true
+    }
+
+    /// A folder's row was clicked: new sessions start there, and what's shown stays.
+    func startHere(_ tag: String) {
+        if let path = Self.folderPath(tag) { moveFolder(to: path) }
     }
 
     /// The folder a sidebar selection stands for: "dir:" a checkout, "repo:" a repo's own row.
