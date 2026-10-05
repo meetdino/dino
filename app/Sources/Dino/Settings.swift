@@ -321,8 +321,12 @@ final class SettingsStore: ObservableObject {
         } done: {
             self.agents = $0
             self.saves += 1
+            NotificationCenter.default.post(name: Self.saved, object: saved)
         }
     }
+
+    /// Posted with the `DinoSettings` dinod just saved from here.
+    static let saved = Notification.Name("dino.settingsSaved")
 
     func setKey(_ name: String, value: String?) {
         run { c in
@@ -1164,6 +1168,11 @@ private struct ExperimentalFeature: Identifiable {
             id: "computer_use",
             title: "Computer use for more agents",
             summary: "For agents with no computer use of their own: they can see your screen and click and type in your apps, through open-computer-use (open source). Anything on screen can steer an agent: a web page or a message could tell it to do something you didn't ask. dino installs it in its own folder and adds it only to the agents you pick. Off, dino removes what it added."
+        ),
+        ExperimentalFeature(
+            id: "fan_out",
+            title: "Fan out",
+            summary: "One prompt to several agents at once, each in its own worktree, then keep the best: Session → Fan Out… (⇧⌘N). Off, it's not offered; fan-outs already running stay in the sidebar."
         ),
         ExperimentalFeature(
             id: "session_tools",

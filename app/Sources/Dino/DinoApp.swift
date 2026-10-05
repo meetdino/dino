@@ -86,8 +86,11 @@ struct DinoApp: App {
                     .disabled(model.launchers.isEmpty)
                 Button("New Session with Options…") { model.showNewSession = true }
                     .keyboardShortcut("n", modifiers: [.command, .control])
-                Button("Fan Out…") { model.showFanout = true }
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                // Experimental: only while it's on (Settings → Experimental).
+                if model.fanoutOn {
+                    Button("Fan Out…") { model.showFanout = true }
+                        .keyboardShortcut("n", modifiers: [.command, .shift])
+                }
                 Button("New Automation…") { model.newTask() }
                 Button("Continue a Session…") {
                     model.loadFound()
@@ -728,18 +731,11 @@ struct EmptyState: View {
                 Text("or start a new one").font(.caption).foregroundStyle(.tertiary)
             }
             if !model.daemonDown {
-                VStack(spacing: 8) {
-                    Button { model.startSession() } label: {
-                        Label("New Session…", systemImage: "plus").frame(width: 240)
-                    }
-                    .controlSize(.large)
-                    .help("Pick a folder, a recent repository, one of yours on GitHub or a URL to clone, then an agent (⌘N)")
-                    Button { model.showFanout = true } label: {
-                        Label("Fan Out…", systemImage: "arrow.triangle.branch").frame(width: 240)
-                    }
-                    .controlSize(.large)
-                    .help("One prompt, several agents, each in its own worktree; keep the best (⇧⌘N)")
+                Button { model.startSession() } label: {
+                    Label("New Session…", systemImage: "plus").frame(width: 240)
                 }
+                .controlSize(.large)
+                .help("Pick a folder, a recent repository, one of yours on GitHub or a URL to clone, then an agent (⌘N)")
             }
         }
         .padding(40)

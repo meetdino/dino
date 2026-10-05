@@ -663,7 +663,11 @@ final class DinoModel: ObservableObject {
                 guard let conn = try? DinoConnection(path: DinoEnvironment.socketPath),
                       var settings = try? conn.settings() else { return }
                 let tmux = settings.tmux
-                await MainActor.run { self.noteTmuxSettings(tmux) }
+                let experimental = settings.experimental
+                await MainActor.run {
+                    self.noteTmuxSettings(tmux)
+                    self.noteExperimental(experimental)
+                }
                 guard let whole = settings.terminal else { return }
                 // Only what the app keeps for itself: the rest is dinod's alone.
                 let there = whole.appOwn
@@ -684,6 +688,19 @@ final class DinoModel: ObservableObject {
         }
         check()
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in check() }
+        // A switch flipped in Settings shows in the menus now, not at the next look.
+        NotificationCenter.default.addObserver(forName: SettingsStore.saved, object: nil, queue: .main) { note in
+            let experimental = (note.object as? DinoSettings)?.experimental
+            MainActor.assumeIsolated { self.noteExperimental(experimental) }
+        }
+    }
+
+    /// Settings → Experimental → Fan out: the menu, ⇧⌘N and the palette offer it.
+    @Published private(set) var fanoutOn = false
+
+    private func noteExperimental(_ e: [String: Bool]?) {
+        let on = e?["fan_out"] ?? false
+        if on != fanoutOn { fanoutOn = on }
     }
 
     func terminal(for id: String) -> TerminalViewState {

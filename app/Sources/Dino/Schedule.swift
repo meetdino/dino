@@ -701,7 +701,10 @@ struct ScheduleSheet: View {
                     Divider().padding(.vertical, 2)
                     Field(label: "Do") {
                         Picker("", selection: $task.action.kind) {
-                            ForEach(AutomationAction.kinds, id: \.id) { Text($0.label).tag($0.id) }
+                            // Fan out is experimental: offered while it's on, kept for one that already does it.
+                            ForEach(AutomationAction.kinds.filter { $0.id != "fanout" || model.fanoutOn || task.action.kind == "fanout" }, id: \.id) {
+                                Text($0.label).tag($0.id)
+                            }
                         }
                         .labelsHidden()
                         .fixedSize()
