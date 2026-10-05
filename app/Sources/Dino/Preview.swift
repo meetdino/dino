@@ -464,7 +464,7 @@ private struct PreviewBody: View {
                 closeHelp: "Close the preview (⌘W or Esc)",
                 close: { model.closeSidePane() }
             ) {
-                Image(systemName: "globe.americas")
+                Image(systemName: "globe")
             } trailing: {
                 Group {
                     serverMenu
