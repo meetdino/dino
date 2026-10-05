@@ -19,7 +19,7 @@ on the machine. This repository holds all of it, the account service included.
 | `dino-term` | Terminal emulation behind each session. | nothing of ours |
 | `dino-router`, `dino-proxy` | The local proxy: per-session routes, coding plans, fallbacks when a route hits its limit, metering, the free models pool, and noticing an agent's computer or browser use. It runs inside dinod as a library, so there's no extra hop. | `dino-router` |
 | `dino-daemon` | dinod, putting it together. | all of the above |
-| `dino` | The CLI. | all of the above |
+| `dino` | The CLI. It draws no terminal of its own: `dino attach` relays one. | all of the above but `dino-term` |
 
 `crates/boundaries` fails the build if a crate reaches across these lines.
 

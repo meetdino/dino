@@ -105,6 +105,7 @@ with each agent's own commands.
 ## Using the command line
 
 ```sh
+dino                      # the app; in a dino terminal or piped, the sessions
 dino .                    # a shell in this folder, shown in the app
 dino . claude             # Claude Code in this folder
 dino ls                   # every session

@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dino_core::ipc::{self, Request, Response};
-use dino_term::{Pane, Transport};
 
 /// Connect to dinod, starting it in the background if it isn't running.
 pub fn connect() -> io::Result<UnixStream> {
@@ -94,18 +93,6 @@ pub fn request(req: &Request) -> io::Result<Response> {
     Control::open()?.request(req)
 }
 
-/// Keystrokes and resizes from a client pane, sent to dinod.
-struct SocketTransport(Mutex<UnixStream>);
-
-impl Transport for SocketTransport {
-    fn write(&self, bytes: Vec<u8>) {
-        let _ = ipc::write_frame(&mut *self.0.lock().unwrap(), ipc::DATA, &bytes);
-    }
-    fn resize(&self, cols: u16, rows: u16) {
-        let _ = ipc::write_frame(&mut *self.0.lock().unwrap(), ipc::RESIZE, &ipc::resize_payload(cols, rows));
-    }
-}
-
 fn start_attach(id: &str, cols: u16, rows: u16) -> io::Result<UnixStream> {
     attach_on(connect()?, id, cols, rows, false)
 }
@@ -119,28 +106,6 @@ fn attach_on(mut s: UnixStream, id: &str, cols: u16, rows: u16, wait: bool) -> i
         Response::Error { message } => Err(io::Error::other(message)),
         other => Err(io::Error::other(format!("unexpected {other:?}"))),
     }
-}
-
-/// A local emulator mirroring session `id`, kept live by a reader thread.
-pub fn attach_pane(id: &str, cols: u16, rows: u16) -> io::Result<Arc<Pane>> {
-    let stream = start_attach(id, cols, rows)?;
-    let mut reader = stream.try_clone()?;
-    let pane = Pane::remote(Arc::new(SocketTransport(Mutex::new(stream))), cols, rows);
-    let weak = Arc::downgrade(&pane);
-    std::thread::spawn(move || {
-        while let Ok((kind, payload)) = ipc::read_frame(&mut reader) {
-            let Some(pane) = weak.upgrade() else { return };
-            match kind {
-                ipc::DATA => pane.feed(&payload),
-                ipc::EXIT => break,
-                _ => {}
-            }
-        }
-        if let Some(pane) = weak.upgrade() {
-            pane.mark_exited();
-        }
-    });
-    Ok(pane)
 }
 
 /// Whether terminal output draws any text: more than escape sequences, titles and blank lines.

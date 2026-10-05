@@ -1,6 +1,6 @@
-//! Terminal panes: an emulator (`alacritty_terminal`) fed with a program's output, rendered as a
-//! ratatui widget, with input encoded the way the program asked for. Output arrives either from a
-//! local PTY (the daemon) or over a socket from dinod (clients); see [`Transport`].
+//! Terminal panes: an emulator (`alacritty_terminal`) fed with a program's output, for replays,
+//! text and the state dinod reports. Output arrives from a local PTY or is fed in; input goes out
+//! through a [`Transport`].
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::{Dimensions, Row, Scroll};
+use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::{Cell, Flags};
@@ -18,10 +18,6 @@ use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AColor, NamedColor, Processor, Rgb};
 use alacritty_terminal::Term;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use terminput::{Encoding, KittyFlags};
 
 /// Colors reported to apps that query them (OSC 10/11); agents use this to pick a light/dark theme.
 /// How long a program gets to leave after the terminal hangs up on it, then after SIGTERM.
@@ -120,7 +116,6 @@ pub trait Transport: Send + Sync {
 
 /// State shared between the output pump and whoever owns the pane.
 pub struct Shared {
-    pub dirty: AtomicBool,
     pub bell: AtomicBool,
     /// Total bells rung, for observers that poll.
     pub bells: AtomicU64,
@@ -206,7 +201,6 @@ impl EventListener for Listener {
         let s = &self.0;
         let answer = s.answer_queries.load(Ordering::Relaxed);
         match event {
-            Event::Wakeup => s.dirty.store(true, Ordering::Relaxed),
             Event::Bell => {
                 s.bell.store(true, Ordering::Relaxed);
                 s.bells.fetch_add(1, Ordering::Relaxed);
@@ -315,7 +309,6 @@ pub struct Pane {
 impl Pane {
     fn emulator(cols: u16, rows: u16, answer_queries: bool) -> Self {
         let shared = Arc::new(Shared {
-            dirty: AtomicBool::new(false),
             bell: AtomicBool::new(false),
             bells: AtomicU64::new(0),
             exited: AtomicBool::new(false),
@@ -386,7 +379,6 @@ impl Pane {
                 let Some(pane) = weak.upgrade() else { continue };
                 let mut term = pane.term.lock();
                 pane.advance(&mut term, &buf[..n]);
-                pane.shared.dirty.store(true, Ordering::Relaxed);
                 tap(&buf[..n]);
                 drop(term);
                 // A prompt is a short write, after the program turned echo off (or on again).
@@ -413,7 +405,6 @@ impl Pane {
             }
             *shared.exit_code.lock().unwrap() = Some(code);
             shared.exited.store(true, Ordering::Relaxed);
-            shared.dirty.store(true, Ordering::Relaxed);
         })?;
         Ok(pane)
     }
@@ -443,7 +434,6 @@ impl Pane {
     pub fn feed(&self, bytes: &[u8]) {
         let mut term = self.term.lock();
         self.advance(&mut term, bytes);
-        self.shared.dirty.store(true, Ordering::Relaxed);
     }
 
     /// Parse output, noting what the alternate screen showed each time the program leaves it.
@@ -549,7 +539,6 @@ impl Pane {
 
     pub fn mark_exited(&self) {
         self.shared.exited.store(true, Ordering::Relaxed);
-        self.shared.dirty.store(true, Ordering::Relaxed);
     }
 
     /// Stop the program and everything it started in its terminal, for sure, off the caller's
@@ -738,35 +727,6 @@ impl Pane {
         out.into_bytes()
     }
 
-    /// Forward a host key event, honoring the modes the child app has enabled.
-    pub fn send_key(&self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyCode, KeyModifiers};
-        let mode = *self.term.lock().mode();
-        // Leaving scrollback on any keypress, like most terminals.
-        self.term.lock().scroll_display(Scroll::Bottom);
-
-        if mode.contains(TermMode::APP_CURSOR) && key.modifiers == KeyModifiers::NONE {
-            let c = match key.code {
-                KeyCode::Up => Some('A'),
-                KeyCode::Down => Some('B'),
-                KeyCode::Right => Some('C'),
-                KeyCode::Left => Some('D'),
-                KeyCode::Home => Some('H'),
-                KeyCode::End => Some('F'),
-                _ => None,
-            };
-            if let Some(c) = c {
-                return self.write(format!("\x1bO{c}"));
-            }
-        }
-
-        let Ok(ev) = terminput_crossterm::to_terminput(crossterm::event::Event::Key(key)) else { return };
-        let mut buf = [0u8; 32];
-        if let Ok(n) = ev.encode(&mut buf, encoding(mode)) {
-            self.write(buf[..n].to_vec());
-        }
-    }
-
     /// `text` as typed text, never keys: escapes and other control characters (C0 but tab and line
     /// breaks, DEL, C1) are dropped, so it can't end the bracketed paste early (`ESC[201~`) and go
     /// on to press keys in the program (`ESC[Z`, Shift+Tab).
@@ -778,105 +738,6 @@ impl Pane {
         } else {
             self.write(text.replace("\r\n", "\r").replace('\n', "\r"));
         }
-    }
-
-    /// Mouse wheel: report to the app if it asked for mouse events, otherwise scroll our history.
-    pub fn scroll(&self, lines: i32, col: u16, row: u16) {
-        let mut term = self.term.lock();
-        let mode = *term.mode();
-        if mode.intersects(TermMode::MOUSE_MODE) && mode.contains(TermMode::SGR_MOUSE) {
-            let button = if lines > 0 { 64 } else { 65 };
-            drop(term);
-            for _ in 0..lines.unsigned_abs() {
-                self.write(format!("\x1b[<{button};{};{}M", col + 1, row + 1));
-            }
-        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
-            drop(term);
-            let seq = if lines > 0 { "\x1bOA" } else { "\x1bOB" };
-            self.write(seq.repeat(lines.unsigned_abs() as usize));
-        } else {
-            term.scroll_display(Scroll::Delta(lines));
-            self.shared.dirty.store(true, Ordering::Relaxed);
-        }
-    }
-
-    /// Forward a click, drag, release or move at pane-local (`col`, `row`) if the app asked for
-    /// mouse reporting. Returns false when the app isn't listening, so the host can use the event.
-    pub fn mouse(&self, ev: crossterm::event::MouseEvent, col: u16, row: u16) -> bool {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind as K};
-        let mode = *self.term.lock().mode();
-        if !mode.intersects(TermMode::MOUSE_MODE) {
-            return false;
-        }
-        let button = |b: MouseButton| match b {
-            MouseButton::Left => 0,
-            MouseButton::Middle => 1,
-            MouseButton::Right => 2,
-        };
-        // (button code, is release)
-        let (mut code, release) = match ev.kind {
-            K::Down(b) => (button(b), false),
-            K::Up(b) => (button(b), true),
-            K::Drag(b) if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) => (button(b) + 32, false),
-            K::Moved if mode.contains(TermMode::MOUSE_MOTION) => (35, false),
-            _ => return true,
-        };
-        if ev.modifiers.contains(KeyModifiers::SHIFT) {
-            code += 4;
-        }
-        if ev.modifiers.contains(KeyModifiers::ALT) {
-            code += 8;
-        }
-        if ev.modifiers.contains(KeyModifiers::CONTROL) {
-            code += 16;
-        }
-        let (x, y) = (col as u32 + 1, row as u32 + 1);
-        if mode.contains(TermMode::SGR_MOUSE) {
-            self.write(format!("\x1b[<{code};{x};{y}{}", if release { 'm' } else { 'M' }));
-        } else {
-            // Legacy X10 encoding: release has no button, coordinates cap at 223.
-            let code = if release { 3 + (code & !3) } else { code };
-            let enc = |v: u32| (32 + v.min(223)) as u8;
-            self.write(vec![0x1b, b'[', b'M', 32 + code as u8, enc(x), enc(y)]);
-        }
-        true
-    }
-
-    /// Draw the visible grid into `area`. Returns where the host cursor should go, if visible.
-    pub fn render(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
-        let term = self.term.lock();
-        let content = term.renderable_content();
-        let offset = content.display_offset as i32;
-
-        for cell in content.display_iter {
-            let row = cell.point.line.0 + offset;
-            let col = cell.point.column.0 as u16;
-            if row < 0 || row as u16 >= area.height || col >= area.width {
-                continue;
-            }
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let Some(out) = buf.cell_mut((area.x + col, area.y + row as u16)) else { continue };
-            let mut symbol = String::new();
-            symbol.push(if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c });
-            if let Some(extra) = cell.zerowidth() {
-                symbol.extend(extra);
-            }
-            out.set_symbol(&symbol);
-            out.set_style(style(cell.fg, cell.bg, cell.flags));
-        }
-
-        let cursor = content.cursor.point;
-        let visible = content.mode.contains(TermMode::SHOW_CURSOR) && offset == 0;
-        let (x, y) = (cursor.column.0 as u16, cursor.line.0);
-        (visible && y >= 0 && (y as u16) < area.height && x < area.width)
-            .then(|| Position::new(area.x + x, area.y + y as u16))
-    }
-
-    /// Lines scrolled back from the bottom (0 = live).
-    pub fn display_offset(&self) -> usize {
-        self.term.lock().grid().display_offset()
     }
 }
 
@@ -1094,57 +955,6 @@ fn sgr_color(c: AColor, base: u8, bright: u8, ext: u8) -> Option<String> {
                 _ => None,
             }
         }
-    }
-}
-
-fn encoding(mode: TermMode) -> Encoding {
-    if !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL) {
-        return Encoding::Xterm;
-    }
-    let mut flags = KittyFlags::empty();
-    flags.set(KittyFlags::DISAMBIGUATE_ESCAPE_CODES, mode.contains(TermMode::DISAMBIGUATE_ESC_CODES));
-    flags.set(KittyFlags::REPORT_EVENT_TYPES, mode.contains(TermMode::REPORT_EVENT_TYPES));
-    flags.set(KittyFlags::REPORT_ALTERNATE_KEYS, mode.contains(TermMode::REPORT_ALTERNATE_KEYS));
-    flags.set(KittyFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES, mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC));
-    Encoding::Kitty(flags)
-}
-
-fn style(fg: AColor, bg: AColor, flags: Flags) -> Style {
-    let mut s = Style::default().fg(color(fg)).bg(color(bg));
-    let mut m = Modifier::empty();
-    m.set(Modifier::BOLD, flags.contains(Flags::BOLD));
-    m.set(Modifier::ITALIC, flags.contains(Flags::ITALIC));
-    m.set(Modifier::DIM, flags.contains(Flags::DIM));
-    m.set(Modifier::UNDERLINED, flags.intersects(Flags::ALL_UNDERLINES));
-    m.set(Modifier::CROSSED_OUT, flags.contains(Flags::STRIKEOUT));
-    m.set(Modifier::REVERSED, flags.contains(Flags::INVERSE));
-    s = s.add_modifier(m);
-    s
-}
-
-fn color(c: AColor) -> Color {
-    match c {
-        AColor::Spec(Rgb { r, g, b }) => Color::Rgb(r, g, b),
-        AColor::Indexed(i) => Color::Indexed(i),
-        AColor::Named(n) => match n {
-            NamedColor::Black | NamedColor::DimBlack => Color::Black,
-            NamedColor::Red | NamedColor::DimRed => Color::Red,
-            NamedColor::Green | NamedColor::DimGreen => Color::Green,
-            NamedColor::Yellow | NamedColor::DimYellow => Color::Yellow,
-            NamedColor::Blue | NamedColor::DimBlue => Color::Blue,
-            NamedColor::Magenta | NamedColor::DimMagenta => Color::Magenta,
-            NamedColor::Cyan | NamedColor::DimCyan => Color::Cyan,
-            NamedColor::White | NamedColor::DimWhite => Color::Gray,
-            NamedColor::BrightBlack => Color::DarkGray,
-            NamedColor::BrightRed => Color::LightRed,
-            NamedColor::BrightGreen => Color::LightGreen,
-            NamedColor::BrightYellow => Color::LightYellow,
-            NamedColor::BrightBlue => Color::LightBlue,
-            NamedColor::BrightMagenta => Color::LightMagenta,
-            NamedColor::BrightCyan => Color::LightCyan,
-            NamedColor::BrightWhite => Color::White,
-            _ => Color::Reset,
-        },
     }
 }
 
