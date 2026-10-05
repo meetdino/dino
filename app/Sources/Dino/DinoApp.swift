@@ -628,8 +628,12 @@ struct Terminals: View {
                     }
                 }
             }
-            ToolbarItem(placement: .primaryAction) { SidePanePicker() }
+            // Pinned to the trailing edge on every screen: on macOS 26 and later the toolbar lays its
+            // primary actions out after the principal item, so with no session (an empty principal)
+            // they slid over to the sidebar toggle. The flexible space holds them at the right.
+            TrailingToolbarSpace()
             ToolbarItem(placement: .primaryAction) { PRToolbarButton() }
+            ToolbarItem(placement: .primaryAction) { SidePanePicker() }
         }
         .overlay(alignment: .bottomTrailing) {
             if let s = model.selectedSession, let u = s.local_url, model.offered[s.id] != u, model.sidePane != .preview {
@@ -640,7 +644,21 @@ struct Terminals: View {
     }
 }
 
-/// Changes, Preview and Tasks as one control: each shows its pane in place of the others.
+/// What pushes the trailing items to the window's edge: a flexible space where the toolbar has
+/// one (macOS 26 and later), else nothing, since earlier systems keep primary actions trailing.
+struct TrailingToolbarSpace: ToolbarContent {
+    var body: some ToolbarContent {
+        if #available(macOS 26, *) {
+            ToolbarSpacer(.flexible, placement: .primaryAction)
+        } else {
+            ToolbarItem(placement: .primaryAction) { EmptyView() }
+        }
+    }
+}
+
+/// Changes, Preview and Tasks as one control at the toolbar's trailing edge, like Xcode's inspector
+/// toggles: each shows its pane in place of the others, and the open one stays pressed. There only
+/// while it has something to act on: a session is selected, or one of its panes is open.
 struct SidePanePicker: View {
     @EnvironmentObject var model: DinoModel
 
@@ -648,30 +666,30 @@ struct SidePanePicker: View {
         let session = model.selectedSession
         let remote = session?.remoteReason
         let running = session.map { $0.exited ? 0 : $0.tasks?.running ?? 0 } ?? 0
-        ControlGroup {
-            Button { model.showReview.toggle() } label: {
-                Label("Changes", systemImage: model.showReview ? "plusminus.circle.fill" : "plusminus.circle")
+        let preview = model.sidePane == .preview, tasks = model.sidePane == .tasks
+        if session != nil || preview || tasks || model.showReview {
+            ControlGroup {
+                Toggle(isOn: Binding(get: { model.showReview }, set: { model.showReview = $0 })) {
+                    Label("Changes", systemImage: "plus.forwardslash.minus")
+                }
+                .help(remote ?? "Changes (⇧⌘D): review this session's diff and comment on a line for the agent")
+                .disabled(session == nil || (remote != nil && !model.showReview))
+                Toggle(isOn: Binding(get: { preview }, set: { _ in model.togglePreview() })) {
+                    Label("Preview", systemImage: "globe")
+                }
+                .help(remote ?? "Preview (⌥⌘P): a browser for this session's dev server or any local page")
+                .disabled(remote != nil && !preview)
+                Toggle(isOn: Binding(get: { tasks }, set: { _ in model.toggleTasks() })) {
+                    Label(running > 0 ? "Tasks, \(running) running" : "Tasks", systemImage: "checklist")
+                }
+                .help(running > 0
+                    ? "Tasks (⌥⌘T): \(running) running in the background, subagents and commands"
+                    : session?.reportsTasks == true ? "Tasks (⌥⌘T): the agent's task list, subagents and background commands" : "Tasks (⌥⌘T): this session doesn't report tasks")
+                .disabled(!(session?.reportsTasks ?? false) && !tasks)
             }
-            .help(remote ?? "Review this session's changes; click a line to comment for the agent (⇧⌘D)")
-            .disabled(session == nil || remote != nil)
-            .accessibilityValue(model.showReview ? "Shown" : "Hidden")
-            Button { model.togglePreview() } label: {
-                Label("Preview", systemImage: model.sidePane == .preview ? "globe.americas.fill" : "globe.americas")
-            }
-            .help(remote ?? "Preview this session's dev server or any local page (⌥⌘P)")
-            .disabled(remote != nil && model.sidePane != .preview)
-            .accessibilityValue(model.sidePane == .preview ? "Shown" : "Hidden")
-            Button { model.toggleTasks() } label: {
-                Label(running > 0 ? "Tasks, \(running) running" : "Tasks",
-                      systemImage: model.sidePane == .tasks ? "checklist.checked" : "checklist")
-            }
-            .help(running > 0
-                ? "\(running) running in the background: subagents and commands (⌥⌘T)"
-                : session?.reportsTasks == true ? "The agent's task list, subagents and background commands (⌥⌘T)" : "This session doesn't report tasks")
-            .disabled(!(session?.reportsTasks ?? false) && model.sidePane != .tasks)
-            .accessibilityValue(model.sidePane == .tasks ? "Shown" : "Hidden")
+            .toggleStyle(.button)
+            .labelStyle(.iconOnly)
         }
-        .controlGroupStyle(.navigation)
     }
 }
 
