@@ -98,6 +98,9 @@ pub struct OnFallback {
     pub since: u64,
     /// Which step of the chain: a session only moves up the chain at the start of a turn.
     pub(crate) step: usize,
+    /// Answered by another of the user's Claude accounts, not a step of the chain: which (see
+    /// `accounts`). Same model, so nothing is mixed; it too changes only as a turn starts.
+    pub account: Option<u32>,
 }
 
 /// How long a route that didn't say when it resets is left alone before it's tried again.
@@ -158,11 +161,14 @@ pub(crate) fn route_key(route: &str, headers: &HeaderMap) -> String {
     format!("{route}#{:08x}", h.finish() as u32)
 }
 
+/// Claude Code's own account, signed in with a subscription, as the session shows it.
+pub const CLAUDE: &str = "Claude";
+
 /// What a route is called where the session shows it: the agent's own account by what signs in.
 pub(crate) fn primary_name(route: &str, headers: &HeaderMap) -> String {
     let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
     match route {
-        "anthropic" if auth.contains("sk-ant-oat") => "Claude".into(),
+        "anthropic" if is_claude_subscription(auth) => CLAUDE.into(),
         "anthropic" => "Anthropic API".into(),
         "openai" => "OpenAI API".into(),
         "chatgpt" => "ChatGPT".into(),

@@ -617,6 +617,7 @@ pub fn key_status() -> Vec<KeyInfo> {
                 !KNOWN_KEYS.iter().any(|(n, _)| n == k)
                     && !k.starts_with("CHATGPT_")
                     && !k.starts_with(ACCOUNT_TOKEN_PREFIX)
+                    && !k.starts_with("CLAUDE_ACCOUNT_")
                     && !k.starts_with(crate::plans::KEY_PREFIX)
                     && k != crate::claude_token::CREATED_KEY
             }),

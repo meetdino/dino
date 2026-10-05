@@ -262,8 +262,8 @@ struct FallbackChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "arrow.triangle.branch").font(.caption)
-            Text("On fallback: \(fallback.name) · \(fallback.why)").lineLimit(1)
+            Image(systemName: fallback.isAccount ? "person.2" : "arrow.triangle.branch").font(.caption)
+            Text(fallback.label).lineLimit(1)
         }
         .font(.callout)
         .foregroundStyle(.orange)
@@ -282,7 +282,7 @@ struct FallbackChip: View {
         if !usage.isEmpty {
             lines.append(usage.map { "\($0.name): ↑\(roundTokens($0.input_tokens)) ↓\(roundTokens($0.output_tokens))" }.joined(separator: " · "))
         }
-        lines.append("Settings → Agents says where each agent goes")
+        lines.append(f.isAccount ? "Your other Claude accounts: dino claude-token status" : "Settings → Agents says where each agent goes")
         return lines.joined(separator: "\n")
     }
 }
@@ -292,7 +292,7 @@ struct FallbackLine: View {
     let fallback: FallbackInfo
 
     var body: some View {
-        Label("On fallback: \(fallback.name) · \(fallback.why)", systemImage: "arrow.triangle.branch")
+        Label(fallback.label, systemImage: fallback.isAccount ? "person.2" : "arrow.triangle.branch")
             .font(.caption)
             .foregroundStyle(.orange)
             .lineLimit(1)
