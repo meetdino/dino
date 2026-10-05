@@ -25,7 +25,37 @@ extension SessionInfo {
     }
 }
 
+/// How dino shows an agent using the Mac or a browser (Settings → Experimental). Whatever it is,
+/// the session's menu says so and has Stop.
+enum UsingDisplay: String, CaseIterable, Identifiable {
+    /// A banner over its terminal, and a mark on its sidebar row.
+    case banner
+    /// Only the mark on its sidebar row.
+    case mark
+    /// Neither, and no notification.
+    case off
+
+    static let key = "computerUse.show"
+    var id: String { rawValue }
+
+    static var current: UsingDisplay {
+        UserDefaults.standard.string(forKey: key).flatMap(UsingDisplay.init(rawValue:)) ?? .banner
+    }
+
+    var label: String {
+        switch self {
+        case .banner: "Banner over its terminal"
+        case .mark: "Sidebar mark only"
+        case .off: "Off"
+        }
+    }
+}
+
 extension DinoModel {
+    /// How long without computer or browser use before the agent's next use is a new burst, which
+    /// shows a banner that was closed again.
+    static let usingBurstGap: TimeInterval = 180
+
     /// Stop the agent's turn as its own key would (Esc in most): what it was doing in an app or
     /// the browser stops, and the session stays open for your next message.
     func interrupt(_ id: String) {
@@ -38,13 +68,38 @@ extension DinoModel {
             }
         }
     }
+
+    /// Close session `id`'s banner until its agent's next separate burst of computer use.
+    func hideUsing(_ id: String) {
+        if !usingHidden.contains(id) { usingHidden.insert(id) }
+    }
+
+    /// Show session `id`'s banner again.
+    func showUsing(_ id: String) {
+        if usingHidden.contains(id) { usingHidden.remove(id) }
+    }
+
+    /// On every state: a closed banner shows again once its agent starts using the Mac or a
+    /// browser after `usingBurstGap` without.
+    func noteUsing(_ sessions: [SessionInfo]) {
+        let now = Date()
+        for s in sessions where s.reach != nil {
+            if usingHidden.contains(s.id), let last = usingSeen[s.id], now.timeIntervalSince(last) > Self.usingBurstGap {
+                usingHidden.remove(s.id)
+            }
+            usingSeen[s.id] = now
+        }
+    }
 }
 
-/// Over the terminals: which agent in view is using the Mac or a browser, with Stop. Its session
-/// stays open; Stop interrupts the turn the way the agent's own key (Esc in most) would. No
-/// animation: it can be up for minutes, and a terminal at rest should cost nothing.
+/// Over the terminals: which agent in view is using the Mac or a browser, with Stop and a close
+/// (×) that hides it until the agent's next burst of it. One line, to cover as little of the
+/// terminal as it can. Its session stays open; Stop interrupts the turn the way the agent's own
+/// key (Esc in most) would, so Esc itself is left to the agent. No animation: it can be up for
+/// minutes, and a terminal at rest should cost nothing.
 struct ComputerUseBanner: View {
     @EnvironmentObject var model: DinoModel
+    @AppStorage(UsingDisplay.key) private var display = UsingDisplay.banner.rawValue
     /// Stop was clicked and the agent hasn't stopped yet.
     @State private var stopping: Set<String> = []
 
@@ -52,24 +107,20 @@ struct ComputerUseBanner: View {
         // The selected session, else the other half of its split.
         let shown = model.shownSplit.map { [$0.first, $0.second] } ?? model.selected.map { [$0] } ?? []
         let ids = shown.filter { $0 == model.selected } + shown.filter { $0 != model.selected }
-        if let s = ids.lazy.compactMap({ id in model.sessions.first { $0.id == id && $0.reach != nil } }).first,
+        if display == UsingDisplay.banner.rawValue,
+           let s = ids.lazy.compactMap({ id in model.sessions.first { $0.id == id && $0.reach != nil && !model.usingHidden.contains(id) } }).first,
            let reach = s.reach, let sentence = s.usingSentence {
-            HStack(spacing: 10) {
+            let detail = reach == .computer ? "sees your screen, clicks and types in your apps" : "reads pages, clicks and types in your browser"
+            HStack(spacing: 8) {
                 Image(systemName: reach.symbol)
-                    .font(.title3)
                     .foregroundStyle(Color(nsColor: .systemOrange))
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(ids.count > 1 && s.id != model.selected ? "\(sentence) (\(s.display))" : sentence)
-                        .font(.callout.weight(.semibold))
-                    Text(reach == .computer
-                        ? "It sees your screen and clicks and types in your apps. Stop ends its turn; the session stays open."
-                        : "It reads pages and clicks and types in your browser. Stop ends its turn; the session stays open.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                (Text(ids.count > 1 && s.id != model.selected ? "\(sentence) (\(s.display))" : sentence).fontWeight(.semibold)
+                    + Text(" · it \(detail)").foregroundColor(.secondary))
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help("\(sentence): it \(detail). Stop ends its turn; the session stays open.")
                 Spacer(minLength: 8)
                 Button {
                     stopping.insert(s.id)
@@ -81,12 +132,24 @@ struct ComputerUseBanner: View {
                         Label("Stop", systemImage: "stop.fill")
                     }
                 }
-                .controlSize(.regular)
+                .controlSize(.small)
                 .disabled(stopping.contains(s.id))
                 .help("Interrupt \(s.agentWord)'s turn, as pressing its interrupt key in its pane would. The session stays open.")
+                Button {
+                    model.hideUsing(s.id)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Hide until \(s.agentWord) next starts using \(reach.object). The sidebar and the session's menu still say so.")
+                .accessibilityLabel("Hide")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
             .background(Color(nsColor: .systemOrange).opacity(0.12))
             .overlay(alignment: .bottom) { Divider() }
             .accessibilityElement(children: .contain)
@@ -97,17 +160,45 @@ struct ComputerUseBanner: View {
     }
 }
 
-/// On a sidebar row: its agent is using the Mac or a browser right now.
+/// On a sidebar row: its agent is using the Mac or a browser right now. Not with the setting off.
 struct UsingMark: View {
     let session: SessionInfo
     let reach: Reach
+    @AppStorage(UsingDisplay.key) private var display = UsingDisplay.banner.rawValue
 
     var body: some View {
-        Image(systemName: reach.symbol)
-            .font(.caption)
-            .foregroundStyle(Color(nsColor: .systemOrange))
-            .help(session.usingSentence ?? "")
-            .accessibilityLabel(session.usingSentence ?? "")
+        if display != UsingDisplay.off.rawValue {
+            Image(systemName: reach.symbol)
+                .font(.caption)
+                .foregroundStyle(Color(nsColor: .systemOrange))
+                .help(session.usingSentence ?? "")
+                .accessibilityLabel(session.usingSentence ?? "")
+        }
+    }
+}
+
+/// In a session's menu while its agent uses the Mac or a browser, whatever the setting shows:
+/// what it's doing, Stop, and the banner back once it was closed.
+struct UsingMenuItems: View {
+    @EnvironmentObject var model: DinoModel
+    let session: SessionInfo
+    @AppStorage(UsingDisplay.key) private var display = UsingDisplay.banner.rawValue
+
+    var body: some View {
+        if session.reach != nil, let sentence = session.usingSentence {
+            Button(sentence) {}.disabled(true)
+            Button("Stop \(session.agentWord)'s Turn") { model.interrupt(session.id) }
+                .help("Interrupt its turn, as its own interrupt key would. The session stays open.")
+            if display == UsingDisplay.banner.rawValue {
+                if model.usingHidden.contains(session.id) {
+                    Button("Show Banner") { model.showUsing(session.id) }
+                } else {
+                    Button("Hide Banner") { model.hideUsing(session.id) }
+                        .help("Until \(session.agentWord) next starts using it")
+                }
+            }
+            Divider()
+        }
     }
 }
 
