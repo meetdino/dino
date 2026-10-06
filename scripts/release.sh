@@ -8,9 +8,14 @@
 #
 # Signing and notarization run only when their credentials are set:
 #   DEVELOPER_ID_APP   "Developer ID Application: Name (TEAMID)", a codesigning identity in the keychain
-#   NOTARY_PROFILE     a profile saved with `xcrun notarytool store-credentials`, or
-#   APPLE_ID, TEAM_ID, APPLE_PASSWORD (app-specific password), or
-#   NOTARY_KEY, NOTARY_KEY_ID, NOTARY_ISSUER (App Store Connect API key, for CI)
+# and, for notarization, the first of these that is set:
+#   NOTARY_KEY, NOTARY_KEY_ID, NOTARY_ISSUER   an App Store Connect API key: the .p8 file, its key ID
+#                      and issuer ID. No keychain is involved, so a locked screen doesn't stop it.
+#   NOTARY_KEY_ENV     a file setting NOTARY_KEY_ID and NOTARY_ISSUER (or NOTARY_ISSUER_ID), and
+#                      optionally NOTARY_KEY; the key defaults to AuthKey_<NOTARY_KEY_ID>.p8 beside it
+#   NOTARY_PROFILE     a profile saved with `xcrun notarytool store-credentials`, which lives in the
+#                      login keychain: notarytool can't read it while the screen is locked
+#   APPLE_ID, TEAM_ID, APPLE_PASSWORD (app-specific password)
 # Without them the app is signed ad hoc, which Gatekeeper refuses for downloads.
 #   RELEASES_REPO      the GitHub repository the release is published in (default meetdino/dino, this
 #                      one); the update feed, the appcast's downloads and the tap's URLs point at its releases
@@ -45,6 +50,22 @@ PUBKEY=""
 if [ -n "$KEY" ]; then PUBKEY="$(swift scripts/release-key.swift public "$KEY")"; fi
 FEED_URL="${DINO_FEED_URL:-https://github.com/$RELEASES_REPO/releases/latest/download/appcast.xml}"
 UPDATE_BASE="${DINO_UPDATE_BASE:-https://github.com/$RELEASES_REPO/releases/download/v$VERSION}"
+
+# Notarization's API key from a file, checked before the build: read as KEY=value lines, not run,
+# and never printed.
+if [ -n "${NOTARY_KEY_ENV:-}" ]; then
+    [ -r "$NOTARY_KEY_ENV" ] || { echo "error: NOTARY_KEY_ENV $NOTARY_KEY_ENV isn't a readable file" >&2; exit 1; }
+    while IFS='=' read -r k v || [ -n "$k" ]; do
+        k="${k#export }"; k="${k// /}"; v="${v%$'\r'}"; v="${v#[\"\']}"; v="${v%[\"\']}"
+        case "$k" in
+            NOTARY_KEY_ID) NOTARY_KEY_ID="${NOTARY_KEY_ID:-$v}" ;;
+            NOTARY_ISSUER|NOTARY_ISSUER_ID) NOTARY_ISSUER="${NOTARY_ISSUER:-$v}" ;;
+            NOTARY_KEY) NOTARY_KEY="${NOTARY_KEY:-$v}" ;;
+        esac
+    done < "$NOTARY_KEY_ENV"
+    NOTARY_KEY="${NOTARY_KEY:-$(dirname "$NOTARY_KEY_ENV")/AuthKey_${NOTARY_KEY_ID:-}.p8}"
+    [ -r "$NOTARY_KEY" ] || { echo "error: no API key at $NOTARY_KEY (set NOTARY_KEY)" >&2; exit 1; }
+fi
 
 rust_target() { case "$1" in arm64) echo aarch64-apple-darwin ;; x86_64) echo x86_64-apple-darwin ;; *) echo "unknown arch $1" >&2; exit 1 ;; esac; }
 read -r -a arch_list <<<"$ARCHS"
@@ -119,9 +140,9 @@ rm -rf "$STAGE"
 if [ -n "${DEVELOPER_ID_APP:-}" ]; then codesign --force --timestamp --sign "$DEVELOPER_ID_APP" "$DMG"; fi
 
 notary=()
-if [ -n "${NOTARY_PROFILE:-}" ]; then notary=(--keychain-profile "$NOTARY_PROFILE")
+if [ -n "${NOTARY_KEY:-}" ] && [ -n "${NOTARY_KEY_ID:-}" ] && [ -n "${NOTARY_ISSUER:-}" ]; then notary=(--key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
+elif [ -n "${NOTARY_PROFILE:-}" ]; then notary=(--keychain-profile "$NOTARY_PROFILE")
 elif [ -n "${APPLE_ID:-}" ] && [ -n "${TEAM_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ]; then notary=(--apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APPLE_PASSWORD")
-elif [ -n "${NOTARY_KEY:-}" ] && [ -n "${NOTARY_KEY_ID:-}" ] && [ -n "${NOTARY_ISSUER:-}" ]; then notary=(--key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
 fi
 if [ -n "${DEVELOPER_ID_APP:-}" ] && [ "${#notary[@]}" -gt 0 ]; then
     say "notarizing"
