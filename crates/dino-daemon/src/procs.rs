@@ -4,8 +4,9 @@
 //! their own (Node's `detached`), which launchd takes in once the agent that started them exits,
 //! and nothing walking down from the agent finds them then. So every process a session starts
 //! carries its tag in its environment ([`TAG`]), which the kernel keeps as it started and dinod
-//! reads back ([`Look`]). macOS hides the environment of its own programs (`/bin/zsh`, `/bin/sh`),
-//! so with each tagged process goes the rest of its terminal session and everything under it.
+//! reads back ([`Look`]). macOS hides the environment of its own programs (`/bin/zsh`, `/bin/sh`;
+//! with System Integrity Protection off it shows them too), so with each tagged process goes the
+//! rest of its terminal session and everything under it.
 //!
 //! A session's processes stop with it (closed, deleted, archived, or not resumed after dinod
 //! restarts), as its terminal's do: hangup, then SIGTERM, then SIGKILL. While it lives they're
@@ -28,17 +29,9 @@ use dino_core::procinfo::{self, Procs};
 /// The variable that says which session of which dino a process is: `<session id> <dino's folder>`.
 pub(crate) const TAG: &str = "DINO_SESSION_TAG";
 
-/// The tag of session `id`.
-pub(crate) fn tag(id: &str) -> String {
-    format!("{id} {}", home())
-}
-
-fn home() -> String {
-    // Tests never tag what they start as the user's own dino's.
-    #[cfg(test)]
-    return std::env::temp_dir().join("dino-procs-test").display().to_string();
-    #[cfg(not(test))]
-    dino_core::config_dir().display().to_string()
+/// The tag of session `id` of the dino whose folder is `home` (its dinod's `Daemon::home`).
+pub(crate) fn tag(home: &Path, id: &str) -> String {
+    format!("{id} {}", home.display())
 }
 
 /// Programs that build: a process with one of these names is a build at work.
@@ -67,15 +60,18 @@ enum Env {
 /// process that execs another program has a new name, and maybe one that can be read.
 static READ: Mutex<Option<HashMap<(u32, u64, String), Env>>> = Mutex::new(None);
 
-/// Every process this user can see, and what each one's environment says.
+/// Every process this user can see, and what each one's environment says, for the dino whose
+/// folder is `home`: its sessions are those whose tags name it.
 pub(crate) struct Look {
     pub procs: Procs,
+    home: String,
     env: HashMap<u32, Env>,
     sids: HashMap<u32, u32>,
 }
 
-/// Look at every process now. A few milliseconds: only processes not seen before are read.
-pub(crate) fn look() -> Look {
+/// Look at every process now, for the dino whose folder is `home`. A few milliseconds: only
+/// processes not seen before are read.
+pub(crate) fn look(home: &Path) -> Look {
     let procs = procinfo::processes();
     let mut read = READ.lock().unwrap();
     let read = read.get_or_insert_with(HashMap::new);
@@ -86,7 +82,7 @@ pub(crate) fn look() -> Look {
         env.insert(p.pid, e.clone());
     }
     read.retain(|(pid, started, name), _| procs.get(pid).is_some_and(|p| p.started_us == *started && p.name == *name));
-    Look { procs, env, sids: HashMap::new() }
+    Look { procs, home: home.display().to_string(), env, sids: HashMap::new() }
 }
 
 fn env_of(pid: u32) -> Env {
@@ -137,7 +133,7 @@ impl Look {
             if MULTIPLEXERS.contains(&p.name.as_str()) {
                 return true;
             }
-            if procinfo::is_dinod(at, &p.name) && (depth > 0 || dinod_home(at).is_none_or(|h| h == home())) {
+            if procinfo::is_dinod(at, &p.name) && (depth > 0 || dinod_home(at).is_none_or(|h| h == self.home)) {
                 return true;
             }
             if p.parent == 1 && procinfo::exe_of(at).is_some_and(|e| is_app(&e)) {
@@ -154,9 +150,9 @@ impl Look {
     /// Whether `p` may be session `id`'s, as far as its environment says: it carries its tag, or
     /// macOS hides what it carries. One whose environment shows no tag dropped it (`env -u`), to
     /// outlive the session, or never came from it.
-    fn may_be(&self, p: u32, id: &str, mine: &str) -> bool {
+    fn may_be(&self, p: u32, id: &str) -> bool {
         match self.env.get(&p) {
-            Some(Env::Tagged(t)) => t.split_once(' ') == Some((id, mine)),
+            Some(Env::Tagged(t)) => t.split_once(' ') == Some((id, self.home.as_str())),
             Some(Env::Untagged) => false,
             Some(Env::Hidden) | None => true,
         }
@@ -165,11 +161,10 @@ impl Look {
     /// The processes of each of this dino's sessions that carry its tag, with what else is in
     /// their terminal sessions and everything under them, by session id.
     pub(crate) fn sessions(&mut self) -> HashMap<String, Vec<u32>> {
-        let mine = home();
         let mut seeds: HashMap<String, Vec<u32>> = HashMap::new();
         for &pid in self.procs.keys() {
             if let Some((id, dir)) = self.tag_of(pid)
-                && dir == mine
+                && dir == self.home
                 && !self.kept_apart(pid)
             {
                 seeds.entry(id.to_string()).or_default().push(pid);
@@ -185,14 +180,14 @@ impl Look {
         for (id, mut set) in seeds {
             let sids: HashSet<u32> = set.iter().filter_map(|&p| self.sid(p)).filter(|&s| s > 1 && Some(s) != own_sid).collect();
             for &p in &all {
-                if !set.contains(&p) && self.sid(p).is_some_and(|s| sids.contains(&s)) && self.may_be(p, &id, &mine) && !self.kept_apart(p) {
+                if !set.contains(&p) && self.sid(p).is_some_and(|s| sids.contains(&s)) && self.may_be(p, &id) && !self.kept_apart(p) {
                     set.push(p);
                 }
             }
             let mut i = 0;
             while i < set.len() {
                 for &k in kids.get(&set[i]).map(Vec::as_slice).unwrap_or_default() {
-                    if !set.contains(&k) && self.may_be(k, &id, &mine) && !self.kept_apart(k) {
+                    if !set.contains(&k) && self.may_be(k, &id) && !self.kept_apart(k) {
                         set.push(k);
                     }
                 }
@@ -205,9 +200,8 @@ impl Look {
 
     /// What's in terminal sessions `sids` now and may be session `id`'s.
     fn in_sessions(&mut self, sids: &HashSet<u32>, id: &str) -> Vec<u32> {
-        let mine = home();
         let all: Vec<u32> = self.procs.keys().copied().collect();
-        all.into_iter().filter(|&p| self.sid(p).is_some_and(|s| sids.contains(&s)) && self.may_be(p, id, &mine) && !self.kept_apart(p)).collect()
+        all.into_iter().filter(|&p| self.sid(p).is_some_and(|s| sids.contains(&s)) && self.may_be(p, id) && !self.kept_apart(p)).collect()
     }
 
     /// `pids` in groups that run together: by terminal session.
@@ -253,11 +247,12 @@ fn stop(pids: Vec<u32>, look: &Look, more: impl Fn(&mut Look) -> Vec<u32> + Send
         return None;
     }
     let mut known: HashMap<u32, u64> = pids.iter().filter_map(|p| Some((*p, look.procs.get(p)?.started_us))).collect();
+    let home = PathBuf::from(&look.home);
     std::thread::Builder::new()
         .name("procs-stop".into())
         .spawn(move || {
             for (signal, grace) in [(libc::SIGHUP, HANGUP_GRACE), (libc::SIGTERM, TERM_GRACE), (libc::SIGKILL, Duration::from_secs(1))] {
-                let mut now = self::look();
+                let mut now = self::look(&home);
                 for p in more(&mut now) {
                     if let Some(q) = now.procs.get(&p) {
                         known.entry(p).or_insert(q.started_us);
@@ -280,11 +275,12 @@ fn stop(pids: Vec<u32>, look: &Look, more: impl Fn(&mut Look) -> Vec<u32> + Send
         .ok()
 }
 
-/// Stop what session `id` runs apart from its terminal: all of it once the session is gone, or,
-/// `builds_only`, the builds its agent left as its process is replaced. Looked at now, before
-/// anything else starts in it; stopped off the caller's thread (join to wait).
-pub(crate) fn stop_session(id: &str, builds_only: bool) -> Option<std::thread::JoinHandle<()>> {
-    let mut look = look();
+/// Stop what session `id` of the dino whose folder is `home` runs apart from its terminal: all of
+/// it once the session is gone, or, `builds_only`, the builds its agent left as its process is
+/// replaced. Looked at now, before anything else starts in it; stopped off the caller's thread
+/// (join to wait).
+pub(crate) fn stop_session(home: &Path, id: &str, builds_only: bool) -> Option<std::thread::JoinHandle<()>> {
+    let mut look = look(home);
     let pids = look.sessions().remove(id).unwrap_or_default();
     let pids = if builds_only { look.builds(&pids, false) } else { pids };
     if pids.is_empty() {
@@ -301,9 +297,9 @@ pub(crate) fn stop_session(id: &str, builds_only: bool) -> Option<std::thread::J
     }
 }
 
-/// Session `id`'s processes apart from its terminal, now.
-pub(crate) fn of_session(id: &str) -> Vec<u32> {
-    look().sessions().remove(id).unwrap_or_default()
+/// Session `id`'s processes apart from its terminal, now: of the dino whose folder is `home`.
+pub(crate) fn of_session(home: &Path, id: &str) -> Vec<u32> {
+    look(home).sessions().remove(id).unwrap_or_default()
 }
 
 /// "cargo, rustc ×6": what `pids` are, for dinod's log.
@@ -335,8 +331,8 @@ pub(crate) fn label(pid: u32, name: &str) -> String {
 /// the builds its old agent left (see the module's notes) and what's still in its old terminal
 /// (after a crash, an agent that didn't leave on the hangup). Then the builds running for no
 /// session at all.
-pub(crate) fn settle(sessions: &[String], known: &[PathBuf]) -> Vec<(Leftover, u64)> {
-    let mut look = look();
+pub(crate) fn settle(home: &Path, sessions: &[String], known: &[PathBuf]) -> Vec<(Leftover, u64)> {
+    let mut look = look(home);
     for (id, pids) in look.sessions() {
         let back = sessions.contains(&id);
         let pids = if back { look.builds(&pids, true) } else { pids };
@@ -360,7 +356,6 @@ pub(crate) fn settle(sessions: &[String], known: &[PathBuf]) -> Vec<(Leftover, u
 /// dino's sessions use (`known`), left there before dino tagged what sessions run. One for each
 /// tree, with when its top process started.
 fn leftovers(look: &Look, known: &[PathBuf]) -> Vec<(Leftover, u64)> {
-    let mine = home();
     let mut tops: HashMap<u32, u32> = HashMap::new();
     for p in look.procs.values().filter(|p| is_build(&p.name)) {
         // Up to launchd: from a terminal, a dinod or a tmux, it isn't left behind.
@@ -382,7 +377,7 @@ fn leftovers(look: &Look, known: &[PathBuf]) -> Vec<(Leftover, u64)> {
         }
         let ours = match look.tag_of(p.pid) {
             // This dino's: its session's, or stopped as it came back (see `settle`).
-            Some((_, dir)) if dir == mine => false,
+            Some((_, dir)) if dir == look.home => false,
             Some((_, dir)) => std::os::unix::net::UnixStream::connect(Path::new(dir).join(dino_core::ipc::SOCKET_NAME)).is_err(),
             None => procinfo::cwd_of(p.pid).is_some_and(|c| known.iter().any(|k| Path::new(&c).starts_with(k))),
         };
@@ -412,10 +407,10 @@ fn leftovers(look: &Look, known: &[PathBuf]) -> Vec<(Leftover, u64)> {
     out
 }
 
-/// Stop the leftover build under `pid` (see [`settle`]), which started at `started_us`: that
-/// process and everything under it.
-pub(crate) fn stop_leftover(pid: u32, started_us: u64) -> Option<std::thread::JoinHandle<()>> {
-    let look = look();
+/// Stop the leftover build under `pid` (see [`settle`]) that the dino whose folder is `home`
+/// found, which started at `started_us`: that process and everything under it.
+pub(crate) fn stop_leftover(home: &Path, pid: u32, started_us: u64) -> Option<std::thread::JoinHandle<()>> {
+    let look = look(home);
     if !look.procs.get(&pid).is_some_and(|p| p.started_us == started_us) {
         return None;
     }
@@ -435,9 +430,14 @@ pub(crate) fn stop_leftover(pid: u32, started_us: u64) -> Option<std::thread::Jo
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;
+
+    /// The folder of the dino these tests' sessions are of: one of their own, never the user's.
+    fn home() -> PathBuf {
+        std::env::temp_dir().join("dino-procs-test")
+    }
 
     fn wait_for(what: &str, done: impl Fn() -> bool) {
         let since = Instant::now();
@@ -447,9 +447,20 @@ mod tests {
         }
     }
 
-    /// A program whose environment macOS shows (its own `/bin` ones it hides): Python.
-    fn python() -> Option<&'static str> {
-        ["/usr/bin/python3", "/opt/homebrew/bin/python3"].into_iter().find(|p| Path::new(p).exists())
+    /// A program whose environment macOS shows (its own `/bin` ones it hides): Python, the
+    /// interpreter itself. `/usr/bin/python3` only finds it, with `xcrun`, which runs `xcodebuild`
+    /// when it has nothing cached yet (a fresh CI runner): a build, to dinod.
+    pub(crate) fn python() -> Option<&'static str> {
+        static PYTHON: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        PYTHON
+            .get_or_init(|| {
+                ["/usr/bin/python3", "/opt/homebrew/bin/python3"].into_iter().filter(|p| Path::new(p).exists()).find_map(|p| {
+                    let out = std::process::Command::new(p).args(["-c", "import sys; print(sys.executable)"]).env_remove(TAG).output().ok()?;
+                    let exe = String::from_utf8(out.stdout).ok()?.trim().to_string();
+                    (out.status.success() && Path::new(&exe).is_file()).then_some(exe)
+                })
+            })
+            .as_deref()
     }
 
     #[test]
@@ -457,10 +468,11 @@ mod tests {
         let Some(py) = python() else { return };
         let id = format!("t{}", std::process::id());
         // As an agent's background command: a shell in a terminal session of its own (setsid),
-        // macOS hiding its environment, running a program that shows it, and one that doesn't.
-        let script = format!("{py} -c 'import time; time.sleep(60)' & /bin/sleep 60 & wait");
+        // macOS hiding its environment (with SIP on), running a program that shows it, and one
+        // that doesn't.
+        let script = format!("'{py}' -c 'import time; time.sleep(60)' & /bin/sleep 60 & wait");
         let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", &script]).env(TAG, tag(&id));
+        cmd.args(["-c", &script]).env(TAG, tag(&home(), &id));
         // SAFETY: setsid in the child before exec.
         unsafe {
             cmd.pre_exec(|| {
@@ -470,17 +482,22 @@ mod tests {
         }
         let mut sh = cmd.spawn().unwrap();
         let shell = sh.id();
-        wait_for("its three processes", || of_session(&id).len() >= 3);
-        let found = of_session(&id);
+        // Both of its programs started: neither is the shell it forked from any more.
+        let started = |found: &[u32]| {
+            let forked = procinfo::name(shell);
+            found.len() >= 3 && found.iter().all(|&p| p == shell || procinfo::name(p) != forked)
+        };
+        wait_for("its three processes", || started(&of_session(&home(), &id)));
+        let found = of_session(&home(), &id);
         assert!(found.contains(&shell), "the shell, though its environment is hidden: {found:?}");
         assert!(found.iter().any(|&p| procinfo::name(p).as_deref() == Some("sleep")));
         // No build in it: kept as the agent's process is replaced.
-        assert!(stop_session(&id, true).is_none());
-        assert_eq!(of_session(&id).len(), found.len());
-        stop_session(&id, false).unwrap().join().unwrap();
+        assert!(stop_session(&home(), &id, true).is_none());
+        assert_eq!(of_session(&home(), &id).len(), found.len());
+        stop_session(&home(), &id, false).unwrap().join().unwrap();
         let _ = sh.wait();
         assert!(found.iter().all(|&p| procinfo::process(p).is_none() || procinfo::name(p).as_deref() == Some("sh")), "all stopped");
-        assert!(of_session(&id).is_empty());
+        assert!(of_session(&home(), &id).is_empty());
     }
 
     #[test]
@@ -488,12 +505,12 @@ mod tests {
         let Some(py) = python() else { return };
         let me = format!("a{}", std::process::id());
         let other = format!("b{}", std::process::id());
-        let mut a = std::process::Command::new(py).args(["-c", "import time; time.sleep(60)"]).env(TAG, tag(&me)).spawn().unwrap();
-        let mut b = std::process::Command::new(py).args(["-c", "import time; time.sleep(60)"]).env(TAG, tag(&other)).spawn().unwrap();
+        let mut a = std::process::Command::new(py).args(["-c", "import time; time.sleep(60)"]).env(TAG, tag(&home(), &me)).spawn().unwrap();
+        let mut b = std::process::Command::new(py).args(["-c", "import time; time.sleep(60)"]).env(TAG, tag(&home(), &other)).spawn().unwrap();
         // Another dino's (its own folder) and one that only says the session's id.
         let mut c = std::process::Command::new(py).args(["-c", "import time; time.sleep(60)"]).env(TAG, format!("{me} /elsewhere/dino")).spawn().unwrap();
-        wait_for("both", || of_session(&me).contains(&a.id()) && of_session(&other).contains(&b.id()));
-        let mine = of_session(&me);
+        wait_for("both", || of_session(&home(), &me).contains(&a.id()) && of_session(&home(), &other).contains(&b.id()));
+        let mine = of_session(&home(), &me);
         assert!(!mine.contains(&b.id()) && !mine.contains(&c.id()), "{mine:?}");
         for p in [&mut a, &mut b, &mut c] {
             let _ = p.kill();
@@ -506,7 +523,7 @@ mod tests {
         procs.insert(11, p(11, 10, "zsh"));
         procs.insert(12, p(12, 11, "cargo"));
         procs.insert(13, p(13, 1, "cargo"));
-        let look = Look { procs, env: HashMap::new(), sids: HashMap::new() };
+        let look = Look { procs, home: home().display().to_string(), env: HashMap::new(), sids: HashMap::new() };
         assert!(look.kept_apart(12));
         assert!(!look.kept_apart(13));
     }

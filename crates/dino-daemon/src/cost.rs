@@ -3,6 +3,7 @@
 //! open), never in the background: with nothing hovered, this costs nothing.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -50,10 +51,10 @@ struct Proc {
 
 impl Sample {
     /// Session `id`'s processes now: its program `root` and everything under it, and what it
-    /// runs apart from them.
-    fn take(id: &str, root: u32) -> Sample {
+    /// runs apart from them (see `procs`; `home` is its dino's folder).
+    fn take(home: &Path, id: &str, root: u32) -> Sample {
         let mut found: Vec<(u32, u32, bool)> = if root > 0 { procinfo::tree(root).into_iter().map(|(p, parent)| (p, parent, false)).collect() } else { vec![] };
-        for pid in crate::procs::of_session(id) {
+        for pid in crate::procs::of_session(home, id) {
             if !found.iter().any(|f| f.0 == pid) {
                 found.push((pid, procinfo::parent_of(pid).unwrap_or(0), true));
             }
@@ -214,9 +215,9 @@ fn builds(prev: &Sample, now: &Sample) -> Vec<ProcessCost> {
 }
 
 impl Costs {
-    /// What session `id`, whose program is `root` (none once it has ended), costs now; none
-    /// with nothing of it running.
-    pub(crate) fn measure(&self, id: &str, root: Option<u32>) -> Option<SessionCost> {
+    /// What session `id` of the dino whose folder is `home`, whose program is `root` (none once
+    /// it has ended), costs now; none with nothing of it running.
+    pub(crate) fn measure(&self, home: &Path, id: &str, root: Option<u32>) -> Option<SessionCost> {
         let root = root.unwrap_or(0);
         let watch = {
             let mut watched = self.watched.lock().unwrap();
@@ -233,14 +234,14 @@ impl Costs {
         if age.is_none_or(|a| a >= MIN_INTERVAL) {
             if age.is_none_or(|a| a >= FRESH) {
                 // CPU "now" needs two looks close together.
-                w.samples.push(Sample::take(id, root));
+                w.samples.push(Sample::take(home, id, root));
                 if w.samples.last().is_some_and(|s| s.procs.is_empty()) {
                     w.samples.clear();
                     return None;
                 }
                 std::thread::sleep(FIRST_LOOK);
             }
-            w.samples.push(Sample::take(id, root));
+            w.samples.push(Sample::take(home, id, root));
         }
         // Keep what the average needs: the newest, and back to the first older than `AVERAGE`.
         let newest = w.samples.last().map_or(0, |s| s.at_ns);
@@ -362,9 +363,11 @@ mod tests {
         let root = sh.id();
         std::thread::sleep(Duration::from_millis(300));
         let costs = Costs::default();
-        let first = costs.measure("t", Some(root)).unwrap();
+        // A dino of no session: only the tree under `root` is measured.
+        let home = std::env::temp_dir().join("dino-cost-test");
+        let first = costs.measure(&home, "t", Some(root)).unwrap();
         std::thread::sleep(Duration::from_millis(1000));
-        let cost = costs.measure("t", Some(root)).unwrap();
+        let cost = costs.measure(&home, "t", Some(root)).unwrap();
         for (pid, _) in procinfo::tree(root) {
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         }
