@@ -96,6 +96,12 @@ pub fn branch(dir: &Path) -> Option<String> {
     git(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// Where `branch` was last pushed: the commits of its remote branches; none when it never was.
+pub fn pushed(dir: &Path, branch: &str) -> Option<String> {
+    let tips = git(dir, &["for-each-ref", "--format=%(objectname)", &format!("refs/remotes/*/{branch}")]).ok()?;
+    Some(tips.trim().to_string()).filter(|t| !t.is_empty())
+}
+
 /// The branch PRs go into by default: origin's HEAD, else main or master if there is one.
 pub fn default_branch(dir: &Path) -> String {
     if let Ok(r) = git(dir, &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"]) {
@@ -485,6 +491,7 @@ mod tests {
         assert_eq!(default_branch(&repo), "trunk");
 
         git(&repo, &["checkout", "-q", "-b", "dino/claude-ab12"]).unwrap();
+        assert_eq!(pushed(&repo, "dino/claude-ab12"), None, "never pushed: no PR to look for");
         commit("Teach the parser commas");
         std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
         assert_eq!(subjects(&repo, "trunk"), vec!["Teach the parser commas".to_string()]);
@@ -493,6 +500,8 @@ mod tests {
         assert!(!nothing_to_lose(&repo), "a commit that isn't pushed");
         git(&repo, &["push", "-q", "-u", "origin", "HEAD"]).unwrap();
         assert!(nothing_to_lose(&repo));
+        let head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(pushed(&repo, "dino/claude-ab12").as_deref(), Some(head.trim()), "where it was pushed");
         std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
         // The branch notes come before any gh call, so these never reach GitHub.
         git(&repo, &["checkout", "-q", "trunk"]).unwrap();
