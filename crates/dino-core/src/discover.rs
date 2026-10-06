@@ -207,10 +207,6 @@ pub fn version_of(bin: &Path) -> Option<String> {
     None
 }
 
-pub(crate) fn read_json(path: PathBuf) -> Option<serde_json::Value> {
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -411,13 +411,6 @@ pub trait Agent: Sync {
     fn account_vars(&self) -> &'static [&'static str] {
         &[]
     }
-
-    // ---- This Mac ----
-
-    /// How it's signed in: "Claude Max", "ChatGPT login", "signed out".
-    fn login(&self) -> Option<String> {
-        None
-    }
 }
 
 /// What in `env` (a process's `NAME=value` environment, as `procinfo::args_and_env` reads it)

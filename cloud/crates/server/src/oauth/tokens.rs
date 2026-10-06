@@ -2,8 +2,7 @@
 //!
 //! Access tokens are opaque: 256 random bits, looked up by hash on each request. That makes
 //! "sign out everywhere", revoking a device and deleting an account take effect on the next
-//! request, with no signing keys to manage; the one resource server that isn't this one (the
-//! harness) asks `/oauth/introspect`.
+//! request, with no signing keys to manage.
 //!
 //! Refresh tokens rotate on every use (RFC 9700 §4.14.2), one family per device. A token that was
 //! already exchanged is accepted again only within [`GRACE`], and then yields the same replacement
@@ -160,7 +159,7 @@ async fn reuse(_state: &AppState, mut tx: Transaction<'_, Postgres>, device: Uui
     Err(Error::oauth("invalid_grant", "This sign-in was used from somewhere else, so it was signed out. Sign in again."))
 }
 
-/// The account behind a bearer access token, for `/v1` and userinfo.
+/// The account behind a bearer access token, for `/v1`.
 #[derive(Clone, Debug)]
 pub struct Bearer {
     pub account_id: Uuid,

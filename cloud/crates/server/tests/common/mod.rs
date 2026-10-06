@@ -16,7 +16,6 @@ use serde_json::{Value, json};
 use sha2::Digest;
 use sqlx::postgres::PgPoolOptions;
 
-pub const INTROSPECT_SECRET: &str = "introspect-secret-for-tests";
 
 static LOGS: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
 
@@ -122,7 +121,6 @@ pub async fn start_with(platform: Platform) -> Server {
         google: Some(up("g", "/g/authorize", "/g/token", "/g/userinfo", None)),
         mail: MailConfig::File(mail.clone()),
         turnstile: None,
-        introspect_secret: Some(INTROSPECT_SECRET.into()),
         json_logs: true,
         ip_limit: (30, 120),
         account_limit: (20, 60),

@@ -1,24 +1,22 @@
 #!/bin/sh
-# Install a dino command-line product (dino by default) into ~/.local/bin.
+# Install the dino command line into ~/.local/bin, on a Mac.
 #
 #   curl -fsSL https://meetdino.com/install.sh | sh
 #   curl -fsSL https://meetdino.com/install.sh | sh -s -- --version 0.1.0
 #
-# Releases are GitHub release assets in DINO_RELEASES_REPO, tagged v<version> for dino and
-# <product>-v<version> for other products; each has <product>-<version>-<os>-<arch>.tar.gz and
-# SHA256SUMS. The download is checked against SHA256SUMS before anything is installed. No sudo;
-# safe to run again.
+# Releases are GitHub release assets in DINO_RELEASES_REPO, tagged v<version>; each has
+# dino-<version>-darwin-<arch>.tar.gz and SHA256SUMS. The download is checked against SHA256SUMS
+# before anything is installed. No sudo; safe to run again.
 #
-#   DINO_PRODUCT         which product (default: dino)
 #   DINO_RELEASES_REPO   GitHub repository with the releases (default: asdf9384/dino-releases)
-#   DINO_DOWNLOAD_BASE   a plain web server instead, laid out <base>/<product>/latest and
-#                        <base>/<product>/<version>/<files>
+#   DINO_DOWNLOAD_BASE   a plain web server instead, laid out <base>/dino/latest and
+#                        <base>/dino/<version>/<files>
 #   DINO_INSTALL_DIR     where the binary goes (default: ~/.local/bin)
 
 # Everything is in main, called on the last line, so a half-downloaded script does nothing.
 main() {
     set -eu
-    product="${DINO_PRODUCT:-dino}"
+    product=dino
     repo="${DINO_RELEASES_REPO:-asdf9384/dino-releases}"
     base="${DINO_DOWNLOAD_BASE:-}"
     dir="${DINO_INSTALL_DIR:-$HOME/.local/bin}"
@@ -32,23 +30,17 @@ main() {
         esac
     done
 
-    case "$(uname -s)" in
-        Darwin) os=darwin ;;
-        Linux) os=linux ;;
-        *) fail "$product doesn't run on $(uname -s) yet" ;;
-    esac
+    [ "$(uname -s)" = Darwin ] || fail "$product runs on macOS only"
+    os=darwin
     case "$(uname -m)" in
-        arm64|aarch64) arch=arm64 ;;
-        x86_64|amd64) arch=x86_64 ;;
+        arm64) arch=arm64 ;;
+        x86_64) arch=x86_64 ;;
         *) fail "$product doesn't run on $(uname -m) yet" ;;
     esac
     need curl
     need tar
-    if command -v shasum >/dev/null 2>&1; then sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
-    elif command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum "$1" | cut -d' ' -f1; }
-    else fail "needs shasum or sha256sum to check the download"; fi
-
-    if [ "$product" = dino ]; then prefix="v"; else prefix="$product-v"; fi
+    need shasum
+    prefix=v
     if [ -z "$version" ]; then
         if [ -n "$base" ]; then
             version="$(curl -fsSL "$base/$product/latest" | tr -d '[:space:]')" || true
@@ -74,7 +66,7 @@ main() {
     say "Downloading $product $version ($os $arch)"
     curl -fSL --progress-bar "$from/$file" -o "$tmp/$file" || fail "download failed"
     expected="$(grep " $file\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)"
-    actual="$(sha "$tmp/$file")"
+    actual="$(shasum -a 256 "$tmp/$file" | cut -d' ' -f1)"
     [ "$expected" = "$actual" ] || fail "checksum mismatch for $file: expected $expected, got $actual"
 
     mkdir -p "$tmp/x" "$dir"

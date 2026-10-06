@@ -156,7 +156,8 @@ mod tests {
 
     #[test]
     fn reads_an_agents_processes() {
-        let mut shell = std::process::Command::new("/bin/sh").args(["-c", "eval 'sleep 30'; true"]).spawn().unwrap();
+        // A command no other test runs: tests share this process, and its children.
+        let mut shell = std::process::Command::new("/bin/sh").args(["-c", "eval 'sleep 41'; true"]).spawn().unwrap();
         let me = std::process::id();
         let mut tree = processes(me);
         for _ in 0..50 {
@@ -166,7 +167,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
             tree = processes(me);
         }
-        let found = shell_for(&tree, me, "sleep 30");
+        let found = shell_for(&tree, me, "sleep 41");
         let under = subtree(&tree, shell.id());
         let _ = shell.kill();
         let _ = shell.wait();

@@ -535,9 +535,9 @@ static EXE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 static LAUNCHD_LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Started by launchd: what a client that starts dinod gives it, made here. Its output goes to
-/// dinod.log, and `PATH` is the one of whoever asked launchd to start it (the login shell's, from
-/// the app), else the login shell's: launchd's is /usr/bin:/bin:/usr/sbin:/sbin. The label is kept
-/// out of what dinod starts.
+/// dinod.log, and `PATH` is the login shell's, whoever asked launchd to start it (a `dino` run from
+/// a shell with nvm or a venv on, say, would hand that on to every agent): launchd's is
+/// /usr/bin:/bin:/usr/sbin:/sbin. The label is kept out of what dinod starts.
 fn under_launchd() {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -554,9 +554,7 @@ fn under_launchd() {
             libc::dup2(log.as_raw_fd(), 2);
         }
     }
-    let asked = std::fs::read(dino_core::launchd_path_file()).ok().filter(|p| !p.is_empty());
-    let asked = asked.map(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec);
-    if let Some(mut path) = asked.or_else(dino_core::discover::login_path) {
+    if let Some(mut path) = dino_core::discover::login_path() {
         if let Some(own) = std::env::var_os("PATH") {
             path.push(":");
             path.push(own);
