@@ -1985,21 +1985,36 @@ fn keeps_terminal(id: &str) -> bool {
 }
 
 /// Write or remove shell `s`'s agent settings, as the settings and its "Keep as terminal" say. The
-/// hook URL carries the proxy's secret: the file is this user's alone.
+/// hook URL carries the proxy's secret: the file is this user's alone. A Claude typed there reports
+/// its context window too, as one dino starts does: through the user's own statusline, wrapped
+/// (`statusline::shell_wrapper`) for the folder the shell is in; none when they have none there.
 fn sync_shell_agents(d: &Daemon, s: &Session, settings: &Settings) {
     if s.agent_id != "shell" || s.host.is_some() {
         return;
     }
     let path = shell_agent_settings(&s.id);
+    let here = shell_folder(s);
+    SHELL_FOLDERS.lock().unwrap().get_or_insert_default().insert(s.id.clone(), here.clone());
     if !typed::followed(settings, &s.id) {
         let _ = std::fs::remove_file(&path);
         return;
     }
-    let json = dino_core::claude_hook_settings(&d.proxy.base_url(&s.id, "hook"), None);
+    let config = session_claude_config(&repo_env(settings, &here), &s.account);
+    let status_line = std::env::current_exe().ok().and_then(|dino| dino_core::statusline::shell_wrapper(&here, config.as_deref(), &dino, &path));
+    let json = dino_core::claude_hook_settings(&d.proxy.base_url(&s.id, "hook"), status_line);
     if let Err(e) = private_dir(&session_files(&s.id)).and_then(|_| write_private(&path, json.as_bytes())) {
         eprintln!("dinod: shell {}: couldn't write its agent settings ({e})", s.id);
     }
 }
+
+/// The folder shell `s` is in: its prompt's, else the one it started in.
+fn shell_folder(s: &Session) -> PathBuf {
+    s.pane.shared.cwd.lock().unwrap().clone().map(PathBuf::from).unwrap_or_else(|| s.cwd.clone())
+}
+
+/// The folder each shell's agent settings were last written for, by session: a statusline can be a
+/// project's own, so they're written again once the shell is in another (see `watch_shells`).
+static SHELL_FOLDERS: Mutex<Option<HashMap<String, PathBuf>>> = Mutex::new(None);
 
 /// Every shell's agent settings, after the settings changed.
 fn sync_all_shell_agents(d: &Daemon) {
@@ -3656,6 +3671,10 @@ fn watch_shells(d: &Daemon) {
             if follow_tmux(&s, fg) {
                 continue;
             }
+        }
+        // At its prompt in another folder: what an agent typed next gets is that folder's.
+        if fg.is_none() && SHELL_FOLDERS.lock().unwrap().as_ref().and_then(|f| f.get(&s.id)) != Some(&shell_folder(&s)) {
+            sync_shell_agents(d, &s, &settings);
         }
         let (due, gone) = {
             let mut i = s.inside.lock().unwrap();
