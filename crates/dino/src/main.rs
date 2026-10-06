@@ -5,6 +5,7 @@ mod client;
 mod launchd;
 mod mcp;
 mod out;
+mod permissions;
 mod search;
 mod shell;
 mod stats;
@@ -84,6 +85,7 @@ Setup
   dino fallback [<agent> [<provider>:<model>... | off] [--outages] [--new-sessions <agent>[:<model>]]]
                                     choose what an agent switches to when it hits a limit
   dino power [status|setup|remove]  see what keeps your Mac awake; run agents with the lid closed
+  dino permissions [--json]         see what macOS lets programs here do: Screen Recording, …
   dino build-cache [on|off|size <GB>|install]
                                     share one Rust build cache across sessions
   dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]
@@ -128,6 +130,7 @@ fn dino() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("build-cache") => return cmd_build_cache(&cli[1..]),
+        Some("permissions") => return permissions::run(&cli[1..]),
         Some("power") => return cmd_power(cli.get(1).map(String::as_str).unwrap_or("status")),
         Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status"), cli.get(2).map(String::as_str)),
         Some("fallback") => return cmd_fallback(&cli[1..]),

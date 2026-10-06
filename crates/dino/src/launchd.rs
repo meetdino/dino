@@ -154,8 +154,9 @@ fn xml(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// As scripts/release.sh writes the app's, but with an absolute `Program` (`BundleProgram` is
-/// SMAppService's alone).
+/// As scripts/bundle.sh writes the app's, but with an absolute `Program` (`BundleProgram` is
+/// SMAppService's alone), and dinod itself rather than the app's executable keeping it (the app's
+/// `DinodHost`): the app found here may be one from before that.
 fn legacy_plist(label: &str, program: &Path, bundle: &str) -> String {
     let home = match std::env::var_os("DINO_HOME") {
         Some(_) => format!("\n        <key>DINO_HOME</key><string>{}</string>", xml(&dino_core::config_dir().to_string_lossy())),
