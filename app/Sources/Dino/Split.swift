@@ -7,8 +7,13 @@ import SwiftUI
 final class SplitChrome: ObservableObject {
     static let shared = SplitChrome()
 
+    /// `unfocused-split-opacity` when the config doesn't set it: much lighter than Ghostty's 0.7,
+    /// which is all that marks the focused split in Ghostty. Here its header is marked in green, so
+    /// the rest only sits back a little and stays easy to read.
+    static let unfocusedOpacity = 0.9
+
     /// How far an unfocused pane sits back: 1 − `unfocused-split-opacity` (0.15…1).
-    @Published private(set) var dim = 0.3
+    @Published private(set) var dim = 1 - unfocusedOpacity
     /// What it sits back under: `unfocused-split-fill`, else the pane's background.
     @Published private(set) var fill = NSColor.black
     /// `split-divider-color`, else a shade of the background, as Ghostty picks it.
@@ -21,7 +26,8 @@ final class SplitChrome: ObservableObject {
     private(set) var inheritDirectory = true
 
     func read(_ c: TerminalController, background: NSColor) {
-        let opacity = min(max(c.configNumber("unfocused-split-opacity") ?? 0.7, 0.15), 1)
+        let opacity = GhosttyConfig.sets("unfocused-split-opacity")
+            ? min(max(c.configNumber("unfocused-split-opacity") ?? 0.7, 0.15), 1) : Self.unfocusedOpacity
         let fill = c.configColor("unfocused-split-fill").map(NSColor.init(ghostty:)) ?? background
         let divider = c.configColor("split-divider-color").map(NSColor.init(ghostty:)) ?? NSColor(name: nil) { look in
             // Ghostty's: a little darker on a light background, much darker on a dark one.

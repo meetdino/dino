@@ -575,8 +575,8 @@ struct Terminals: View {
                             // A new state (after reconnecting) must mean a new surface.
                             .id(ObjectIdentifier(state))
                             .overlay {
-                                // The rest of a split sits back, as Ghostty's `unfocused-split-opacity`
-                                // and `unfocused-split-fill` say.
+                                // The rest of a split sits back a little, or as Ghostty's
+                                // `unfocused-split-opacity` and `unfocused-split-fill` say (SplitChrome).
                                 if split != nil, s.id != model.selected, chrome.dim > 0 {
                                     Color(nsColor: chrome.fill).opacity(chrome.dim).allowsHitTesting(false)
                                 }
