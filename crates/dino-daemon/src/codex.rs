@@ -45,6 +45,9 @@ pub(crate) struct Rollout {
     calls: Vec<(String, String)>,
     /// The file's modification time when its context was last read, and what it said.
     read: Option<(SystemTime, Option<(u64, u64)>)>,
+    /// What its conversation is called, as Codex's records say: the name Codex gave it, else its
+    /// first prompt. Its terminal's title is only its folder.
+    pub(crate) title: Option<String>,
 }
 
 /// Look at every Codex session on this Mac: which conversation it's on, and where its turn is.
@@ -67,7 +70,8 @@ fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
     let mut model = None;
     let mut r = s.rollout.lock().unwrap();
     // Until its first prompt makes one, look every poll: a short first turn is over in seconds.
-    if r.path.is_none() || r.looked.is_none_or(|t| t.elapsed() >= RELOOK) {
+    let relook = r.path.is_none() || r.looked.is_none_or(|t| t.elapsed() >= RELOOK);
+    if relook {
         r.looked = Some(Instant::now());
         if let Some(path) = s.pane.pid().and_then(open_rollout).filter(|p| r.path.as_ref() != Some(p)) {
             // Its first prompt, or another conversation: pick up where that one is.
@@ -90,6 +94,9 @@ fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
         }
     }
     let Some(path) = r.path.clone() else { return moved };
+    if relook {
+        r.title = history::codex_thread_name(&path).or_else(|| history::codex_meta(&path).title);
+    }
     for v in new_events(&path, &mut r.offset) {
         model = a.log_model(&v).or(model);
         if let Some(call) = tool_call(&v) {

@@ -342,6 +342,14 @@ pub fn codex_titles() -> HashMap<String, String> {
     codex_titles_in(&text)
 }
 
+/// The name Codex gave the conversation in rollout `p`, from the `session_index.jsonl` of the
+/// Codex home it's in (beside its `sessions`, whichever `CODEX_HOME` that Codex ran with).
+pub fn codex_thread_name(p: &Path) -> Option<String> {
+    let home = p.ancestors().find(|a| a.file_name().is_some_and(|n| n == "sessions"))?.parent()?;
+    let text = std::fs::read_to_string(home.join("session_index.jsonl")).ok()?;
+    codex_titles_in(&text).remove(&rollout_id(p)?)
+}
+
 fn codex_titles_in(text: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {

@@ -239,9 +239,14 @@ impl Agent for Claude {
     }
 
     fn catalog(&self, program: &str) -> Option<Catalog> {
-        let out = std::process::Command::new(program).arg("--version").stdin(std::process::Stdio::null()).output().ok();
-        let version = out.and_then(|o| models::version_of(&String::from_utf8_lossy(&o.stdout)));
-        models::claude_from_files(version.as_deref())
+        let ask = |arg: &str| std::process::Command::new(program).arg(arg).stdin(std::process::Stdio::null()).output().ok();
+        let version = ask("--version").and_then(|o| models::version_of(&String::from_utf8_lossy(&o.stdout)));
+        // No catalog here (Claude keeps one only once it has fetched it; a new config folder has
+        // none): the effort levels its help says `--effort` takes, for whichever model it's on.
+        models::claude_from_files(version.as_deref()).or_else(|| {
+            let efforts = models::claude_help_efforts(&String::from_utf8_lossy(&ask("--help")?.stdout));
+            (!efforts.is_empty()).then(|| Catalog { efforts, ..Catalog::default() })
+        })
     }
 
     fn wiring(&self, route: bool, base: &dyn Fn(&str) -> String, status_line: Option<String>) -> Wiring {

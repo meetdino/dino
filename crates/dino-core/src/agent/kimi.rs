@@ -152,7 +152,7 @@ fn catalog_in(config: &str) -> Option<Catalog> {
             aliases: vec![],
         })
         .collect();
-    (!models.is_empty()).then(|| Catalog { models, default_model: v.get("default_model").and_then(|d| d.as_str()).map(String::from) })
+    (!models.is_empty()).then(|| Catalog { models, default_model: v.get("default_model").and_then(|d| d.as_str()).map(String::from), ..Catalog::default() })
 }
 
 /// The conversation a live process is on: the one it began (created in its folder since it

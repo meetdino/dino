@@ -313,7 +313,7 @@ fn catalog_in(list: &str) -> Option<Catalog> {
         }
         models.push(ModelInfo { id: id.into(), label: id.into(), efforts: vec![], default_effort: None, group: None, aliases: vec![] });
     }
-    (!models.is_empty()).then_some(Catalog { models, default_model })
+    (!models.is_empty()).then_some(Catalog { models, default_model, ..Catalog::default() })
 }
 
 impl CodeWhale {

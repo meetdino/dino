@@ -270,7 +270,7 @@ fn catalog_in(listing: &str, config: Option<String>, recent: &[String]) -> Optio
     flush(id, &json);
     // As it picks: its config's, else the latest one used that it can still use.
     let default_model = config.or_else(|| recent.iter().find(|r| models.iter().any(|m| &m.id == *r)).cloned());
-    (!models.is_empty()).then(|| Catalog { models, default_model })
+    (!models.is_empty()).then(|| Catalog { models, default_model, ..Catalog::default() })
 }
 
 /// The model its config starts it on.
