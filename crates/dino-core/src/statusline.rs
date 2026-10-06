@@ -1,7 +1,9 @@
 //! Claude Code's statusline, which is where it reports the context window (size and use). dino
 //! wraps a statusline the user already has with `dino statusline`: it passes the report on to dino,
 //! then runs their command and prints its output unchanged. Without one, nothing is wrapped: any
-//! statusline, even an empty one, takes the place of Claude Code's "? for shortcuts" hint.
+//! statusline, even an empty one, takes the place of Claude Code's "? for shortcuts" hint. A
+//! Claude dino starts says where to report in its environment; one typed into a dino shell, in the
+//! settings its shell gives it (`--settings`), whose hooks report there already.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -80,24 +82,49 @@ pub const HOOK_ENV: &str = "DINO_HOOK_URL";
 /// they have none, or when it is managed (a managed setting can't be overridden anyway).
 pub fn wrapper(project: &Path, config: Option<&Path>, dino: &Path) -> Option<String> {
     let config = config.map_or_else(crate::claude_config::home, Path::to_path_buf);
-    wrap(Layers::for_project(project, &config).effective(), dino)
+    wrap(Layers::for_project(project, &config).effective(), dino, None)
 }
 
-fn wrap(effective: Option<(Value, bool)>, dino: &Path) -> Option<String> {
+/// `wrapper`, for a Claude typed into a dino shell, given `settings` (the file its shell gives it
+/// with `--settings`): `dino statusline` reports where that file's hooks do. Its path is on the
+/// statusline's command line; the URL, and the proxy's secret, stay in the file, which is the
+/// user's alone.
+pub fn shell_wrapper(project: &Path, config: Option<&Path>, dino: &Path, settings: &Path) -> Option<String> {
+    let config = config.map_or_else(crate::claude_config::home, Path::to_path_buf);
+    wrap(Layers::for_project(project, &config).effective(), dino, Some(settings))
+}
+
+fn wrap(effective: Option<(Value, bool)>, dino: &Path, settings: Option<&Path>) -> Option<String> {
     let (mut setting, managed) = effective?;
     if managed {
         return None;
     }
-    setting["command"] = format!("{} statusline", shell_quote(&dino.display().to_string())).into();
+    let from = settings.map(|f| format!(" {HOOKS_FLAG} {}", shell_quote(&f.display().to_string()))).unwrap_or_default();
+    setting["command"] = format!("{} statusline{from}", shell_quote(&dino.display().to_string())).into();
     Some(setting.to_string())
 }
 
-/// `dino statusline [<hook_url>]`: pass what Claude Code gives the statusline on to dino (at
-/// `hook_url`, else `HOOK_ENV`), then run the user's own statusline with the same input; what it
-/// prints and its exit status are the statusline's. Failing to reach dino changes nothing the user sees.
-pub fn run(hook_url: Option<&str>) -> i32 {
+/// `dino statusline --hooks <file>`: report where the hooks in Claude settings file `file` do.
+pub const HOOKS_FLAG: &str = "--hooks";
+
+/// Where the HTTP hooks in Claude settings `json` report (all to one place, see `hook_settings`).
+fn hooks_url(json: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    v["hooks"].as_object()?.values().flat_map(|e| e.as_array().into_iter().flatten()).flat_map(|m| m["hooks"].as_array().into_iter().flatten()).find(|h| h["type"] == "http").and_then(|h| h["url"].as_str()).map(String::from)
+}
+
+/// `dino statusline [<hook_url> | --hooks <settings file>]`: pass what Claude Code gives the
+/// statusline on to dino (at `hook_url`, where the file's hooks report, else `HOOK_ENV`), then run
+/// the user's own statusline with the same input; what it prints and its exit status are the
+/// statusline's. Failing to reach dino changes nothing the user sees.
+pub fn run(args: &[String]) -> i32 {
+    let given = match args {
+        [flag, file, ..] if flag == HOOKS_FLAG => std::fs::read_to_string(file).ok().and_then(|j| hooks_url(&j)),
+        [url, ..] => Some(url.clone()),
+        [] => None,
+    };
     let from_env = std::env::var(HOOK_ENV).ok().filter(|u| !u.is_empty());
-    let hook_url = hook_url.or(from_env.as_deref());
+    let hook_url = given.as_deref().or(from_env.as_deref());
     let mut input = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut input);
     let report = hook_url.map(|url| {
@@ -230,15 +257,29 @@ mod tests {
     fn wraps_the_users_own_keeping_its_options() {
         let d = dir("wrap");
         let dino = Path::new("/Applications/Dino app/dino");
-        assert_eq!(wrap(effective(&d), dino), None, "nothing to wrap");
+        assert_eq!(wrap(effective(&d), dino, None), None, "nothing to wrap");
         write(&d, "home/.claude/settings.json", r#"{"statusLine":{"type":"command","command":"~/bin/sl.sh","padding":0,"refreshInterval":10}}"#);
-        let wrapped: Value = serde_json::from_str(&wrap(effective(&d), dino).unwrap()).unwrap();
+        let wrapped: Value = serde_json::from_str(&wrap(effective(&d), dino, None).unwrap()).unwrap();
         // No URL: the one it reports to holds the proxy's secret, and comes from its environment.
         assert_eq!(wrapped["command"], r#"'/Applications/Dino app/dino' statusline"#);
         assert_eq!((wrapped["padding"].as_u64(), wrapped["refreshInterval"].as_u64(), wrapped["type"].as_str()), (Some(0), Some(10), Some("command")));
+        // Typed into a dino shell: where to report is in the settings file its shell gives it.
+        let typed: Value = serde_json::from_str(&wrap(effective(&d), dino, Some(Path::new("/x/run/7/claude-hooks.json"))).unwrap()).unwrap();
+        assert_eq!(typed["command"], r#"'/Applications/Dino app/dino' statusline --hooks '/x/run/7/claude-hooks.json'"#);
+        assert_eq!(typed["refreshInterval"].as_u64(), Some(10));
         write(&d, "managed/managed-settings.json", r#"{"statusLine":{"type":"command","command":"org.sh"}}"#);
-        assert_eq!(wrap(effective(&d), dino), None, "a managed statusline can't be replaced");
+        assert_eq!(wrap(effective(&d), dino, None), None, "a managed statusline can't be replaced");
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The hooks a shell gives a Claude typed there say where its statusline reports.
+    #[test]
+    fn reports_where_the_shells_hooks_do() {
+        let url = "http://127.0.0.1:4100/k/secret/s/7/hook";
+        let settings = crate::claude_hook_settings(url, Some(r#"{"type":"command","command":"x"}"#.into()));
+        assert_eq!(hooks_url(&settings).as_deref(), Some(url));
+        assert_eq!(hooks_url(r#"{"hooks":{}}"#), None);
+        assert_eq!(hooks_url("not json"), None);
     }
 
     /// A session with a config folder of its own (`CLAUDE_CONFIG_DIR`) has its user settings there.
