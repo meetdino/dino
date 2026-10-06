@@ -5187,6 +5187,10 @@ while (sysread(STDIN, my $c, 1)) {
         let opus = Controls { model: Some("opus".into()), ..Controls::default() };
         let id = spawn(&d, Launch { controls: opus, ..Launch::new("claude", vec![], Some(dir.display().to_string())) }).unwrap();
         let s = session(&d, &id);
+        // Up, its footer drawn, as Claude is by the time it's told `/model`. The mode it runs with
+        // is read off its screen: drawn between the choice made below and set_controls' own read,
+        // the footer made choosing the model it's on a change (of mode), left pending.
+        wait_for("its footer", || mode::now(&s, None).is_some());
         let shown = |d: &Daemon| match state(d) {
             Response::State { sessions, .. } => sessions.into_iter().find(|x| x.id == id).unwrap(),
             _ => unreachable!(),
