@@ -440,12 +440,14 @@ pub(crate) fn recent(agent: &str, session_id: String, title: String, cwd: Option
         args: vec![],
         url: None,
         tmux: None,
+        unsure: None,
     }
 }
 
 /// Every conversation on disk that isn't running (those are in `running`), newest first.
 pub fn finished(running: &[FoundSession]) -> Vec<FoundSession> {
-    let is_running = |id: &str| running.iter().any(|r| r.session_id == id);
+    // One a running agent may be on, though dino can't tell which, isn't finished either.
+    let is_running = |id: &str| running.iter().any(|r| r.session_id == id || r.unsure.as_ref().is_some_and(|u| u.maybe.iter().any(|m| m == id)));
     let mut out: Vec<FoundSession> = crate::agent::all().into_iter().flat_map(|a| a.recent(&is_running)).collect();
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     out

@@ -544,6 +544,15 @@ struct ContentView: View {
                 ? "It's working right now. When its current turn ends, dino closes it in \(f.terminal ?? "the other terminal") and continues the conversation here."
                 : "dino closes it in \(f.terminal ?? "the other terminal") and continues the conversation here, with its full history.")
         }
+        .alert(
+            "dino can't tell which conversation this \(model.unsureMove?.agentName ?? "agent") is on",
+            isPresented: Binding(get: { model.unsureMove != nil }, set: { if !$0 { model.unsureMove = nil } }),
+            presenting: model.unsureMove
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { f in
+            Text("\(f.unsure?.why ?? "") So it can't continue it here. It keeps running in \(f.terminal ?? "the other terminal").")
+        }
         .background(WelcomeCard())
     }
 }
@@ -1026,7 +1035,7 @@ struct Sidebar: View {
         if tag.hasPrefix("tmux:") {
             if let f = model.elsewhere.first(where: { "tmux:\($0.id)" == tag }) { model.showInTmux(f) }
         } else {
-            model.confirmMove = model.elsewhere.first { "move:\($0.id)" == tag }
+            if let f = model.elsewhere.first(where: { "move:\($0.id)" == tag }) { model.askToMove(f) }
         }
     }
 
@@ -1779,6 +1788,10 @@ struct ElsewhereRow: View {
             } else if session.tmux != nil {
                 Image(systemName: "rectangle.split.2x1").foregroundStyle(.secondary)
                     .help("Running in tmux. Click to show it there.")
+            } else if let unsure = session.unsure {
+                Image(systemName: "questionmark.circle").foregroundStyle(.secondary)
+                    .help(unsure.why)
+                    .accessibilityLabel("dino can't tell which conversation it's on")
             } else {
                 Image(systemName: "arrow.right.circle").foregroundStyle(Brand.green)
                     .help("Click to continue this session in dino")
@@ -1790,7 +1803,7 @@ struct ElsewhereRow: View {
             if session.tmux != nil {
                 Button("Show in tmux") { model.showInTmux(session) }
             }
-            Button("Continue in dino…") { model.confirmMove = session }
+            Button(session.unsure == nil ? "Continue in dino…" : "Why dino Can't Continue It…") { model.askToMove(session) }
         }
     }
 }
@@ -1799,6 +1812,7 @@ func whereText(_ f: FoundSession) -> String {
     var parts: [String] = []
     if let t = f.terminal { parts.append("in \(t)") }
     if let s = f.status { parts.append(s == "needs" ? "needs you" : s) }
+    if f.unsure != nil { parts.append("can't tell which conversation") }
     if let cwd = f.cwd { parts.append(shortPath(cwd)) }
     return parts.joined(separator: " · ")
 }

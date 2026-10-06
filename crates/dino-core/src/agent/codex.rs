@@ -1,5 +1,8 @@
 //! Codex CLI. It names its conversation only once it writes one: by the rollout file its process
-//! has open (`~/.codex/sessions/…/rollout-<time>-<id>.jsonl`).
+//! has open (`~/.codex/sessions/…/rollout-<time>-<id>.jsonl`); one its shared background server
+//! runs (Codex 0.160.1) has none open, and is told by what that server has loaded (see `attached`).
+
+pub mod attached;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -8,6 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::{Agent, ControlKind, StatusSource, Wiring, strings};
+use attached::Attached;
 use crate::found::{self, FoundSession, Source};
 use crate::history::{self, Turn};
 use crate::models::{self, Catalog};
@@ -15,6 +19,29 @@ use crate::providers::Format;
 use crate::procinfo;
 
 pub(crate) struct Codex;
+
+impl Codex {
+    /// Codex `pid`, on the conversation `rollout` is of, as found running.
+    fn on(&self, pid: u32, rollout: &Path, titles: &std::collections::HashMap<String, String>) -> Option<FoundSession> {
+        let sid = history::rollout_id(rollout)?;
+        let (terminal, args) = found::terminal_and_flags(self, pid);
+        Some(FoundSession {
+            source: Source::Running,
+            agent: "codex".into(),
+            title: titles.get(&sid).cloned().or_else(|| history::codex_meta(rollout).title).unwrap_or_else(|| "Codex session".into()),
+            session_id: sid,
+            cwd: procinfo::cwd_of(pid),
+            updated_at: history::modified(rollout),
+            pid: Some(pid),
+            status: history::codex_status(rollout),
+            terminal,
+            args,
+            url: None,
+            tmux: None,
+            unsure: None,
+        })
+    }
+}
 
 /// Flags that make Codex say on its terminal when it waits on the user (an approval, a
 /// question), focused or not. It notices a finished turn too, which its rollout says anyway.
@@ -34,45 +61,11 @@ pub fn open_rollout(pid: u32) -> Option<PathBuf> {
         .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())
 }
 
-/// How long after a Codex starts its server has begun its conversation, at most (seconds): it
-/// begins it as the terminal's Codex connects, in a second or two. Short, so one started a moment
-/// later in the same folder, whose first prompt comes first, isn't taken for it.
-const BEGUN_WITHIN: u64 = 5;
-
-/// The conversation begun in `cwd` as a Codex started there at `since` (seconds since the epoch):
-/// the earliest begun from a second before then to `BEGUN_WITHIN` after, but `claimed`. Its rollout
-/// is written once it has a first prompt: until then, none.
-pub fn begun_at(cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
-    begun_in(&Path::new(&std::env::var_os("HOME")?).join(".codex/sessions"), cwd, since, claimed)
-}
-
-/// `begun_at`, with Codex's rollouts kept in `root` (`~/.codex/sessions`).
-fn begun_in(root: &Path, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
-    let want = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let mut days: Vec<PathBuf> = [since.saturating_sub(1), since + BEGUN_WITHIN].into_iter().filter_map(|t| day_dir(root, t)).collect();
-    days.dedup();
-    days.iter()
-        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
-        .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")))
-        .filter_map(|p| {
-            let id = history::rollout_id(&p)?;
-            let at = begun(&id).filter(|at| at + 1 >= since && *at <= since + BEGUN_WITHIN)?;
-            Some((at, id, p))
-        })
-        .filter(|(_, id, p)| {
-            let meta = history::codex_meta(p);
-            !claimed.contains(id) && !meta.hidden && meta.cwd.is_some_and(|c| std::fs::canonicalize(&c).unwrap_or_else(|_| PathBuf::from(&c)) == want)
-        })
-        .min_by_key(|(at, _, _)| *at)
-        .map(|(_, id, _)| id)
-}
-
 /// Conversation `id`'s rollout, once it's written: looked for in the day's folder its id says it
 /// began on (Codex's ids are UUIDv7s), else everywhere.
 pub fn rollout_path(id: &str) -> Option<PathBuf> {
-    match begun(id) {
-        Some(at) => rollout_in(&Path::new(&std::env::var_os("HOME")?).join(".codex/sessions"), id, at),
+    match attached::begun_ms(id) {
+        Some(at) => rollout_in(&Path::new(&std::env::var_os("HOME")?).join(".codex/sessions"), id, at / 1000),
         None => crate::transcript::codex_path(id),
     }
 }
@@ -89,17 +82,10 @@ fn rollout_in(root: &Path, id: &str, at: u64) -> Option<PathBuf> {
         .find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix)))
 }
 
-/// When conversation `id` began, in seconds since the epoch: Codex's ids are UUIDv7s, which begin
-/// with that time in milliseconds. `None` for an id of another kind.
-fn begun(id: &str) -> Option<u64> {
-    let hex: String = id.split('-').take(2).collect();
-    (hex.len() == 12 && id.as_bytes().get(14) == Some(&b'7')).then(|| u64::from_str_radix(&hex, 16).ok()).flatten().map(|ms| ms / 1000)
-}
-
 /// The conversation `codex resume <id>` names among `args` (after the program), options before it.
 fn resumed_in(args: &[String]) -> Option<String> {
     let at = args.iter().position(|a| a == "resume")?;
-    args[at + 1..].iter().find(|a| a.len() == 36 && a.chars().filter(|&c| c == '-').count() == 4 && a.chars().all(|c| c == '-' || c.is_ascii_hexdigit())).cloned()
+    args[at + 1..].iter().find(|a| is_id(a)).cloned()
 }
 
 /// Where Codex keeps the rollouts it began on the day (this Mac's) of `t`, under `root`: `YYYY/MM/DD`.
@@ -110,6 +96,100 @@ fn day_dir(root: &Path, t: u64) -> Option<PathBuf> {
         return None;
     }
     Some(root.join(format!("{:04}/{:02}/{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)))
+}
+
+/// What the Codex processes `pids` among `procs` have of their own: the ones in a terminal (not
+/// its server, a headless run…) as `attached` sees them, and the rollout each that has one open
+/// has (any of `pids`: a headless one's too).
+fn in_terminals(procs: &procinfo::Procs, pids: &[u32]) -> (Vec<attached::Tui>, Vec<(u32, PathBuf)>) {
+    let mut tuis = vec![];
+    let mut open = vec![];
+    let mut held = HELD.lock().unwrap();
+    let held = held.get_or_insert_default();
+    held.retain(|pid, _| pids.contains(pid));
+    for &pid in pids {
+        let Some(p) = procs.get(&pid) else { continue };
+        // The descriptor it had its conversation open as last time, if it still does: one look
+        // instead of one per file it has open.
+        let known = held.get(&pid).filter(|(at, fd, path)| *at == p.started_us && procinfo::open_file(pid, *fd).as_deref() == Some(path.as_str())).map(|(_, _, path)| path.clone());
+        let (rollout, lock) = match known {
+            Some(path) => (Some(path), None),
+            None => {
+                held.remove(&pid);
+                let fds = procinfo::open_fds(pid);
+                let rollout = fds.iter().find(|(_, f)| f.contains("/.codex/sessions/") && f.ends_with(".jsonl"));
+                if let Some((fd, path)) = rollout {
+                    held.insert(pid, (p.started_us, *fd, path.clone()));
+                }
+                // Run on its own (`--no-daemon`), it holds its conversation's lock from the start.
+                let lock = fds.iter().find_map(|(_, f)| f.split_once("/thread-writer-locks/")?.1.strip_suffix(".lock").map(String::from));
+                (rollout.map(|(_, path)| path.clone()), lock)
+            }
+        };
+        let rollout = rollout.map(PathBuf::from);
+        if let Some(r) = &rollout {
+            open.push((pid, r.clone()));
+        }
+        let args = found::args_of(pid);
+        if !p.tty || Codex.headless(&args) {
+            continue;
+        }
+        let (told, picks, dir) = how_started(&args);
+        let here = procinfo::cwd_of(pid).map(PathBuf::from);
+        let cwd = match (dir, &here) {
+            (Some(d), Some(h)) => Some(h.join(d)),
+            (Some(d), None) => Some(PathBuf::from(d)),
+            (None, h) => h.clone(),
+        };
+        tuis.push(attached::Tui {
+            pid,
+            started_ms: p.started_us / 1000,
+            cwd: cwd.map(|c| attached::resolved(&c)),
+            open: rollout.as_deref().and_then(history::rollout_id).or(lock),
+            told,
+            picks,
+        });
+    }
+    (tuis, open)
+}
+
+/// The conversations Codex's shared server has loaded, when some of `tuis` has none of its own.
+fn loaded(tuis: &[attached::Tui]) -> Vec<attached::Loaded> {
+    if tuis.iter().all(|t| t.open.is_some() || t.told.is_some()) {
+        return vec![];
+    }
+    std::env::var_os("HOME").map(|h| attached::loaded_in(Path::new(&h))).unwrap_or_default()
+}
+
+/// The conversation Codex process `pid`, in a terminal, is on, as sure as dino can be, when it has
+/// none open of its own (Codex 0.160.1's shared server runs it): the one only it could have begun,
+/// `claimed` being dino's own sessions' (see `attached`). `None` while it has begun none dino can
+/// see, or dino can't tell.
+pub fn attached_to(pid: u32, claimed: &[String]) -> Option<String> {
+    let procs = procinfo::processes();
+    let pids = procinfo::named_in(&procs, "codex");
+    let (tuis, _) = in_terminals(&procs, &pids);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    match attached::attach(&tuis, &loaded(&tuis), claimed, now).remove(&pid) {
+        Some(Attached::On(id)) => Some(id),
+        _ => None,
+    }
+}
+
+/// What Codex's command line (`args`, after the program) says of the conversation it started on:
+/// the one `codex resume <id>` names; whether it began none as it started (started to pick one,
+/// `codex resume`, or to work with another server, `--remote`); the folder `-C` points it to.
+fn how_started(args: &[String]) -> (Option<String>, bool, Option<String>) {
+    let told = resumed_in(args);
+    let forked = args.iter().position(|a| a == "fork").is_some_and(|at| args[at + 1..].iter().any(|a| attached::begun_ms(a).is_some() || is_id(a)));
+    let picks = told.is_none() && !forked && super::runs_with(args, &["--remote"], &["resume", "fork"]);
+    let dir = args.iter().position(|a| a == "-C" || a == "--cd").and_then(|i| args.get(i + 1).cloned()).or_else(|| args.iter().find_map(|a| a.strip_prefix("--cd=").map(String::from)));
+    (told, picks, dir)
+}
+
+/// `a` looks like a conversation's id (a UUID).
+fn is_id(a: &str) -> bool {
+    a.len() == 36 && a.chars().filter(|&c| c == '-').count() == 4 && a.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
 
 /// Each Codex process's open conversation: when it started, the descriptor, the file.
@@ -343,9 +423,20 @@ impl Agent for Codex {
             Some(id) => (vec!["resume".to_string()], vec![id.clone()]),
             None => (vec![], vec![]),
         };
-        // So it says when it waits on the user (see dinod's `codex`).
-        after.extend(NOTICE_ARGS.map(String::from));
+        // So it says when it waits on the user (see dinod's `codex`); not to one its shared
+        // server has open, which it takes over there only without them.
+        if !session.as_deref().is_some_and(|id| self.in_shared_server(id)) {
+            after.extend(NOTICE_ARGS.map(String::from));
+        }
         (before, after)
+    }
+
+    // Any `-c` makes Codex 0.160.1 run on its own, not on its shared server (`codex app-server
+    // --managed-daemon`); on its own it can't take a conversation that server has open: "This
+    // conversation is open in another app", until the server lets it go, a minute after the last
+    // Codex on it has gone (60 s by default).
+    fn in_shared_server(&self, session: &str) -> bool {
+        std::env::var_os("HOME").is_some_and(|h| attached::in_server(Path::new(&h), session))
     }
 
     // Without the notices dino asks of the sessions it starts: what a person types.
@@ -357,13 +448,6 @@ impl Agent for Codex {
     // back. A signal leaves its screen behind (Codex 0.160.1 draws in the terminal's own screen).
     fn quit_keys(&self) -> &'static [u8] {
         b"\x03\x03"
-    }
-
-    // Codex 0.160.1 runs its conversations in a background server its terminals share (`codex
-    // app-server --managed-daemon`): the process in the terminal has no file of its own open, and
-    // its conversation is the one that server began for it as it started, in its folder.
-    fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
-        begun_at(cwd, since, claimed)
     }
 
     // `codex fork <id> [prompt]` (Codex 0.160): a new conversation, its rollout naming the original
@@ -409,7 +493,10 @@ impl Agent for Codex {
         found::drop_flags(args, &["-c", "--config"], &["resume", "--last"])
     }
 
-    /// Codex keeps its rollout file open; that names the session, the process's cwd the folder.
+    /// Codex before its shared server (and one run with `--no-daemon`) keeps its rollout open: that
+    /// names its conversation, the process's cwd the folder. One its shared server runs (Codex
+    /// 0.160.1) has none open: it's on the one only it could have begun, among those its server has
+    /// loaded (see `attached`). One dino can't tell is listed as such, with nothing to continue.
     fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         let pids = procinfo::named_in(procs, "codex");
         if pids.is_empty() {
@@ -417,40 +504,34 @@ impl Agent for Codex {
         }
         let titles = history::codex_titles();
         let mut out = vec![];
-        let mut held = HELD.lock().unwrap();
-        let held = held.get_or_insert_default();
-        held.retain(|pid, _| pids.contains(pid));
-        for pid in pids {
-            // The descriptor it had its conversation open as last time, if it still does: one
-            // look instead of one per file it has open.
-            let started = procs.get(&pid).map_or(0, |p| p.started_us);
-            let known = held.get(&pid).filter(|(at, fd, path)| *at == started && procinfo::open_file(pid, *fd).as_deref() == Some(path.as_str()));
-            let rollout = match known {
-                Some((_, _, path)) => path.clone(),
-                None => {
-                    held.remove(&pid);
-                    let Some((fd, path)) = procinfo::open_fds(pid).into_iter().find(|(_, f)| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) else { continue };
-                    held.insert(pid, (started, fd, path.clone()));
-                    path
+        let (tuis, open) = in_terminals(procs, &pids);
+        for (pid, rollout) in &open {
+            out.extend(self.on(*pid, rollout, &titles));
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        for (pid, a) in attached::attach(&tuis, &loaded(&tuis), &[], now) {
+            match a {
+                Attached::On(id) => {
+                    // Its rollout is written with its first prompt: nothing to continue until then.
+                    if let Some(rollout) = attached::rollout(&id).or_else(|| rollout_path(&id)) {
+                        out.extend(self.on(pid, &rollout, &titles));
+                    }
                 }
-            };
-            let rollout = Path::new(&rollout);
-            let Some(sid) = history::rollout_id(rollout) else { continue };
-            let (terminal, args) = found::terminal_and_flags(self, pid);
-            out.push(FoundSession {
-                source: Source::Running,
-                agent: "codex".into(),
-                title: titles.get(&sid).cloned().or_else(|| history::codex_meta(rollout).title).unwrap_or_else(|| "Codex session".into()),
-                session_id: sid,
-                cwd: procinfo::cwd_of(pid),
-                updated_at: history::modified(rollout),
-                pid: Some(pid),
-                status: history::codex_status(rollout),
-                terminal,
-                args,
-                url: None,
-                tmux: None,
-            });
+                Attached::Unsure { why, maybe } if !maybe.is_empty() => {
+                    let (terminal, args) = found::terminal_and_flags(self, pid);
+                    let updated_at = maybe.iter().filter_map(|id| attached::rollout(id)).map(|p| history::modified(&p)).max().unwrap_or(0);
+                    out.push(FoundSession {
+                        title: "Codex".into(),
+                        cwd: procinfo::cwd_of(pid),
+                        updated_at,
+                        terminal,
+                        args,
+                        unsure: Some(found::Unsure { why: why.into(), maybe }),
+                        ..found::by_hand("codex", pid)
+                    });
+                }
+                _ => {}
+            }
         }
         out
     }
@@ -537,6 +618,7 @@ impl Agent for Codex {
                 args: vec![],
                 url: t["url"].as_str().map(String::from),
                 tmux: None,
+                unsure: None,
             })
             .collect()
     }
@@ -583,43 +665,57 @@ impl Agent for Codex {
 mod tests {
     use super::*;
 
-    /// Codex 0.160.1's TUI holds no file of its conversation open: it's the one Codex's shared
-    /// server began for it as it started, in its folder, by the time its UUIDv7 id starts with
-    /// (its rollout is written once it has a first prompt). One begun later, in another folder, or
-    /// that another session has isn't it.
+    /// What Codex 0.160.1's shared server has loaded: a lock file for each, named for it; one a
+    /// subagent's or a headless run's isn't a terminal's. Each has its folder once its rollout is
+    /// written (with its first prompt), found in the day's folder its id says it began on.
     #[test]
-    fn its_conversation_is_the_one_begun_as_it_started_in_its_folder() {
-        let root = std::env::temp_dir().join(format!("dino-codex-begun-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let (here, there, sessions) = (root.join("proj"), root.join("other"), root.join("sessions"));
+    fn what_its_shared_server_has_loaded() {
+        let home = std::env::temp_dir().join(format!("dino-codex-loaded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let (here, sessions, locks) = (home.join("proj"), home.join(".codex/sessions"), home.join(".codex/thread-writer-locks"));
         std::fs::create_dir_all(&here).unwrap();
-        std::fs::create_dir_all(&there).unwrap();
+        std::fs::create_dir_all(&locks).unwrap();
         let since: u64 = 1_791_318_223;
         let id = |at_ms: u64, tail: &str| format!("{:08x}-{:04x}-7{tail}", at_ms >> 16, at_ms & 0xffff);
-        let write = |id: &str, cwd: &Path| {
+        let write = |id: &str, source: &str| {
             let day = day_dir(&sessions, since).unwrap();
             std::fs::create_dir_all(&day).unwrap();
-            let meta = format!(r#"{{"timestamp":"2026-10-06T20:23:43.400Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}","originator":"codex-tui","cli_version":"0.160.1","source":"vscode"}}}}"#, cwd.display());
+            let meta = format!(r#"{{"timestamp":"2026-10-06T20:23:43.400Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}","originator":"codex-tui","cli_version":"0.160.1","source":{source}}}}}"#, here.display());
             std::fs::write(day.join(format!("rollout-2026-10-06T13-23-43-{id}.jsonl")), meta + "\n").unwrap();
         };
         let its = id(since * 1000 + 600, "cd2-b4cb-58e3cc582ab7");
-        let later = id((since + 30) * 1000, "cd2-b4cb-000000000001");
-        let elsewhere = id(since * 1000 + 300, "cd2-b4cb-000000000002");
-        let taken = id(since * 1000 - 400, "cd2-b4cb-000000000003");
-        write(&its, &here);
-        write(&later, &here);
-        write(&elsewhere, &there);
-        write(&taken, &here);
-        assert_eq!(begun(&its), Some(since));
-        assert_eq!(begun("8b0a3c52-29a1-4e37-9a1c-5d1a1f1b2c3d"), None, "not a UUIDv7");
-        assert_eq!(begun_in(&sessions, &here, since, std::slice::from_ref(&taken)).as_deref(), Some(its.as_str()));
-        assert_eq!(begun_in(&sessions, &here, since, &[taken.clone(), its.clone()]), None, "the later one began too long after it started");
-        assert_eq!(begun_in(&sessions, &there, since + 1, &[]).as_deref(), Some(elsewhere.as_str()), "a second after: the other folder's");
+        let fresh = id(since * 1000 + 900, "cd2-b4cb-000000000001");
+        let sub = id(since * 1000 + 700, "cd2-b4cb-000000000002");
+        write(&its, r#""vscode""#);
+        write(&sub, r#"{"subagent":{"thread_spawn":{}}}"#);
+        for f in [format!("{its}.lock"), format!("{fresh}.lock"), format!("{sub}.lock"), ".coordination.lock".into(), "not-an-id.lock".into()] {
+            std::fs::write(locks.join(f), "").unwrap();
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let mut loaded = attached::loaded_in(&home);
+        loaded.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(loaded.iter().map(|l| (l.id.as_str(), l.cwd.clone(), l.written)).collect::<Vec<_>>(), [(its.as_str(), Some(attached::resolved(&here)), true), (fresh.as_str(), None, false)]);
+        assert!(loaded.iter().all(|l| l.at_ms.abs_diff(now) < 10_000), "loaded as its lock was made, not as it began");
+        assert!(attached::rollout(&its).unwrap().to_string_lossy().ends_with(&format!("{its}.jsonl")));
         // Found again by its id, in the day's folder it says it began on.
-        let found = rollout_in(&sessions, &its, begun(&its).unwrap()).unwrap();
-        assert!(found.starts_with(day_dir(&sessions, since).unwrap()) && found.to_string_lossy().ends_with(&format!("{its}.jsonl")));
-        assert_eq!(rollout_in(&sessions, &id(since * 1000, "cd2-b4cb-0000000000ff"), since), None, "not written yet");
-        std::fs::remove_dir_all(&root).unwrap();
+        let found = rollout_in(&sessions, &its, attached::begun_ms(&its).unwrap() / 1000).unwrap();
+        assert!(found.starts_with(day_dir(&sessions, since).unwrap()));
+        assert_eq!(rollout_in(&sessions, &fresh, since), None, "not written yet");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn what_its_command_line_says() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let id = "01a112e2-c11f-7cd2-b4cb-58e3cc582ab7";
+        assert_eq!(how_started(&args(&["-m", "gpt-5.5"])), (None, false, None), "a new one, begun as it starts");
+        assert_eq!(how_started(&args(&["resume", id])), (Some(id.into()), false, None));
+        assert_eq!(how_started(&args(&["resume"])), (None, true, None), "its picker");
+        assert_eq!(how_started(&args(&["resume", "--last"])), (None, true, None), "the last one: loaded long ago, maybe");
+        assert_eq!(how_started(&args(&["fork", id, "-C", "/x"])), (None, false, Some("/x".into())), "a fork is a new one");
+        assert_eq!(how_started(&args(&["fork"])), (None, true, None));
+        assert_eq!(how_started(&args(&["--remote", "ws://h:1"])), (None, true, None), "another server's");
+        assert_eq!(how_started(&args(&["--cd=sub"])).2.as_deref(), Some("sub"));
     }
 
     #[test]

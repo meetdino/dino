@@ -97,6 +97,8 @@ final class DinoModel: ObservableObject {
     @Published var showContinue = false
     /// A handoff waiting for the user's confirmation.
     @Published var confirmMove: FoundSession?
+    /// One asked to move that dino can't tell the conversation of: why it can't.
+    @Published var unsureMove: FoundSession?
     /// An agent in a tmux pane nobody is attached to: its screen, read-only (TmuxLook).
     @Published var tmuxLook: FoundSession?
 
@@ -990,9 +992,16 @@ final class DinoModel: ObservableObject {
         loadedHistory = true
     }
 
+    /// Ask before continuing running `f` in dino; one whose conversation dino can't tell says why
+    /// instead.
+    func askToMove(_ f: FoundSession) {
+        if f.unsure != nil { unsureMove = f } else { confirmMove = f }
+    }
+
     /// Move a found session into dino. A running one finishes its turn first, then continues
     /// here; its row says so meanwhile, with Cancel, and the rest of the app goes on.
     func adopt(_ f: FoundSession) {
+        guard f.unsure == nil else { unsureMove = f; return }
         guard !adopting.contains(f.id) else { return }
         adopting.insert(f.id)
         let cwd = folder.path

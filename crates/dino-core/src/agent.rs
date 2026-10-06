@@ -226,6 +226,13 @@ pub trait Agent: Sync {
     /// Arguments that start conversation `session` (set when dino picks the id up front), or
     /// resume it when `restoring`: those before dino's other arguments, and those after.
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>);
+    /// Conversation `session` is open in the agent's shared server right now (Codex 0.160.1's):
+    /// resumed, it's taken over there, which only an agent started without command-line
+    /// configuration does (dino's routing, its notices); one with it runs on its own, and finds the
+    /// conversation taken until the server lets it go.
+    fn in_shared_server(&self, _session: &str) -> bool {
+        false
+    }
     /// What a person types after its command to continue conversation `session` at a shell's
     /// prompt (`--resume <id>`, `resume <id>`), before and after their other flags: `session_args`
     /// without what dino adds for itself.

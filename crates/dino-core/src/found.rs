@@ -42,6 +42,19 @@ pub struct FoundSession {
     /// Running in a tmux pane: where, so dino can show it there (tmux owns it; dino only watches).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxPlace>,
+    /// Running, but dino can't tell which conversation it's on (Codex's shared server runs every
+    /// terminal's Codex, and more than one fits): nothing to continue, `session_id` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsure: Option<Unsure>,
+}
+
+/// Why dino can't tell which conversation a running agent is on, and the ones it may be on.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Unsure {
+    /// Why, for people.
+    pub why: String,
+    /// The conversations it may be on.
+    pub maybe: Vec<String>,
 }
 
 /// The tmux pane an agent runs in.
@@ -181,6 +194,7 @@ pub(crate) fn by_hand(agent: &str, pid: u32) -> FoundSession {
         args: vec![],
         url: None,
         tmux: None,
+        unsure: None,
     }
 }
 
@@ -403,6 +417,13 @@ pub fn scan(roots: &[u32], skip: &dyn Fn(&FoundSession) -> bool) -> Vec<FoundSes
 pub fn live() -> Vec<FoundSession> {
     let procs = crate::procinfo::processes();
     crate::agent::all().into_iter().flat_map(|a| a.running(&procs)).collect()
+}
+
+/// Why dino can't tell which conversation `agent`'s process `pid` is on, asked now; `None` when it
+/// can, or it isn't running.
+pub fn unsure(agent: &str, pid: u32) -> Option<Unsure> {
+    let a = crate::agent::agent(agent)?;
+    a.running(&crate::procinfo::processes()).into_iter().find(|f| f.pid == Some(pid))?.unsure
 }
 
 /// The agent's own question on screen, waiting for the user: a permission or trust dialog (its

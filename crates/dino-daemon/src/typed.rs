@@ -162,6 +162,7 @@ fn hold(d: &Daemon, s: &Session, t: &Typed, quitting: Option<u32>) {
         args,
         url: None,
         tmux: None,
+        unsure: None,
     });
     i.resuming = Some((Instant::now() + BACK_WITHIN, quitting));
 }

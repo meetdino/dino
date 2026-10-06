@@ -257,9 +257,11 @@ struct TmuxLook: View {
             HStack {
                 Text("Attach to its tmux session to type in it.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("Continue in dino…") {
-                    dismiss()
-                    model.confirmMove = session
+                if session.unsure == nil {
+                    Button("Continue in dino…") {
+                        dismiss()
+                        model.confirmMove = session
+                    }
                 }
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }

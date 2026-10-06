@@ -2048,7 +2048,10 @@ fn local_spec(
         hooked.set(hooked.get() || provider == "hook");
         if keyed { d.proxy.header_base_url(id, provider) } else { d.proxy.base_url(id, provider) }
     };
-    let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy && route.is_none(), &base, status_line);
+    // A conversation the agent's shared server has open is taken over there, as it ran: not routed
+    // (see `Agent::in_shared_server`).
+    let shared = agent_session.as_deref().zip(adapter).is_some_and(|(c, a)| a.in_shared_server(c));
+    let (wiring_env, mut wired_args) = proxy_wiring(&l.agent_id, settings.routing.proxy && route.is_none() && !shared, &base, status_line);
     if hooked.get() {
         d.proxy.stats.reports_turns(id);
     }
@@ -2633,15 +2636,17 @@ fn claude_setup(s: &Session, activity: Option<&Activity>) -> Option<&'static str
 /// mid-turn). Otherwise `activity`, as its record has it. One whose store is polled has its screen
 /// read there instead (see `agentlog`), and what it asks is already in `activity`. So is one typed
 /// into a shell without hooks (`hooked`): dino gave it nothing that says when it asks (Codex's
-/// notices), so its screen does.
+/// notices), so its screen does. And Codex on its shared server, which dino can't ask for its
+/// notices (see `Agent::in_shared_server`): it has no rollout open of its own.
 fn on_screen(s: &Session, activity: Option<String>, hooked: bool) -> Option<String> {
     if activity.as_deref().is_some_and(|a| a != "working") {
         return activity;
     }
     let typed = s.agent_id == "shell" && !hooked;
+    let unheard = |a: &dyn dino_core::agent::Agent| s.agent_id != "shell" && a.status_source() == StatusSource::Rollout && s.agent_pid().is_some_and(|p| a.conversation_of(p).is_none());
     let asked = s
         .adapter()
-        .filter(|a| (a.asks_on_screen() || typed) && a.status_source() != StatusSource::Polled && s.host.is_none() && !s.pane.is_exited())
+        .filter(|a| (a.asks_on_screen() || typed || unheard(*a)) && a.status_source() != StatusSource::Polled && s.host.is_none() && !s.pane.is_exited())
         .and_then(|a| a.asking(&s.pane.text(0)));
     asked.map(|what| format!("needs:{what}")).or(activity)
 }
@@ -3442,6 +3447,12 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
         return spawn(d, Launch::new(&launcher, a.cloud_args(&f.session_id), cwd.or(f.cwd.clone())));
     }
     let running = f.pid.filter(|_| f.source == Source::Running);
+    // One whose conversation dino can't tell (see `found::Unsure`) has nothing to continue here:
+    // stopping it would leave its conversation for a new one. Asked of it now too, whatever the
+    // app asking had.
+    if let Some(u) = f.unsure.clone().or_else(|| running.filter(|_| f.session_id.is_empty()).and_then(|pid| found::unsure(&f.agent, pid))) {
+        anyhow::bail!("{} It keeps running in {}.", u.why, f.terminal.as_deref().unwrap_or("its terminal"));
+    }
     let held = (!f.session_id.is_empty()).then(|| holder(d, &f.session_id, None)).flatten();
     if let (Some(h), None) = (&held, running) {
         // Nothing to stop: it's that session's already. One that ended starts again.
@@ -6271,7 +6282,7 @@ while (sysread(STDIN, my $c, 1)) {
         s.pane.write(b"printf '  Would you like to run the following command?\\n\\n  $ touch hello.txt\\n\\n  1. Yes, proceed (y)\\n  3. No, and tell Codex what to do differently (esc)\\n'\r".to_vec());
         wait_for("its dialog", || s.pane.text(0).contains("No, and tell Codex what to do differently (esc)\n"));
         assert_eq!(on_screen(&s, Some("working".into()), false).as_deref(), Some("working"), "a plain shell asks nothing");
-        let codex = FoundSession { source: Source::Running, agent: "codex".into(), session_id: String::new(), title: "Codex".into(), cwd: None, updated_at: 0, pid: Some(1), status: None, terminal: None, args: vec![], url: None, tmux: None };
+        let codex = FoundSession { source: Source::Running, agent: "codex".into(), session_id: String::new(), title: "Codex".into(), cwd: None, updated_at: 0, pid: Some(1), status: None, terminal: None, args: vec![], url: None, tmux: None, unsure: None };
         s.inside.lock().unwrap().found = Some(codex);
         assert_eq!(on_screen(&s, Some("working".into()), false).as_deref(), Some("needs:Codex asks"));
         assert_eq!(on_screen(&s, None, false).as_deref(), Some("needs:Codex asks"), "before its record says anything");

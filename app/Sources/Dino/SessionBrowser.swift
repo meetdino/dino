@@ -129,7 +129,9 @@ struct ContinueSheet: View {
 
     @ViewBuilder
     private func menu(_ f: FoundSession) -> some View {
-        Button(f.source == "running" ? "Continue in dino…" : "Continue in dino") { continueIn(f) }
+        if f.unsure == nil {
+            Button(f.source == "running" ? "Continue in dino…" : "Continue in dino") { continueIn(f) }
+        }
         if let url = f.url.flatMap(URL.init(string:)) {
             Button("Open in Browser") { NSWorkspace.shared.open(url) }
         }
@@ -147,7 +149,7 @@ struct ContinueSheet: View {
     private func continueIn(_ f: FoundSession) {
         if f.source == "running" {
             model.showContinue = false
-            model.confirmMove = f
+            model.askToMove(f)
         } else {
             model.adopt(f)
         }
@@ -196,6 +198,7 @@ struct FoundRow: View {
         if let cwd = session.cwd { parts.append(shortPath(cwd)) }
         if let t = session.terminal { parts.append(session.source == "cloud" ? t : "in \(t)") }
         if session.source == "cloud", let s = session.status { parts.append(s) }
+        if session.unsure != nil { parts.append("can't tell which conversation") }
         return parts.joined(separator: " · ")
     }
 }
@@ -208,6 +211,8 @@ private struct SessionDetail: View {
 
     private var state: (String, Color) {
         switch session.source {
+        // Which conversation it's on, and so whether it's working, dino can't tell.
+        case "running" where session.unsure != nil: ("Running", .secondary)
         case "running": session.isBusy ? ("Running", SessionStatus.working.color) : ("Idle", .secondary)
         case "cloud": (session.status ?? "Cloud", .blue)
         default: ("Done", SessionStatus.done.color)
@@ -236,6 +241,8 @@ private struct SessionDetail: View {
             Divider()
             if session.source == "cloud" {
                 CloudNote(session: session)
+            } else if let unsure = session.unsure {
+                UnsureNote(session: session, unsure: unsure)
             } else {
                 SessionPreview(session: session, path: $path)
             }
@@ -256,10 +263,12 @@ private struct SessionDetail: View {
     @ViewBuilder
     private var actions: some View {
         switch session.source {
+        case "running" where session.unsure != nil:
+            EmptyView()
         case "running":
             Button("Continue in dino…") {
                 model.showContinue = false
-                model.confirmMove = session
+                model.askToMove(session)
             }
             .keyboardShortcut(.defaultAction)
             .help(session.isBusy ? "dino waits for its current turn to end, closes it in \(session.terminal ?? "its terminal") and continues it here" : "dino closes it in \(session.terminal ?? "its terminal") and continues it here")
@@ -315,6 +324,23 @@ private struct SessionPreview: View {
         case .failure(let e):
             if page == nil { failed = e.localizedDescription }
         }
+    }
+}
+
+/// A running agent whose conversation dino can't tell: why, and that there's nothing to continue.
+private struct UnsureNote: View {
+    let session: FoundSession
+    let unsure: Unsure
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "questionmark.circle").font(.system(size: 30)).foregroundStyle(.tertiary)
+            Text("dino can't tell which conversation this \(session.agentName) is on.").font(.headline)
+            Text(unsure.why)
+            Text("So there's nothing for dino to continue: it keeps running in \(session.terminal ?? "its terminal").")
+        }
+        .foregroundStyle(.secondary).multilineTextAlignment(.center)
+        .frame(maxWidth: 420).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
