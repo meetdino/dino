@@ -11,10 +11,17 @@ struct ClaudeAccountInfo: Codable, Equatable, Identifiable {
     var spent: Bool
     var resets_at: UInt64?
     var retry_at: UInt64?
+    /// Its usage windows as Anthropic last reported them on a call it signed; nil until then.
+    var windows: [WindowInfo]?
 
     var id: UInt32 { number }
+    /// As the sidebar says it: "Claude account 1" is the one Claude Code signed in with.
+    var short: String { "Claude account \(number)" }
+    /// When it can answer again: its reset, or else when dino tries it again.
+    var backAt: UInt64? { resets_at ?? retry_at }
     var isOwn: Bool { number == 1 }
-    var name: String { isOwn ? "Your signed-in account" : "Account \(number)" }
+    /// The sidebar's footer calls the sign-in account 1, so Settings does too.
+    var name: String { isOwn ? "Account 1 · your signed-in account" : "Account \(number)" }
 }
 
 struct ClaudeAccountsInfo: Codable, Equatable {

@@ -658,6 +658,22 @@ impl Proxy {
         (own, tokens.iter().map(|t| self.stats.limited(&accounts::key(t))).collect())
     }
 
+    /// The user's Claude accounts as calls find them, for the state: each one's number (1 for
+    /// Claude Code's own sign-in), whether it's spent until when, and its windows as Anthropic last
+    /// reported them on a call it signed. `None` with no other account. From what the proxy holds
+    /// already: no key store read, as the state is looked at many times a second.
+    pub fn claude_accounts_now(&self) -> Option<Vec<(u32, Option<fallback::Limited>, Option<Quota>)>> {
+        let others = accounts::others(&self.keys.read().unwrap());
+        if others.is_empty() {
+            return None;
+        }
+        let tokens: Vec<&str> = others.iter().map(|(_, t)| t.as_str()).collect();
+        let (own, spent) = self.claude_accounts(&tokens);
+        let mut out = vec![(1, own, self.stats.quota("anthropic"))];
+        out.extend(others.iter().zip(spent).map(|((n, t), l)| (*n, l, self.stats.quota(&accounts::key(t)))));
+        Some(out)
+    }
+
     /// The coding plans to serve at `plan/<id>`, from the next request on.
     pub fn set_plans(&self, plans: HashMap<String, plan::Plan>) {
         let mut errors = self.stats.plan_errors.lock().unwrap();
@@ -1119,9 +1135,7 @@ async fn forward(
                 };
                 let (key, name) = signer(current);
                 st.stats.mark_limited(&key, &name, &t);
-                if current.is_none() {
-                    record_quota(&st.stats, &provider, &headers);
-                }
+                record_quota(&st.stats, &quota_key(&provider, account.as_ref()), &headers);
                 let own = (current.is_some() && st.stats.limited(&p.key).is_none()).then_some(None);
                 let others = accounts.iter().filter(|(n, _)| Some(*n) != current && spare(*n)).map(Some);
                 for next in own.into_iter().chain(others) {
@@ -1138,6 +1152,7 @@ async fn forward(
                             let (s2, h2) = (r.status(), r.headers().clone());
                             let t2 = read_capped(r, MAX_BODY).await.unwrap_or_default();
                             log(format_args!("{session} {next_name} -> {s2}"));
+                            record_quota(&st.stats, &quota_key(&provider, next), &h2);
                             if let Some(t2) = fallback::classify(s2.as_u16(), &h2, &t2) {
                                 st.stats.mark_limited(&next_key, &next_name, &t2);
                             }
@@ -1147,10 +1162,8 @@ async fn forward(
                 }
             }
             log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
-            // Claude Code's plan usage is its own account's, not another's that signed the call.
-            if account.is_none() {
-                record_quota(&st.stats, &provider, &headers);
-            }
+            // Each Claude account's windows are its own: kept by the account that signed the call.
+            record_quota(&st.stats, &quota_key(&provider, account.as_ref()), &headers);
             // Spent: known as such (for new sessions, and the other sessions on it), and with a
             // chain, answered by it. Down, for a chain that counts outages, once it goes on.
             if let Some(p) = &primary {
@@ -1220,9 +1233,7 @@ async fn forward(
         let names: Vec<String> = resp.headers().iter().filter(|(n, _)| (n.as_str().contains("limit") || n.as_str().starts_with("x-codex")) && !n.as_str().ends_with("turn-state")).map(|(n, v)| format!("{n}={}", v.to_str().unwrap_or("?"))).collect();
         log(format_args!("  headers: {}", names.join(" ")));
     }
-    if account.is_none() {
-        record_quota(&st.stats, &provider, resp.headers());
-    }
+    record_quota(&st.stats, &quota_key(&provider, account.as_ref()), resp.headers());
     if !status.is_success() && is_model_call {
         st.stats.update(&session, |s| s.errors += 1);
     } else if is_model_call {
@@ -1261,7 +1272,14 @@ async fn forward(
                         account: account.as_ref().map(|a| a.0),
                     });
                 }
-                Some(_) => {}
+                // Still on it: when its own account is back is as that's found now (it may have
+                // been found spent again, until a later reset).
+                Some((_, p)) => {
+                    if let (Some(f), Some(l)) = (s.fallback.as_mut(), st.stats.limited(&p.key)) {
+                        f.resets_at = l.resets_at;
+                        f.retry_at = l.retry_at;
+                    }
+                }
                 None => {
                     if let Some(f) = s.fallback.take() {
                         log(format_args!("{session} back on {} from {}", f.from_name, f.name));
@@ -1816,6 +1834,12 @@ fn reason(e: &reqwest::Error) -> String {
 
 fn error(status: StatusCode, msg: String) -> Response<Body> {
     Response::builder().status(status).body(Body::from(msg)).unwrap()
+}
+
+/// Where a call's usage windows are kept: by its provider, or for another of the user's Claude
+/// accounts, by that account (see `accounts::key`), so one account's use never reads as another's.
+fn quota_key(provider: &str, account: Option<&(u32, String)>) -> String {
+    account.map_or_else(|| provider.to_string(), |(_, token)| accounts::key(token))
 }
 
 /// Subscription windows from response headers: Claude's `anthropic-ratelimit-unified-5h-utilization`
@@ -2382,8 +2406,12 @@ mod tests {
             let own = req.contains("authorization: bearer sk-ant-oat01-own");
             if (own && !r.load(Ordering::Relaxed)) || req.contains("authorization: bearer sk-ant-oat01-third") {
                 claude_spent(spent_until)
+            } else if req.contains("sk-ant-oat01-own") {
+                streamed("claude-opus-5-5", "OWN")
             } else {
-                streamed("claude-opus-5-5", if req.contains("sk-ant-oat01-own") { "OWN" } else { "OTHER" })
+                // Account 3 reports its own windows.
+                let h = format!("anthropic-ratelimit-unified-status: allowed\r\nanthropic-ratelimit-unified-5h-utilization: 0.07\r\nanthropic-ratelimit-unified-5h-reset: {}\r\n", spent_until + 600);
+                streamed("claude-opus-5-5", "OTHER").replacen("Content-Type", &format!("{h}Content-Type"), 1)
             }
         });
         let base = anthropic.trim_end_matches("/api/anthropic").to_string();
@@ -2428,10 +2456,25 @@ mod tests {
         assert_eq!(own_spent.map(|l| l.resets_at), Some(Some(spent_until)));
         assert_eq!(others.iter().map(|l| l.as_ref().map(|l| l.resets_at)).collect::<Vec<_>>(), [None, Some(Some(spent_until))]);
 
+        // Each account's windows are its own: account 3's use isn't Claude Code's own account's,
+        // which keeps its spent window; account 2 reported none.
+        let now = proxy.claude_accounts_now().expect("more than one account");
+        let window = |n: u32| now.iter().find(|a| a.0 == n).and_then(|a| a.2.clone()).map(|q| q.windows.into_iter().map(|(name, w)| (name, w.utilization)).collect::<Vec<_>>());
+        assert_eq!(window(3), Some(vec![("5h".to_string(), 0.07)]));
+        assert_eq!(window(1).map(|w| w.into_iter().map(|(n, _)| n).collect::<Vec<_>>()), Some(vec!["5h".to_string()]));
+        assert!(proxy.stats.quota("anthropic").unwrap().windows.iter().all(|(_, w)| w.utilization != 0.07));
+        assert_eq!(now.iter().map(|a| (a.0, a.1.is_some())).collect::<Vec<_>>(), [(1, true), (2, true), (3, false)]);
+
         // The next call goes straight to account 3.
         assert!(send("acct", "sk-ant-oat01-own").contains("OTHER"));
         assert_eq!(auth_of(&from.recv_timeout(wait()).unwrap()), "bearer sk-ant-oat01-fourth");
         assert!(from.recv_timeout(std::time::Duration::from_millis(300)).is_err());
+
+        // Its own found spent again meanwhile, until later: the session says the later reset.
+        proxy.stats.limited.lock().unwrap().get_mut(&own).unwrap().resets_at = Some(spent_until + 60);
+        assert!(send("acct", "sk-ant-oat01-own").contains("OTHER"));
+        assert_eq!(auth_of(&from.recv_timeout(wait()).unwrap()), "bearer sk-ant-oat01-fourth");
+        assert_eq!(proxy.stats.session("acct").fallback.and_then(|f| f.resets_at), Some(spent_until + 60));
 
         // Its window resets: mid-turn, the turn stays on account 3; back on its own as the next starts.
         reset.store(true, Ordering::Relaxed);

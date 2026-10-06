@@ -421,6 +421,10 @@ pub enum Response {
         /// when its session or an older dinod went), until they end or are stopped.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         leftovers: Vec<Leftover>,
+        /// Your Claude accounts with their windows, once Claude Code has more than one: which one
+        /// answers now and which are spent. Absent with one account, and from an older dinod.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claude_accounts: Option<Vec<ClaudeAccountInfo>>,
         /// Tags this state for `StateChange`; only in a reply to one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<u64>,
@@ -810,8 +814,13 @@ pub struct SessionInfo {
     pub bells: u64,
     pub requests: u64,
     pub in_flight: u32,
+    /// Everything its model calls read, cache reads included, and wrote.
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Of `input_tokens`, what was read again from the prompt cache: each call reads the whole
+    /// conversation so far again, so over a long session this is most of it.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
     pub last_model: Option<String>,
     pub tier: Option<String>,
     /// "working", "done", "needs:<what>", or "waiting:<what>" when the turn ended on background
@@ -1321,6 +1330,10 @@ pub struct ClaudeAccountInfo {
     /// When it's tried again (unix seconds): its reset, or a while after it was found spent.
     #[serde(default)]
     pub retry_at: Option<u64>,
+    /// Its usage windows ("5h", "7d") as Anthropic last reported them on a call it signed; empty
+    /// until it signed one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<WindowInfo>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1329,7 +1342,7 @@ pub struct QuotaInfo {
     pub windows: Vec<WindowInfo>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WindowInfo {
     pub name: String,
     pub utilization: f32,
