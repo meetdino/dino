@@ -546,6 +546,7 @@ extension DinoModel {
             let running = reply?.dino
             let outdated = Updates.fromAnotherBuild(version: running, build: reply?.build, exe: reply?.exe)
             let unmanaged = DinodAgent.enabled && (reply?.launchd != DinodAgent.bundled?.label || DinodAgent.stale)
+            if reply?.launchd != nil, reply?.launchd == DinodAgent.bundled?.label { DinodAgent.retirePredecessor() }
             await MainActor.run {
                 self.daemonVersion = running.map { v in reply?.build.map { "\(v) (\($0))" } ?? v } ?? "an older version"
                 self.daemonOutdated = outdated
