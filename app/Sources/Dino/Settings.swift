@@ -195,6 +195,8 @@ private struct SettingsResponse: Decodable {
     let locked_from: [String: String]?
     /// Hosts in ~/.ssh/config, to suggest; nil from an older dinod.
     let ssh_config_hosts: [String]?
+    /// Why settings.toml doesn't parse ("settings.toml has an error on line 3: …"); nil when it does.
+    let error: String?
 }
 private struct KeysResponse: Decodable { let keys: [KeyInfo] }
 
@@ -288,6 +290,7 @@ final class SettingsStore: ObservableObject {
             let from = $0.0.locked_from ?? [:]
             if self.lockedFrom != from { self.lockedFrom = from }
             self.configHosts = $0.0.ssh_config_hosts ?? []
+            if let error = $0.0.error { self.error = error }
             self.keys = $0.1
             self.agents = $0.2
         }

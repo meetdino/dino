@@ -325,6 +325,10 @@ fn record_local() {
 }
 
 fn record_local_in(s: &mut State) {
+    // A settings.toml that doesn't parse reads as earlier settings or the defaults: no change made here.
+    if Settings::error().is_some() {
+        return;
+    }
     let current = local_entries();
     let baseline: Entries = s.baseline.iter().cloned().collect();
     let changes = dino_sync::settings::diff(&baseline, &current);
