@@ -101,11 +101,6 @@ struct DinoApp: App {
                     .disabled(model.launchers.isEmpty)
                 Button("New Session with Options…") { model.showNewSession = true }
                     .keyboardShortcut("n", modifiers: [.command, .control])
-                // Experimental: only while it's on (Settings → Experimental).
-                if model.fanoutOn {
-                    Button("Fan Out…") { model.showFanout = true }
-                        .keyboardShortcut("n", modifiers: [.command, .shift])
-                }
                 Button("New Automation…") { model.newTask() }
                 Button("Continue a Session…") {
                     model.loadFound()
@@ -472,7 +467,6 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $model.showContinue) { ContinueSheet() }
-        .sheet(isPresented: $model.showFanout) { FanoutSheet() }
         .sheet(isPresented: $model.showNewSession) { NewSessionSheet() }
         .sheet(item: $model.startRequest) { StartSessionSheet(request: $0) }
         .sheet(item: $model.tmuxLook) { TmuxLook(session: $0) }
@@ -505,17 +499,6 @@ struct ContentView: View {
         .modifier(ArchiveWhileWorking(model: model))
         .sheet(isPresented: $model.showCreatePR) {
             if let s = model.selectedSession { CreatePRSheet(session: s) }
-        }
-        .alert(
-            "Keep \(model.confirmKeep?.launcher ?? "")'s changes?",
-            isPresented: Binding(get: { model.confirmKeep != nil }, set: { if !$0 { model.confirmKeep = nil } }),
-            presenting: model.confirmKeep
-        ) { m in
-            Button("Keep") { model.keep(m) }
-                .keyboardShortcut(.defaultAction)
-            Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("The changes are applied to your checkout, uncommitted, so you can review them. The other agents stop, and all of this fan-out's worktrees are removed.")
         }
         .alert(
             model.closingWorktree?.apply == true ? "Apply \(model.closingWorktree?.label ?? "")'s changes?" : "Discard \(model.closingWorktree?.label ?? "")?",
@@ -620,9 +603,6 @@ struct Terminals: View {
                 .coordinateSpace(name: Self.space)
                 .onAppear { model.paneArea = geo.size }
                 .onChange(of: geo.size) { _, size in model.paneArea = size }
-            }
-            if let g = model.groups.first(where: { "group:\($0.id)" == model.selected }) {
-                CompareView(group: g)
             }
         }
         .toolbar {
@@ -894,8 +874,8 @@ struct Sidebar: View {
             } else {
                 let narrowed = model.sidebarNarrowed
                 let tree = filter == .all && !narrowed
-                    ? SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups)
-                    : SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups) {
+                    ? SessionTree.build(repos: model.repos, sessions: model.sidebarSessions)
+                    : SessionTree.build(repos: model.repos, sessions: model.sidebarSessions) {
                         filter.passes(model.status(of: $0)) && model.sidebarShows($0)
                     }
                 // Headings are plain rows, not List section headers: when the sidebar's height
@@ -1023,7 +1003,7 @@ struct Sidebar: View {
     /// Opens (true), closes (false) or flips (nil) the row tagged `tag`, if it's one that opens.
     @discardableResult
     private func setOpen(_ tag: String, _ open: Bool?) -> KeyPress.Result {
-        let tree = SessionTree.build(repos: model.repos, sessions: model.sidebarSessions, groups: model.groups)
+        let tree = SessionTree.build(repos: model.repos, sessions: model.sidebarSessions)
         guard let (key, startsOpen) = tree.repos.lazy.compactMap({ $0.opening(tag) }).first else { return .ignored }
         var set = collapsed.wrappedValue
         let isOpen = startsOpen != set.contains(key)
@@ -1140,7 +1120,6 @@ struct SessionRow: View {
     @EnvironmentObject var model: DinoModel
     let session: SessionInfo
     let index: Int
-    var stat: DiffStat?
     /// The worktree's branch, on the row instead of a header above a single session.
     var branch: String?
     /// The repo or worktree it's filed under: a shell's folder shows only when it's somewhere else.
@@ -1242,9 +1221,6 @@ struct SessionRow: View {
                 ErrorLine(message: error)
             }
             PeerChips(session: session)
-            if let stat, stat.files > 0 {
-                StatText(stat: stat).font(.caption.monospacedDigit())
-            }
         }
         .padding(.vertical, 3)
         .background(CostAnchor(holder: anchor))

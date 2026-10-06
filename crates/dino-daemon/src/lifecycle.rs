@@ -14,7 +14,7 @@ use dino_core::ipc::{self, Request, Response};
 use dino_core::{pr, trust, worktree};
 
 use super::{
-    Daemon, Launch, SavedSession, SessionWorktree, kill, now_secs, real, save, save_groups, save_worktrees,
+    Daemon, Launch, SavedSession, SessionWorktree, kill, now_secs, real, save, save_worktrees,
     session_worktree, sessions_in, spawn,
 };
 
@@ -96,7 +96,6 @@ pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
 /// Archive it; `put_away` false keeps its worktree on disk whatever state it's in.
 fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-    anyhow::ensure!(super::group_of(d, id).is_none(), "{} is part of a fan-out: keep or discard it instead", s.name);
     let agent_session = s.agent_session.lock().unwrap().clone().or_else(|| super::conversation_of(&s));
     // The mode it's in, which it may have switched to since it started. Read before any of its
     // locks is taken below: the pane's reader takes them holding its screen.
@@ -256,7 +255,7 @@ fn delete(d: &Daemon, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The worktree dino made that a session's deletion takes along: its own, or its fan-out seat.
+/// The worktree dino made that a session's deletion takes along.
 struct Doomed {
     path: PathBuf,
     repo: PathBuf,
@@ -264,18 +263,15 @@ struct Doomed {
 }
 
 /// Delete a session for good: its agent stopped, everything dinod keeps for it forgotten (its
-/// restore state, screens, fan-out seat, PR watch), and the worktree dino made for it removed,
+/// restore state, screens, PR watch), and the worktree dino made for it removed,
 /// uncommitted work and all. Its branch goes too when nothing on it is unmerged; else it stays.
 /// A shell, a session on another machine, or one in a folder of the user's takes nothing along,
 /// and a worktree another session is in stays. The agent's conversation file is never touched:
 /// Continue a Session still finds it. `dry_run` only says what would happen.
 pub(crate) fn delete_session(d: &Daemon, id: &str, dry_run: bool) -> anyhow::Result<ipc::Deletion> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-    let member = d.groups.lock().unwrap().iter().find_map(|g| {
-        g.members.iter().find(|m| m.session == id).map(|m| Doomed { path: m.worktree.clone(), repo: g.repo.clone(), branch: m.branch.clone() })
-    });
     let own = || session_worktree(d, &s.cwd).map(|w| Doomed { path: w.path, repo: w.repo, branch: w.branch });
-    let doomed = if s.host.is_some() || s.agent_id == "shell" { None } else { member.or_else(own) };
+    let doomed = if s.host.is_some() || s.agent_id == "shell" { None } else { own() };
 
     let mut out = ipc::Deletion::default();
     let mut landed = false;
@@ -301,16 +297,6 @@ pub(crate) fn delete_session(d: &Daemon, id: &str, dry_run: bool) -> anyhow::Res
     kill(d, id);
     d.closing.lock().unwrap().remove(id);
     d.prs.lock().unwrap().remove(id);
-    {
-        let mut groups = d.groups.lock().unwrap();
-        if groups.iter().any(|g| g.members.iter().any(|m| m.session == id)) {
-            for g in groups.iter_mut() {
-                g.members.retain(|m| m.session != id);
-            }
-            groups.retain(|g| !g.members.is_empty());
-            save_groups(&d.home, &groups);
-        }
-    }
     {
         let mut archived = d.archived.lock().unwrap();
         if archived.iter().any(|a| a.saved.id == id) {
@@ -368,11 +354,7 @@ const SIZE_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn storage(d: &Arc<Daemon>) -> Vec<ipc::StoredWorktree> {
     let archived: Vec<String> = d.archived.lock().unwrap().iter().filter_map(|a| a.worktree.as_ref()).map(|w| real(&w.path)).collect();
-    let mut all: Vec<(PathBuf, PathBuf, String, bool)> =
-        d.worktrees.lock().unwrap().iter().map(|w| (w.path.clone(), w.repo.clone(), w.branch.clone(), false)).collect();
-    for g in d.groups.lock().unwrap().iter() {
-        all.extend(g.members.iter().map(|m| (m.worktree.clone(), g.repo.clone(), m.branch.clone(), true)));
-    }
+    let mut all: Vec<(PathBuf, PathBuf, String)> = d.worktrees.lock().unwrap().iter().map(|w| (w.path.clone(), w.repo.clone(), w.branch.clone())).collect();
     all.retain(|(p, ..)| p.is_dir());
     let mut bases: HashMap<PathBuf, String> = HashMap::new();
     let sizes = d.sizes.lock().unwrap().clone();
@@ -380,7 +362,7 @@ fn storage(d: &Arc<Daemon>) -> Vec<ipc::StoredWorktree> {
     let mut stale = vec![];
     let out = all
         .into_iter()
-        .map(|(path, repo, branch, fanout)| {
+        .map(|(path, repo, branch)| {
             let key = real(&path);
             let base = bases.entry(repo.clone()).or_insert_with(|| base_of(&repo)).clone();
             let summary = super::summary(d, &key, Some(&branch), &base);
@@ -409,14 +391,14 @@ fn storage(d: &Arc<Daemon>) -> Vec<ipc::StoredWorktree> {
                 path: key.clone(),
                 repo: real(&repo),
                 branch,
-                reclaimable: live.is_none() && !fanout && !dirty && landed,
+                reclaimable: live.is_none() && !dirty && landed,
                 state,
                 dirty,
                 size,
                 session,
                 session_state: session_state.map(String::from),
                 archived: archived.contains(&key),
-                fanout,
+                fanout: false,
             }
         })
         .collect();
@@ -445,8 +427,6 @@ fn measure(d: &Arc<Daemon>, paths: Vec<String>) {
 /// session that ended in it is archived, so its conversation can still be picked up.
 fn remove_stored(d: &Daemon, path: &str) -> anyhow::Result<()> {
     let target = real(Path::new(path));
-    let fanout = d.groups.lock().unwrap().iter().any(|g| g.members.iter().any(|m| real(&m.worktree) == target));
-    anyhow::ensure!(!fanout, "It belongs to a fan-out: keep or discard the fan-out instead");
     let w = d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == target).cloned();
     let w = w.ok_or_else(|| anyhow::anyhow!("{path} isn't a worktree dino made"))?;
     let ended = sessions_in(d, &target);
@@ -489,14 +469,11 @@ fn forget_stored(d: &Daemon, w: &SessionWorktree, target: &str, ended: Vec<Arc<s
 }
 
 /// The sidebar's Clean Up for any worktree of a repo, dino's or another tool's. Never the main
-/// checkout, a fan-out's, or one something works in: a live session, a running subagent, a
-/// program whose folder is inside it, or a change in the last few minutes (an agent between
-/// commands). Without `force` one with uncommitted changes stays; with it they're lost. Its
+/// checkout, or one something works in: a live session, a running subagent, a program whose
+/// folder is inside it, or a change in the last few minutes (an agent between commands). Without `force` one with uncommitted changes stays; with it they're lost. Its
 /// branch goes only when git sees it merged, so commits are never lost.
 pub(crate) fn clean_up(d: &Daemon, path: &str, force: bool) -> anyhow::Result<()> {
     let target = real(Path::new(path));
-    let fanout = d.groups.lock().unwrap().iter().any(|g| g.members.iter().any(|m| real(&m.worktree) == target));
-    anyhow::ensure!(!fanout, "it belongs to a fan-out: keep or discard the fan-out instead");
     let ended = sessions_in(d, &target);
     if let Some(s) = ended.iter().find(|s| !s.pane.is_exited()) {
         anyhow::bail!("{} is running in it", s.label.lock().unwrap().clone().unwrap_or_else(|| s.name.clone()));

@@ -1,6 +1,6 @@
 //! Automations: when something happens (a time comes round, a PR opens, CI fails, files change,
 //! another run finishes), dinod does something (starts an agent with a prompt, continues a
-//! session, fans out, runs a command). They began as scheduled tasks, so the file is still
+//! session, starts several agents, runs a command). They began as scheduled tasks, so the file is still
 //! `schedule.json` and the types and requests keep their names: a task from before is an
 //! automation with a schedule for its trigger and an agent for its action. Every field added since
 //! has a default, so either side can be older.
@@ -157,7 +157,7 @@ pub struct Action {
     pub kind: ActionKind,
     /// Continue: the session (id or name) the prompt is sent into.
     pub session: String,
-    /// Fan-out: the agents, by launcher short name.
+    /// Several agents: which, by launcher short name.
     pub agents: Vec<String>,
     /// Command: what to run, with `sh -c` in `cwd`.
     pub command: String,
@@ -173,8 +173,9 @@ pub enum ActionKind {
     Agent,
     /// The prompt sent into a session that's already there.
     Continue,
-    /// The prompt to several agents, a worktree each.
-    Fanout,
+    /// The prompt to several agents, each in its own worktree. Named "fanout" in the files.
+    #[serde(rename = "fanout")]
+    Agents,
     /// A shell command, and maybe an agent after it.
     Command,
 }
@@ -291,10 +292,8 @@ pub struct ScheduledRun {
     pub event: Option<Event>,
     /// 0 for the first try, 1 for the first retry, …
     pub attempt: u32,
-    /// Every session it started, `session` first (a fan-out's).
+    /// Every session it started, `session` first.
     pub sessions: Vec<String>,
-    /// The fan-out it started.
-    pub group: Option<String>,
     /// When it finished, and how: "success" or "failure".
     pub finished_at: Option<u64>,
     pub result: Option<String>,
@@ -359,7 +358,7 @@ impl ScheduledTask {
         match a.kind {
             ActionKind::Agent => format!("Start {}", self.launcher),
             ActionKind::Continue => format!("Continue {}", a.session),
-            ActionKind::Fanout => format!("Fan out to {}", a.agents.join(", ")),
+            ActionKind::Agents => format!("Start {}, a worktree each", a.agents.join(", ")),
             ActionKind::Command => {
                 let cmd = shorten(a.command.lines().next().unwrap_or_default(), 40);
                 match a.then_agent.as_str() {
@@ -531,6 +530,18 @@ mod tests {
         assert!(t.output.notify && !t.conditions.parallel);
         assert_eq!(t.history[0].session.as_deref(), Some("s1"));
         // And back: what an older client sends still reads.
+        let again: ScheduledTask = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(again, t);
+    }
+
+    #[test]
+    fn several_agents_tasks_load() {
+        let old = r#"{"id":"a2","name":"Race","prompt":"fix it","launcher":"claude","cwd":"/tmp","enabled":true,"action":{"do":"fanout","agents":["claude","codex"]},"history":[{"at":5,"outcome":"started","session":"s1","sessions":["s1","s2"],"group":"fix-ab12"}]}"#;
+        let t: ScheduledTask = serde_json::from_str(old).unwrap();
+        assert_eq!(t.action.kind, ActionKind::Agents);
+        assert_eq!(t.action.agents, ["claude", "codex"]);
+        assert_eq!(t.history[0].sessions, ["s1", "s2"]);
+        assert!(serde_json::to_string(&t).unwrap().contains(r#""do":"fanout""#), "the name older dinods know");
         let again: ScheduledTask = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert_eq!(again, t);
     }

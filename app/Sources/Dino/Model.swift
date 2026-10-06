@@ -87,9 +87,6 @@ final class DinoModel: ObservableObject {
     /// An agent in a tmux pane nobody is attached to: its screen, read-only (TmuxLook).
     @Published var tmuxLook: FoundSession?
 
-    /// Fan-outs, with each member's diff size.
-    @Published var groups: [GroupInfo] = []
-    @Published var showFanout = false
     /// The New Session sheet: agent, place, mode, model and effort.
     @Published var showNewSession = false
     @Published var showNewProject = false
@@ -97,8 +94,6 @@ final class DinoModel: ObservableObject {
     @Published var startRequest: StartRequest?
     /// The toolbar's mode, model or effort picker that's open (⇧⌘M, ⇧⌘I, ⇧⌘E).
     @Published var controlPicker: ControlKind?
-    /// A member whose changes the user is about to keep.
-    @Published var confirmKeep: MemberInfo?
     /// A session worktree the user is about to close, and whether its changes come along.
     @Published var closingWorktree: ClosingWorktree?
     /// Clean Up… waiting on the user's yes.
@@ -247,7 +242,7 @@ final class DinoModel: ObservableObject {
                     self.polling = true
                     self.poll()
                     self.watchElsewhere()
-                    self.watchGroups()
+                    self.watchSlower()
                     self.watchTree()
                     self.watchGhosttyConfig()
                     self.watchTerminalSettings()
@@ -542,7 +537,7 @@ final class DinoModel: ObservableObject {
                 startingShell = newShell()
             }
         }
-        // Rows that aren't sessions (fan-outs, subagents, runs) carry a "kind:" prefix: one of
+        // Rows that aren't sessions (subagents, runs) carry a "kind:" prefix: one of
         // those stays selected. Only a session that's gone falls back to another.
         let sessionGone = selected.map { !$0.contains(":") && !live.contains($0) } ?? true
         if !startingShell, sessionGone, !(shownOne && tabs.isEmpty) {
@@ -627,7 +622,7 @@ final class DinoModel: ObservableObject {
     }
 
     /// Whether the main area has something of its own for a sidebar row: a session's terminal, a
-    /// fan-out's comparison, a subagent's conversation, an automation's run. A repo's row, a
+    /// subagent's conversation, an automation's run. A repo's row, a
     /// worktree's over its sessions, "Other worktrees" and a worktree in it have none: selected,
     /// they left the main area empty, so they open and close instead and the session stays.
     func showsSomething(_ tag: String) -> Bool {
@@ -718,10 +713,8 @@ final class DinoModel: ObservableObject {
                 guard let conn = try? DinoConnection(path: DinoEnvironment.socketPath),
                       var settings = try? conn.settings() else { return }
                 let tmux = settings.tmux
-                let experimental = settings.experimental
                 let shell = await MainActor.run {
                     self.noteTmuxSettings(tmux)
-                    self.noteExperimental(experimental)
                     return GhosttyConfig.shellSetup
                 }
                 // The user's Ghostty `shell-integration` and its features, for the shells dinod
@@ -752,19 +745,6 @@ final class DinoModel: ObservableObject {
         }
         check()
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in check() }
-        // A switch flipped in Settings shows in the menus now, not at the next look.
-        NotificationCenter.default.addObserver(forName: SettingsStore.saved, object: nil, queue: .main) { note in
-            let experimental = (note.object as? DinoSettings)?.experimental
-            MainActor.assumeIsolated { self.noteExperimental(experimental) }
-        }
-    }
-
-    /// Settings → Experimental → Fan out: the menu, ⇧⌘N and the palette offer it.
-    @Published private(set) var fanoutOn = false
-
-    private func noteExperimental(_ e: [String: Bool]?) {
-        let on = e?["fan_out"] ?? false
-        if on != fanoutOn { fanoutOn = on }
     }
 
     /// What a pane's `dino attach` runs with: the scrollback the pane keeps (Ghostty's
@@ -1055,12 +1035,12 @@ final class DinoModel: ObservableObject {
         Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).cancelTakeOver(id: id) }
     }
 
-    /// Diff sizes need git, so these refresh slower than session state. Launchers too: keys and
-    /// policies change which agents can start.
-    private func watchGroups() {
+    /// Automations, archived sessions and launchers (keys and policies change which agents can
+    /// start) refresh slower than session state.
+    private func watchSlower() {
         Task.detached {
             while true {
-                if let conn = try? DinoConnection(path: DinoEnvironment.socketPath), let list = try? conn.groups() {
+                if let conn = try? DinoConnection(path: DinoEnvironment.socketPath) {
                     let launchers = try? conn.request(["type": "launchers"]).launchers
                     let tasks = try? conn.scheduleList()
                     let archived = try? conn.archived()
@@ -1069,11 +1049,6 @@ final class DinoModel: ObservableObject {
                         self.notePolled(schedule: true)
                         if let archived, archived != self.archived { self.archived = archived }
                         if let launchers, launchers != self.launchers { self.launchers = launchers }
-                        if list != self.groups { self.groups = list }
-                        if let want = self.pendingGroup, list.contains(where: { $0.id == want }) {
-                            self.pendingGroup = nil
-                            self.select("group:\(want)")
-                        }
                     }
                 } else {
                     // A dinod that can't answer this still gets a sidebar.
@@ -1083,8 +1058,6 @@ final class DinoModel: ObservableObject {
             }
         }
     }
-
-    private var pendingGroup: String?
 
     private func watchTree() {
         Task.detached {
@@ -1126,21 +1099,6 @@ final class DinoModel: ObservableObject {
                 self.notePolled(tree: true)
             }
         }
-    }
-
-    /// Start a fan-out in the current folder; throws dinod's reason (not a git repo, …).
-    func fanout(prompt: String, launchers: [String]) async throws {
-        let cwd = folder.path
-        let id = try await Task.detached {
-            try DinoConnection(path: DinoEnvironment.socketPath)
-                .request(["type": "fanout", "prompt": prompt, "launchers": launchers, "cwd": cwd]).id
-        }.value
-        showFanout = false
-        pendingGroup = id
-    }
-
-    func diff(_ session: String) async -> String {
-        await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).diff(session: session)) ?? "" }.value
     }
 
     /// Nil when dinod can't be reached; the panel keeps what it last showed.
@@ -1258,30 +1216,6 @@ final class DinoModel: ObservableObject {
         try await Task.detached { try DinoConnection(path: DinoEnvironment.socketPath).prFix(session: session) }.value
         showPR = false
         select(session)
-    }
-
-    /// Apply this member's changes to the checkout and close its fan-out.
-    func keep(_ m: MemberInfo) {
-        groupAction(["type": "keep", "session": m.session])
-    }
-
-    func discard(_ g: GroupInfo) {
-        groupAction(["type": "discard", "group": g.id])
-    }
-
-    private func groupAction(_ body: [String: Any]) {
-        Task.detached {
-            do {
-                _ = try DinoConnection(path: DinoEnvironment.socketPath).request(body)
-                let list = try DinoConnection(path: DinoEnvironment.socketPath).groups()
-                await MainActor.run {
-                    self.groups = list
-                    self.selected = nil
-                }
-            } catch {
-                await MainActor.run { self.error = error.localizedDescription }
-            }
-        }
     }
 
     func chooseFolder() {

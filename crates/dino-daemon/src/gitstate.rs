@@ -353,14 +353,13 @@ enum Job {
 
 /// Summaries of `w[1..]`, the worktrees of one repo (main checkout first, `paths` their real
 /// paths), next to `base`: what's known where nothing changed, read again where something did.
-/// `wanted`: whether a worktree gets one at all. `until`: no more reads after then; a worktree
-/// never read before is then still to be read (true beside it), the next look reads it.
+/// `until`: no more reads after then; a worktree never read before is then still to be read
+/// (true beside it), the next look reads it.
 pub(crate) fn summaries(
     d: &Daemon,
     w: &[worktree::Worktree],
     paths: &[String],
     base: &str,
-    wanted: impl Fn(&str) -> bool,
     until: Option<Instant>,
 ) -> Vec<(Option<worktree::Summary>, bool)> {
     let Some(first) = w.first() else { return Vec::new() };
@@ -374,9 +373,6 @@ pub(crate) fn summaries(
     {
         let mut known = d.summaries.lock().unwrap();
         for (i, (wt, path)) in w.iter().zip(paths).enumerate().skip(1) {
-            if !wanted(path) {
-                continue;
-            }
             let k = known.get_mut(path.as_str());
             let stamp = match (&watched, &wt.head) {
                 (Some((id, _)), Some(head)) if !base_tip.is_empty() => Some(Stamp {

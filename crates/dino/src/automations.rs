@@ -36,7 +36,7 @@ When (one; without any, it runs only when you run it):
 What it does (default: start the agent with the prompt):
   --agent <agent>               which agent (default: the first dino offers)
   --continue <session>          send the prompt into a session that's already there
-  --fan <agent,agent,…>         the prompt to several agents, a worktree each
+  --agents <agent,agent,…>      start several agents with the prompt, a worktree each
   --command <command>           run a command (sh -c, in the folder); with --then-agent failure
                                 or always, the agent after it, its output in the prompt
 
@@ -286,9 +286,6 @@ fn cmd_show(key: &str) -> anyhow::Result<()> {
         if let Some(s) = &r.session {
             head.push_str(&format!("  session {}", printable(s)));
         }
-        if let Some(g) = &r.group {
-            head.push_str(&format!("  fan-out {}", printable(g)));
-        }
         if r.attempt > 0 {
             head.push_str(&format!("  retry {}", r.attempt));
         }
@@ -326,7 +323,7 @@ fn cmd_show(key: &str) -> anyhow::Result<()> {
         }
     }
     if let Some(s) = t.history.iter().rev().find_map(|r| r.session.clone()) {
-        println!("\n{}", out::paint(&format!("`dino attach {s}` opens the last run; `dino diff {s}` shows a fan-out's changes."), Paint::Dim));
+        println!("\n{}", out::paint(&format!("`dino attach {s}` opens the last run."), Paint::Dim));
     }
     Ok(())
 }
@@ -491,8 +488,9 @@ fn apply(t: &mut ScheduledTask, args: &[String]) -> anyhow::Result<Option<String
                 t.action.kind = ActionKind::Continue;
                 t.action.session = val(&mut i, a)?;
             }
-            "--fan" => {
-                t.action.kind = ActionKind::Fanout;
+            // `--fan`: its name from before.
+            "--agents" | "--fan" => {
+                t.action.kind = ActionKind::Agents;
                 t.action.agents = val(&mut i, a)?.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             }
             "--command" => {

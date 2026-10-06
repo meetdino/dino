@@ -18,7 +18,6 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var last_model: String?
     var tier: String?
     var activity: String?
-    var group: String?
     /// Why the agent's last model call failed.
     var error: String?
     /// Where it runs, symlinks resolved; nil from an older dinod.
@@ -558,23 +557,6 @@ struct DiffStat: Codable, Equatable {
     var removed: UInt32
 }
 
-/// A fan-out: one prompt, several agents, each in its own worktree.
-struct GroupInfo: Codable, Identifiable, Equatable {
-    var id: String
-    var prompt: String
-    var repo: String
-    var members: [MemberInfo]
-}
-
-struct MemberInfo: Codable, Identifiable, Equatable {
-    var session: String
-    var launcher: String
-    var branch: String
-    var worktree: String
-    var stat: DiffStat?
-    var id: String { session }
-}
-
 /// A session's changes, per file (see worktree::changes).
 struct Changes: Codable, Equatable {
     /// The checkout the paths are in, and what they're compared with, in words.
@@ -668,15 +650,6 @@ private struct ForegroundResponse: Decodable {
 }
 
 private struct TextResponse: Decodable {
-    var text: String
-}
-
-private struct GroupsResponse: Decodable {
-    var groups: [GroupInfo]
-}
-
-private struct DiffResponse: Decodable {
-    var stat: DiffStat
     var text: String
 }
 
@@ -901,14 +874,6 @@ final class DinoConnection: @unchecked Sendable {
     /// Forget every usage statistic dino has kept.
     func clearStats() throws {
         _ = try send(["type": "stats_clear"])
-    }
-
-    func groups() throws -> [GroupInfo] {
-        try JSONDecoder().decode(GroupsResponse.self, from: send(["type": "groups"])).groups
-    }
-
-    func diff(session: String) throws -> String {
-        try JSONDecoder().decode(DiffResponse.self, from: send(["type": "diff", "session": session])).text
     }
 
     func changes(session: String) throws -> Changes {

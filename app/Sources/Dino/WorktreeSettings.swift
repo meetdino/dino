@@ -13,7 +13,7 @@ extension DinoSettings {
     }
 }
 
-/// Settings → Workspaces → Worktrees: where they go, trust for fan-outs, archiving after a PR,
+/// Settings → Workspaces → Worktrees: where they go, trust, archiving after a PR,
 /// and the ones on disk.
 struct WorktreesPane: View {
     @EnvironmentObject var store: SettingsStore
@@ -56,15 +56,15 @@ struct WorktreesPane: View {
                 Footnote("A relative location is created inside each repo and kept out of git status. An absolute location gets one folder per repo. Changes apply to new worktrees. Branches are named like \(prefixShown)claude-3f2a; an automation's runs are named after the automation.")
             }
             Section {
-                Toggle("Trust fan-out worktrees when the repo is trusted", isOn: Binding(
+                Toggle("Trust worktrees when the repo is trusted", isOn: Binding(
                     get: { store.settings?.policies.worktree_trust ?? true },
                     set: { on in store.update { $0.policies.worktree_trust = on } }
                 ))
                 .orgLocked("policies.worktree_trust")
             } header: {
-                Text("Fan-out")
+                Text("Trust")
             } footer: {
-                Footnote("Claude Code asks whether to trust every new folder, including each fan-out worktree. If you already trust the repo, dino marks its fan-out worktrees as trusted too, and removes them again when the fan-out closes. Codex handles this itself.")
+                Footnote("Claude Code asks whether to trust every new folder. It takes a worktree's trust from its repo, but not a trusted folder inside the repo: dino marks that same folder trusted in each worktree it makes, and removes the mark when the worktree is removed. Codex handles this itself.")
             }
             Section {
                 Toggle("Archive sessions after their PR merges or closes", isOn: Binding(
@@ -178,7 +178,6 @@ struct WorktreesPane: View {
     }
 
     private func removeHelp(_ w: StoredWorktree) -> String {
-        if w.fanout { return "Part of a fan-out. Keep or discard the fan-out instead." }
         if let s = w.session { return "\(s) is running in it" }
         if w.session_state == "ended" { return "Remove it. Its ended session is archived, and gets the worktree back from \(w.branch) when you restart it." }
         if w.dirty { return "Has uncommitted changes, so dino won't remove it" }
@@ -280,7 +279,6 @@ private struct StateChip: View {
             chip(label, color)
             if worktree.dirty, worktree.state != "in_progress" { chip("uncommitted", SessionStatus.needsYou.color) }
             if worktree.archived { chip("archived", .secondary) }
-            if worktree.fanout { chip("fan-out", .blue) }
             switch worktree.session_state {
             case "working": chip("working", Brand.green)
             case "idle": chip("idle", Brand.green)

@@ -108,7 +108,7 @@ struct SubagentPane: View {
     private var running: Bool { known?.running ?? detail?.running ?? false }
     private var place: PlaceNode? {
         guard let path else { return nil }
-        return SessionTree.build(repos: model.repos, sessions: model.sessions, groups: model.groups)
+        return SessionTree.build(repos: model.repos, sessions: model.sessions)
             .repos.lazy.flatMap(\.allPlaces).first { $0.path == path }
     }
 
