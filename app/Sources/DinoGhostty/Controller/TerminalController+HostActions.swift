@@ -414,6 +414,14 @@ extension TerminalController {
         return UInt64(ms)
     }
 
+    /// A count or size config value as Ghostty resolved it (`scrollback-limit`, in bytes).
+    public func configCount(_ key: String) -> UInt64? {
+        guard let config else { return nil }
+        var n: UInt = 0
+        guard ghostty_config_get(config, &n, key, UInt(key.utf8.count)) else { return nil }
+        return UInt64(n)
+    }
+
     /// A floating-point config value (`quick-terminal-animation-duration`, `bell-audio-volume`).
     /// Ghostty writes an f64 for its f64 keys and an f32 for its f32 keys: `single` reads the latter.
     public func configNumber(_ key: String, single: Bool = false) -> Double? {

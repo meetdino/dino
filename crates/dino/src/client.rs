@@ -97,9 +97,16 @@ fn start_attach(id: &str, cols: u16, rows: u16) -> io::Result<UnixStream> {
     attach_on(connect()?, id, cols, rows, false)
 }
 
+/// How much scrollback the terminal this runs in keeps, in bytes, when it says
+/// (`DINO_SCROLLBACK_LIMIT`, Ghostty's `scrollback-limit` in a dino pane): the session's replay
+/// brings that much rather than a short one.
+fn scrollback() -> Option<u64> {
+    std::env::var("DINO_SCROLLBACK_LIMIT").ok()?.parse().ok()
+}
+
 /// `wait`: if the session has ended, answer once it's resumed.
 fn attach_on(mut s: UnixStream, id: &str, cols: u16, rows: u16, wait: bool) -> io::Result<UnixStream> {
-    ipc::write_json(&mut s, &Request::Attach { id: id.into(), cols, rows, wait })?;
+    ipc::write_json(&mut s, &Request::Attach { id: id.into(), cols, rows, wait, scrollback: scrollback() })?;
     let (_, payload) = ipc::read_frame(&mut s)?;
     match serde_json::from_slice(&payload).map_err(io::Error::other)? {
         Response::Ok => Ok(s),

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -13,9 +13,9 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
 use alacritty_terminal::term::{Config, TermMode};
-use alacritty_terminal::vte::ansi::{Color as AColor, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{Color as AColor, Handler, Hyperlink as VteHyperlink, NamedColor, Processor, Rgb};
 use alacritty_terminal::Term;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -86,9 +86,37 @@ const ALT_OFF: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"];
 const KEEP_ALT_WITHIN: Duration = Duration::from_secs(10);
 
 /// The OSC sequences dino reads, which the parser drops: `ESC ] <kind> ; text`, ended by BEL or
-/// ST. 9 is a desktop notification, 7 the folder a shell is in, 133 a shell's prompt marks.
+/// ST. 9 is a desktop notification, 7 the folder a shell is in, 133 a shell's prompt marks, and 8
+/// a hyperlink (the parser keeps those; dino only needs to know when one ends, see [`MARK`]).
 const OSC: &[u8] = b"\x1b]";
-const READ: [&str; 3] = ["9", "7", "133"];
+const READ: [&str; 4] = ["9", "7", "133", "8"];
+
+/// What the shell's prompt marks (OSC 133) say the cells written next are, kept on those cells the
+/// way Ghostty keeps them: prompt, input, or (the default) a command's output. The emulator has no
+/// such field, so the cursor carries the mark as a hyperlink no program can send (its URI starts
+/// with a control character), set while the shell is in the prompt or its input and gone for
+/// output. A replay turns them back into the marks (see [`Spans`]), so `jump_to_prompt` and the
+/// like work on what came before a reattach.
+const MARK: &str = "\u{1}dino-133;";
+
+/// Scrollback lines kept for new panes (see [`keep_history`]): the emulator's own default until a
+/// client asks for more.
+static HISTORY: AtomicUsize = AtomicUsize::new(10_000);
+
+/// The most scrollback lines a pane keeps, whatever a client asks for.
+pub const MAX_HISTORY: usize = 100_000;
+
+/// Keep at least `lines` of scrollback in panes started from now on (up to [`MAX_HISTORY`]).
+pub fn keep_history(lines: usize) {
+    HISTORY.fetch_max(lines.min(MAX_HISTORY), Ordering::Relaxed);
+}
+
+/// The scrollback lines that fit in `bytes` of a terminal `cols` wide, as Ghostty counts its
+/// `scrollback-limit`: 8 bytes a cell and 8 a row.
+pub fn history_lines(bytes: u64, cols: u16) -> usize {
+    let row = cols.max(1) as u64 * 8 + 8;
+    ((bytes / row) as usize).min(MAX_HISTORY)
+}
 
 /// Longer than any of those worth reading: an unended one this long is dropped, not kept waiting.
 const OSC_MAX: usize = 4096;
@@ -156,6 +184,8 @@ pub struct Shared {
     looking_again: AtomicBool,
     /// Look for password prompts at all (on by default; dinod turns it off for agents).
     pub watch_password: AtomicBool,
+    /// Scrollback lines this pane's emulator keeps.
+    history: AtomicUsize,
 }
 
 /// How long after a short write the terminal is looked at again: zsh's `read -s` prints its
@@ -284,6 +314,13 @@ struct Feed {
     /// Where the running command's output began (OSC 133 C), counted from the top of the
     /// scrollback, and the scrollback size then (so a full scrollback dropping lines is seen).
     output_from: Option<(usize, usize)>,
+    /// The prompt mark the shell is in (OSC 133's text, `A;…` or `B`), none for output: what
+    /// the cursor writes into cells (see [`MARK`]).
+    mark: Option<String>,
+    /// A program's own hyperlink is open: its cells carry that instead of the mark.
+    in_link: bool,
+    /// The last prompt's start mark (`A;…`), for a prompt the shell draws again.
+    prompt: Option<String>,
 }
 
 /// The alternate screen as it was when the program last left it.
@@ -330,9 +367,10 @@ impl Pane {
             on_password: OnceLock::new(),
             looking_again: AtomicBool::new(false),
             watch_password: AtomicBool::new(true),
+            history: AtomicUsize::new(HISTORY.load(Ordering::Relaxed)),
         });
         let term = new_term(&shared, cols, rows);
-        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, osc: Vec::new(), output_from: None };
+        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, osc: Vec::new(), output_from: None, mark: None, in_link: false, prompt: None };
         Self { term: Arc::new(FairMutex::new(term)), feed: Mutex::new(feed), shared, killer: Mutex::new(None), pid: OnceLock::new() }
     }
 
@@ -465,31 +503,82 @@ impl Pane {
                         }
                     }
                 }
-                "133" => match text.split(';').collect::<Vec<_>>()[..] {
-                    ["A", ..] => {
-                        s.prompts.fetch_add(1, Ordering::Relaxed);
-                    }
-                    ["C", ..] => {
-                        Self::parse(term, feed, &bytes[fed..end.max(fed)]);
-                        fed = end.max(fed);
-                        let grid = term.grid();
-                        let alt = term.mode().contains(TermMode::ALT_SCREEN);
-                        feed.output_from = (!alt).then(|| (grid.history_size() + grid.cursor.point.line.0.max(0) as usize, grid.history_size()));
-                    }
-                    ["D", ref rest @ ..] => {
-                        *s.last_exit.lock().unwrap() = rest.first().and_then(|c| c.parse().ok());
-                        Self::parse(term, feed, &bytes[fed..end.max(fed)]);
-                        fed = end.max(fed);
-                        if let Some(from) = feed.output_from.take() {
-                            *s.last_output.lock().unwrap() = output_since(term, from);
+                "133" => {
+                    Self::parse(term, feed, &bytes[fed..end.max(fed)]);
+                    fed = end.max(fed);
+                    match text.split(';').collect::<Vec<_>>()[..] {
+                        ["A" | "N", ..] => {
+                            s.prompts.fetch_add(1, Ordering::Relaxed);
+                            feed.mark = Some(text.clone());
+                            feed.prompt = Some(text.clone());
                         }
+                        ["P", ..] => feed.mark = Some(text.clone()),
+                        ["B" | "I", ..] => {
+                            // Its end again with no new start: the shell drew its prompt again (a
+                            // resize, a redraw), over the line, while the mark said input.
+                            if feed.mark.as_deref() == Some("B") {
+                                if let Some(prompt) = &feed.prompt {
+                                    Self::remark_prompt(term, prompt);
+                                }
+                            }
+                            feed.mark = Some("B".into());
+                        }
+                        ["C", ..] => {
+                            feed.mark = None;
+                            let grid = term.grid();
+                            let alt = term.mode().contains(TermMode::ALT_SCREEN);
+                            feed.output_from = (!alt).then(|| (grid.history_size() + grid.cursor.point.line.0.max(0) as usize, grid.history_size()));
+                        }
+                        ["D", ref rest @ ..] => {
+                            feed.mark = None;
+                            *s.last_exit.lock().unwrap() = rest.first().and_then(|c| c.parse().ok());
+                            if let Some(from) = feed.output_from.take() {
+                                *s.last_output.lock().unwrap() = output_since(term, from);
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                    Self::mark(term, feed);
+                }
+                // A program's hyperlink: the parser opened or closed it; once closed, the cells
+                // after it carry the prompt mark again.
+                "8" => {
+                    Self::parse(term, feed, &bytes[fed..end.max(fed)]);
+                    fed = end.max(fed);
+                    feed.in_link = !text.split_once(';').is_none_or(|(_, uri)| uri.is_empty());
+                    if !feed.in_link {
+                        Self::mark(term, feed);
+                    } else if let (Some(m), Some(h)) = (&feed.mark, term.grid().cursor.template.hyperlink()) {
+                        // Opened in a prompt: its cells carry the mark in the link's id.
+                        term.set_hyperlink(Some(VteHyperlink { id: Some(format!("{MARK}{m}\u{1}{}", h.id())), uri: h.uri().into() }));
+                    }
+                }
                 _ => {}
             }
         }
         Self::parse(term, feed, &bytes[fed..]);
+    }
+
+    /// The cells before the cursor on its line that say input are the prompt (`prompt`'s mark).
+    fn remark_prompt(term: &mut Term<Listener>, prompt: &str) {
+        let input = format!("{MARK}B");
+        let point = term.grid().cursor.point;
+        let mark = Hyperlink::new(Some("dino-133"), format!("{MARK}{prompt}"));
+        let row = &mut term.grid_mut()[point.line];
+        for c in 0..point.column.0.min(row.len()) {
+            let cell = &mut row[Column(c)];
+            if cell.hyperlink().is_some_and(|h| h.uri() == input) {
+                cell.set_hyperlink(Some(mark.clone()));
+            }
+        }
+    }
+
+    /// The cursor writes the prompt mark the shell is in (see [`MARK`]), unless a program's own
+    /// hyperlink is open.
+    fn mark(term: &mut Term<Listener>, feed: &Feed) {
+        if !feed.in_link {
+            term.set_hyperlink(feed.mark.as_ref().map(|m| VteHyperlink { id: Some("dino-133".into()), uri: format!("{MARK}{m}") }));
+        }
     }
 
     /// Feed the parser, noting what the alternate screen showed each time the program leaves it.
@@ -577,6 +666,14 @@ impl Pane {
         self.term.lock().resize(TermSize { cols: cols as usize, rows: rows as usize });
         if let Some(t) = self.shared.transport.get() {
             t.resize(cols, rows);
+        }
+    }
+
+    /// Keep at least `lines` of scrollback from now on (up to [`MAX_HISTORY`]).
+    pub fn keep_history(&self, lines: usize) {
+        let lines = lines.min(MAX_HISTORY);
+        if self.shared.history.fetch_max(lines, Ordering::Relaxed) < lines {
+            self.term.lock().set_options(config(lines));
         }
     }
 
@@ -680,15 +777,28 @@ impl Pane {
         let hist = if alt { 0 } else { grid.history_size().min(history) as i32 };
         let rows = grid.screen_lines() as i32;
         let cols = grid.columns();
+        let mut spans = Spans::default();
+        let mut wrapped = false;
         for (n, line) in (-hist..rows).enumerate() {
-            if n > 0 {
+            // A row the text ran on from goes on without a line break, so the terminal wraps it
+            // itself and can rewrap it when its width changes.
+            if n > 0 && !wrapped {
                 out.push_str("\r\n");
             }
-            out.push_str(&styled_row(&grid[Line(line)], cols));
+            let row = &grid[Line(line)];
+            wrapped = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+            out.push_str(&spans.row(row, cols, wrapped));
             out.push_str("\x1b[0m");
         }
         let cursor = term.grid().cursor.point;
         out.push_str(&format!("\x1b[{};{}H", cursor.line.0 + 1, cursor.column.0 + 1));
+        // Whatever the shell is in now (its prompt, the line being typed) goes on from the cursor.
+        if !alt {
+            let live = self.feed.lock().unwrap().mark.as_deref().map(Semantic::of).unwrap_or(Semantic::Output);
+            if live != spans.semantic {
+                out.push_str(&live.mark(false));
+            }
+        }
         let set = |on: bool, code: &str, out: &mut String| {
             if on {
                 out.push_str(&format!("\x1b[?{code}h"));
@@ -747,9 +857,13 @@ impl Drop for Pane {
     }
 }
 
+fn config(history: usize) -> Config {
+    Config { kitty_keyboard: true, scrolling_history: history, ..Config::default() }
+}
+
 fn new_term(shared: &Arc<Shared>, cols: u16, rows: u16) -> Term<Listener> {
-    let config = Config { kitty_keyboard: true, ..Config::default() };
-    Term::new(config, &TermSize { cols: cols as usize, rows: rows as usize }, Listener(shared.clone()))
+    let history = shared.history.load(Ordering::Relaxed);
+    Term::new(config(history), &TermSize { cols: cols as usize, rows: rows as usize }, Listener(shared.clone()))
 }
 
 /// The OSCs dino reads (see [`READ`]) in `bytes`, as their kind, text and where in `bytes` they
@@ -886,25 +1000,94 @@ fn screen_rows(term: &Term<Listener>) -> Vec<String> {
 /// A row as text with its colors and attributes, without trailing default blanks (a fresh
 /// terminal is already blank there); empty when the row is blank.
 fn styled_row(row: &Row<Cell>, cols: usize) -> String {
-    let end = (0..cols).rev().find(|&c| !is_blank(&row[Column(c)])).map_or(0, |c| c + 1);
-    let mut out = String::new();
-    let mut last = String::new();
-    for c in 0..end {
-        let cell = &row[Column(c)];
-        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-            continue;
-        }
-        let sgr = sgr(cell);
-        if sgr != last {
-            out.push_str(&sgr);
-            last = sgr;
-        }
-        out.push(cell.c);
-        if let Some(extra) = cell.zerowidth() {
-            out.extend(extra);
-        }
+    Spans::default().row(row, cols, false)
+}
+
+/// What a cell is to the shell's prompt marks (see [`MARK`]), as Ghostty keeps it per cell.
+#[derive(Clone, Debug, PartialEq, Default)]
+enum Semantic {
+    /// The prompt, with its OSC 133 text (`A;cl=line`, `P;k=s`).
+    Prompt(String),
+    Input,
+    #[default]
+    Output,
+}
+
+impl Semantic {
+    fn of(mark: &str) -> Self {
+        if mark.starts_with('B') { Self::Input } else { Self::Prompt(mark.into()) }
     }
-    out
+
+    /// The OSC 133 mark that starts this, `fresh` at the start of a line: a prompt anywhere else
+    /// is marked without the fresh line `A` would start.
+    fn mark(&self, fresh: bool) -> String {
+        let text = match self {
+            Self::Prompt(t) if fresh || t.starts_with('P') => t.as_str(),
+            Self::Prompt(_) => "P;k=i",
+            Self::Input => "B",
+            Self::Output => "C",
+        };
+        format!("\x1b]133;{text}\x1b\\")
+    }
+}
+
+/// What carries over from cell to cell as rows are written out: their prompt marks.
+#[derive(Default)]
+struct Spans {
+    semantic: Semantic,
+}
+
+impl Spans {
+    /// `row` with its colors and attributes, hyperlinks (OSC 8) and prompt marks (OSC 133). Without
+    /// trailing default blanks (a fresh terminal is already blank there), unless the text runs on
+    /// to the next row (`wraps`): then every cell, up to where it wrapped.
+    fn row(&mut self, row: &Row<Cell>, cols: usize, wraps: bool) -> String {
+        let end = if wraps { cols } else { (0..cols).rev().find(|&c| !is_blank(&row[Column(c)])).map_or(0, |c| c + 1) };
+        let mut out = String::new();
+        let mut last = String::new();
+        let mut link: Option<(String, String)> = None;
+        for c in 0..end {
+            let cell = &row[Column(c)];
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let h = cell.hyperlink();
+            let (mark, real) = match &h {
+                Some(h) if h.uri().starts_with(MARK) => (Some(Semantic::of(&h.uri()[MARK.len()..])), None),
+                // A program's link opened in a prompt: the mark is in its id.
+                Some(h) => match h.id().strip_prefix(MARK).and_then(|r| r.split_once('\u{1}')) {
+                    Some((m, id)) => (Some(Semantic::of(m)), Some((id.to_string(), h.uri().to_string()))),
+                    None => (Some(Semantic::Output), Some((h.id().to_string(), h.uri().to_string()))),
+                },
+                // A cell no mark was on is output, the default.
+                None => (Some(Semantic::Output), None),
+            };
+            if let Some(m) = mark.filter(|m| *m != self.semantic) {
+                out.push_str(&m.mark(c == 0));
+                self.semantic = m;
+            }
+            if real != link {
+                match &real {
+                    Some((id, uri)) => out.push_str(&format!("\x1b]8;id={id};{uri}\x1b\\")),
+                    None => out.push_str("\x1b]8;;\x1b\\"),
+                }
+                link = real;
+            }
+            let sgr = sgr(cell);
+            if sgr != last {
+                out.push_str(&sgr);
+                last = sgr;
+            }
+            out.push(cell.c);
+            if let Some(extra) = cell.zerowidth() {
+                out.extend(extra);
+            }
+        }
+        if link.is_some() {
+            out.push_str("\x1b]8;;\x1b\\");
+        }
+        out
+    }
 }
 
 fn window_size(cols: u16, rows: u16) -> WindowSize {
@@ -1231,5 +1414,97 @@ mod tests {
         p.feed(b"\x1b[?2004h");
         p.paste("fix it\x1b[201~\x1b[Z\x7f\u{85}\tnow\n");
         assert_eq!(sent.drain(), "\x1b[200~fix it[201~[Z\tnow\n\x1b[201~");
+    }
+
+    /// The OSC 133 marks and hyperlinks in a replay, in order, as `A`, `B`, `C`, `link:<uri>`
+    /// and `/link`.
+    fn marks(replay: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(replay);
+        let mut out = vec![];
+        let mut rest = text.as_ref();
+        while let Some(i) = rest.find("\x1b]") {
+            let body = &rest[i + 2..];
+            let end = body.find("\x1b\\").or_else(|| body.find('\x07')).unwrap();
+            let osc = &body[..end];
+            if let Some(m) = osc.strip_prefix("133;") {
+                out.push(m.to_string());
+            } else if let Some(l) = osc.strip_prefix("8;") {
+                let uri = l.split_once(';').map_or("", |(_, u)| u);
+                out.push(if uri.is_empty() { "/link".into() } else { format!("link:{uri}") });
+            }
+            rest = &body[end..];
+        }
+        out
+    }
+
+    /// Two commands at a prompt, then a third being typed: what a shell with integration prints.
+    const SESSION: &[u8] = b"\x1b]133;A;cl=line\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a.txt\r\n\x1b]133;D;0\x07\
+        \x1b]133;A;cl=line\x07$ \x1b]133;B\x07cat a.txt\r\n\x1b]133;C\x07see \x1b]8;;https://example.com/x\x1b\\the docs\x1b]8;;\x1b\\ here\r\n\
+        \x1b]133;D;0\x07\x1b]133;A;cl=line\x07$ \x1b]133;B\x07gi";
+
+    #[test]
+    fn a_replay_keeps_the_prompt_marks_and_links() {
+        let p = Pane::emulator(40, 12, false);
+        p.feed(SESSION);
+        let replay = p.replay(100);
+        assert_eq!(
+            marks(&replay),
+            ["A;cl=line", "B", "C", "A;cl=line", "B", "C", "link:https://example.com/x", "/link", "A;cl=line", "B"],
+            "{}",
+            String::from_utf8_lossy(&replay)
+        );
+        assert_eq!(p.text(100), "$ ls\na.txt\n$ cat a.txt\nsee the docs here\n$ gi");
+        // Brought back from a replay (a saved screen, a reattach of a reattach): the same again.
+        let again = Pane::ended(&replay, 40, 12, None);
+        assert_eq!(marks(&again.replay(100)), marks(&replay));
+        assert_eq!(again.text(100), p.text(100));
+    }
+
+    #[test]
+    fn the_prompt_just_shown_is_marked_where_the_cursor_is() {
+        let p = Pane::emulator(40, 6, false);
+        p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        // Nothing typed yet: the input mark goes after the cursor's position.
+        let replay = String::from_utf8(p.replay(10)).unwrap();
+        assert!(replay.ends_with("\x1b[1;3H\x1b]133;B\x1b\\"), "{replay:?}");
+        // A program's link inside the prompt doesn't lose the input mark after it.
+        let p = Pane::emulator(40, 6, false);
+        p.feed(b"\x1b]133;A\x07\x1b]8;;file:///tmp\x1b\\tmp\x1b]8;;\x1b\\ $ \x1b]133;B\x07x");
+        assert_eq!(marks(&p.replay(10)), ["A", "link:file:///tmp", "/link", "B"]);
+    }
+
+    #[test]
+    fn a_prompt_drawn_again_is_still_the_prompt() {
+        // zsh's prompt ends with the input mark; on a resize it draws the line again.
+        let p = Pane::emulator(40, 6, false);
+        p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07ls");
+        p.feed(b"\r\x1b[K$ \x1b]133;B\x07ls");
+        assert_eq!(marks(&p.replay(10)), ["A", "B"]);
+    }
+
+    #[test]
+    fn a_wrapped_line_stays_one_line() {
+        let p = Pane::emulator(10, 4, false);
+        p.feed(b"abcdefghijKLM\r\nnext");
+        let replay = String::from_utf8(p.replay(10)).unwrap();
+        assert!(!replay.contains("j\x1b[0m\r\n"), "{replay:?}");
+        // A wider terminal gets it as one line.
+        let wide = Pane::emulator(20, 4, false);
+        wide.feed(replay.as_bytes());
+        assert_eq!(wide.text(10), "abcdefghijKLM\nnext");
+    }
+
+    #[test]
+    fn scrollback_follows_what_the_client_keeps() {
+        // Ghostty's default 10 MB at 120 columns.
+        assert_eq!(history_lines(10_000_000, 120), 10_330);
+        assert_eq!(history_lines(u64::MAX, 80), MAX_HISTORY);
+        let p = Pane::emulator(20, 3, false);
+        p.keep_history(20_000);
+        let lines: String = (0..15_000).map(|i| format!("line {i}\r\n")).collect();
+        p.feed(lines.as_bytes());
+        let text = p.text(usize::MAX);
+        assert!(text.starts_with("line 0\n"), "{}", &text[..40]);
+        assert_eq!(p.replay(12_000).split(|&b| b == b'\n').count(), 12_000 + 3);
     }
 }

@@ -156,6 +156,11 @@ pub enum Request {
         rows: u16,
         #[serde(default)]
         wait: bool,
+        /// The client's own scrollback, in bytes as Ghostty's `scrollback-limit` counts them: the
+        /// replay brings that much (and the session keeps it from then on). Without it, a shorter
+        /// replay, for a terminal whose own scrollback shouldn't fill with it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrollback: Option<u64>,
     },
     /// Start the agent of a session that ended again, in place, continuing its conversation.
     Resume { id: String },

@@ -18,7 +18,8 @@ models. Changes from upstream:
 - `TerminalSurfaceStateDelegate`: a delegate standing in front of a `TerminalViewState` says which,
   so actions name the right surface.
 - `TerminalController.configText`/`configFlag`/`configColor`/`configBits`/`configMilliseconds`/
-  `configNumber`/`configPath`/`configQuickTerminalSize`: a config value as Ghostty resolved it;
+  `configCount`/`configNumber`/`configPath`/`configQuickTerminalSize`: a config value as Ghostty
+  resolved it;
   `configTrigger`: the key an action is bound to, as a Mac key code and Carbon modifiers.
 - `TerminalHostAction` types `progressReport`, `desktopNotification`, `commandFinished` and
   `ringBell` (`TerminalActionEvent.isPaneSignal`), so a host can take them before the wrapper

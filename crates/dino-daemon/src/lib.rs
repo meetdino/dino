@@ -73,8 +73,12 @@ fn without_restart_marks(screen: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Scrollback lines replayed to a newly attached client.
+/// Scrollback lines replayed to a newly attached client that doesn't say how much it keeps.
 const REPLAY_HISTORY: usize = 2000;
+
+/// Scrollback lines the last client that said how much it keeps asked for: an ended session's
+/// screen is saved with that many.
+static REPLAY: AtomicUsize = AtomicUsize::new(REPLAY_HISTORY);
 
 struct Session {
     id: String,
@@ -1332,7 +1336,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     Response::Error { message: format!("{id} can't be reopened anymore") }
                 }
             }
-            Request::Attach { id, cols, rows, wait } => {
+            Request::Attach { id, cols, rows, wait, scrollback } => {
                 let session = loop {
                     match attachable(d, &id) {
                         // Restarting: wait for the one taking its place.
@@ -1347,7 +1351,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 };
                 return match session {
-                    Some(s) => attach(d, &s, stream, cols, rows),
+                    Some(s) => attach(d, &s, stream, cols, rows, scrollback),
                     None => ipc::write_json(&mut stream, &Response::Error { message: format!("no session {id}") }),
                 };
             }
@@ -2351,7 +2355,15 @@ fn ended_note(d: &Daemon, s: &Arc<Session>) -> Vec<u8> {
 }
 
 /// Stream a session to a client until it detaches or the session ends.
-fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, rows: u16) -> io::Result<()> {
+fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, rows: u16, scrollback: Option<u64>) -> io::Result<()> {
+    // As much scrollback as the client keeps (Ghostty's `scrollback-limit`), kept from now on by
+    // this session and the ones started after it.
+    let history = scrollback.map_or(REPLAY_HISTORY, |bytes| dino_term::history_lines(bytes, cols));
+    if scrollback.is_some() {
+        dino_term::keep_history(history);
+        s.pane.keep_history(history);
+        REPLAY.store(history, Ordering::Relaxed);
+    }
     ipc::write_json(&mut stream, &Response::Ok)?;
     s.poke();
     let sub_id = d.next_sub.fetch_add(1, Ordering::Relaxed);
@@ -2363,7 +2375,7 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
     s.pane.shared.answer_queries.store(false, Ordering::Relaxed);
 
     let (tx, rx) = channel::<Vec<u8>>();
-    let replay = s.pane.replay_then(REPLAY_HISTORY, |bytes| {
+    let replay = s.pane.replay_then(history, |bytes| {
         s.subscribers.lock().unwrap().push((sub_id, tx));
         bytes
     });
@@ -2393,7 +2405,7 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
             if ended {
                 // A fullscreen agent ends on its last screen, not the one it switched back to.
                 if s2.pane.shared.kept_alt.load(Ordering::Relaxed) {
-                    let screen = [b"\x1b[H\x1b[2J\x1b[3J".as_slice(), &s2.pane.replay(REPLAY_HISTORY)].concat();
+                    let screen = [b"\x1b[H\x1b[2J\x1b[3J".as_slice(), &s2.pane.replay(history)].concat();
                     let _ = ipc::write_frame(&mut out, ipc::DATA, &screen);
                 }
                 let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
@@ -2992,7 +3004,7 @@ fn save(d: &Daemon) {
             .truncate(true)
             .mode(0o600)
             .open(dir.join(&s.id))
-            .and_then(|mut f| io::Write::write_all(&mut f, &s.pane.replay(REPLAY_HISTORY)));
+            .and_then(|mut f| io::Write::write_all(&mut f, &s.pane.replay(REPLAY.load(Ordering::Relaxed))));
         s.screen_saved.store(written.is_ok(), Ordering::Relaxed);
     }
     // A screen whose session was resumed or removed goes.
@@ -5101,7 +5113,7 @@ while (sysread(STDIN, my $c, 1)) {
         let (mut client, server) = UnixStream::pair().unwrap();
         let d2 = d.clone();
         std::thread::spawn(move || serve(&d2, server));
-        ipc::write_json(&mut client, &Request::Attach { id: id.clone(), cols: 80, rows: 24, wait: false }).unwrap();
+        ipc::write_json(&mut client, &Request::Attach { id: id.clone(), cols: 80, rows: 24, wait: false, scrollback: None }).unwrap();
         client.set_read_timeout(Some(std::time::Duration::from_millis(400))).unwrap();
         let mut b = [0u8; 1];
         let early = io::Read::read(&mut client, &mut b);

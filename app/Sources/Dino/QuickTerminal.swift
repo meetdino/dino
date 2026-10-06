@@ -342,7 +342,7 @@ final class QuickTerminal: NSObject, NSWindowDelegate {
         let t = TerminalViewState(controller: DinoModel.terminals)
         t.configuration = TerminalSurfaceOptions(
             backend: .exec,
-            envVars: ["PATH": DinoEnvironment.loginPath, "DINO_HOME": DinoEnvironment.home],
+            envVars: DinoModel.attachEnv,
             command: "\(DinoEnvironment.dinoBinary) attach --fresh \(id)",
             waitAfterCommand: false
         )
