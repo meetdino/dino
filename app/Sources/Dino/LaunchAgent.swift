@@ -23,7 +23,8 @@ enum DinodAgent {
     static let bundled: (plist: String, label: String, data: Data)? = {
         let dir = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchAgents")
         let own = canonical(DinoEnvironment.home)
-        for url in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] where url.pathExtension == "plist" {
+        // Not the agent from before `DinodHost` (`<bundle>.dinod`), carried only to be unregistered.
+        for url in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] where url.pathExtension == "plist" && url.lastPathComponent.contains(".dinod-host") {
             guard let data = try? Data(contentsOf: url),
                   let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                   let label = plist["Label"] as? String else { continue }
@@ -88,10 +89,11 @@ enum DinodAgent {
 
     /// The agent from before `DinodHost` (`<bundle>.dinod…`, which ran Contents/Helpers/dino):
     /// launchd keeps an agent's launch constraint from when it was first registered, so the
-    /// app's executable couldn't run under it, and this one has a name of its own. The old one goes
-    /// once dinod has stopped (unregistering it stops what it runs).
-    private static func retirePredecessor() {
-        guard let bundled, bundled.label.contains(".dinod-host") else { return }
+    /// app's executable couldn't run under it, and this one has a name of its own. The old one is
+    /// unregistered (the bundle carries its plist for that) once it isn't running dinod: dinod
+    /// stopped, or running under this one. Unregistering it would stop what it runs.
+    static func retirePredecessor() {
+        guard let bundled else { return }
         let old = SMAppService.agent(plistName: bundled.plist.replacingOccurrences(of: ".dinod-host", with: ".dinod"))
         if old.status == .enabled || old.status == .requiresApproval { try? old.unregister() }
     }
