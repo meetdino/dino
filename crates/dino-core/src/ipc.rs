@@ -955,9 +955,10 @@ pub struct FallbackInfo {
     pub provider: String,
     pub name: String,
     pub model: String,
-    /// The route it uses otherwise: "Claude", "GLM Coding Plan".
+    /// The route it uses otherwise: "Claude", "GLM Coding Plan"; for "unavailable", the model.
     pub from: String,
-    /// "limit", "balance" or "outage".
+    /// "limit", "balance", "outage", or "unavailable": ChatGPT rejects the Codex model it asks
+    /// for (`from`), and another its account lists answers (`model`).
     pub reason: String,
     /// What that route said.
     pub said: String,

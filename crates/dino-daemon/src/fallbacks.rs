@@ -67,9 +67,23 @@ pub(crate) fn set(d: &Daemon, settings: &Settings, s: &Session) {
     d.proxy.set_fallback(&s.id, chain(settings, &s.agent_id, s.route.as_ref(), s.host.as_deref()));
 }
 
-/// Where session `st` is answered from, when it's a fallback.
+/// Where session `st` is answered from, when it's a fallback: another route, or another of its
+/// Codex account's models while ChatGPT rejects the one it asks for (reason "unavailable").
 pub(crate) fn info(st: &SessionStats) -> Option<FallbackInfo> {
-    let f = st.fallback.as_ref()?;
+    let Some(f) = st.fallback.as_ref() else {
+        let s = st.substitute.as_ref()?;
+        return Some(FallbackInfo {
+            provider: "chatgpt".into(),
+            name: "ChatGPT".into(),
+            model: s.using.clone(),
+            from: s.rejected.clone(),
+            reason: "unavailable".into(),
+            said: s.said.clone(),
+            resets_at: None,
+            retry_at: None,
+            since: s.since,
+        });
+    };
     Some(FallbackInfo {
         provider: provider_of_route(&f.route).unwrap_or_else(|| f.route.clone()),
         name: f.name.clone(),
