@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
-  <a href="https://github.com/meetdino/dino-releases/releases/latest"><img src="https://img.shields.io/github/v/release/meetdino/dino-releases?label=release" alt="Latest release"></a>
+  <a href="https://github.com/meetdino/dino/releases/latest"><img src="https://img.shields.io/github/v/release/meetdino/dino?label=release" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-lightgrey?logo=apple" alt="macOS 14 or later">
 </p>
 
@@ -36,7 +36,7 @@ macOS 14 or later, on Apple silicon.
 brew install meetdino/tap/dino
 ```
 
-Or download [Dino.dmg](https://github.com/meetdino/dino-releases/releases/latest/download/Dino.dmg).
+Or download [Dino.dmg](https://github.com/meetdino/dino/releases/latest/download/Dino.dmg).
 Both include the `dino` command. For just the command line:
 
 ```sh

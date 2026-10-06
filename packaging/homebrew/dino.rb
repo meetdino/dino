@@ -4,8 +4,7 @@ cask "dino" do
   version "@VERSION@"
   sha256 "@DMG_SHA256@"
 
-  url "https://github.com/@RELEASES_REPO@/releases/download/v#{version}/Dino-#{version}-@LABEL@.dmg",
-      verified: "github.com/@RELEASES_REPO@/"
+  url "https://github.com/@RELEASES_REPO@/releases/download/v#{version}/Dino-#{version}-@LABEL@.dmg"
   name "dino"
   desc "Terminal for the agent era, on Ghostty's core"
   homepage "https://meetdino.com/"

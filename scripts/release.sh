@@ -12,8 +12,8 @@
 #   APPLE_ID, TEAM_ID, APPLE_PASSWORD (app-specific password), or
 #   NOTARY_KEY, NOTARY_KEY_ID, NOTARY_ISSUER (App Store Connect API key, for CI)
 # Without them the app is signed ad hoc, which Gatekeeper refuses for downloads.
-#   RELEASES_REPO      the binaries-only GitHub repository the files are published to
-#                      (default meetdino/dino-releases); the tap's URLs point at its releases
+#   RELEASES_REPO      the GitHub repository the release is published in (default meetdino/dino, this
+#                      one); the update feed, the appcast's downloads and the tap's URLs point at its releases
 #
 # Updates (the app through Sparkle, an install.sh `dino` through dinod) need the release key:
 #   DINO_RELEASE_KEY   its private half, a file outside any repository (scripts/release-key.swift).
@@ -33,7 +33,7 @@ cd "$ROOT"
 VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 BUILD_ID="$(dino_build_id "$ROOT")"
-RELEASES_REPO="${RELEASES_REPO:-meetdino/dino-releases}"
+RELEASES_REPO="${RELEASES_REPO:-meetdino/dino}"
 BUNDLE_ID="${DINO_BUNDLE_ID:-dev.dino.app}"
 ARCHS="${ARCHS:-$(uname -m)}"
 DIST="${DIST:-$ROOT/dist}"
@@ -192,6 +192,8 @@ mkdir -p "$D"
 cp "$DMG" "$DIST/$TAR" "$DIST/SHA256SUMS" "$D/"
 if [ -n "$KEY" ]; then cp "$DIST/$ZIP" "$DIST/appcast.xml" "$D/"; fi
 echo "$VERSION" > "$DIST/download/dino/latest"
+# The commit this was built from, which publish.sh tags; only when nothing uncommitted went in.
+case "$BUILD_ID" in ""|*-dirty*) ;; *) git rev-parse HEAD > "$DIST/commit" ;; esac
 cp scripts/install.sh "$DIST/download/install.sh"
 
 # The app stays here for publish.sh to check, but isn't one LaunchServices opens: `open -b`,

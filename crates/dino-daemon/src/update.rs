@@ -21,7 +21,7 @@ use crate::Daemon;
 /// `DINO_UPDATE_FEED` at run time points elsewhere (a local server, to try an update).
 const FEED: &str = match option_env!("DINO_UPDATE_FEED_URL") {
     Some(f) => f,
-    None => "https://github.com/meetdino/dino-releases/releases/latest/download/appcast.xml",
+    None => "https://github.com/meetdino/dino/releases/latest/download/appcast.xml",
 };
 /// The release key's public half (Ed25519, base64), compiled in by scripts/release.sh.
 const PUBLIC_KEY: Option<&str> = option_env!("DINO_UPDATE_PUBLIC_KEY");
