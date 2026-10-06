@@ -286,29 +286,24 @@ final class DinoModel: ObservableObject {
     private var stateSeen: UInt64?
     /// The waits have a connection of their own: on the shared one, every request would wait too.
     private var stateConnection: DinoConnection?
-    /// False with a dinod too old to wait for a change: then ask four times a second.
-    private var stateWaits = true
 
+    /// Wait for the state to change, apply it, and wait again.
     private func poll() {
-        guard polling, let conn = connection else { return }
-        if stateWaits, stateConnection == nil { stateConnection = try? DinoConnection(path: DinoEnvironment.socketPath) }
-        let wait = stateWaits ? stateConnection : nil
-        var body: [String: Any] = ["type": wait == nil ? "state" : "state_change"]
+        guard polling else { return }
+        if stateConnection == nil { stateConnection = try? DinoConnection(path: DinoEnvironment.socketPath) }
+        guard let wait = stateConnection else { return lostDaemon() }
+        var body: [String: Any] = ["type": "state_change"]
         body["seen"] = stateSeen
         let request = body
         Task.detached {
-            // An error answer, rather than none: a dinod too old to wait.
-            let (resp, older): (Response?, Bool) = {
-                do { return (try (wait ?? conn).request(request), false) }
-                catch DinoError.daemon { return (nil, wait != nil) }
+            // An error answer, rather than none: dinod is there, so ask again in a moment.
+            let (resp, refused): (Response?, Bool) = {
+                do { return (try wait.request(request), false) }
+                catch DinoError.daemon { return (nil, true) }
                 catch { return (nil, false) }
             }()
             await MainActor.run {
-                if older {
-                    self.stateWaits = false
-                    self.stateConnection = nil
-                    self.poll()
-                } else if let resp {
+                if let resp {
                     self.apply(resp.sessions ?? [], resp.quotas ?? [])
                     self.applyPower(resp.power)
                     let limits = resp.limits ?? []
@@ -316,11 +311,9 @@ final class DinoModel: ObservableObject {
                     let leftovers = resp.leftovers ?? []
                     if leftovers != self.leftovers { self.leftovers = leftovers }
                     self.stateSeen = resp.version
-                    if wait != nil {
-                        self.poll()
-                    } else {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.poll() }
-                    }
+                    self.poll()
+                } else if refused {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.poll() }
                 } else {
                     self.lostDaemon()
                 }
@@ -333,7 +326,6 @@ final class DinoModel: ObservableObject {
         connection = nil
         stateConnection = nil
         stateSeen = nil
-        stateWaits = true
         polling = false
         daemonDown = true
         terminals.removeAll()
@@ -410,7 +402,7 @@ final class DinoModel: ObservableObject {
                 SecureInput.shared.update()
             }
         }
-        let raw = Self.onePerConversation(next.filter { $0.id != QuickTerminal.shared.sessionID })
+        let raw = next.filter { $0.id != QuickTerminal.shared.sessionID }
         // Only which side of 1.5s and 5s the last output is matters here. Kept exact, a session
         // printing anything differs on every tick and the whole window redraws four times a second.
         // Agents also animate a spinner at the front of their terminal title (Claude cycles
@@ -560,20 +552,6 @@ final class DinoModel: ObservableObject {
             Updates.shared.sessionsChanged(quiet: restartIsQuiet)
         }
         updateBadge(next)
-    }
-
-    /// One row per conversation: a second session on one (an older dinod could leave them) is
-    /// hidden behind the one running it, else the newest.
-    nonisolated static func onePerConversation(_ list: [SessionInfo]) -> [SessionInfo] {
-        let rank = { (s: SessionInfo) in (s.exited ? 0 : 1, Int(s.id) ?? 0) }
-        var best: [String: SessionInfo] = [:]
-        for s in list {
-            guard let c = s.conversation else { continue }
-            if let b = best[c], rank(b) >= rank(s) { continue }
-            best[c] = s
-        }
-        guard best.count < list.filter({ $0.conversation != nil }).count else { return list }
-        return list.filter { s in s.conversation.map { best[$0]?.id == s.id } ?? true }
     }
 
     /// A terminal title without the spinner or status glyphs an agent puts before its words.
@@ -1303,10 +1281,6 @@ final class DinoModel: ObservableObject {
     /// A run of it is going.
     func isRunning(_ task: ScheduledTask) -> Bool {
         guard let last = task.history.last, last.outcome == "started", last.finished_at == nil else { return false }
-        // From an older dinod, which doesn't say when runs finish: its session says.
-        if last.id == nil, let id = last.session, let s = sessions.first(where: { $0.id == id }) {
-            return [.working, .thinking, .waiting].contains(status(of: s))
-        }
         return last.id != nil
     }
 

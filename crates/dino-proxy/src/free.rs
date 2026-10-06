@@ -59,7 +59,8 @@ pub(crate) async fn handle(st: AppState, session: String, rest: &str, body: Byte
 
     let tier = choose_tier(&st, &session, &raw, &key).await;
     let in_flight = start(&st, &session, tier);
-    if std::env::var_os("DINO_PROXY_LOG").is_some() {
+    // The whole request, prompt and all: a debugging aid only a debug build has.
+    if cfg!(debug_assertions) && std::env::var_os("DINO_PROXY_LOG").is_some() {
         let _ = std::fs::write(std::env::temp_dir().join("dino-last-anthropic.json"), raw.to_string());
     }
     let oai = serde_json::to_value(anthropic_to_openai_request(&req)).unwrap_or_default();

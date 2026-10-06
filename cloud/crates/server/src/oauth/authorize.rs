@@ -62,7 +62,7 @@ pub async fn start(State(s): State<AppState>, headers: HeaderMap, Query(p): Quer
     let Some(client) = p.client_id.as_deref().and_then(clients::find) else {
         return Ok(pages::message(&s, "Unknown app", "This sign-in link isn't from an app dino knows.").into_response());
     };
-    let Some(redirect) = p.redirect_uri.clone().filter(|r| client.allows_redirect(&s.cfg, r)) else {
+    let Some(redirect) = p.redirect_uri.clone().filter(|r| client.allows_redirect(r)) else {
         return Ok(pages::message(&s, "Sign-in link not valid", "The app asked to return somewhere it isn't allowed to.").into_response());
     };
     let st = p.state.as_deref();
@@ -147,7 +147,7 @@ pub async fn decide(State(s): State<AppState>, headers: HeaderMap, Form(d): Form
     session.take("authorize");
     session.save(&s).await?;
     let redirect = p.redirect_uri.clone().expect("checked at start");
-    if !client.allows_redirect(&s.cfg, &redirect) {
+    if !client.allows_redirect(&redirect) {
         return Err(Error::BadRequest("redirect".into()));
     }
     if d.decision != "allow" {
@@ -164,7 +164,7 @@ pub async fn finish_one_click(s: &AppState, session: &mut Session, account: Uuid
     }
     let Some((p, client)) = pending(session) else { return Ok(None) };
     session.take("authorize");
-    if !p.redirect_uri.as_deref().is_some_and(|r| client.allows_redirect(&s.cfg, r)) {
+    if !p.redirect_uri.as_deref().is_some_and(|r| client.allows_redirect(r)) {
         return Err(Error::BadRequest("redirect".into()));
     }
     Ok(Some(issue(s, account, &p, client).await?))

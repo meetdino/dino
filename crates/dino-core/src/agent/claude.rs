@@ -292,6 +292,11 @@ impl Agent for Claude {
         true
     }
 
+    /// Its permission and trust dialogs each end in "Esc to cancel".
+    fn asking(&self, screen: &str) -> Option<String> {
+        screen.contains("Esc to cancel").then(|| "Claude asks".into())
+    }
+
     fn asks_trust(&self) -> bool {
         true
     }
@@ -475,20 +480,5 @@ impl Agent for Claude {
             "AWS_SESSION_TOKEN",
             "AWS_BEARER_TOKEN_BEDROCK",
         ]
-    }
-
-    fn login(&self) -> Option<String> {
-        let account = crate::discover::read_json(home().join(".claude.json")).map(|v| v["oauthAccount"].clone()).filter(|a| a.is_object());
-        Some(match account {
-            Some(a) => match a["organizationType"].as_str() {
-                Some("claude_max") => "Claude Max".into(),
-                Some("claude_pro") => "Claude Pro".into(),
-                Some(t) if t.contains("team") => "Claude Team".into(),
-                Some(t) if t.contains("enterprise") => "Claude Enterprise".into(),
-                _ => "claude.ai login".into(),
-            },
-            None if std::env::var_os("ANTHROPIC_API_KEY").is_some() => "API key".into(),
-            None => "signed out".into(),
-        })
     }
 }

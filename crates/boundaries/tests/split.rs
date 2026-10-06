@@ -5,19 +5,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Each crate, the repository it goes to, and the other dino crates it may use.
-const RULES: &[(&str, &str, &[&str])] = &[
+/// Each crate, and the other dino crates it may use.
+const RULES: &[(&str, &[&str])] = &[
     // Public crates others build on (the account server in cloud/): no daemon, proxy or terminal code.
-    ("dino-core", "dino", &[]),
-    ("dino-sync", "dino", &["dino-core"]),
+    ("dino-core", &[]),
+    ("dino-sync", &["dino-core"]),
     // The terminal emulation and the proxy stand on their own, so either can move out.
-    ("dino-term", "dino", &[]),
-    ("dino-router", "dino", &[]),
-    ("dino-proxy", "dino", &["dino-router"]),
+    ("dino-term", &[]),
+    ("dino-router", &[]),
+    ("dino-proxy", &["dino-router"]),
     // dinod and its CLI put the pieces together.
-    ("dino-daemon", "dino", &["dino-core", "dino-sync", "dino-term", "dino-proxy", "dino-router"]),
-    ("dino", "dino", &["dino-core", "dino-sync", "dino-daemon", "dino-proxy", "dino-router"]),
-    ("boundaries", "dino", &[]),
+    ("dino-daemon", &["dino-core", "dino-sync", "dino-term", "dino-proxy", "dino-router"]),
+    ("dino", &["dino-core", "dino-sync", "dino-daemon", "dino-proxy", "dino-router"]),
+    ("boundaries", &[]),
 ];
 
 fn root() -> PathBuf {
@@ -36,7 +36,7 @@ fn crates_only_use_what_their_repository_allows() {
     let meta = metadata();
     let packages = meta["packages"].as_array().unwrap();
     let ours: BTreeSet<&str> = packages.iter().map(|p| p["name"].as_str().unwrap()).collect();
-    let rules: BTreeMap<&str, &[&str]> = RULES.iter().map(|(name, _, allowed)| (*name, *allowed)).collect();
+    let rules: BTreeMap<&str, &[&str]> = RULES.iter().map(|(name, allowed)| (*name, *allowed)).collect();
     let mut wrong = vec![];
     for p in packages {
         let name = p["name"].as_str().unwrap();

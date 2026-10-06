@@ -25,8 +25,6 @@ pub struct Config {
     pub google: Option<Upstream>,
     pub mail: MailConfig,
     pub turnstile: Option<Turnstile>,
-    /// Shared secret a resource server (the harness) presents to `/oauth/introspect`.
-    pub introspect_secret: Option<String>,
     /// JSON logs (production) or readable ones (development).
     pub json_logs: bool,
     /// Requests per second and burst, per client address (`DINO_IP_LIMIT=30,120`).
@@ -192,7 +190,6 @@ impl Config {
             google: upstream("GOOGLE", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://openidconnect.googleapis.com/v1/userinfo", None),
             mail,
             turnstile,
-            introspect_secret: var("DINO_INTROSPECT_SECRET"),
             json_logs: production || var("DINO_JSON_LOGS").as_deref() == Some("1"),
             ip_limit: pair("DINO_IP_LIMIT", (30, 120))?,
             account_limit: pair("DINO_ACCOUNT_LIMIT", (20, 60))?,

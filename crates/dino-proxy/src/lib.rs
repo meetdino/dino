@@ -41,16 +41,17 @@ pub const PROVIDERS: &[(&str, &str)] = &[
     ("chatgpt", "https://chatgpt.com/backend-api"),
 ];
 
-/// Where `provider` is: `PROVIDERS`, or for Anthropic and ChatGPT what `DINO_ANTHROPIC_UPSTREAM`
-/// and `DINO_CHATGPT_UPSTREAM` name (a stand-in to try a spent Claude account or a rejected Codex
-/// model against, e.g. one that answers some calls itself and passes the rest on).
+/// Where `provider` is: `PROVIDERS`, or for Anthropic and ChatGPT in a debug build what
+/// `DINO_ANTHROPIC_UPSTREAM` and `DINO_CHATGPT_UPSTREAM` name (a stand-in to try a spent Claude
+/// account or a rejected Codex model against, e.g. one that answers some calls itself and passes
+/// the rest on). Never in a release: it would hand the account's token to any URL.
 fn provider_upstream(provider: &str) -> Option<&'static str> {
     use std::sync::OnceLock;
     static ANTHROPIC: OnceLock<Option<String>> = OnceLock::new();
     static CHATGPT: OnceLock<Option<String>> = OnceLock::new();
     let (cell, var) = match provider {
-        "anthropic" => (&ANTHROPIC, "DINO_ANTHROPIC_UPSTREAM"),
-        "chatgpt" => (&CHATGPT, "DINO_CHATGPT_UPSTREAM"),
+        "anthropic" if cfg!(debug_assertions) => (&ANTHROPIC, "DINO_ANTHROPIC_UPSTREAM"),
+        "chatgpt" if cfg!(debug_assertions) => (&CHATGPT, "DINO_CHATGPT_UPSTREAM"),
         _ => return PROVIDERS.iter().find(|(p, _)| *p == provider).map(|&(_, u)| u),
     };
     if let Some(u) = cell.get_or_init(|| std::env::var(var).ok().filter(|u| !u.is_empty())).as_deref() {

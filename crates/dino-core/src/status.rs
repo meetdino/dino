@@ -30,8 +30,9 @@ impl Status {
         if needs(s).is_some() {
             return Status::NeedsYou;
         }
-        // An agent run by hand in a shell says whether it's busy; its shell has no hooks.
-        if let Some(st) = s.inside.as_ref().and_then(|f| f.status.as_deref()) {
+        // An agent run by hand in a shell says whether it's busy, unless its hooks report to dino
+        // (typed into a dino shell): those say more, as for dino's sessions. As the app has it.
+        if let Some(st) = s.inside.as_ref().and_then(|f| f.status.as_deref()).filter(|_| s.activity.is_none()) {
             return match st {
                 "needs" => Status::NeedsYou,
                 "busy" => Status::Working,
@@ -112,5 +113,21 @@ mod tests {
         assert_eq!(Status::of(&SessionInfo { exited: true, ..session(Some("needs:x")) }), Status::Ended);
         assert_eq!(Status::of(&SessionInfo { exited: true, exit_code: Some(1), ..session(None) }), Status::Exited);
         assert!(Status::NeedsYou < Status::Working && Status::Done < Status::Idle);
+    }
+
+    #[test]
+    fn an_agent_typed_into_a_shell() {
+        let inside = |status: &str| {
+            serde_json::from_value(serde_json::json!({
+                "source": "running", "agent": "claude", "session_id": "", "title": "", "cwd": null, "updated_at": 0,
+                "pid": 7, "status": status, "terminal": null, "args": [], "url": null,
+            }))
+            .ok()
+        };
+        let shell = |activity: Option<&str>, status: &str| SessionInfo { agent_id: "shell".into(), inside: inside(status), ..session(activity) };
+        // Without hooks, what the agent says; with them, what they say, as in the app.
+        assert_eq!(Status::of(&shell(None, "busy")), Status::Working);
+        assert_eq!(Status::of(&shell(Some("done"), "busy")), Status::Done);
+        assert_eq!(Status::of(&shell(Some("working"), "idle")), Status::Working);
     }
 }

@@ -425,20 +425,10 @@ pub fn live() -> Vec<FoundSession> {
     crate::agent::all().into_iter().flat_map(|a| a.running(&procs)).collect()
 }
 
-/// The agent's own question on screen, waiting for the user: a permission or trust dialog.
-/// Each says so in words it doesn't use otherwise; an agent dino can't read this way says nothing.
+/// The agent's own question on screen, waiting for the user: a permission or trust dialog (its
+/// `asking`); an agent dino can't read this way says nothing.
 pub fn asking(agent: &str, screen: &str) -> bool {
-    match agent.trim_end_matches("-free") {
-        // Claude Code's permission and trust dialogs each end in "Esc to cancel".
-        "claude" => screen.contains("Esc to cancel"),
-        // Codex's approvals ("Would you like to run the following command?", "…make the following
-        // edits?", …) all offer this way out; its folder trust has its own.
-        "codex" => {
-            (screen.contains("Would you like to ") && screen.contains("No, and tell Codex what to do differently"))
-                || (screen.contains("Trust this folder?") && screen.contains("Trust and continue"))
-        }
-        other => crate::agent::agent(other).and_then(|a| a.asking(screen)).is_some(),
-    }
+    crate::agent::agent(agent.trim_end_matches("-free")).and_then(|a| a.asking(screen)).is_some()
 }
 
 #[cfg(test)]

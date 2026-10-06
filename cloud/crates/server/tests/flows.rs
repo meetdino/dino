@@ -347,23 +347,13 @@ async fn rate_limits_trip() {
 }
 
 #[tokio::test]
-async fn harness_tokens_have_their_own_audience_and_introspect() {
+async fn harness_tokens_have_their_own_audience() {
     let s = start().await;
     let b = browser();
     s.email_signin(&b, "harness@example.com").await;
     let t = s.native_login(&b, "dino-harness", "harness on Mac").await;
     let at = t["access_token"].as_str().unwrap();
     assert_eq!(s.me(at).await, 401, "harness tokens don't open dino's account API");
-    let info: Value = app().get(s.url("/oauth/userinfo")).bearer_auth(at).send().await.unwrap().json().await.unwrap();
-    assert!(info["sub"].is_string());
-    let r = app().post(s.url("/oauth/introspect")).form(&[("token", at)]).send().await.unwrap();
-    assert_eq!(r.status(), 401, "introspection needs the resource server's secret");
-    let i: Value = app().post(s.url("/oauth/introspect")).bearer_auth(INTROSPECT_SECRET).form(&[("token", at)]).send().await.unwrap().json().await.unwrap();
-    assert_eq!(i["active"], true);
-    assert_eq!(i["aud"], "dino-harness");
-    assert_eq!(i["client_id"], "dino-harness");
-    let i: Value = app().post(s.url("/oauth/introspect")).bearer_auth(INTROSPECT_SECRET).form(&[("token", "dino_at_nope")]).send().await.unwrap().json().await.unwrap();
-    assert_eq!(i["active"], false);
     // dino tokens reach sync; a fresh account has nothing yet.
     let d = s.native_login(&b, "dino", "Mac").await;
     let r: Value = app().get(s.url("/v1/sync")).bearer_auth(d["access_token"].as_str().unwrap()).send().await.unwrap().json().await.unwrap();

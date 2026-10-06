@@ -12,16 +12,15 @@ The account page shows everything it holds, settings included, and the export re
 
 | Area | Endpoints |
 |---|---|
-| OAuth 2 server | `GET /oauth/authorize` (code + PKCE S256, loopback redirects for native apps), `POST /oauth/token` (`authorization_code`, `refresh_token`, `urn:ietf:params:oauth:grant-type:device_code`), `POST /oauth/device_authorization` (with `email`: a sign-in link by mail, opened at `/login/{token}`), `POST /oauth/revoke`, `POST /oauth/introspect`, `GET /oauth/userinfo`, `/.well-known/oauth-authorization-server` (also at `openid-configuration`) |
+| OAuth 2 server | `GET /oauth/authorize` (code + PKCE S256, loopback redirects for native apps), `POST /oauth/token` (`authorization_code`, `refresh_token`, `urn:ietf:params:oauth:grant-type:device_code`), `POST /oauth/device_authorization` (with `email`: a sign-in link by mail, opened at `/login/{token}`), `POST /oauth/revoke`, `/.well-known/oauth-authorization-server` |
 | Sign-in pages | `/signin` (GitHub, Google, emailed code), `/device` (approve a device-flow code), `/account` (devices, synced data, export, sign out everywhere, delete) |
 | Account API (`/v1`, bearer) | `GET /me`, `GET /devices`, `DELETE /devices/{id}`, `POST /signout-everywhere`, `DELETE /account`, `GET /export` |
 | Sync (`/v1/sync`, bearer) | `GET ?since=&limit=`, `POST` (a `dino_sync::PushRequest`), `GET /ws` (nudges) |
 | Operations | `/healthz`, `/readyz`, Prometheus `/metrics` on `DINO_METRICS_BIND` |
 
 Clients: `dino` (the app and CLI) and `dino-harness` are native (loopback `http://127.0.0.1:<any
-port>/callback`, and the device flow); `dino-web` is reserved for a separate web page. Harness
-tokens carry audience `dino-harness` and don't open the `/v1` API; the harness checks them with
-`/oauth/introspect`.
+port>/callback`, and the device flow). Harness tokens carry audience `dino-harness` and don't open
+the `/v1` API.
 
 ## How it works
 
@@ -102,7 +101,7 @@ Each test gets its own database and a real server on a random port, with GitHub,
 faked. They cover the full PKCE sign-in, code replay, bad clients and redirects, refresh rotation
 with the grace window, concurrent refreshes and reuse detection, the device flow with consent and
 fresh sign-in, GitHub and Google linking to one account, sign-out everywhere, idempotency,
-deletion and erasure, CSRF and Origin checks, rate limits, introspection, two devices converging
+deletion and erasure, CSRF and Origin checks, rate limits, two devices converging
 through sync, paging, nudges across two nodes, older clients told to upgrade, gapless sequences
 under concurrent pushes, sign-in links (single use, expiry, per-address limits, no enumeration),
 one-click GitHub joining an email account, a 503 when the database is out of reach, and that the
