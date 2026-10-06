@@ -164,7 +164,7 @@ struct DinoApp: App {
                 .disabled(model.selectedSession == nil)
                 Button("Mark as Unread") { if let id = model.selectedSession?.id { model.markUnread(id) } }
                     .disabled(model.selectedSession == nil || model.selectedSession?.exited == true)
-                Button("Rename…") { if let id = model.selectedSession?.id { model.renaming = Renaming(id: id, place: .toolbar) } }
+                Button("Rename…") { if let id = model.selectedSession?.id { model.renaming = Renaming(id: id, place: .tab) } }
                     .disabled(model.selectedSession == nil)
                 Button("Archive") { if let id = model.selectedSession?.id { model.archive(id) } }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
@@ -605,30 +605,15 @@ struct Terminals: View {
             }
         }
         .toolbar {
-            ToolbarItem(placement: .principal) {
+            // The toolbar reads left to right as what the session is set to, then what you can
+            // open: leading, over the tabs, the selected session's mode, model and effort (in a
+            // split, the focused pane's); trailing, the panes. Its name is its tab's, and its
+            // pane's in a split, not said again here; a plain shell leaves the toolbar bare.
+            ToolbarItem(placement: .navigation) {
                 if let s = model.sessions.first(where: { $0.id == model.selected }) {
-                    // Its title and how it's doing come from its own observable: a change there
-                    // redraws this, not the terminals.
-                    Live(s) { s in
-                        HStack(spacing: 8) {
-                            // The name gives way first: the chips beside it are what you click.
-                            SessionName(session: s, place: .toolbar, font: .body.weight(.semibold))
-                                .layoutPriority(-1)
-                                .help(s.inside?.title ?? s.title ?? s.display)
-                            Group {
-                                if let f = s.inside { AgentBadge(agent: f.agent) }
-                                if let f = s.inside, f.continuable { TakeOverButton(session: s, found: f) }
-                                if let host = s.host { HostChip(host: host) }
-                                if s.exited {
-                                    ResumeButton(session: s).padding(.leading, 4)
-                                } else if s.agent_id != "shell" {
-                                    // A plain shell has no mode or model to pick.
-                                    SessionControlsBar(session: s).padding(.leading, 4)
-                                }
-                            }
-                            .fixedSize()
-                        }
-                    }
+                    // Its settings come from its own observable: a change there redraws this, not
+                    // the terminals.
+                    Live(s) { s in SessionToolbarItem(session: s) }
                 }
             }
             // Pinned to the trailing edge on every screen: on macOS 26 and later the toolbar lays its

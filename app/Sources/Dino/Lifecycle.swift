@@ -314,7 +314,7 @@ extension DinoModel {
 struct SessionName: View {
     @EnvironmentObject var model: DinoModel
     let session: SessionInfo
-    /// Which place is renaming: the sidebar row and the toolbar both show the name.
+    /// Which place is renaming: the sidebar row and the tab both show the name.
     let place: DinoModel.RenamePlace
     let font: Font
     var color: Color = .primary
@@ -345,9 +345,9 @@ struct SessionName: View {
                 .font(font)
                 .foregroundStyle(color)
                 .lineLimit(1)
-                // In the toolbar only: on a sidebar row a gesture on the name swallows the click that
+                // In the tab only: on a sidebar row a gesture on the name swallows the click that
                 // should select the row, so there the list's own double-click renames (see Sidebar).
-                .simultaneousGesture(TapGesture(count: 2).onEnded { model.renaming = Renaming(id: session.id, place: place) }, including: place == .toolbar ? .all : .none)
+                .simultaneousGesture(TapGesture(count: 2).onEnded { model.renaming = Renaming(id: session.id, place: place) }, including: place == .tab ? .all : .none)
                 .help(session.label == nil ? "Double-click to rename" : "\(session.name) · double-click to rename")
         }
     }
@@ -369,7 +369,7 @@ struct Renaming: Equatable {
 }
 
 extension DinoModel {
-    enum RenamePlace { case sidebar, toolbar }
+    enum RenamePlace { case sidebar, tab }
 }
 
 // MARK: - Archived sessions
