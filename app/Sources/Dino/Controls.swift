@@ -326,60 +326,37 @@ func roundTokens(_ n: UInt64) -> String {
     }
 }
 
-/// The selected session's mode, model and effort, compact, each opening its picker.
+/// What leads the toolbar for the selected session: what it's set to (SessionControlsBar), or an
+/// action in its place: continuing an agent found in a shell, resuming one that exited. A plain
+/// shell has none of these, and leaves the toolbar bare.
+struct SessionToolbarItem: View {
+    let session: SessionInfo
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let f = session.inside, f.continuable { TakeOverButton(session: session, found: f) }
+            if let host = session.host { HostChip(host: host) }
+            if session.exited {
+                ResumeButton(session: session)
+            } else if session.agent_id != "shell" {
+                SessionControlsBar(session: session)
+            }
+        }
+        .fixedSize()
+    }
+}
+
+/// The selected session's mode, model and effort as one segmented control, each segment opening
+/// its picker, with what qualifies them beside it: a fallback answering, a change on its way, how
+/// full its context is.
 struct SessionControlsBar: View {
     @EnvironmentObject var model: DinoModel
     let session: SessionInfo
 
     var body: some View {
         let knobs = model.knobs(for: session) ?? .none
-        let c = session.shownControls
-        HStack(spacing: 2) {
-            if ControlKind.mode.offered(by: knobs) {
-                // The mode it's in, and the one chosen on its way: "Auto → Bypass".
-                let next = session.pending(.mode).map { " → " + knobs.modeLabel($0) } ?? ""
-                chip(.mode, knobs, icon: ControlKind.icon(mode: c.mode), text: knobs.modeLabel(c.mode) + next,
-                     tint: c.mode == "bypass" ? .red : nil)
-            }
-            if knobs.keeps("model"), session.route != nil || ControlKind.model.offered(by: knobs) {
-                // It keeps its conversation's model: shown, not offered.
-                let text = session.route?.label ?? c.model.map(knobs.label) ?? knobs.default_model.map(knobs.label) ?? "Default"
-                HStack(spacing: 4) {
-                    Image(systemName: session.route == nil ? "cpu" : "desktopcomputer").font(.caption)
-                    Text(text).lineLimit(1)
-                }
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .help(Self.keptModel(session))
-            } else if let route = session.route {
-                // On a provider's model: that provider's models, not the agent's own.
-                Button { model.controlPicker = .model } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: route.provider == "openrouter" || route.provider == "chatgpt" ? "cloud" : "desktopcomputer").font(.caption)
-                        Text(route.label).lineLimit(1)
-                    }
-                    .font(.callout)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .help("Runs on \(route.label) through dino, not \(AgentNames.of(session.agent_id))'s own account (⇧⌘M)")
-                .popover(isPresented: Binding(get: { model.controlPicker == .model }, set: { if !$0, model.controlPicker == .model { model.controlPicker = nil } }), arrowEdge: .bottom) {
-                    ProviderModelPopover(session: session, route: route)
-                }
-            } else if ControlKind.model.offered(by: knobs) {
-                let text = c.model.map(knobs.label) ?? (session.last_model ?? knobs.default_model).map(knobs.label) ?? "Default"
-                let next = session.pending(.model).map { " → " + ($0.map(knobs.label) ?? "Default") } ?? ""
-                chip(.model, knobs, icon: "cpu", text: text + next, tint: session.otherModel == nil ? nil : .orange)
-            }
-            // A model without effort levels (Haiku) has none to show.
-            if ControlKind.effort.offered(by: knobs), !knobs.efforts(for: c.model).isEmpty {
-                let next = session.pending(.effort).map { " → " + ($0?.capitalized ?? "Default") } ?? ""
-                chip(.effort, knobs, icon: "gauge.with.dots.needle.50percent", text: (c.effort?.capitalized ?? "Default") + next)
-            }
+        HStack(spacing: 8) {
+            ControlGroup { pickers(knobs) }
             if let f = session.fallback {
                 FallbackChip(fallback: f, usage: session.usage_by_route ?? [])
             }
@@ -396,6 +373,57 @@ struct SessionControlsBar: View {
         }
     }
 
+    /// Mode, model and effort, each opening its picker.
+    @ViewBuilder private func pickers(_ knobs: Knobs) -> some View {
+        let c = session.shownControls
+        Group {
+            if ControlKind.mode.offered(by: knobs) {
+                // The mode it's in, and the one chosen on its way: "Auto → Bypass".
+                let next = session.pending(.mode).map { " → " + knobs.modeLabel($0) } ?? ""
+                chip(.mode, knobs, icon: ControlKind.icon(mode: c.mode), text: knobs.modeLabel(c.mode) + next,
+                     tint: c.mode == "bypass" ? .red : nil)
+            }
+            if knobs.keeps("model"), session.route != nil || ControlKind.model.offered(by: knobs) {
+                // It keeps its conversation's model: shown, not offered.
+                let text = session.route?.label ?? c.model.map(knobs.label) ?? knobs.default_model.map(knobs.label) ?? "Default"
+                HStack(spacing: 4) {
+                    Image(systemName: session.route == nil ? "cpu" : "desktopcomputer").font(.caption)
+                    Text(text).lineLimit(1)
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 2)
+                .padding(.vertical, 2)
+                .help(Self.keptModel(session))
+            } else if let route = session.route {
+                // On a provider's model: that provider's models, not the agent's own.
+                Button { model.controlPicker = .model } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: route.provider == "openrouter" || route.provider == "chatgpt" ? "cloud" : "desktopcomputer").font(.caption)
+                        Text(route.label).lineLimit(1)
+                    }
+                    .font(.callout)
+                    .padding(.horizontal, 2)
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
+                }
+                .help("Runs on \(route.label) through dino, not \(AgentNames.of(session.agent_id))'s own account (⇧⌘M)")
+                .popover(isPresented: Binding(get: { model.controlPicker == .model }, set: { if !$0, model.controlPicker == .model { model.controlPicker = nil } }), arrowEdge: .bottom) {
+                    ProviderModelPopover(session: session, route: route)
+                }
+            } else if ControlKind.model.offered(by: knobs) {
+                let text = c.model.map(knobs.label) ?? (session.last_model ?? knobs.default_model).map(knobs.label) ?? "Default"
+                let next = session.pending(.model).map { " → " + ($0.map(knobs.label) ?? "Default") } ?? ""
+                chip(.model, knobs, icon: "cpu", text: text + next, tint: session.otherModel == nil ? nil : .orange)
+            }
+            // A model without effort levels (Haiku) has none to show.
+            if ControlKind.effort.offered(by: knobs), !knobs.efforts(for: c.model).isEmpty {
+                let next = session.pending(.effort).map { " → " + ($0?.capitalized ?? "Default") } ?? ""
+                chip(.effort, knobs, icon: "gauge.with.dots.needle.50percent", text: (c.effort?.capitalized ?? "Default") + next)
+            }
+        }
+    }
+
     private func chip(_ kind: ControlKind, _ knobs: Knobs, icon: String, text: String, tint: Color? = nil) -> some View {
         Button { model.controlPicker = kind } label: {
             HStack(spacing: 4) {
@@ -404,11 +432,10 @@ struct SessionControlsBar: View {
             }
             .font(.callout)
             .foregroundStyle(tint ?? .primary)
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 2)
             .padding(.vertical, 2)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
         .help(help(kind))
         .popover(isPresented: Binding(get: { model.controlPicker == kind }, set: { if !$0, model.controlPicker == kind { model.controlPicker = nil } }), arrowEdge: .bottom) {
             ControlPopover(kind: kind, session: session, knobs: knobs)

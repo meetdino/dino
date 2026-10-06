@@ -174,7 +174,7 @@ enum GhosttyActions {
             guard what != .window, let id = session else { return nil }
             return {
                 if model.selected != id { model.select(id) }
-                model.renaming = Renaming(id: id, place: .toolbar)
+                model.renaming = Renaming(id: id, place: .tab)
             }
         case .copyTitleToClipboard:
             let title = state.map(\.title).flatMap { $0.isEmpty ? nil : $0 }

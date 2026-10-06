@@ -151,9 +151,15 @@ private struct TabItem: View {
                 Circle().fill(status.color).frame(width: 5, height: 5)
             }
             BellTitleMark(signal: PaneSignals.of(session.id))
-            Text(panes.count > 1 ? panes.map { model.tabName($0) }.joined(separator: " | ") : model.tabName(session))
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if panes.count > 1 {
+                Text(panes.map { model.tabName($0) }.joined(separator: " | "))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                // Its name, renamed in place by double-clicking it.
+                SessionName(session: session, place: .tab, font: .subheadline, color: selected ? .primary : .secondary)
+                    .truncationMode(.middle)
+            }
             let unseen = model.tmuxUnseen(session)
             if !unseen.isEmpty {
                 Text("\(unseen.count)")
