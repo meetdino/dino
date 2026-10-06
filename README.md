@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/images/icon.png" width="128" height="128" alt="dino's icon: a green pixel dinosaur">
-</p>
-
 <h1 align="center">dino</h1>
 
 <p align="center"><strong>Every agent, one terminal.</strong></p>
