@@ -1,10 +1,12 @@
-//! The permission mode a session's agent is really in, and switching it in place.
+//! The permission mode and model a session's agent is really on, and switching its mode in place.
 //!
 //! What dino asked for when it started the agent isn't always what it's in: Claude switches mode
 //! itself (Shift+Tab, leaving plan mode), and a switch chosen mid-turn waits. So the mode shown is
 //! the one the agent's own screen shows, else the one it last showed there, else the one its hooks
 //! last reported. An agent with a key that steps through its modes (Claude's Shift+Tab) is
-//! switched with that key, its screen read after each step, rather than restarted.
+//! switched with that key, its screen read after each step, rather than restarted. The model is
+//! the one the agent last said it's on (`/model` in it included): Claude's hooks, Codex's rollout,
+//! other agents' own records; else the one it was started with.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -61,15 +63,23 @@ pub(crate) fn now(s: &Session, hooked: Option<&str>) -> Option<String> {
         .or_else(|| hooked.and_then(|m| controls::reported_mode(&s.agent_id, m)))
 }
 
-/// `s`'s controls as its agent runs with them now: its mode as it says it is (see `now`), over
-/// the one it was started with. What it restarts with, so a restart doesn't undo a switch.
-pub(crate) fn current_with(s: &Session, hooked: Option<&str>) -> Controls {
-    Controls { mode: now(s, hooked).or_else(|| s.controls.mode.clone()), ..s.controls.clone() }
+/// The model `s`'s agent says it's on (`said`: `SessionStats::agent_model`), once it has said
+/// since it started; `None` until then, when it's on the one it was started with, and for an agent
+/// whose model dino picks for each turn (the free tier).
+pub(crate) fn model_now(s: &Session, said: Option<&str>) -> Option<String> {
+    said.filter(|_| agent(&s.agent_id).is_some_and(|a| a.picks_model())).map(String::from)
 }
 
-/// `current_with`, its hooks' last word looked up.
+/// `s`'s controls as its agent runs with them now: its mode and model as it says they are (see
+/// `now`, `model_now`), over the ones it was started with. What it restarts with, so a restart
+/// doesn't undo a switch.
 pub(crate) fn current(d: &Daemon, s: &Session) -> Controls {
-    current_with(s, d.proxy.stats.session(&s.id).agent_mode.as_deref())
+    let st = d.proxy.stats.session(&s.id);
+    Controls {
+        mode: now(s, st.agent_mode.as_deref()).or_else(|| s.controls.mode.clone()),
+        model: model_now(s, st.agent_model.as_deref()).or_else(|| s.controls.model.clone()),
+        ..s.controls.clone()
+    }
 }
 
 /// Whether a switch of `s` to `want` is worth trying in place: its agent has a key for it, and

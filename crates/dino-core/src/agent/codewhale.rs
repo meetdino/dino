@@ -168,6 +168,12 @@ fn written_since(p: &Path, since: u64) -> bool {
     mtime(p).is_some_and(|t| t >= since)
 }
 
+/// The model the newest of `files` written since `since` says the conversation is on.
+fn model_written(files: &[PathBuf], since: u64) -> Option<String> {
+    let newest = files.iter().filter(|p| written_since(p, since)).max_by_key(|p| mtime(p))?;
+    head(newest).map(|h| h.model).filter(|m| !m.is_empty())
+}
+
 /// Folders compared as the same folder, whatever links lead to them.
 fn same_dir(a: &str, b: &Path) -> bool {
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -463,6 +469,12 @@ impl Agent for CodeWhale {
         tools_out(session)
     }
 
+    // The copy it saves as a prompt goes out, then the conversation as the turn ends: a model
+    // picked in it shows from its next prompt. What it resumes with, too (see `resumed`).
+    fn model_now(&self, session: &str, since: u64) -> Option<String> {
+        model_written(&[checkpoint(session), document(session)].into_iter().flatten().collect::<Vec<_>>(), since)
+    }
+
     fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
         begun(cwd, since, claimed).map(|(id, _)| id)
     }
@@ -729,6 +741,12 @@ mod tests {
         assert_eq!((m.title.as_deref(), m.cwd.as_deref(), m.hidden), (Some("Reply with PELICAN"), Some("/r/proj"), false));
         std::fs::write(&p, DOC.replace(r#""spawn_depth":0"#, r#""spawn_depth":10"#)).unwrap();
         assert!(meta(&p).hidden, "a sub-agent's (read again: it changed size)");
+        // The model it's on: picked in it (its next prompt's copy), as written since it started.
+        let copy = dir.join("checkpoint.json");
+        std::fs::write(&copy, DOC.replace(r#""model":"fake-coder""#, r#""model":"deepseek-v4-pro""#)).unwrap();
+        assert_eq!(model_written(&[p.clone(), copy.clone()], now).as_deref(), Some("deepseek-v4-pro"), "the newest");
+        assert_eq!(model_written(std::slice::from_ref(&p), now).as_deref(), Some("fake-coder"));
+        assert_eq!(model_written(&[p, copy], now + 60), None, "nothing written since: what it was started with");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -103,7 +103,9 @@ extension Controls {
 
 /// `answered` is the model `chosen` names: the alias "haiku" is claude-haiku-4-5-20251001.
 func same(_ answered: String, _ chosen: String) -> Bool {
-    answered == chosen || answered.lowercased().contains(chosen.lowercased())
+    // A variant (Claude's `opus[1m]`) answers as the model it's a variant of.
+    let chosen = chosen.hasSuffix("]") ? String(chosen[..<(chosen.lastIndex(of: "[") ?? chosen.endIndex)]) : chosen
+    return answered == chosen || answered.lowercased().contains(chosen.lowercased())
 }
 
 /// Pickers for a Form: New Session and Settings → Agents.
@@ -234,12 +236,20 @@ struct ControlFields: View {
 }
 
 extension SessionInfo {
-    /// What the session runs with now: the mode the agent says it's in. Never what's only asked
-    /// for (`pending`): that's shown as on its way.
+    /// What the session runs with now: the mode and model the agent says it's on. Never what's
+    /// only asked for (`pending`): that's shown as on its way.
     var shownControls: Controls {
         var c = controls ?? Controls()
         c.mode = agent_mode ?? c.mode
+        c.model = agent_model ?? c.model
         return c
+    }
+
+    /// The model it's on now, to show beside it: what the agent says, unless dino answers it with
+    /// another (a fallback route, the free tier's pick); else what its last model call asked for.
+    var modelNow: String? {
+        guard fallback == nil, tier == nil, let said = agent_model else { return last_model }
+        return said
     }
 
     /// What's been chosen: what's on its way, else what it runs with. A choice builds on it.
@@ -257,9 +267,11 @@ extension SessionInfo {
         return (used, limit)
     }
 
-    /// The model it last answered with, when that isn't the one chosen.
+    /// The model it last answered with, when that isn't the one chosen. Not once the agent says
+    /// which it's on: that's the one shown, and a reply from before a switch, or a side call's,
+    /// is no news.
     var otherModel: String? {
-        guard let last = last_model, let chosen = controls?.model, !same(last, chosen) else { return nil }
+        guard agent_model == nil, let last = last_model, let chosen = controls?.model, !same(last, chosen) else { return nil }
         return last
     }
 }
@@ -422,6 +434,9 @@ struct SessionControlsBar: View {
         case .model:
             if let other = session.otherModel, let chosen = session.controls?.model {
                 return "You chose \(chosen), but the agent answered with \(other) (\(key))"
+            }
+            if let said = session.agent_model {
+                return "Model: \(said), as \(AgentNames.of(session.agent_id)) says (\(key))"
             }
             return "Model: \(session.last_model.map { "answering with \($0)" } ?? "the agent's default") (\(key))"
         case .mode:

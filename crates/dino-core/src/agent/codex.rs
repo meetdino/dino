@@ -287,6 +287,18 @@ impl Agent for Codex {
         StatusSource::Rollout
     }
 
+    // What each turn runs with (`turn_context`), and a change of it between turns, written as it's
+    // made (`/model`: `thread_settings_applied`, Codex 0.160).
+    fn log_model(&self, line: &Value) -> Option<String> {
+        let p = &line["payload"];
+        let model = match (line["type"].as_str()?, p["type"].as_str()) {
+            ("turn_context", _) => &p["model"],
+            ("event_msg", Some("thread_settings_applied")) => &p["thread_settings"]["model"],
+            _ => return None,
+        };
+        model.as_str().filter(|m| !m.is_empty()).map(String::from)
+    }
+
     fn conversation_of(&self, pid: u32) -> Option<String> {
         open_rollout(pid).and_then(|p| history::rollout_id(&p))
     }

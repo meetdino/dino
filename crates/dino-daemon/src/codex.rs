@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use dino_core::agent::codex::open_rollout;
+use dino_core::agent::agent;
 use dino_core::history;
 use dino_proxy::Activity;
 
@@ -61,6 +62,9 @@ pub(crate) fn watch(d: &Daemon) {
 /// The conversation it was on and the one it's on now, when it has moved to another.
 fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
     let mut moved = None;
+    let a = agent(&s.agent_id)?;
+    // The model it says it's on, as of the lines read now.
+    let mut model = None;
     let mut r = s.rollout.lock().unwrap();
     // Until its first prompt makes one, look every poll: a short first turn is over in seconds.
     if r.path.is_none() || r.looked.is_none_or(|t| t.elapsed() >= RELOOK) {
@@ -71,6 +75,13 @@ fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
             moved = history::rollout_id(&path).filter(|now| known.as_ref() != Some(now)).map(|now| (known, now));
             r.turn = history::codex_status(&path).as_deref() == Some("busy");
             r.offset = path.metadata().map_or(0, |m| m.len());
+            // One begun since it started (its first prompt, `/new`, a fork) says what it's been
+            // on so far: a `/model` before that first prompt included. One it resumed says what an
+            // earlier run was on.
+            if s.pane.pid().and_then(dino_core::procinfo::started).is_some_and(|since| born(&path) + 1 >= since) {
+                let mut from = r.offset.saturating_sub(MODEL_PEEK);
+                model = new_events(&path, &mut from).iter().filter_map(|v| a.log_model(v)).last();
+            }
             r.needs = None;
             r.notice = None;
             r.read = None;
@@ -80,6 +91,7 @@ fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
     }
     let Some(path) = r.path.clone() else { return moved };
     for v in new_events(&path, &mut r.offset) {
+        model = a.log_model(&v).or(model);
         if let Some(call) = tool_call(&v) {
             count(&mut r, call, |tool, phase| d.proxy.stats.tool_call(&s.id, tool, phase));
         }
@@ -139,7 +151,20 @@ fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
         d.proxy.stats.report(&s.id, now.clone());
         r.reported = Some(now);
     }
+    if let Some(m) = model {
+        d.proxy.stats.report_model(&s.id, m);
+    }
     moved
+}
+
+/// How much of the end of a rollout begun since its agent started is read for the model it's on:
+/// all of one that new, but never a whole long conversation.
+const MODEL_PEEK: u64 = 512 << 10;
+
+/// When `path` was made, in seconds since the epoch; 0 when that can't be read.
+fn born(path: &Path) -> u64 {
+    let made = path.metadata().and_then(|m| m.created()).ok();
+    made.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
 }
 
 /// The whole lines written since `offset`, moving it past them.

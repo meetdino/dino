@@ -405,6 +405,14 @@ impl Agent for Pi {
         tool_calls_in(line)
     }
 
+    // Written as the model is picked (its first, `/model`, Ctrl+P), as `--model` takes it.
+    fn log_model(&self, line: &Value) -> Option<String> {
+        if line["type"] != "model_change" {
+            return None;
+        }
+        Some(format!("{}/{}", line["provider"].as_str().filter(|p| !p.is_empty())?, line["modelId"].as_str().filter(|m| !m.is_empty())?))
+    }
+
     fn busy(&self, pid: u32) -> Option<bool> {
         Some(busy_in(&std::fs::read_to_string(conversation_in(pid)?).ok()?))
     }

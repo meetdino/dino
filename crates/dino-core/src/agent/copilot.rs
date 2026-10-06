@@ -301,6 +301,17 @@ impl Agent for Copilot {
         tool_calls_in(line)
     }
 
+    // The model it starts or resumes on, and each change (`/model`), as it writes them.
+    fn log_model(&self, line: &Value) -> Option<String> {
+        let d = &line["data"];
+        let model = match line["type"].as_str()? {
+            "session.start" | "session.resume" => &d["selectedModel"],
+            "session.model_change" => &d["newModel"],
+            _ => return None,
+        };
+        model.as_str().filter(|m| !m.is_empty()).map(String::from)
+    }
+
     fn conversation_of(&self, pid: u32) -> Option<String> {
         conversation_in(pid)
     }

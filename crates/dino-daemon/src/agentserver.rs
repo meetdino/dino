@@ -81,6 +81,8 @@ fn run(a: &'static dyn Agent, stats: &Stats, s: &Session, addr: &Address) {
                     if s.agent_session.lock().unwrap().as_deref() != Some(session.as_str()) {
                         continue;
                     }
+                    // The model that answered, as `-m` takes it: one picked in it shows from then.
+                    stats.report_model(&s.id, model.clone());
                     let window = *st.windows.entry(model.clone()).or_insert_with(|| {
                         let providers = a.server_providers().and_then(|p| get(p)).and_then(|r| r.json::<serde_json::Value>().ok())?;
                         a.server_context_window(&providers, &model)

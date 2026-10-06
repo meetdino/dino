@@ -39,6 +39,9 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var pending: Controls?
     /// The permission mode the agent says it's in; differs from `controls` after Claude's Shift+Tab.
     var agent_mode: String?
+    /// The model the agent says it's on, once it has said; differs from what it was started with
+    /// after `/model` in it. Nil from an older dinod.
+    var agent_model: String?
     /// How full the context window is: tokens the last model call read, and the window's size.
     var context_tokens: UInt64?
     var context_limit: UInt64?
@@ -461,9 +464,14 @@ struct Knobs: Codable, Equatable {
         listed(name)?.id ?? name
     }
 
-    /// How to show a model: its listed name, else shortened.
+    /// How to show a model: its listed name, else shortened. A variant of a listed one, as the
+    /// agent names it (Claude's `claude-opus-5-5[1m]`), is that one's name and the variant.
     func label(_ name: String) -> String {
-        listed(name)?.label ?? shortModel(name)
+        if let m = listed(name) { return m.label }
+        if name.hasSuffix("]"), let open = name.lastIndex(of: "["), let base = listed(String(name[..<open])) {
+            return "\(base.label) \(name[open...])"
+        }
+        return shortModel(name)
     }
 
     /// The efforts `model` takes (the agent's default when nil); all of them for one it doesn't list.

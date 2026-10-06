@@ -136,6 +136,10 @@ pub struct SessionStats {
     pub tracked: bool,
     /// The permission mode the agent last said it's in, in its own words (Claude's hooks).
     pub agent_mode: Option<String>,
+    /// The model the agent last said its session is on, as its command line names it: Claude's
+    /// PostModelSwitch hook, or its own record (`report_model`). A switch made in the agent itself
+    /// (`/model`) included, which the flags it was started with don't say.
+    pub agent_model: Option<String>,
     /// Router tier for free-tier sessions ("fast", "code", "reason").
     pub tier: Option<String>,
     /// Which classifier made the last routing decision ("jev" or "llm").
@@ -202,6 +206,13 @@ impl SessionStats {
         self.hooked = true;
         if let Some(m) = v["permission_mode"].as_str() {
             self.agent_mode = Some(m.into());
+        }
+        // Its session's model changed (`/model`, its picker, its own fallback, a resume restoring
+        // it): what it's on from now on, as it names it (`claude-opus-5-5[1m]`).
+        if event == "PostModelSwitch"
+            && let Some(m) = v["to_model"].as_str().filter(|m| !m.is_empty())
+        {
+            self.agent_model = Some(m.into());
         }
         match event {
             "UserPromptSubmit" => self.last_error = None,
@@ -441,6 +452,11 @@ impl Stats {
         });
     }
 
+    /// The model the agent's own record says it's on now (Codex's rollout): see `agent_model`.
+    pub fn report_model(&self, id: &str, model: String) {
+        self.update(id, |s| s.agent_model = Some(model));
+    }
+
     /// dino wired the agent's hooks: it reports its own turns, so only a failed turn is an error,
     /// not any call that failed (Claude's quota probe as it resumes, which can be rate limited
     /// when dinod restarts and resumes everything at once). Known before its first hook, which
@@ -452,7 +468,10 @@ impl Stats {
     /// Forget context use, e.g. when the agent restarts on another model.
     /// The agent is starting over: what it said about itself no longer holds.
     pub fn restarted(&self, id: &str) {
-        self.update(id, |s| s.agent_mode = None);
+        self.update(id, |s| {
+            s.agent_mode = None;
+            s.agent_model = None;
+        });
     }
 
     /// The agent said how full its context window is, other than to its statusline (OpenCode's server).
@@ -549,6 +568,7 @@ impl Stats {
         s.activity = None;
         s.hooked = false;
         s.agent_mode = None;
+        s.agent_model = None;
         s.last_error = None;
         s.call_error = None;
         s.limit_error = None;
@@ -2882,6 +2902,45 @@ mod tests {
         // Through Qwen's bridge for the tools it defers.
         post(call("PreToolUse", "tool_call", json!({"name": "mcp__claude-in-chrome__navigate", "params": {}})));
         assert_eq!(proxy.stats.using("7"), Some(computer::Reach::Browser));
+    }
+
+    #[test]
+    fn the_model_is_the_one_claude_says_it_switched_to() {
+        use std::io::{Read, Write};
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        let origin = format!("http://127.0.0.1:{}", proxy.port);
+        let hook = proxy.base_url("7", "hook");
+        let hook = hook.strip_prefix(&origin).unwrap().to_string();
+        let post = |body: serde_json::Value| {
+            let body = body.to_string();
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
+            write!(c, "POST {hook} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", proxy.port, body.len()).unwrap();
+            let mut answer = String::new();
+            let _ = c.read_to_string(&mut answer);
+            answer
+        };
+        let switch = |from: &str, to: &str, source: &str| {
+            json!({"hook_event_name": "PostModelSwitch", "session_id": "c1", "from_model": from, "to_model": to, "requested_model": null, "source": source, "context_tokens": 0})
+        };
+        assert_eq!(proxy.stats.session("7").agent_model, None, "nothing said: what it was started with");
+        post(json!({"hook_event_name": "Stop"}));
+        proxy.stats.report("7", Activity::Done);
+        // `/model sonnet` in Claude itself: Claude Code 2.1.291's input, as the hook gets it.
+        let answer = post(switch("claude-opus-5-5", "claude-sonnet-5-5", "command"));
+        assert!(answer.starts_with("HTTP/1.1 200") && answer.ends_with("\r\n\r\n"), "nothing for Claude to add to its context: {answer}");
+        let s = proxy.stats.session("7");
+        assert_eq!(s.agent_model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(s.activity, Some(Activity::Done), "a switch isn't a turn");
+        // Its own fallback, and the 1M variant as it names it.
+        post(switch("claude-sonnet-5-5", "claude-opus-5-5[1m]", "auto"));
+        assert_eq!(proxy.stats.session("7").agent_model.as_deref(), Some("claude-opus-5-5[1m]"));
+        post(json!({"hook_event_name": "PostModelSwitch", "to_model": ""}));
+        assert_eq!(proxy.stats.session("7").agent_model.as_deref(), Some("claude-opus-5-5[1m]"), "an empty one says nothing");
+        // Started again: it's on what it's started with until it says otherwise.
+        proxy.stats.restarted("7");
+        assert_eq!(proxy.stats.session("7").agent_model, None);
+        proxy.stats.report_model("7", "gpt-5.5".into());
+        assert_eq!(proxy.stats.session("7").agent_model.as_deref(), Some("gpt-5.5"));
     }
 
     /// Free models off (the default): a free-tier request is refused before anything leaves this
