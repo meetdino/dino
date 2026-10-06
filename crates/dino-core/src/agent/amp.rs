@@ -96,6 +96,7 @@ fn threads_in(json: &str) -> Vec<FoundSession> {
                 args: vec![],
                 url: Some(t["url"].as_str().map(String::from).unwrap_or_else(|| format!("https://ampcode.com/threads/{id}"))),
                 tmux: None,
+                unsure: None,
             })
         })
         .collect()

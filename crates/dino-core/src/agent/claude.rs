@@ -399,6 +399,7 @@ impl Agent for Claude {
                 args,
                 url: None,
                 tmux: None,
+                unsure: None,
             });
         }
         out
@@ -474,6 +475,7 @@ impl Agent for Claude {
             args: vec![],
             url: None,
             tmux: None,
+            unsure: None,
         }]
     }
 
