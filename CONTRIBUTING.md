@@ -18,8 +18,9 @@ cargo build --release      # target/release/dino: the CLI, and dinod (`dino daem
 
 "dino dev" has its own bundle id, so it shares no settings or permissions with the dino you use,
 and runs the `dino` it finds on your `PATH` or in `~/.local/bin` (or `DINO_BIN`, when set): link
-the one you built, `ln -sf "$PWD/target/release/dino" ~/.local/bin/dino`. An installed build
-carries its `dino` and runs dinod from it, as a release does.
+the one you built, `ln -sf "$PWD/target/release/dino" ~/.local/bin/dino`. Then run it with
+`open app/build/Dino.app`. An installed build carries its `dino` and runs dinod from it, as a
+release does.
 
 To keep the dino you use built from main, install the git hooks once:
 
@@ -28,8 +29,9 @@ scripts/install-hooks.sh   # main moves in the main checkout: ./app/build.sh --i
 ```
 
 Then every commit or merge to main in the main checkout rebuilds it (log: `app/build/build.log`)
-and the running dino offers Restart to Update; `scripts/check.sh --push` from any worktree
-fast-forwards the main checkout's main too, unless it has changes of its own. To sign with your
+and the running dino offers Restart to Update; `scripts/land.sh` from any worktree fast-forwards
+the main checkout's main too once its change lands, unless the main checkout has changes of its
+own. To sign with your
 Developer ID, `git config dino.signingIdentity "Developer ID Application: Name (TEAMID)"`.
 
 ## Where things are
@@ -78,8 +80,26 @@ scripts/check.sh           # builds and tests the workspace and the app
 ```
 
 It runs `cargo build`, `cargo test --workspace` and the app's `swift build` (the dev profile, quick
-to build; releases build the shipping one), and
-refuses code marked `TEST-ONLY`. CI runs the same on every pull request.
+to build; releases build the shipping one), refuses code marked `TEST-ONLY` (`scripts/lint.sh`),
+and checks that `cloud/Cargo.lock` is current.
+
+CI runs on every pull request, from a fork too (a first-time contributor's waits for a
+maintainer to approve the run). Each of these has to pass before it merges:
+
+| Check | What it runs |
+| --- | --- |
+| `changes` | `scripts/lint.sh`, and which of the checks below the change needs |
+| `rust` | `cargo build` and `cargo test` of the workspace, on macOS |
+| `clippy` | `cargo clippy` of the workspace: its errors fail, its warnings don't |
+| `app` | the app's `swift build -c release`, on macOS |
+| `cloud` | `cloud/`'s build, clippy and tests, against Postgres |
+| `dco` | every commit is signed off (below) |
+| `deny` | `cargo deny`: dependencies' licenses and sources, per `deny.toml` |
+
+A check the change doesn't need is skipped, which counts as passed: a change to `app/` alone
+doesn't build `cloud/`. CodeQL scans the Rust and the workflows of every pull request, and the
+Swift on main. The code isn't formatted with `cargo fmt`, so don't run it over files you change:
+it would bury your change in reformatting.
 
 dino is a terminal first, so speed is a feature. If your change touches the app or `dinod`, also
 run the performance budget once:
@@ -102,8 +122,8 @@ pull request. Some guidelines that keep dino fast:
 
 `cloud/` is a Cargo workspace of its own, on Linux or macOS: Rust through rustup
 (`cloud/rust-toolchain.toml` picks the version) and Postgres, from Docker or Homebrew.
-`scripts/check.sh` doesn't build it; its own CI job does, whenever `cloud/` or `crates/dino-sync`
-changes. In `cloud/`:
+`scripts/check.sh` doesn't build it; the `cloud` check does, whenever `cloud/`, `crates/dino-sync`
+or the root `Cargo.toml` changes. In `cloud/`:
 
 ```sh
 scripts/dev.sh start       # Postgres, migrations, the server on http://127.0.0.1:8787
@@ -128,12 +148,34 @@ logs for this.
 
 ## Commits and pull requests
 
+Every change reaches main through a pull request, the maintainers' own too, and is squash-merged:
+one commit on main per pull request.
+
 - One change per pull request, with a description of what changes for someone using dino and how
-  you tested it.
-- Commit messages say what changed and why, in plain words. Keep the style of the code around you:
-  its naming, its comments, its idioms.
+  you tested it, and a screenshot for anything you can see in the app.
+- The pull request's title becomes the commit's message on main: one line that says what changed
+  for someone using dino, in plain words. The commit's body is only its `Co-Authored-By` and
+  `Signed-off-by` lines.
+- Commits on your branch can be as many as you like; they're squashed. Keep the style of the code
+  around you: its naming, its comments, its idioms.
 - Add a test where the change can be tested, and check new behaviour end to end with a real agent
   where it involves one.
+- To catch up with main, rebase on it rather than merging it in.
+
+### Landing a change (maintainers)
+
+With push access, land a branch with:
+
+```sh
+scripts/land.sh "What changes, in one line"   # the title can be left out for a one-commit branch
+```
+
+It rebases the branch on `origin/main`, runs `scripts/check.sh`, pushes the branch, opens (or
+updates) its pull request, waits for the required checks, and squash-merges it with that title and
+the branch's `Co-Authored-By` and `Signed-off-by` lines. If main moved meanwhile, it rebases and
+checks again, so what lands is what was checked. Then, where `scripts/install-hooks.sh` ran, the
+dino you use rebuilds. Nothing pushes to main directly. `scripts/land.sh --admin` merges once
+`scripts/check.sh` passes without waiting for CI, for when CI can't run.
 
 ### Sign off your commits (DCO)
 

@@ -1,0 +1,51 @@
+# cargo-deny's checks for both workspaces: `cargo deny check` here, and
+# `cargo deny --manifest-path cloud/Cargo.toml check` for cloud/, which finds this file too.
+# CI runs them on every pull request and every day (.github/workflows/deny.yml).
+
+[graph]
+# dino runs on macOS and the account server on Linux; dependencies only other platforms pull in
+# (Windows, wasm, Android) don't ship, so their licenses and advisories don't matter here.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+all-features = true
+
+[advisories]
+# Every RustSec advisory fails the check, unmaintained and unsound crates included. To accept one,
+# list its id here with the reason, e.g. { id = "RUSTSEC-2025-0000", reason = "..." }.
+ignore = []
+yanked = "deny"
+
+[licenses]
+# Licenses compatible with shipping dino under MIT. A new dependency under another license fails
+# the check: add the license here only after checking it, and THIRD_PARTY_NOTICES.md if it ships.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    # webpki-roots, the Mozilla root certificates.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+
+[bans]
+# Two versions of a crate cost build time but aren't wrong.
+multiple-versions = "allow"
+# The workspaces' crates depend on each other by path, which cargo-deny counts as a wildcard.
+wildcards = "allow"
+
+[sources]
+# Only crates.io, no git dependencies: a new source fails the check until it's listed here.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

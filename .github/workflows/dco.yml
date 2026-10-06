@@ -4,26 +4,41 @@ name: DCO
 # Runs on pull requests from forks too: it only reads the commits, and needs no secrets.
 on: pull_request
 
-permissions:
-  contents: read
+permissions: {}
+
+concurrency:
+  group: dco-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
-  sign-off:
+  dco:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          filter: blob:none
           ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
       - name: Check Signed-off-by
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          # Dependabot's updates carry no sign-off; who opened the pull request can't be forged.
+          OPENER: ${{ github.event.pull_request.user.login }}
         run: |
+          if [ "$OPENER" = "dependabot[bot]" ]; then
+            echo "Dependabot's update: no sign-off needed"
+            exit 0
+          fi
           missing=0
           for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
             email=$(git log -1 --format=%ae "$c")
-            if ! git log -1 --format=%B "$c" | grep -qi "^Signed-off-by: .* <$email>\$"; then
+            # The address as plain text, not a pattern: bots' addresses have brackets.
+            if ! git log -1 --format=%B "$c" | grep -i '^Signed-off-by: ' | grep -qiF "<$email>"; then
               echo "::error::$(git log -1 --format='%h %s' "$c") has no Signed-off-by for $email"
               missing=1
             fi

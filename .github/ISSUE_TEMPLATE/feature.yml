@@ -13,8 +13,20 @@ body:
     id: idea
     attributes:
       label: What would help
+  - type: input
+    id: agent
+    attributes:
+      label: Agent, if it's about one
+      placeholder: Codex
   - type: textarea
     id: else
     attributes:
       label: Anything else
       description: How you work around it now, how other tools do it, screenshots.
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Before you file it
+      options:
+        - label: I searched the existing issues, and this isn't one of them.
+          required: true

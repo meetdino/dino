@@ -1,0 +1,57 @@
+# Dependency updates, weekly, a week after a release (security updates come right away). Each
+# ecosystem's minor and patch updates come as one pull request; a major update comes on its own.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /cloud
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cloud-cargo:
+        update-types: [minor, patch]
+
+  - package-ecosystem: rust-toolchain
+    directory: /cloud
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: docker
+    directory: /cloud
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: swift
+    directory: /app
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      swift:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        update-types: [minor, patch]
