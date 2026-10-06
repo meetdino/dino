@@ -535,6 +535,9 @@ struct FoundSession: Codable, Identifiable, Equatable {
     var url: String?
     /// Running in a tmux pane: where. tmux owns it; dino watches, and can show it there.
     var tmux: TmuxPlace?
+    /// Running, but dino can't tell which conversation it's on (Codex's shared server runs every
+    /// terminal's Codex, and more than one fits): nothing to continue.
+    var unsure: Unsure?
 
     var id: String { "\(source)-\(agent)-\(session_id)-\(pid ?? 0)" }
     var isBusy: Bool { status == "busy" || status == "needs" }
@@ -553,6 +556,12 @@ enum AgentNames {
     static func of(_ agent: String) -> String {
         short[agent.hasSuffix("-free") ? String(agent.dropLast(5)) : agent] ?? agent
     }
+}
+
+/// Why dino can't tell which conversation a running agent is on, and the ones it may be on.
+struct Unsure: Codable, Equatable {
+    var why: String
+    var maybe: [String]
 }
 
 /// The tmux pane an agent runs in.

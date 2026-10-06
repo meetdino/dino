@@ -48,7 +48,11 @@ its own: shown under it, and stopped with it (crates/dino-daemon/src/procs.rs). 
 is that shell's session's agent while it runs: dinod notices it in the shell's foreground and follows
 it with the same code as one it started (crates/dino-daemon/src/typed.rs), and starts it again in the
 shell, on its conversation, when it restarts. Agents running elsewhere on the Mac (other terminals,
-tmux) are found the same way, and *Continue in dino* moves one over.
+tmux) are found the same way, and *Continue in dino* moves one over. Codex 0.160.1 runs every
+terminal's Codex in one shared background server and keeps no record of which terminal is on which
+conversation: dino works it out from what that server has loaded and when each conversation began
+(crates/dino-core/src/agent/codex/attached.rs), and where more than one fits, says it can't tell
+rather than guess.
 
 Each agent has an adapter in `dino-core/src/agent/` that reads its status from the agent's own
 signals: its hooks, the log or database it keeps of its turns, or its server; for one that keeps

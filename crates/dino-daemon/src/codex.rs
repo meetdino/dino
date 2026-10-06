@@ -4,7 +4,7 @@
 //! the user. Both hold with routing off, when no model call passes through dino. Codex 0.160.1
 //! runs its conversations in a background server its terminals share, and the process in the
 //! terminal has no rollout open: its rollout is then the one of the conversation dino knows it's on,
-//! else the one begun for it as it started (see `Agent::new_conversation`).
+//! else the one only it could have begun as it started (see `dino_core::agent::codex::attached`).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -69,9 +69,9 @@ pub(crate) fn watch(d: &Daemon) {
 
 /// The rollout Codex process `pid` of session `s` is on: the one it has open, else (its
 /// conversations in Codex's shared server) the one of the conversation dino knows it's on, or
-/// the one begun for it as it started in its folder, but `claimed`. Only a rollout it has open says
-/// it moved to another.
-fn rollout_of(a: &dyn dino_core::agent::Agent, s: &Session, pid: u32, followed: bool, claimed: &[String]) -> Option<PathBuf> {
+/// the one only it could have begun as it started, but `claimed`; none while dino can't tell.
+/// Only a rollout it has open says it moved to another.
+fn rollout_of(s: &Session, pid: u32, followed: bool, claimed: &[String]) -> Option<PathBuf> {
     if let Some(open) = open_rollout(pid) {
         return Some(open);
     }
@@ -79,7 +79,7 @@ fn rollout_of(a: &dyn dino_core::agent::Agent, s: &Session, pid: u32, followed: 
         return None;
     }
     let known = s.agent_session.lock().unwrap().clone();
-    let id = known.or_else(|| a.new_conversation(&s.agent_cwd(), dino_core::procinfo::started(pid)?, claimed))?;
+    let id = known.or_else(|| dino_core::agent::codex::attached_to(pid, claimed))?;
     dino_core::agent::codex::rollout_path(&id)
 }
 
@@ -96,7 +96,7 @@ fn track(d: &Daemon, s: &Session, claimed: &[String]) -> Option<(Option<String>,
     if relook {
         r.looked = Some(Instant::now());
         let followed = r.path.is_some();
-        if let Some(path) = rollout_of(a, s, pid, followed, claimed).filter(|p| r.path.as_ref() != Some(p)) {
+        if let Some(path) = rollout_of(s, pid, followed, claimed).filter(|p| r.path.as_ref() != Some(p)) {
             // Its first prompt, or another conversation: pick up where that one is.
             let known = s.agent_session.lock().unwrap().clone();
             moved = history::rollout_id(&path).filter(|now| known.as_ref() != Some(now)).map(|now| (known, now));

@@ -1138,7 +1138,9 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
                 Source::Cloud => "cloud",
             };
             let when = if f.updated_at > 0 { out::iso(f.updated_at) } else { String::new() };
-            let fields = [source, &f.session_id, &f.agent, &f.title, f.cwd.as_deref().unwrap_or(""), f.status.as_deref().unwrap_or(""), &when];
+            // One whose conversation dino can't tell says so where its state goes.
+            let status = if f.unsure.is_some() { "unsure" } else { f.status.as_deref().unwrap_or("") };
+            let fields = [source, &f.session_id, &f.agent, &f.title, f.cwd.as_deref().unwrap_or(""), status, &when];
             println!("{}", fields.map(printable).join("\t"));
         }
         return Ok(());
@@ -1180,7 +1182,13 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
                     _ => SessionStatus::Idle,
                 };
                 let mut r = row(f);
-                r.push(Cell::status(state));
+                // Which conversation it's on, and so what it's doing, dino can't tell.
+                if f.unsure.is_some() {
+                    r[2] = Cell::new("can't tell which conversation").paint(Paint::Dim);
+                    r.push(Cell::new("unsure").paint(Paint::Dim));
+                } else {
+                    r.push(Cell::status(state));
+                }
                 if any_place {
                     r.push(Cell::new(printable(&place(f).unwrap_or_default())).paint(Paint::Dim));
                 }
@@ -1188,6 +1196,15 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
             })
             .collect();
         print!("{}", out::table(&cols, &rows, true));
+        let mut said = vec![];
+        for f in running.iter().filter(|f| f.unsure.is_some()) {
+            let why = f.unsure.as_ref().map(|u| u.why.as_str()).unwrap_or_default();
+            let line = format!("{} in {}: {}", printable(&f.agent), printable(&out::short_path(f.cwd.as_deref().unwrap_or(""))), printable(why));
+            if !said.contains(&line) {
+                println!("{}", out::paint(&line, Paint::Dim));
+                said.push(line);
+            }
+        }
     }
     let recent: Vec<_> = sessions.iter().filter(|f| f.source == Source::Recent).collect();
     if !recent.is_empty() {
