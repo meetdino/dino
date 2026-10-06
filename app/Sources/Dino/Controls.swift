@@ -278,7 +278,7 @@ extension SessionInfo {
 
 extension DinoModel {
     func knobs(for s: SessionInfo) -> Knobs? {
-        launchers.first { $0.agent_id == s.agent_id }?.knobs
+        launchers.first { $0.agent_id == s.agent }?.knobs
     }
 
     /// Mid-turn, or with subagents or background commands running, a change waits: restarting
@@ -326,19 +326,18 @@ func roundTokens(_ n: UInt64) -> String {
     }
 }
 
-/// What leads the toolbar for the selected session: what it's set to (SessionControlsBar), or an
-/// action in its place: continuing an agent found in a shell, resuming one that exited. A plain
-/// shell has none of these, and leaves the toolbar bare.
+/// What leads the toolbar for the selected session: what it's set to (SessionControlsBar), an
+/// agent typed into a shell's as any other's, or Resume for one that exited. A plain shell has
+/// none of these, and leaves the toolbar bare.
 struct SessionToolbarItem: View {
     let session: SessionInfo
 
     var body: some View {
         HStack(spacing: 8) {
-            if let f = session.inside, f.continuable { TakeOverButton(session: session, found: f) }
             if let host = session.host { HostChip(host: host) }
             if session.exited {
                 ResumeButton(session: session)
-            } else if session.agent_id != "shell" {
+            } else if session.agent != "shell" {
                 SessionControlsBar(session: session)
             }
         }
@@ -407,7 +406,7 @@ struct SessionControlsBar: View {
                     .padding(.vertical, 2)
                     .contentShape(Rectangle())
                 }
-                .help("Runs on \(route.label) through dino, not \(AgentNames.of(session.agent_id))'s own account (⇧⌘M)")
+                .help("Runs on \(route.label) through dino, not \(AgentNames.of(session.agent))'s own account (⇧⌘M)")
                 .popover(isPresented: Binding(get: { model.controlPicker == .model }, set: { if !$0, model.controlPicker == .model { model.controlPicker = nil } }), arrowEdge: .bottom) {
                     ProviderModelPopover(session: session, route: route)
                 }
@@ -452,7 +451,7 @@ struct SessionControlsBar: View {
 
     /// Why a session's model can't be changed from here.
     static func keptModel(_ s: SessionInfo) -> String {
-        "\(AgentNames.of(s.agent_id)) can't change a conversation's model. Start a new session to use another one."
+        "\(AgentNames.of(s.agent)) can't change a conversation's model. Start a new session to use another one."
     }
 
     private func help(_ kind: ControlKind) -> String {
@@ -463,7 +462,7 @@ struct SessionControlsBar: View {
                 return "You chose \(chosen), but the agent answered with \(other) (\(key))"
             }
             if let said = session.agent_model {
-                return "Model: \(said), as \(AgentNames.of(session.agent_id)) says (\(key))"
+                return "Model: \(said), as \(AgentNames.of(session.agent)) says (\(key))"
             }
             return "Model: \(session.last_model.map { "answering with \($0)" } ?? "the agent's default") (\(key))"
         case .mode:
@@ -503,7 +502,7 @@ struct ControlPopover: View {
     }
 
     var body: some View {
-        let listed = kind.options(knobs, seen: model.seenModels(session.agent_id), current: current, model: session.shownControls.model)
+        let listed = kind.options(knobs, seen: model.seenModels(session.agent), current: current, model: session.shownControls.model)
             .filter { kind != .mode || !knobs.keeps($0.value) || $0.value == current }
         let dropped = kind == .mode ? knobs.modes.filter { knobs.keeps($0) && $0 != current } : []
         // Ungrouped first, so the numbers follow what's shown; older models fold away unless
@@ -550,7 +549,7 @@ struct ControlPopover: View {
             }
             Divider().padding(.vertical, 6)
             if !dropped.isEmpty {
-                Text("\(AgentNames.of(session.agent_id)) can't keep \(dropped.map(knobs.modeLabel).joined(separator: ", ")) when it resumes a conversation. Start a new session to use \(dropped.count == 1 ? "it" : "them").")
+                Text("\(AgentNames.of(session.agent)) can't keep \(dropped.map(knobs.modeLabel).joined(separator: ", ")) when it resumes a conversation. Start a new session to use \(dropped.count == 1 ? "it" : "them").")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -668,7 +667,7 @@ struct ProviderModelPopover: View {
         .padding(12)
         .frame(width: 320)
         .task {
-            let provider = route.provider, agent = session.agent_id
+            let provider = route.provider, agent = session.agent
             let list = await Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).models(provider).models }.value ?? []
             // What its agent can use, the best for it first.
             let usable = list.filter { m in m.agents.first { $0.agent == agent }.map { $0.status != "no" && !$0.translated } ?? true }
@@ -682,7 +681,7 @@ struct ProviderModelPopover: View {
     }
 
     private func row(_ m: ProviderModel) -> some View {
-        let v = m.agents.first { $0.agent == session.agent_id }
+        let v = m.agents.first { $0.agent == session.agent }
         return Button {
             var c = session.wantedControls
             c.model = m.id

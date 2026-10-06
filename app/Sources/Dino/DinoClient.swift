@@ -60,10 +60,9 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var messaged_by: String?
     /// The SSH host it runs on (`cwd` is then a path there); nil for this Mac.
     var host: String?
-    /// A shell's: the agent someone started in it by hand, while it runs.
+    /// A shell's: the agent typed into it, while it runs. It's the session's agent then, as one
+    /// dino started would be (see `agent`).
     var inside: FoundSession?
-    /// A shell whose agent waits for its turn to end to continue in dino (Cancel stops it).
-    var taking_over: Bool?
     /// The agent's own conversation id: one conversation is one row.
     var conversation: String?
     /// A shell's, from its shell integration: where it is now (`cwd` is where it started), and
@@ -541,8 +540,6 @@ struct FoundSession: Codable, Identifiable, Equatable {
     var isBusy: Bool { status == "busy" || status == "needs" }
     /// Asking for something (a permission) in its tmux pane.
     var asking: Bool { status == "needs" }
-    /// Started by hand in a dino shell, and dino can continue it (it has a conversation to resume).
-    var continuable: Bool { AgentNames.short[baseAgent] != nil && !session_id.isEmpty }
     var agentName: String { AgentNames.of(agent) }
     /// The agent, whether or not it ran on the free tier ("kimi-free" is Kimi).
     var baseAgent: String { agent.hasSuffix("-free") ? String(agent.dropLast(5)) : agent }
@@ -1038,13 +1035,8 @@ final class DinoConnection: @unchecked Sendable {
         return try request(body).id
     }
 
-    /// Continue the agent started by hand in shell `session` as a dino session, in the shell's place.
-    func takeOver(session: String) throws {
-        _ = try send(["type": "take_over", "id": session])
-    }
-
-    /// Stop waiting to continue in dino: `id` is the shell's session id (take over), or the
-    /// conversation's id (adopt).
+    /// Stop waiting to continue a found session in dino (adopt): `id` is its conversation's id, or
+    /// its process's.
     func cancelTakeOver(id: String) throws {
         _ = try send(["type": "cancel_take_over", "id": id])
     }

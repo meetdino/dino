@@ -241,15 +241,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model.showPalette = false
                 return nil
             }
-            // Esc while the session in front waits to continue in dino stops the wait, rather than
-            // reaching its agent (where it would interrupt the turn being waited on).
-            if e.keyCode == 53, e.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
-               let model = self?.model, let w = e.window, !(w is NSPanel), w.attachedSheet == nil,
-               w.identifier?.rawValue != SettingsView.windowID,
-               let s = model.selectedSession, model.isTakingOver(s) {
-                model.cancelTakeOver(s.id)
-                return nil
-            }
             guard let model = self?.model, let w = e.window, !(w is NSPanel), w.attachedSheet == nil,
                   w.identifier?.rawValue != SettingsView.windowID,
                   Self.desktopKey(e, model: model) else { return e }
@@ -466,7 +457,6 @@ struct ContentView: View {
                     TabStrip()
                     TmuxSuggestion()
                     ComputerUseBanner()
-                    TakeOverBanner()
                     UpdateBanner()
                     Terminals()
                 }
@@ -1211,22 +1201,6 @@ struct SessionRow: View {
             if let from = session.forked_from {
                 ForkedFromLine(from: from)
             }
-            if let f = session.inside {
-                // The row's name is already the agent's title: the badge says what it is and where.
-                HStack(spacing: 5) {
-                    AgentBadge(agent: f.agent)
-                    if model.isTakingOver(session) {
-                        Image(systemName: "hourglass").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
-                        Text("continues in dino after this turn").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        Button("Cancel") { model.cancelTakeOver(session.id) }
-                            .buttonStyle(.link).font(.caption)
-                            .help("Stop waiting. \(f.agentName) keeps running in this shell.")
-                    } else {
-                        Text("in a shell").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
-                .help("\(f.agentName), started from the command line in this shell")
-            }
             if detail != nil || modelText != nil {
                 HStack(spacing: 6) {
                     if let detail { detail.lineLimit(1).truncationMode(.tail) }
@@ -1740,68 +1714,6 @@ struct AgentBadge: View {
         case "cursor": .brown
         case "amp": .pink
         default: Brand.spike
-        }
-    }
-}
-
-/// Continue an agent started by hand in a shell as a dino session: same row, conversation resumed.
-struct TakeOverButton: View {
-    @EnvironmentObject var model: DinoModel
-    let session: SessionInfo
-    let found: FoundSession
-
-    var body: some View {
-        if model.isTakingOver(session) {
-            Button("Cancel Continue") { model.cancelTakeOver(session.id) }
-                .controlSize(.small)
-                .help("Stop waiting (Esc). \(found.agentName) keeps running in this shell.")
-        } else {
-            Button("Continue in dino") { model.takeOver(session) }
-                .controlSize(.small)
-                .help("When its current turn ends, continue this \(found.agentName) conversation as a dino session, with status, tasks, controls and previews. The shell closes.")
-        }
-    }
-}
-
-/// Over the terminals: a shell in view whose agent waits for its turn to end to continue in
-/// dino, with Cancel (Esc in its terminal). Only that session waits; the rest of dino goes on.
-/// No animation: a turn can take minutes, and a terminal at rest should cost nothing.
-struct TakeOverBanner: View {
-    @EnvironmentObject var model: DinoModel
-
-    var body: some View {
-        let ids = model.shownSessions
-        if let s = ids.lazy.compactMap({ id in model.sessions.first { $0.id == id && model.isTakingOver($0) } }).first,
-           let f = s.inside {
-            let title = f.title.isEmpty ? f.agentName : "“\(f.title)”"
-            HStack(spacing: 10) {
-                Image(systemName: "hourglass")
-                    .font(.title3)
-                    .foregroundStyle(Brand.green)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(ids.count > 1 && s.id != model.selected ? "Continuing \(title) in dino (\(s.display))" : "Continuing \(title) in dino")
-                        .font(.callout.weight(.semibold))
-                        .lineLimit(1)
-                    Text(f.isBusy
-                        ? "Waiting for \(f.agentName)'s turn to end. Then the conversation continues here as a dino session."
-                        : "\(f.agentName) stops in this shell, and the conversation continues here as a dino session.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 8)
-                Button("Cancel") { model.cancelTakeOver(s.id) }
-                    .controlSize(.regular)
-                    .help("Stop waiting (Esc). \(f.agentName) keeps running in this shell.")
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(Brand.green.opacity(0.10))
-            .overlay(alignment: .bottom) { Divider() }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Continuing \(title) in dino")
         }
     }
 }

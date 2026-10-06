@@ -6,7 +6,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use dino_core::agent::{Agent, LogEvent, StatusSource, agent};
+use dino_core::agent::{Agent, LogEvent, StatusSource};
 use dino_proxy::Activity;
 use dino_proxy::computer::Phase;
 
@@ -28,7 +28,7 @@ pub(crate) struct Log {
 }
 
 fn followed(s: &Session) -> bool {
-    s.host.is_none() && agent(&s.agent_id).is_some_and(|a| matches!(a.status_source(), StatusSource::Log | StatusSource::Polled))
+    s.host.is_none() && s.adapter().is_some_and(|a| matches!(a.status_source(), StatusSource::Log | StatusSource::Polled))
 }
 
 /// Look at every session whose agent keeps such a record.
@@ -43,16 +43,17 @@ pub(crate) fn watch(d: &Daemon) {
 }
 
 fn track(d: &Daemon, s: &Session, claimed: &[String]) {
-    let Some(a) = agent(&s.agent_id) else { return };
+    let Some(a) = s.adapter() else { return };
+    let Some(since) = s.agent_pid().and_then(dino_core::procinfo::started) else { return };
+    let cwd = s.agent_cwd();
     let mut l = s.log.lock().unwrap();
-    let Some(since) = s.pane.pid().and_then(dino_core::procinfo::started) else { return };
     if l.conversation.is_none() {
         let known = s.agent_session.lock().unwrap().clone();
         l.conversation = match known {
             Some(id) => Some(id),
             // An agent that can't be told its conversation id starts one with its first prompt.
             None => {
-                let Some(id) = a.new_conversation(&s.cwd, since, claimed) else { return };
+                let Some(id) = a.new_conversation(&cwd, since, claimed) else { return };
                 *s.agent_session.lock().unwrap() = Some(id.clone());
                 Some(id)
             }

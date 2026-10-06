@@ -204,9 +204,10 @@ pub fn inside(fg: u32) -> Option<FoundSession> {
             return Some(s);
         }
     }
-    procs.iter().find_map(|(pid, comm, _)| {
+    // Its flags too: they say what it was started with (its mode, its model) before anything else does.
+    procs.iter().find_map(|(pid, comm, args)| {
         let a = crate::agent::all().into_iter().find(|a| a.may_be(comm))?;
-        Some(FoundSession { status: Some("starting".into()), ..by_hand(a.id(), *pid) })
+        Some(FoundSession { status: Some("starting".into()), args: a.portable_flags(args), ..by_hand(a.id(), *pid) })
     })
 }
 

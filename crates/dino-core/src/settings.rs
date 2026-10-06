@@ -317,8 +317,10 @@ pub struct Machine {
     pub awake_while_working: bool,
     /// Shells dino starts mark their prompts and report their folder, as in Ghostty (new shells only).
     pub shell_integration: bool,
-    /// An agent typed into a dino shell (`claude`) reports to dino from its start, as a session dino
-    /// started does: its turns, questions and tasks. Needs the shell integration.
+    /// An agent typed into a dino shell (`claude`, `codex`) is that shell's session's agent while it
+    /// runs, as one dino started is: its turns, questions, tasks, mode and model, and its
+    /// conversation resumed in the shell when dinod restarts. Off, it's a plain program. Needs the
+    /// shell integration.
     pub shell_agents: bool,
     /// Keep agents running with the lid closed. Off unless turned on, and for this Mac only.
     pub lid: Lid,

@@ -64,7 +64,7 @@ pub(crate) fn read(d: &Daemon, id: &str, lines: Option<u32>) -> anyhow::Result<S
         out.push_str(&format!("Last messaged by {}'s agent\n", name_of(&by)));
     }
     let session = s.agent_session.lock().unwrap().clone();
-    let conversation = session.zip(dino_core::agent::agent(&s.agent_id)).and_then(|(u, a)| a.tail(&u, CONVERSATION_BUDGET));
+    let conversation = session.zip(s.adapter()).and_then(|(u, a)| a.tail(&u, CONVERSATION_BUDGET));
     if let Some(c) = conversation {
         out.push_str(&format!("\n## Conversation (latest last)\n{c}\n"));
     }

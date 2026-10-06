@@ -152,16 +152,18 @@ extension DinoConnection {
 }
 
 extension SessionInfo {
-    /// What the user named it, else what its agent calls the conversation, else dino's name for it.
-    var display: String { label ?? agentTitle ?? name }
+    /// What the user named it, else what its agent calls the conversation, else dino's name for it;
+    /// for an agent typed into a shell, what dino read of its conversation's name, or the agent's.
+    var display: String { label ?? agentTitle ?? inside.map { $0.title.isEmpty ? AgentNames.of($0.agent) : $0.title } ?? name }
 
     /// What the agent calls the conversation: its terminal title (Claude sets it to the topic once
     /// it has one, and dinod passes every change on), without spinner or status glyphs. Nil for a
-    /// shell, and while the agent only names itself ("Claude Code", "Codex").
+    /// plain shell, while the agent only names itself ("Claude Code", "Codex"), and, typed into a
+    /// shell, while the title is still the command line it was typed as.
     var agentTitle: String? {
-        guard agent_id != "shell", let title, let t = DinoModel.undecorated(title) else { return nil }
+        guard agent != "shell", let title, let t = DinoModel.undecorated(title) else { return nil }
         let words = t.lowercased().split(separator: " ")
-        if let first = words.first, agent_id.lowercased().hasPrefix(first), words.count <= 2 { return nil }
+        if let first = words.first, agent.lowercased().hasPrefix(first), words.count <= 2 || inside != nil { return nil }
         return t
     }
 }

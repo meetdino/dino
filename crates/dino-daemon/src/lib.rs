@@ -56,10 +56,14 @@ mod sync;
 mod tmux;
 mod tmux_mirror;
 mod triggers;
+mod typed;
 mod update;
 
-/// The line between a resumed session's screen from before dinod restarted and what follows.
-const RESTART_MARK: &[u8] = b"\x1b[?1049l\r\n\x1b[0m\x1b[2m-- dino restarted; above is where this session was --\x1b[0m\r\n";
+/// The line between a resumed session's screen from before dinod restarted and what follows. The
+/// program starting now gets the terminal as a new one is: back on the normal screen, and none of
+/// the input modes the one before it asked for (bracketed paste, focus and mouse reports, cursor
+/// keys, keypad, kitty keyboard flags), which a shell at its prompt would get as text.
+const RESTART_MARK: &[u8] = b"\x1b[?1049l\r\n\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1l\x1b>\x1b[?25h\x1b[=0;1u\x1b[0m\x1b[2m-- dino restarted; above is where this session was --\x1b[0m\r\n";
 
 /// A saved screen without the restart lines earlier restarts left in it: one line per restart,
 /// not one more each time.
@@ -145,7 +149,7 @@ struct Session {
     log: Mutex<agentlog::Log>,
     /// Where its agent serves its own API, for agents dino follows that way (OpenCode).
     server: Option<agentserver::Address>,
-    /// A shell's: the agent someone started in it by hand.
+    /// A shell's: what runs in its foreground, an agent someone typed there among it (see `typed`).
     inside: Mutex<Inside>,
     /// Once it has ended: its last screen is on disk (see `save`).
     screen_saved: AtomicBool,
@@ -177,7 +181,12 @@ struct Inside {
     /// `fg`'s process name, as of `checked`.
     fg_name: Option<String>,
     checked: Option<Instant>,
+    /// The agent typed into it, while it runs there and dino follows it: the session's agent (see
+    /// `typed`).
     found: Option<FoundSession>,
+    /// dino is starting that agent again (see `typed::restart`): until when it waits for it, and
+    /// the process it's quitting, which isn't it any more.
+    resuming: Option<(Instant, Option<u32>)>,
     /// The shell's own title from before the command started, put back when an agent leaves.
     before: Option<Option<String>>,
     /// The foreground is a tmux client: its tmux and server, and what it shows as last asked.
@@ -313,7 +322,7 @@ struct Daemon {
     /// Sessions whose cost a client is looking at (the sidebar's hover card).
     costs: cost::Costs,
     /// Conversations waiting for their turn to end to continue in dino (see `Waiting`), by the
-    /// shell's session id (`TakeOver`) or the conversation's (`Adopt`): set to cancel.
+    /// conversation's id (`Adopt`): set to cancel.
     moves: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Builds found running for no session as dinod started (see `procs::settle`), each with
     /// when its top process started, until they end or are stopped.
@@ -954,13 +963,11 @@ fn install_sccache(d: &Daemon) -> anyhow::Result<String> {
 }
 
 /// Interrupt the agent's turn with its own key, as if pressed in its pane: the agent stops what it
-/// does (a tool call included) and waits for you, and the session goes on. A shell's agent started
-/// by hand is interrupted the same way; a plain shell has no turn to interrupt.
+/// does (a tool call included) and waits for you, and the session goes on. A shell's agent typed
+/// there is interrupted the same way; a plain shell has no turn to interrupt.
 fn interrupt(d: &Daemon, s: &Session) -> anyhow::Result<()> {
-    let id = match s.agent_id.as_str() {
-        "shell" => s.inside.lock().unwrap().found.as_ref().map(|f| f.agent.clone()).ok_or_else(|| anyhow::anyhow!("no agent is running in this shell"))?,
-        id => id.to_string(),
-    };
+    let id = s.agent_now();
+    anyhow::ensure!(id != "shell", "no agent is running in this shell");
     let a = agent(&id).ok_or_else(|| anyhow::anyhow!("dino can't interrupt {id}"))?;
     let keys = a.interrupt_keys();
     // Ctrl+C at its prompt would quit it: only mid-turn.
@@ -1432,10 +1439,6 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::TmuxScreen { socket, pane } => match tmux::screen(&socket, &pane) {
                 Some(text) => Response::Text { text },
                 None => Response::Error { message: "that tmux pane is gone".into() },
-            },
-            Request::TakeOver { id } => match take_over(d, &id) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error { message: e.to_string() },
             },
             Request::CancelTakeOver { id } => match cancel_move(d, &id) {
                 Ok(()) => Response::Ok,
@@ -1946,12 +1949,17 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let session = sessions.last().cloned();
     drop(sessions);
     if let Some(s) = session {
+        // A shell's agent typed there, running as it was saved: started there again.
+        let typed = restore.as_ref().and_then(|r| r.typed.clone()).filter(|_| s.agent_id == "shell" && s.host.is_none() && !s.pane.is_exited());
         if restore.is_some() {
-            let conversation = s.agent_session.lock().unwrap().clone();
+            let conversation = typed.as_ref().and_then(|t| t.conversation.clone()).or_else(|| s.agent_session.lock().unwrap().clone());
             stats::seed(d, &s.id, None, s.started_at, conversation.as_deref());
         }
         fallbacks::set(d, &settings, &s);
         sync_shell_agents(d, &s, &Settings::load());
+        if let Some(t) = typed {
+            typed::resume(d, &s, t);
+        }
         if s.server.is_some() && !s.pane.is_exited() {
             agentserver::follow(d.proxy.stats.clone(), s);
         }
@@ -1983,8 +1991,7 @@ fn sync_shell_agents(d: &Daemon, s: &Session, settings: &Settings) {
         return;
     }
     let path = shell_agent_settings(&s.id);
-    let on = settings.machine.shell_integration && settings.machine.shell_agents && !keeps_terminal(&s.id);
-    if !on {
+    if !typed::followed(settings, &s.id) {
         let _ = std::fs::remove_file(&path);
         return;
     }
@@ -2335,14 +2342,15 @@ fn in_place(s: &Session, have: &Controls, want: &Controls) -> bool {
 /// `Agent::resume_keeps`) is refused, rather than shown as if it applied. `have` is what it runs
 /// with now.
 fn kept_on_resume(s: &Session, have: &Controls, controls: &Controls) -> anyhow::Result<()> {
-    let Some(a) = agent(&s.agent_id) else { return Ok(()) };
+    let Some(a) = s.adapter() else { return Ok(()) };
     if s.agent_session.lock().unwrap().is_none() {
         return Ok(());
     }
-    let name = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == s.agent_id).map_or(s.agent_id.as_str(), |k| k.name);
+    let id = s.agent_now();
+    let name = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id).map_or(id.as_str(), |k| k.name);
     let keeps = a.resume_keeps();
     anyhow::ensure!(!keeps.contains(&"model") || controls.model == have.model, "{name} keeps a conversation's model; start a new session to change it");
-    if let Some(m) = controls.mode.as_deref().filter(|m| keeps.contains(m) && s.controls.mode.as_deref() != Some(*m)) {
+    if let Some(m) = controls.mode.as_deref().filter(|m| keeps.contains(m) && s.launched_controls().mode.as_deref() != Some(*m)) {
         let label = a.mode_label(m).unwrap_or(m);
         anyhow::bail!("{name} can't resume a conversation in {label} mode; start a new session in {label} mode instead");
     }
@@ -2610,12 +2618,12 @@ fn bypass_prompt(screen: &str) -> bool {
 /// What Claude's own screen asks before it can go on (see `setup_prompt`): before its first
 /// hook, or after a finished turn when it was restarted into bypass.
 fn claude_setup(s: &Session, activity: Option<&Activity>) -> Option<&'static str> {
-    if s.agent_id != "claude" || s.pane.is_exited() {
+    if s.agent_now() != "claude" || s.pane.is_exited() {
         return None;
     }
     match activity {
         None => setup_prompt(&s.pane.text(0)),
-        Some(Activity::Done) if s.controls.mode.as_deref() == Some("bypass") => bypass_prompt(&s.pane.text(0)).then_some(BYPASS_PROMPT),
+        Some(Activity::Done) if s.launched_controls().mode.as_deref() == Some("bypass") => bypass_prompt(&s.pane.text(0)).then_some(BYPASS_PROMPT),
         Some(_) => None,
     }
 }
@@ -2623,13 +2631,17 @@ fn claude_setup(s: &Session, activity: Option<&Activity>) -> Option<&'static str
 /// What an agent whose questions are only on its screen (see `Agent::asking`) asks there:
 /// before its record says anything, or while it says the turn is going (a permission dialog
 /// mid-turn). Otherwise `activity`, as its record has it. One whose store is polled has its screen
-/// read there instead (see `agentlog`), and what it asks is already in `activity`.
-fn on_screen(s: &Session, activity: Option<String>) -> Option<String> {
+/// read there instead (see `agentlog`), and what it asks is already in `activity`. So is one typed
+/// into a shell without hooks (`hooked`): dino gave it nothing that says when it asks (Codex's
+/// notices), so its screen does.
+fn on_screen(s: &Session, activity: Option<String>, hooked: bool) -> Option<String> {
     if activity.as_deref().is_some_and(|a| a != "working") {
         return activity;
     }
-    let asked = agent(&s.agent_id)
-        .filter(|a| a.asks_on_screen() && a.status_source() != StatusSource::Polled && s.host.is_none() && !s.pane.is_exited())
+    let typed = s.agent_id == "shell" && !hooked;
+    let asked = s
+        .adapter()
+        .filter(|a| (a.asks_on_screen() || typed) && a.status_source() != StatusSource::Polled && s.host.is_none() && !s.pane.is_exited())
         .and_then(|a| a.asking(&s.pane.text(0)));
     asked.map(|what| format!("needs:{what}")).or(activity)
 }
@@ -2773,7 +2785,6 @@ fn state(d: &Daemon) -> Response {
     let prs = d.prs.lock().unwrap().clone();
     let previews = d.previews.lock().unwrap().clone();
     let live = d.sessions.lock().unwrap().clone();
-    let moving: HashSet<String> = d.moves.lock().unwrap().keys().cloned().collect();
     let sessions = live
         .iter()
         .map(|s| {
@@ -2783,8 +2794,10 @@ fn state(d: &Daemon) -> Response {
             let label = s.label.lock().unwrap().clone();
             let agent_mode = mode::now(s, st.agent_mode.as_deref());
             let agent_model = mode::model_now(s, st.agent_model.as_deref());
-            let model = agent_model.clone().or_else(|| s.controls.model.clone());
-            let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
+            // What its agent was started with: dino's controls, or the flags typed with it.
+            let launched = s.launched_controls();
+            let model = agent_model.clone().or_else(|| launched.model.clone());
+            let tasks = session_tasks(&st, &s.agent_cwd(), s.pane.is_exited());
             let (inside, running, tmux, foreground) = {
                 let i = s.inside.lock().unwrap();
                 let tmux = i.tmux.as_ref().and_then(|t| t.1.as_ref()).map(|v| ipc::TmuxPane {
@@ -2814,7 +2827,7 @@ fn state(d: &Daemon) -> Response {
                 },
                 Activity::NeedsPermission(what) => format!("needs:{what}"),
             }))
-            .or_else(|| (s.agent_id == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))));
+            .or_else(|| (s.agent_now() == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))), st.hooked);
             let output_ms_ago = s.last_output.lock().unwrap().map(|t| t.elapsed().as_millis() as u64);
             // Each of its locks read on its own, none held as the next is taken: a lock taken in
             // the struct below is held to its end, and `snapshot` (the save loop) takes some of
@@ -2832,7 +2845,8 @@ fn state(d: &Daemon) -> Response {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 agent_id: s.agent_id.clone(),
-                title: label.clone().or(named).or_else(|| s.pane.title().and_then(|t| agent(&s.agent_id).map_or(Some(t.clone()), |a| a.shown_title(&t))).and_then(|t| undecorated(&t))),
+                // Not its shell's, while its agent typed there starts again.
+                title: label.clone().or(named).or_else(|| s.pane.title().filter(|_| s.agent_id != "shell" || s.agent_pid().is_some() || inside.is_none()).and_then(|t| s.adapter().map_or(Some(t.clone()), |a| a.shown_title(&t))).and_then(|t| undecorated(&t))),
                 exited: s.pane.is_exited(),
                 exit_code: s.pane.exit_code(),
                 output_ms_ago,
@@ -2854,7 +2868,7 @@ fn state(d: &Daemon) -> Response {
                 local_url,
                 // What it runs with as its agent says (its screen, its hooks, its record), never
                 // what's only asked for: that's `pending` until it's in effect.
-                controls: Controls { mode: agent_mode.clone().or_else(|| s.controls.mode.clone()), model: model.clone(), ..s.controls.clone() },
+                controls: Controls { mode: agent_mode.clone().or_else(|| launched.mode.clone()), model: model.clone(), ..launched },
                 pending,
                 agent_mode,
                 agent_model,
@@ -2869,7 +2883,6 @@ fn state(d: &Daemon) -> Response {
                 revealed: Some(s.revealed.load(Ordering::Relaxed)).filter(|&t| t > 0),
                 tasks,
                 inside,
-                taking_over: moving.contains(&s.id),
                 conversation,
                 running,
                 foreground,
@@ -3048,6 +3061,9 @@ struct SavedSession {
     /// `local_spec`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     fork_pending: bool,
+    /// A shell's: the agent typed into it, running as it was saved, to start there again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    typed: Option<typed::Typed>,
 }
 
 fn saved_path(home: &Path) -> PathBuf {
@@ -3158,12 +3174,13 @@ fn save(d: &Daemon) {
     }
 }
 
-/// What it takes to bring `s` back.
-/// Where session `s` starts again after dinod restarts (or crashes): a shell on this Mac where it
-/// last was, if that folder is still there; anything else where it started.
+/// Where session `s` starts again after dinod restarts (or crashes): a shell on this Mac where the
+/// agent typed into it runs (it resumes its conversation there), else where the shell last was, if
+/// that folder is still there; anything else where it started.
 fn resume_folder(s: &Session) -> String {
     if s.agent_id == "shell" && s.host.is_none() {
-        if let Some(here) = s.pane.shared.cwd.lock().unwrap().clone().filter(|p| Path::new(p).is_dir()) {
+        let typed = s.typed().and_then(|f| f.cwd);
+        if let Some(here) = typed.or_else(|| s.pane.shared.cwd.lock().unwrap().clone()).filter(|p| Path::new(p).is_dir()) {
             return here;
         }
     }
@@ -3173,10 +3190,16 @@ fn resume_folder(s: &Session) -> String {
 /// Holds no lock of `s`'s while it reads its screen: the pane's reader takes them holding the
 /// screen's.
 fn snapshot(d: &Daemon, s: &Session) -> SavedSession {
-    // The mode it's in, which it may have switched to since it started: what it resumes in.
-    let controls = mode::current(d, s);
+    // The mode it's in, which it may have switched to since it started: what it resumes in. A
+    // shell's own: its typed agent's go with it (`typed`).
+    let controls = if s.agent_id == "shell" { s.controls.clone() } else { mode::current(d, s) };
+    // A shell's agent typed there, and its conversation, start again in the shell (see `typed`):
+    // the shell itself has none of its own.
+    let typed = typed::saved(d, s);
     // Released before the session's other locks are taken (see `state`).
-    let agent_session = {
+    let agent_session = if s.agent_id == "shell" {
+        None
+    } else {
         let mut agent_session = s.agent_session.lock().unwrap();
         if agent_session.is_none() {
             *agent_session = conversation_of(s);
@@ -3209,6 +3232,7 @@ fn snapshot(d: &Daemon, s: &Session) -> SavedSession {
         account: s.account.clone(),
         forked_from: s.forked_from.lock().unwrap().clone(),
         fork_pending: s.fork_pending.load(Ordering::Relaxed),
+        typed,
     }
 }
 
@@ -3228,6 +3252,11 @@ fn attachable(d: &Daemon, id: &str) -> Option<Arc<Session>> {
 /// with them, under the same id. Attached clients see the socket drop without an exit and
 /// reattach (see `dino attach`), so the terminal carries on.
 fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
+    // An agent typed into a shell starts again in it; the shell goes on.
+    let typed = d.sessions.lock().unwrap().iter().find(|s| s.id == id && !s.pane.is_exited() && s.typed().is_some()).cloned();
+    if let Some(s) = typed {
+        return typed::restart(d, &s, controls);
+    }
     restart_with(d, id, |saved| {
         if saved.controls.model != controls.model {
             d.proxy.stats.reset_context(id);
@@ -3365,12 +3394,12 @@ fn prompt_args(agent_id: &str, prompt: String) -> Vec<String> {
 
 /// The conversation `s`'s agent is on, looked at now, for agents that name it only as they go.
 fn conversation_of(s: &Session) -> Option<String> {
-    s.host.is_none().then(|| agent(&s.agent_id)?.conversation_of(s.pane.pid()?)).flatten()
+    s.host.is_none().then(|| s.adapter()?.conversation_of(s.agent_pid()?)).flatten()
 }
 
 /// `s` is on this Mac, and dino follows its agent's own record of its turns (see `codex`).
 fn watched(s: &Session) -> bool {
-    s.host.is_none() && agent(&s.agent_id).is_some_and(|a| a.status_source() == StatusSource::Rollout)
+    s.host.is_none() && s.adapter().is_some_and(|a| a.status_source() == StatusSource::Rollout)
 }
 
 fn home() -> PathBuf {
@@ -3478,6 +3507,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
                 account,
                 forked_from: None,
                 fork_pending: false,
+                typed: None,
             };
             spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?
         }
@@ -3602,11 +3632,13 @@ fn foreground_now(s: &Session) -> Option<ipc::ForegroundProcess> {
     Some(ipc::ForegroundProcess { pid: fg, name: dino_core::procinfo::name(fg).unwrap_or_default() })
 }
 
-/// Notice agents started by hand in dino's shells, and when they exit back to the prompt.
+/// Notice agents typed by hand in dino's shells (each then the shell session's agent, see `typed`),
+/// and when they exit back to the prompt.
 fn watch_shells(d: &Daemon) {
     // Calls from an agent typed in a shell are written down while dinod still knows it's there.
     stats::flush(d);
     let shells: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| s.agent_id == "shell" && s.host.is_none() && !s.pane.is_exited()).cloned().collect();
+    let settings = Settings::load();
     for s in shells {
         let fg = s.pane.foreground().filter(|fg| Some(*fg) != s.pane.pid());
         if let Some(fg) = fg {
@@ -3614,9 +3646,12 @@ fn watch_shells(d: &Daemon) {
                 continue;
             }
         }
-        let due = {
+        let (due, gone) = {
             let mut i = s.inside.lock().unwrap();
-            if fg.is_none() {
+            // dino is starting its agent again: at the prompt meanwhile, it's still the shell's agent.
+            let resuming = i.resuming.is_some_and(|(until, _)| Instant::now() < until);
+            let mut gone = false;
+            if fg.is_none() && !resuming {
                 // Agents set the title, and change it again on the way out: put the shell's back.
                 // So does a tmux client (its server's title, or the command line).
                 if i.found.is_some() || i.tmux.is_some() {
@@ -3625,21 +3660,29 @@ fn watch_shells(d: &Daemon) {
                 // Back at the prompt: what an agent's hooks said of it went with it, and its own
                 // records are read while they're fresh. Only after an agent: a read looks at every
                 // agent's records on this Mac, and a loop forking `sleep` comes back here each time.
-                if i.fg.is_some() {
+                if i.fg.is_some() || i.found.is_some() {
                     let hooked = d.proxy.stats.agent_left(&s.id);
                     if hooked || i.found.is_some() {
                         stats::session_ended();
                     }
                 }
+                gone = i.found.is_some();
                 // Taken at the prompt: an agent can retitle before a poll sees it start.
                 *i = Inside { before: Some(s.pane.title()), ..Inside::default() };
+            } else if fg.is_none() {
+                // At the prompt, its agent about to be typed there again.
+                i.before = Some(s.pane.title());
             } else if i.before.is_none() {
                 i.before = Some(s.pane.title());
             }
-            fg.is_some() && (i.fg != fg || i.checked.is_none_or(|t| t.elapsed() >= INSIDE_RECHECK))
+            (fg.is_some() && (i.fg != fg || i.checked.is_none_or(|t| t.elapsed() >= INSIDE_RECHECK)), gone)
         };
+        if gone {
+            typed::left(d, &s);
+        }
         let Some(fg) = fg.filter(|_| due) else { continue };
-        let mut found = found::inside(fg);
+        // Settings → Agents and Keep as Terminal can leave it a plain program.
+        let mut found = if typed::followed(&settings, &s.id) { found::inside(fg) } else { None };
         // Asking the user (a permission or trust dialog): its own status only says busy.
         if let Some(f) = found.as_mut().filter(|f| ["claude", "codex"].contains(&f.agent.as_str()) || agent(&f.agent).is_some_and(|a| a.asks_on_screen())) {
             if found::asking(&f.agent, &s.pane.text(0)) {
@@ -3651,7 +3694,25 @@ fn watch_shells(d: &Daemon) {
         // Asked again at each look: a child the shell has forked is named for the shell until it
         // execs the command.
         let fg_name = dino_core::procinfo::name(fg);
-        *i = Inside { fg: Some(fg), fg_name, checked: Some(Instant::now()), found, before, ..Inside::default() };
+        let resuming = i.resuming.filter(|(until, _)| Instant::now() < *until);
+        // While dino starts it again, the process quitting, or what the shell runs before the line
+        // is typed, isn't it.
+        if let Some((_, quitting)) = resuming {
+            if found.as_ref().is_none_or(|f| f.pid == quitting) {
+                found = i.found.clone();
+            }
+        }
+        let back = found.as_ref().is_some_and(|f| f.pid.is_some());
+        // Not the agent it had: that one exited, and another program started between two looks.
+        let gone = i.found.as_ref().is_some_and(|old| old.pid.is_some() && found.as_ref().is_none_or(|f| f.pid != old.pid || f.agent != old.agent));
+        *i = Inside { fg: Some(fg), fg_name, checked: Some(Instant::now()), found: found.clone(), resuming: resuming.filter(|_| !back), before, ..Inside::default() };
+        drop(i);
+        if gone {
+            typed::left(d, &s);
+        }
+        if let Some(f) = &found {
+            typed::seen(d, &s, f);
+        }
     }
 }
 
@@ -3692,7 +3753,7 @@ fn follow_tmux(s: &Session, fg: u32) -> bool {
         let before = i.before.take().or_else(|| Some(s.pane.title()));
         // From here on: what rang before the client started isn't tmux's.
         let alerts = TmuxAlerts { bells, notices, ..TmuxAlerts::default() };
-        *i = Inside { fg: Some(fg), fg_name: dino_core::procinfo::name(fg), checked: Some(Instant::now()), found: None, before, tmux: None, alerts };
+        *i = Inside { fg: Some(fg), fg_name: dino_core::procinfo::name(fg), checked: Some(Instant::now()), found: None, resuming: None, before, tmux: None, alerts };
     }
     if let Some(v) = &view {
         // A bell: tmux says which windows rang. A notification only comes through from the pane
@@ -3712,85 +3773,6 @@ fn follow_tmux(s: &Session, fg: u32) -> bool {
     i.alerts.notices = notices;
     i.tmux = Some((client, view));
     true
-}
-
-/// Continue the agent someone started by hand in shell `id` as a dino session in the shell's
-/// place: same id and row, the agent's folder, flags and account, its conversation resumed. The
-/// shell goes. A conversation a dino session already has continues in that session instead, and
-/// the shell stays, back at its prompt.
-fn take_over(d: &Daemon, id: &str) -> anyhow::Result<()> {
-    let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-    anyhow::ensure!(s.agent_id == "shell" && s.host.is_none(), "{id} isn't a shell on this Mac");
-    // Looked at now, not as of the last poll: it may have exited, or named its conversation since.
-    let f = s.pane.foreground().and_then(found::inside).ok_or_else(|| anyhow::anyhow!("no agent is running in {id}"))?;
-    let Some(a) = agent(&f.agent) else { anyhow::bail!("dino can't continue {} sessions yet", f.agent) };
-    anyhow::ensure!(!f.session_id.is_empty(), "the agent hasn't started a conversation yet; send it a prompt first");
-    let pid = f.pid.ok_or_else(|| anyhow::anyhow!("no agent is running in {id}"))?;
-    let waiting = Waiting::start(d, id)?;
-    waiting.until_idle(a, pid)?;
-    let held = holder(d, &f.session_id, Some(id));
-    if let Some(h) = &held {
-        waiting.until_restartable(h)?;
-    }
-    // Read before it's stopped: what it was started with goes with it.
-    let account = account_of(&f.agent, pid);
-    let tty = tty_of(pid);
-    // And the mode it's in, which its flags may not say (switched with Claude's Shift+Tab):
-    // resumed without it, it would start in whatever its own settings say instead. As its flags
-    // say, else as its screen shows it, else as its hooks last said.
-    let hooked = d.proxy.stats.session(id).agent_mode.and_then(|m| a.reported_mode(&m));
-    let mode = controls::from_args(&f.agent, &f.args).mode.or_else(|| a.screen_mode(&s.pane.text(0))).or(hooked);
-    waiting.done()?;
-    stop(pid)?;
-    if let Some(h) = held {
-        restart_with(d, &h.id, |saved| {
-            saved.args = f.args.clone();
-            saved.account = account;
-            // In the mode it was in by hand, not the one the session had before.
-            if mode.is_some() {
-                saved.controls.mode = mode;
-            }
-        })?;
-        if let Some(tty) = tty {
-            moved_note(&tty, &f.title, &h.id);
-        }
-        return Ok(());
-    }
-    let restore = SavedSession {
-        id: id.to_string(),
-        name: session_name(&f.title),
-        launcher: f.agent.clone(),
-        args: f.args.clone(),
-        cwd: f.cwd.clone().unwrap_or_else(|| real(&s.cwd)),
-        started_at: now_secs(),
-        agent_session: Some(f.session_id.clone()),
-        auto: AutoState::default(),
-        // Its flags say the rest.
-        controls: Controls { mode, ..Controls::default() },
-        scheduled: s.scheduled.clone(),
-        started_by: s.started_by.clone(),
-        messaged_by: s.messaged_by.lock().unwrap().clone(),
-        label: s.label.lock().unwrap().clone(),
-        pinned: s.pinned.load(Ordering::Relaxed),
-        host: None,
-        ended: false,
-        exit_code: None,
-        route: None,
-        instead_of: None,
-        account,
-        forked_from: None,
-        fork_pending: false,
-    };
-    let (cols, rows) = s.pane.size();
-    spawn(d, Launch { cols, rows, restore: Some(restore.clone()), ..Launch::new(&restore.launcher, restore.args.clone(), Some(restore.cwd.clone())) })?;
-    // In the shell's place first, so clients reattaching by id find the agent.
-    take_place(d, &s);
-    // As in `restart`: clients see the stream drop without an exit, and reattach.
-    s.subscribers.lock().unwrap().clear();
-    s.pane.kill();
-    d.proxy.stats.restarted(id);
-    save(d);
-    Ok(())
 }
 
 fn tty_of(pid: u32) -> Option<String> {
@@ -4955,6 +4937,7 @@ mod tests {
             account: vec![],
             forked_from: None,
             fork_pending: false,
+            typed: None,
         }
     }
 
@@ -6073,6 +6056,255 @@ while (sysread(STDIN, my $c, 1)) {
         kill(&d, &id);
         save_live_screens(&d2, false);
         assert!(!file.exists(), "a gone session's screen goes");
+    }
+
+    /// The program starting after dinod restarted gets the terminal as a new one: the modes the one
+    /// before asked for (an agent's bracketed paste, focus reports) would reach a shell's prompt as
+    /// text, and a line pasted there as `00~…01~`.
+    #[test]
+    fn a_restart_leaves_the_last_programs_modes_behind() {
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(test_home().display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        s.pane.write(b"echo kept-$((6*7))\r".to_vec());
+        wait_for("the output", || s.pane.text(0).contains("kept-42") && s.last_output.lock().unwrap().is_some());
+        save_live_screens(&d, true);
+        // Saved with an agent up that had asked for them.
+        let file = live_screens_dir(&d.home).join(&id);
+        let mut screen = std::fs::read(&file).unwrap();
+        screen.extend_from_slice(b"\x1b[?2004h\x1b[?1004h\x1b[?1002h");
+        std::fs::write(&file, screen).unwrap();
+        let saved = snapshot(&d, &s);
+        kill(&d, &id);
+        let d2 = restarted(&d);
+        spawn(&d2, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) }).unwrap();
+        let back = session(&d2, &id);
+        let replay = String::from_utf8_lossy(&back.pane.replay(50)).into_owned();
+        assert!(replay.contains("kept-42") && replay.contains("dino restarted"), "{replay:?}");
+        assert!(!replay.contains("?2004h") && !replay.contains("?1004h") && !replay.contains("?1002h"), "{replay:?}");
+        kill(&d2, &id);
+    }
+
+    /// A shell in `dir` with an id no other test's session has: its private files (its agent
+    /// settings, its Keep as Terminal) are under dino's folder by id, which tests share.
+    fn own_shell(d: &Daemon, id: &str, dir: &Path) -> String {
+        let saved = SavedSession { id: id.into(), name: format!("shell-{id}"), launcher: "shell".into(), cwd: dir.display().to_string(), ..SavedSession::default() };
+        forget_session_files(id);
+        spawn(d, Launch { restore: Some(saved), ..Launch::new("shell", vec![], Some(dir.display().to_string())) }).unwrap()
+    }
+
+    /// A stand-in for Codex typed into a shell (`codex`, found on its PATH): it writes what it was
+    /// started with to `runs`, holds its rollout open, and quits on ⌃C. It goes by `codex`, as the
+    /// real one does, but its flags aren't kept.
+    fn typed_codex(dir: &Path, rollout: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = format!("#!/bin/bash\necho \"$@\" >> '{}'\nexec 3>>'{}'\nexec -a codex /bin/sleep 600\n", dir.join("runs").display(), rollout.display());
+        std::fs::write(bin.join("codex"), script).unwrap();
+        std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// An agent typed into a dino shell is that session's agent: its controls from what it was
+    /// typed with and its model from its own record, its conversation, its status. What it's
+    /// saved with is the shell's own, and the agent apart; another model chosen in dino quits it
+    /// with its own keys and types it again at the shell's prompt on its conversation; dinod
+    /// restarting types it there again; once it exits, the shell is a plain shell.
+    #[test]
+    fn an_agent_typed_into_a_shell_is_its_session_and_starts_again_there() {
+        let dir = test_home().join("typed-codex");
+        let _ = std::fs::remove_dir_all(&dir);
+        let conversation = "01a112e2-c11f-7cd2-b4cb-58e3cc582ab7";
+        let sessions = dir.join(".codex/sessions/2026/10/06");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join(format!("rollout-2026-10-06T13-23-43-{conversation}.jsonl"));
+        let lines = [
+            format!(r#"{{"timestamp":"2026-10-06T20:23:43.400Z","type":"session_meta","payload":{{"id":"{conversation}","cwd":"{}","originator":"codex-tui","cli_version":"0.160.1","source":"vscode"}}}}"#, dir.display()),
+            r#"{"timestamp":"2026-10-06T20:23:44.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/r","approval_policy":"on-request","model":"gpt-5.5","effort":"xhigh","summary":"none"}}"#.to_string(),
+            r#"{"timestamp":"2026-10-06T20:23:44.100Z","type":"event_msg","payload":{"type":"task_started"}}"#.to_string(),
+            r#"{"timestamp":"2026-10-06T20:23:45.000Z","type":"event_msg","payload":{"type":"task_complete"}}"#.to_string(),
+        ];
+        std::fs::write(&rollout, lines.join("\n") + "\n").unwrap();
+        typed_codex(&dir, &rollout);
+        let path = format!("PATH='{}':\"$PATH\"; export PATH\r", dir.join("bin").display());
+        let runs = || std::fs::read_to_string(dir.join("runs")).unwrap_or_default();
+        let d = shell_daemon();
+        let id = own_shell(&d, "9601", &dir);
+        let s = session(&d, &id);
+        s.pane.write(path.clone().into_bytes());
+        s.pane.write(b"codex\r".to_vec());
+        let shown = |d: &Daemon| match state(d) {
+            Response::State { sessions, .. } => sessions.into_iter().find(|x| x.id == id).unwrap(),
+            _ => unreachable!(),
+        };
+        wait_for("it as the shell's agent, on its conversation", || {
+            watch_shells(&d);
+            codex::watch(&d);
+            s.agent_session.lock().unwrap().as_deref() == Some(conversation)
+        });
+        let first = s.typed().and_then(|f| f.pid).unwrap();
+        let first_started = dino_core::procinfo::process(first).unwrap().started_us;
+        assert_eq!((s.agent_now(), s.agent_launcher(), s.agent_pid()), ("codex".to_string(), "codex".to_string(), Some(first)));
+        let x = shown(&d);
+        assert_eq!((x.agent_id.as_str(), x.inside.as_ref().map(|f| f.agent.as_str())), ("shell", Some("codex")));
+        assert_eq!((x.controls.model.as_deref(), x.agent_model.as_deref(), x.conversation.as_deref()), (Some("gpt-5.5"), Some("gpt-5.5"), Some(conversation)));
+        assert_eq!(x.activity.as_deref(), Some("done"), "its rollout says its turn is over");
+
+        // Saved: the shell's own controls and no conversation; its agent apart, to type again.
+        let saved = snapshot(&d, &s);
+        assert_eq!((saved.launcher.as_str(), saved.agent_session.as_deref(), saved.controls.clone()), ("shell", None, Controls::default()));
+        let t = saved.typed.clone().unwrap();
+        assert_eq!((t.agent.as_str(), t.conversation.as_deref(), t.controls.model.as_deref()), ("codex", Some(conversation), Some("gpt-5.5")));
+        // What it said it's on, which `codex` alone wouldn't start it on.
+        assert_eq!(typed::command_line(&d, &t).unwrap(), format!("codex resume -m gpt-5.5 {conversation}"));
+        assert_eq!(typed::command_line(&d, &typed::Typed { args: vec!["--search".into(), "go on".into()], ..t.clone() }).unwrap(), format!("codex resume --search -m gpt-5.5 {conversation}"), "a prompt it was typed with isn't given again");
+
+        // dinod restarts: the shell comes back with its agent on its way, typed there again on the
+        // model it said it's on.
+        save_live_screens(&d, true);
+        let saved = snapshot(&d, &s);
+        kill(&d, &id);
+        wait_for("it gone with its shell", || !dino_core::procinfo::alive(first, first_started));
+        let d2 = restarted(&d);
+        spawn(&d2, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) }).unwrap();
+        let back = session(&d2, &id);
+        // Its PATH again (a new shell), before the line is typed at its prompt.
+        back.pane.write(path.into_bytes());
+        let waiting = back.typed().unwrap();
+        assert_eq!((waiting.agent.as_str(), waiting.pid, waiting.status.as_deref()), ("codex", None, Some("starting")), "its agent while it starts again");
+        assert_eq!(back.agent_now(), "codex");
+        wait_for("it typed again after the restart", || {
+            watch_shells(&d2);
+            runs().lines().count() == 2 && back.typed().is_some_and(|f| f.pid.is_some())
+        });
+        assert_eq!(runs().lines().nth(1), Some(format!("resume -m gpt-5.5 {conversation}").as_str()));
+        wait_for("its conversation again", || {
+            codex::watch(&d2);
+            back.agent_session.lock().unwrap().as_deref() == Some(conversation)
+        });
+        let second = back.typed().and_then(|f| f.pid).unwrap();
+        let second_started = dino_core::procinfo::process(second).unwrap().started_us;
+
+        // Another model chosen in dino: it quits with its own keys and is typed again in its shell.
+        set_controls(&d2, &id, Controls { model: Some("gpt-test-2".into()), ..mode::current(&d2, &back) }).unwrap();
+        wait_for("it typed again", || {
+            apply_pending(&d2);
+            watch_shells(&d2);
+            runs().lines().count() == 3 && back.typed().and_then(|f| f.pid).is_some_and(|p| p != second)
+        });
+        assert_eq!(runs().lines().nth(2), Some(format!("resume -m gpt-test-2 {conversation}").as_str()));
+        wait_for("the one before quit", || !dino_core::procinfo::alive(second, second_started));
+        assert_eq!(back.agent_session.lock().unwrap().as_deref(), Some(conversation));
+        assert_eq!(session(&d2, &id).pane.pid(), back.pane.pid(), "the same shell");
+
+        // It exits: a plain shell again.
+        back.pane.write(b"\x03".to_vec());
+        wait_for("a plain shell", || {
+            watch_shells(&d2);
+            back.typed().is_none() && back.agent_session.lock().unwrap().is_none()
+        });
+        let x = shown(&d2);
+        assert!(x.inside.is_none() && x.conversation.is_none() && x.activity.is_none() && x.controls == Controls::default(), "{x:?}");
+        kill(&d2, &id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Claude typed through the shell's `claude` (its hooks to this session among its flags) reports
+    /// its turns from its start, as one dino started does; typed past it (`command claude`), it
+    /// doesn't, and a call that fails shows as it would for any agent without hooks.
+    #[test]
+    fn a_claude_typed_with_the_shells_hooks_reports_its_turns_from_the_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_home().join("typed-claude");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        // Goes by `claude`, its flags kept, until ⌃C.
+        std::fs::write(dir.join("bin/claude"), "#!/bin/bash\nexec -a claude /usr/bin/perl -e 'sleep 600' -- \"$@\"\n").unwrap();
+        std::fs::set_permissions(dir.join("bin/claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let d = shell_daemon();
+        let id = own_shell(&d, "9603", &dir);
+        let s = session(&d, &id);
+        let typed = |hooks: bool| {
+            let settings = if hooks { format!(" --settings '{}'", shell_agent_settings(&id).display()) } else { String::new() };
+            s.pane.write(format!("'{}'{settings} --model haiku\r", dir.join("bin/claude").display()).into_bytes());
+            wait_for("it as the shell's agent", || {
+                watch_shells(&d);
+                s.typed().is_some_and(|f| f.agent == "claude" && f.pid.is_some())
+            });
+        };
+        typed(false);
+        assert!(!d.proxy.stats.session(&id).hooked, "no hooks of this shell's: it says nothing");
+        assert_eq!(s.launched_controls().model.as_deref(), Some("haiku"), "its flags, while it starts");
+        s.pane.write(b"\x03".to_vec());
+        wait_for("a plain shell", || {
+            watch_shells(&d);
+            s.typed().is_none()
+        });
+        typed(true);
+        assert!(d.proxy.stats.session(&id).hooked, "this shell's hooks: it reports its turns");
+        s.pane.write(b"\x03".to_vec());
+        wait_for("a plain shell again", || {
+            watch_shells(&d);
+            s.typed().is_none() && !d.proxy.stats.session(&id).hooked
+        });
+        kill(&d, &id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex typed into a shell has no notices of dino's (Codex's OSC 9) to say it asks: its
+    /// approval dialog on its screen does, mid-turn too; an agent whose hooks report says so itself.
+    #[test]
+    fn a_typed_agents_dialog_is_read_off_its_screen() {
+        let d = shell_daemon();
+        let id = own_shell(&d, "9604", test_home());
+        let s = session(&d, &id);
+        s.pane.write(b"printf '  Would you like to run the following command?\\n\\n  $ touch hello.txt\\n\\n  1. Yes, proceed (y)\\n  3. No, and tell Codex what to do differently (esc)\\n'\r".to_vec());
+        wait_for("its dialog", || s.pane.text(0).contains("No, and tell Codex what to do differently (esc)\n"));
+        assert_eq!(on_screen(&s, Some("working".into()), false).as_deref(), Some("working"), "a plain shell asks nothing");
+        let codex = FoundSession { source: Source::Running, agent: "codex".into(), session_id: String::new(), title: "Codex".into(), cwd: None, updated_at: 0, pid: Some(1), status: None, terminal: None, args: vec![], url: None, tmux: None };
+        s.inside.lock().unwrap().found = Some(codex);
+        assert_eq!(on_screen(&s, Some("working".into()), false).as_deref(), Some("needs:Codex asks"));
+        assert_eq!(on_screen(&s, None, false).as_deref(), Some("needs:Codex asks"), "before its record says anything");
+        assert_eq!(on_screen(&s, Some("done".into()), false).as_deref(), Some("done"));
+        assert_eq!(on_screen(&s, Some("working".into()), true).as_deref(), Some("working"), "its hooks say when it asks");
+        s.inside.lock().unwrap().found = None;
+        kill(&d, &id);
+    }
+
+    /// Keep as Terminal (and Settings → Agents) leave an agent typed into a shell a plain program,
+    /// and a program that isn't an agent is never one.
+    #[test]
+    fn a_kept_terminal_and_other_programs_stay_plain() {
+        let dir = test_home().join("typed-kept");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".codex/sessions")).unwrap();
+        let rollout = dir.join(".codex/sessions/rollout-2026-10-06T13-23-43-01a112e2-c11f-7cd2-b4cb-000000000009.jsonl");
+        std::fs::write(&rollout, "").unwrap();
+        typed_codex(&dir, &rollout);
+        let d = shell_daemon();
+        let id = own_shell(&d, "9602", &dir);
+        let s = session(&d, &id);
+        s.pane.write(b"sleep 30\r".to_vec());
+        wait_for("its foreground", || {
+            watch_shells(&d);
+            s.inside.lock().unwrap().fg_name.as_deref() == Some("sleep")
+        });
+        assert!(s.typed().is_none() && s.agent_now() == "shell", "a program that isn't an agent");
+        s.pane.write(b"\x03".to_vec());
+        private_dir(&session_files(&id)).unwrap();
+        write_private(&keep_terminal_mark(&id), b"").unwrap();
+        s.pane.write(format!("'{}'\r", dir.join("bin/codex").display()).into_bytes());
+        wait_for("the agent in its foreground", || {
+            watch_shells(&d);
+            s.inside.lock().unwrap().fg_name.as_deref() == Some("sleep") && std::fs::read_to_string(dir.join("runs")).is_ok()
+        });
+        std::thread::sleep(INSIDE_RECHECK);
+        watch_shells(&d);
+        assert!(s.typed().is_none(), "kept as a terminal: a plain program");
+        let Response::State { sessions, .. } = state(&d) else { unreachable!() };
+        assert!(sessions.iter().find(|x| x.id == id).unwrap().inside.is_none());
+        kill(&d, &id);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A question answered without a hook: once its dialog has been on the screen and is gone, the

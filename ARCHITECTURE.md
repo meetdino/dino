@@ -45,8 +45,10 @@ with its proxy route, controls and `DINO_SESSION`, and the terminal shows it thr
 `dino attach`. The terminal never spawns an agent itself. Everything a session starts carries its
 tag (`DINO_SESSION_TAG`), so what its agent runs in the background, outside its terminal, is still
 its own: shown under it, and stopped with it (crates/dino-daemon/src/procs.rs). An agent typed by hand into a dino shell
-is a process in that shell, which dinod notices; it can report to dino from the start, or dinod can
-take it over. Agents running elsewhere on the Mac (other terminals, tmux) are found the same way.
+is that shell's session's agent while it runs: dinod notices it in the shell's foreground and follows
+it with the same code as one it started (crates/dino-daemon/src/typed.rs), and starts it again in the
+shell, on its conversation, when it restarts. Agents running elsewhere on the Mac (other terminals,
+tmux) are found the same way, and *Continue in dino* moves one over.
 
 Each agent has an adapter in `dino-core/src/agent/` that reads its status from the agent's own
 signals: its hooks, its session record or its server. The tool calls dinod reads there also tell it

@@ -6,13 +6,13 @@ extension DinoModel {
     /// Its agent forks conversations (Claude Code, Codex), it runs on this Mac and has one to fork.
     func canFork(_ s: SessionInfo) -> Bool {
         guard s.host == nil, s.conversation != nil else { return false }
-        return launchers.contains { $0.agent_id == s.agent_id && $0.forks == true }
+        return launchers.contains { $0.agent_id == s.agent && $0.forks == true }
     }
 
     /// Why Fork Session is off for `s`, in a few words; nil when it's on.
     func whyNoFork(_ s: SessionInfo) -> String? {
         if s.host != nil { return "Forking runs on this Mac" }
-        if !launchers.contains(where: { $0.agent_id == s.agent_id && $0.forks == true }) { return "This agent can't fork a conversation" }
+        if !launchers.contains(where: { $0.agent_id == s.agent && $0.forks == true }) { return "This agent can't fork a conversation" }
         if s.conversation == nil { return "Nothing to fork yet: send it a prompt first" }
         return nil
     }
@@ -52,7 +52,7 @@ struct ForkSheet: View {
     @State private var error: String?
     @FocusState private var focused: Bool
 
-    private var agentName: String { model.launchers.first { $0.agent_id == session.agent_id }?.label ?? session.agent_id }
+    private var agentName: String { model.launchers.first { $0.agent_id == session.agent }?.label ?? session.agent }
 
     var body: some View {
         let repo = model.gitRepo(of: session)
@@ -60,7 +60,7 @@ struct ForkSheet: View {
             Label("Fork “\(session.display)”", systemImage: "arrow.triangle.branch")
                 .font(.title2.weight(.semibold))
                 .lineLimit(1)
-            Text("Starts a new session with a copy of this conversation, made by \(agentName), with the same model and mode. The original session doesn't change.\(session.agent_id.hasPrefix("claude") ? " Permissions you allowed only for this session don't carry over." : "")")
+            Text("Starts a new session with a copy of this conversation, made by \(agentName), with the same model and mode. The original session doesn't change.\(session.agent.hasPrefix("claude") ? " Permissions you allowed only for this session don't carry over." : "")")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             LabeledContent("Name") {

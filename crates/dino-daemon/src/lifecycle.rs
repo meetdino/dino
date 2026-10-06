@@ -96,10 +96,12 @@ pub(crate) fn archive(d: &Daemon, id: &str) -> anyhow::Result<()> {
 /// Archive it; `put_away` false keeps its worktree on disk whatever state it's in.
 fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-    let agent_session = s.agent_session.lock().unwrap().clone().or_else(|| super::conversation_of(&s));
+    // A shell's agent typed there comes back in it, on its conversation (see `typed`).
+    let typed = super::typed::saved(d, &s);
+    let agent_session = if s.agent_id == "shell" { None } else { s.agent_session.lock().unwrap().clone().or_else(|| super::conversation_of(&s)) };
     // The mode it's in, which it may have switched to since it started. Read before any of its
     // locks is taken below: the pane's reader takes them holding its screen.
-    let controls = super::mode::current(d, &s);
+    let controls = if s.agent_id == "shell" { s.controls.clone() } else { super::mode::current(d, &s) };
     let saved = SavedSession {
         id: s.id.clone(),
         name: s.name.clone(),
@@ -107,7 +109,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         pinned: s.pinned.load(Ordering::Relaxed),
         launcher: s.launcher.clone(),
         args: s.args.clone(),
-        cwd: s.cwd.display().to_string(),
+        cwd: if typed.is_some() { super::resume_folder(&s) } else { s.cwd.display().to_string() },
         started_at: s.started_at,
         agent_session,
         auto: s.auto.lock().unwrap().clone(),
@@ -123,6 +125,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         account: s.account.clone(),
         forked_from: s.forked_from.lock().unwrap().clone(),
         fork_pending: s.fork_pending.load(Ordering::Relaxed),
+        typed,
     };
     let w = if s.host.is_some() { None } else { session_worktree(d, &s.cwd) };
     kill(d, id);
@@ -179,10 +182,11 @@ fn list(d: &Daemon) -> Vec<ipc::ArchivedInfo> {
             cwd: a.saved.cwd.clone(),
             branch: a.worktree.as_ref().map(|w| w.branch.clone()),
             archived_at: a.archived_at,
-            resumable: a.saved.agent_session.is_some(),
+            // A shell's agent typed there is what comes back in it, on its conversation.
+            resumable: a.saved.agent_session.is_some() || a.saved.typed.as_ref().is_some_and(|t| t.conversation.is_some()),
             worktree_removed: a.worktree_removed,
-            agent: d.launcher(&a.saved.launcher).map_or_else(|| a.saved.launcher.clone(), |l| l.agent_id),
-            agent_session: a.saved.agent_session.clone(),
+            agent: a.saved.typed.as_ref().map(|t| t.agent.clone()).unwrap_or_else(|| d.launcher(&a.saved.launcher).map_or_else(|| a.saved.launcher.clone(), |l| l.agent_id)),
+            agent_session: a.saved.agent_session.clone().or_else(|| a.saved.typed.as_ref().and_then(|t| t.conversation.clone())),
             pinned: a.saved.pinned,
         })
         .collect()

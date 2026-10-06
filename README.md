@@ -49,7 +49,7 @@ dino updates itself.
 
 - **Finds the agents you already have.** Agents running in iTerm2, Terminal, Ghostty or tmux show
   up in the sidebar with what they're doing. *Continue in dino* brings one over, conversation
-  included.
+  included. One you type in a dino shell (`claude`, `codex`) is a dino session from the start.
 - **Agents outlive the window.** A background daemon, `dinod`, owns every session. Quit the app,
   or restart dinod, and they're still there; `dino ls` lists them from any terminal.
 - **Knows which one needs you.** Working, needs you, done or idle, from each agent's own signals,

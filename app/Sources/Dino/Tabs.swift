@@ -5,6 +5,10 @@ import SwiftUI
 // what's in it, as in a terminal: a shell ends, an agent is archived (Archived has it to resume).
 
 extension SessionInfo {
+    /// The agent it runs: its own, or the one typed into the shell while it runs there, which is
+    /// the session's agent then (its controls, status, fork); "shell" for a plain shell.
+    var agent: String { inside?.agent ?? agent_id }
+
     /// A shell with no agent in it: it lives in the tabs only, not in the sidebar.
     var plainShell: Bool { agent_id == "shell" && inside == nil }
 
@@ -137,10 +141,7 @@ private struct TabItem: View {
     @State private var hovering = false
 
     /// The agent this tab is: its own, or one typed into the shell.
-    private var tabAgent: String? {
-        if let inside = session.inside { return inside.agent }
-        return session.agent_id == "shell" ? nil : session.agent_id
-    }
+    private var tabAgent: String? { session.plainShell ? nil : session.agent }
 
     var body: some View {
         // A split's tab names each of its panes.
