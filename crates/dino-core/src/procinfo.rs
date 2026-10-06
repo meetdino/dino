@@ -106,6 +106,12 @@ pub fn process(pid: u32) -> Option<Proc> {
     })
 }
 
+/// Process `pid` is still the one that started at `started_us` (see [`Proc`]), and hasn't ended:
+/// not a zombie waiting for its parent.
+pub fn alive(pid: u32, started_us: u64) -> bool {
+    bsdinfo(pid).is_some_and(|i| i.pbi_start_tvsec * 1_000_000 + i.pbi_start_tvusec == started_us && i.pbi_status != libc::SZOMB as u32)
+}
+
 /// Processes by pid, as [`processes`] lists them.
 pub type Procs = std::collections::HashMap<u32, Proc>;
 
@@ -117,6 +123,13 @@ pub fn processes() -> Procs {
 /// When a process started, in seconds since the epoch, like `ps -o lstart`.
 pub fn started(pid: u32) -> Option<u64> {
     bsdinfo(pid).map(|i| i.pbi_start_tvsec)
+}
+
+/// The terminal session a process is in (the pid of the process that started it, `setsid`), like
+/// `ps -o sess`.
+pub fn session_of(pid: u32) -> Option<u32> {
+    let sid = unsafe { libc::getsid(pid as libc::pid_t) };
+    (sid > 0).then_some(sid as u32)
 }
 
 /// A process's parent, like `ps -o ppid`.

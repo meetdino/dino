@@ -10,6 +10,8 @@ struct SessionCost: Codable, Equatable {
     var avg_secs: UInt32?
     var processes: UInt32?
     var top_child: ProcessCost?
+    /// The builds it runs, each with everything under it; nil from an older dinod.
+    var builds: [ProcessCost]?
 }
 
 struct ProcessCost: Codable, Equatable {
@@ -17,6 +19,8 @@ struct ProcessCost: Codable, Equatable {
     var pid: UInt32?
     var mem_bytes: UInt64?
     var cpu_pct: Double?
+    /// A build running apart from the agent's terminal: in the background, or left by an earlier run of it.
+    var background: Bool?
 }
 
 private struct SessionCostResponse: Decodable {
@@ -88,7 +92,14 @@ final class CostCard {
                 }.value
                 guard !Task.isCancelled else { return }
                 switch result {
-                case let .success(cost): feed.set(cost)
+                case let .success(cost):
+                    let resize = shown && (cost.builds?.count ?? 0) != (feed.cost?.builds?.count ?? 0)
+                    feed.set(cost)
+                    // A build started or ended: its line comes or goes, and the card fits it.
+                    if resize {
+                        await Task.yield()
+                        self.show(beside: anchor)
+                    }
                 case .failure:
                     // Exited, remote, or dinod predates it: nothing worth a card.
                     if !shown { return }
@@ -210,6 +221,26 @@ struct CostCardView: View {
                         .font(.callout.monospacedDigit()).lineLimit(1).truncationMode(.middle)
                 } else {
                     Text("Nothing running").font(.callout).foregroundStyle(.tertiary)
+                }
+            }
+            if let builds = c?.builds, !builds.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(builds.count == 1 ? "Building" : "\(builds.count) builds").font(.caption).foregroundStyle(.secondary)
+                    ForEach(builds.prefix(4), id: \.pid) { b in
+                        HStack(spacing: 4) {
+                            Text(b.name ?? "build").lineLimit(1).truncationMode(.middle)
+                            if b.background == true {
+                                Text("background").font(.caption2).foregroundStyle(.tertiary)
+                            }
+                            Spacer(minLength: 4)
+                            Text(CostFormat.cpu(b.cpu_pct)).foregroundStyle(.secondary)
+                        }
+                        .font(.callout.monospacedDigit())
+                    }
+                    if builds.contains(where: { $0.background == true }) {
+                        Text("Background builds stop when the session ends").font(.caption2).foregroundStyle(.tertiary)
+                    }
                 }
             }
             Text(Self.count(c?.processes)).font(.caption).foregroundStyle(.tertiary)

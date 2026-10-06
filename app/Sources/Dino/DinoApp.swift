@@ -638,6 +638,8 @@ struct Terminals: View {
         .overlay(alignment: .bottomTrailing) {
             if let s = model.selectedSession, let u = s.local_url, model.offered[s.id] != u, model.sidePane != .preview {
                 PreviewOffer(session: s, url: u)
+            } else if !model.leftovers.isEmpty {
+                LeftoversOffer(leftovers: model.leftovers)
             } else {
                 BuildCacheOfferSlot()
             }
