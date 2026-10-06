@@ -488,7 +488,7 @@ name = "dino-daemon"
 version = "0.1.5"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "dino-core",
  "dino-proxy",
  "dino-sync",
