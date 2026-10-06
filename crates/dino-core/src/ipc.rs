@@ -211,9 +211,6 @@ pub enum Request {
     /// waiting request then fails with "cancelled", and the agent runs on where it is. An error
     /// when nothing waits for it (it may have just moved).
     CancelTakeOver { id: String },
-    /// One prompt to several agents, each in its own git worktree of the repo at `cwd`.
-    Fanout { prompt: String, launchers: Vec<String>, cwd: Option<String> },
-    Groups,
     /// Repos (with their worktrees) and folders where sessions run, plus `folders` the app shows.
     /// `known`: the version of the tree the asker has; the same one is answered with `same`.
     Tree {
@@ -221,10 +218,8 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         known: Option<String>,
     },
-    /// A fan-out member's changes as a patch.
-    Diff { session: String },
-    /// Any session's changes, per file, for review: a fan-out member's since its fan-out began,
-    /// any other since its checkout's last commit.
+    /// Any session's changes, per file, for review: one in a worktree dino made since that
+    /// worktree began, any other since its checkout's last commit.
     Changes { id: String },
     /// Type `text` into a session, as a paste; `submit` presses Return after it.
     SendInput { id: String, text: String, submit: bool },
@@ -243,15 +238,11 @@ pub enum Request {
     /// dinod measures only when asked, so a client asks while it shows the answer (a row's hover
     /// card, every couple of seconds) and stops when it's gone. Answers `SessionCost`.
     SessionCost { id: String },
-    /// Apply this member's changes to the user's checkout and close its group.
-    Keep { session: String },
-    /// Close a fan-out group: stop its agents, remove their worktrees and branches.
-    Discard { group: String },
     /// Close a worktree dino made for a session: stop the sessions in it, remove it and its branch.
     /// `apply` first brings its changes into the checkout it came from, uncommitted.
     RemoveWorktree { path: String, apply: bool },
     /// Remove a worktree and its branch if git sees it merged (a branch it doesn't stays). Refuses
-    /// the main checkout, a fan-out's, and one in use (see `Worktree::in_use`); refuses one with
+    /// the main checkout and one in use (see `Worktree::in_use`); refuses one with
     /// uncommitted work unless `force`, which loses that work.
     CleanWorktree {
         path: String,
@@ -353,10 +344,10 @@ pub enum Request {
     /// Every worktree dino made, with its size on disk.
     Storage,
     /// Remove a worktree dino made (and its branch when merged), never forcing: refuses one
-    /// with uncommitted work, one a session runs in, and fan-out members (discard the group).
+    /// with uncommitted work and one a session runs in.
     RemoveStored { path: String },
     /// Remove every worktree dino made that nothing would be lost from: no session running in
-    /// it, not a fan-out member, no uncommitted changes, and its commits merged or pushed.
+    /// it, no uncommitted changes, and its commits merged or pushed.
     FreeUpSpace,
     /// The dev servers the session's folder configures (`.dino/launch.json`, `.claude/launch.json`).
     PreviewConfigs { id: String },
@@ -437,7 +428,6 @@ pub enum Response {
     TmuxShown { tty: Option<String>, session: Option<String> },
     Conversation { page: crate::history::Page },
     Stats { report: Box<crate::usage::Report> },
-    Groups { groups: Vec<GroupInfo> },
     /// `same`: it's the version the asker has (`repos` is left empty, a thousand worktrees
     /// aren't sent and decoded again every few seconds for nothing).
     Tree {
@@ -447,7 +437,6 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         same: bool,
     },
-    Diff { stat: DiffStat, text: String },
     /// `root` is the checkout the paths are in, `base` what they're compared with (for people).
     /// No repo: no files, and `note` says why.
     Changes { root: String, base: String, files: Vec<FileDiff>, note: Option<String> },
@@ -791,9 +780,6 @@ pub struct SessionInfo {
     /// work that still runs ("waiting:1 agent, 2 commands"), or "server:<ports>" when all that runs
     /// is a server ("server:3000, 8080").
     pub activity: Option<String>,
-    /// The fan-out group this session belongs to.
-    #[serde(default)]
-    pub group: Option<String>,
     /// Why the agent's last model call failed, if it did.
     #[serde(default)]
     pub error: Option<String>,
@@ -1111,7 +1097,8 @@ pub struct StoredWorktree {
     pub session_state: Option<String>,
     /// Kept for an archived session (removing it here still lets that one come back from its branch).
     pub archived: bool,
-    /// Belongs to a fan-out group.
+    /// Always false. Clients from before fan-out was removed require the field.
+    #[serde(default)]
     pub fanout: bool,
     /// Free up space would remove it: see [`Request::FreeUpSpace`].
     #[serde(default)]
@@ -1151,24 +1138,6 @@ pub struct RepoInfo {
 }
 
 pub use crate::worktree::{DiffLine, DiffStat, FileDiff};
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct GroupInfo {
-    pub id: String,
-    pub prompt: String,
-    pub repo: String,
-    pub members: Vec<MemberInfo>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MemberInfo {
-    pub session: String,
-    pub launcher: String,
-    pub branch: String,
-    pub worktree: String,
-    /// None when the worktree can't be read (removed by hand).
-    pub stat: Option<DiffStat>,
-}
 
 /// Keeping agents running with the lid closed, as dinod sees it.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]

@@ -306,10 +306,10 @@ fn check(d: &Daemon, t: &mut ScheduledTask) -> anyhow::Result<()> {
             t.action.session = s.id.clone();
             false
         }
-        ActionKind::Fanout => {
-            anyhow::ensure!(!t.prompt.trim().is_empty(), "give the prompt to fan out");
-            anyhow::ensure!(!t.action.agents.is_empty(), "pick the agents to fan out to");
-            worktree::repo_root(&dir).map_err(|_| anyhow::anyhow!("{} isn't in a git repository: a fan-out gives each agent a worktree", dir.display()))?;
+        ActionKind::Agents => {
+            anyhow::ensure!(!t.prompt.trim().is_empty(), "give the prompt for the agents");
+            anyhow::ensure!(!t.action.agents.is_empty(), "pick the agents to start");
+            worktree::repo_root(&dir).map_err(|_| anyhow::anyhow!("{} isn't in a git repository: each agent gets a worktree of it", dir.display()))?;
             for a in &t.action.agents {
                 let l = d.allowed_launcher(a)?;
                 anyhow::ensure!(l.agent_id != "shell", "a shell can't take a prompt");
@@ -500,7 +500,7 @@ fn run(d: &Daemon, t: &ScheduledTask, why: Why) -> Option<ScheduledRun> {
     let fingerprint = if t.conditions.if_changed { fingerprint(&work_dir(Some(&t.cwd))) } else { None };
     let run = match fire(d, t, &launcher, why.event.as_ref(), &base.id) {
         Ok(started) => {
-            let run = ScheduledRun { session: started.sessions.first().cloned(), sessions: started.sessions.clone(), group: started.group.clone(), outcome: "started".into(), ..base };
+            let run = ScheduledRun { session: started.sessions.first().cloned(), sessions: started.sessions.clone(), outcome: "started".into(), ..base };
             let baseline = started.sessions.iter().map(|s| (s.clone(), d.proxy.stats.session(s).requests)).collect();
             d.schedule.live.lock().unwrap().insert(
                 run.id.clone(),
@@ -657,7 +657,6 @@ fn still_going(d: &Daemon, t: &ScheduledTask) -> Option<String> {
 #[derive(Default)]
 struct Started {
     sessions: Vec<String>,
-    group: Option<String>,
     deliver: Option<String>,
     command: Option<Arc<Mutex<Option<(Option<i32>, String)>>>>,
 }
@@ -686,12 +685,27 @@ fn fire(d: &Daemon, t: &ScheduledTask, launcher: &str, event: Option<&Event>, ru
             }
             Ok(Started { sessions: vec![s.id.clone()], deliver: Some(prompt), ..Default::default() })
         }
-        ActionKind::Fanout => {
-            let group = crate::fanout(d, &prompt, &t.action.agents, Some(t.cwd.clone()), t.route.as_ref())?;
-            super::reshaped(d);
-            save(d);
-            let sessions = d.groups.lock().unwrap().iter().find(|g| g.id == group).map(|g| g.members.iter().map(|m| m.session.clone()).collect()).unwrap_or_default();
-            Ok(Started { sessions, group: Some(group), ..Default::default() })
+        ActionKind::Agents => {
+            // Each a session of its own in a worktree of its own, like a one-agent run's.
+            let mut sessions = vec![];
+            for a in &t.action.agents {
+                let l = d.allowed_launcher(a)?;
+                let each = ScheduledTask {
+                    launcher: l.short.clone(),
+                    worktree: true,
+                    args: String::new(),
+                    // A provider's model for the agents that can take it, the rest on their own accounts.
+                    route: t.route.clone().filter(|r| crate::provider_route(&l, r.clone()).is_ok()),
+                    ..t.clone()
+                };
+                match start_agent(d, &each, &l.short, &prompt) {
+                    Ok(id) => sessions.push(id),
+                    // The ones started already run on: the run is theirs.
+                    Err(e) if sessions.is_empty() => return Err(e),
+                    Err(e) => eprintln!("dinod: {} didn't start {}: {e}", t.name, l.short),
+                }
+            }
+            Ok(Started { sessions, ..Default::default() })
         }
         ActionKind::Command => {
             let dir = work_dir(Some(&t.cwd));

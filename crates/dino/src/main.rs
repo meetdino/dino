@@ -69,10 +69,6 @@ const USAGE: &str = "Sessions
   dino stats [--range 7d|30d|all] [--json]
                                     show usage across all agents: tokens, models, streaks
 
-Fan-out: one prompt to several agents, a git worktree each
-  dino fan [--agents claude,codex,...] <prompt>
-  dino groups | diff <id> | keep <id> | discard <group>
-
 Automations: agents and commands that run on their own
   dino automations [show|add|edit|run|pause|resume|rm] …
                                     on a schedule, a PR, failed CI, changed files, …
@@ -94,7 +90,7 @@ Setup
   dino mcp [--read-only]            serve dino's sessions to agents over MCP (stdio)
   dino ping | stop | daemon | --version
 
-`dino <command> --help` says more about ls, rm, found, stats, login, fan and automations.";
+`dino <command> --help` says more about ls, rm, found, stats, login and automations.";
 
 /// The build this is: the commit app/build.sh and scripts/release.sh built it from. Read here, in
 /// the crate built last, so a new commit recompiles only this one.
@@ -168,27 +164,7 @@ fn dino() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("sync") => return account::sync(&cli[1..]),
-        Some("fan") => return cmd_fan(&cli[1..]),
         Some("automations" | "automation") => return automations::run(&cli[1..]),
-        Some("groups") => return cmd_groups(),
-        Some("diff") => {
-            let session = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino diff <id>\n`dino groups` lists fan-outs and their sessions."))?.clone();
-            let Response::Diff { text, .. } = client::request(&Request::Diff { session })? else { return Err(unexpected()) };
-            print!("{text}");
-            return Ok(());
-        }
-        Some("keep") => {
-            let session = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino keep <session id>\n`dino groups` lists fan-outs and their sessions."))?.clone();
-            done(client::request(&Request::Keep { session: session.clone() })?)?;
-            say(&format!("Applied session {}'s changes to your checkout, and closed its group.", printable(&session)));
-            return Ok(());
-        }
-        Some("discard") => {
-            let group = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino discard <group>\n`dino groups` lists them."))?.clone();
-            done(client::request(&Request::Discard { group: group.clone() })?)?;
-            say(&format!("Closed group {}: its agents are stopped and their worktrees removed.", printable(&group)));
-            return Ok(());
-        }
         Some("continue") => return cmd_continue(cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino continue <id>\n`dino found` lists the sessions you can continue."))?),
         // Start dinod if needed; used by the app before it attaches surfaces.
         Some("ping") => {
@@ -1249,30 +1225,6 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One prompt to several agents, each in its own worktree. Without `--agents`, every agent dino has.
-fn cmd_fan(args: &[String]) -> anyhow::Result<()> {
-    if args.is_empty() || args.first().is_some_and(|a| a.starts_with('-') && a != "--agents") {
-        println!("usage: dino fan [--agents claude,codex,…] <prompt>\n\nOne prompt, several agents, each in its own git worktree of the current repo.");
-        return Ok(());
-    }
-    let (agents, prompt) = match args {
-        [flag, list, rest @ ..] if flag == "--agents" => (list.split(',').map(String::from).collect(), rest.join(" ")),
-        rest => {
-            let Response::Launchers { launchers } = client::request(&Request::Launchers)? else { return Err(unexpected()) };
-            (launchers.into_iter().filter(|l| l.agent_id != "shell").map(|l| l.short).collect::<Vec<_>>(), rest.join(" "))
-        }
-    };
-    let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
-    let group = created(client::request(&Request::Fanout { prompt, launchers: agents.clone(), cwd })?)?;
-    if out::tty() {
-        println!("Fanned out to {} as group {group}. `dino groups` shows how each is doing.", agents.join(", "));
-    } else {
-        println!("{group}");
-    }
-    Ok(())
-}
-
-
 /// Connect a hosted provider in the browser (OpenRouter's sign-in, or Sign in with ChatGPT; no key
 /// to paste), then wait until dinod has what it gave.
 fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
@@ -1332,56 +1284,6 @@ fn cmd_login_plan(args: &[String]) -> anyhow::Result<()> {
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut key)?;
     done(client::request(&Request::ConnectPlan { plan: id, key, base })?)?;
     say(&format!("Connected {}. dino keeps its key on this Mac and never shows it.", preset.name));
-    Ok(())
-}
-
-/// Fan-outs: each group's prompt, then how each of its agents is doing and what it changed.
-fn cmd_groups() -> anyhow::Result<()> {
-    let Response::Groups { groups } = client::request(&Request::Groups)? else { return Err(unexpected()) };
-    if groups.is_empty() {
-        eprintln!("No fan-outs. `dino fan <prompt>` starts one: one prompt, several agents, a worktree each.");
-        return Ok(());
-    }
-    let sessions = match client::request(&Request::State)? {
-        Response::State { sessions, .. } => sessions,
-        _ => vec![],
-    };
-    let cols = [Column::keep("ID"), Column::keep("AGENT"), Column::keep("STATUS"), Column::keep("CHANGES"), Column::path("WORKTREE", 12)];
-    let rows: Vec<_> = groups
-        .iter()
-        .flat_map(|g| &g.members)
-        .map(|m| {
-            let st = sessions.iter().find(|s| s.id == m.session).map_or(SessionStatus::Ended, SessionStatus::of);
-            let changes = match &m.stat {
-                Some(s) if s.files == 0 => Cell::new("none").raw("0 +0 -0").paint(Paint::Dim),
-                Some(s) => Cell::new(format!("{} {}  +{} -{}", s.files, if s.files == 1 { "file" } else { "files" }, s.added, s.removed)).raw(format!("{} +{} -{}", s.files, s.added, s.removed)),
-                None => Cell::new("worktree missing").raw("missing").paint(Paint::Red),
-            };
-            vec![Cell::new(printable(&m.session)), Cell::new(printable(&m.launcher)), Cell::status(st), changes, Cell::new(printable(&out::short_path(&m.worktree))).raw(printable(&m.worktree))]
-        })
-        .collect();
-    // One table for all of them, so their columns line up; each group's rows under its prompt.
-    let table = out::table(&cols, &rows, out::tty());
-    let mut lines = table.lines();
-    let header = if out::tty() { lines.next().unwrap_or_default() } else { "" };
-    for (i, g) in groups.iter().enumerate() {
-        if out::tty() {
-            if i > 0 {
-                println!();
-            }
-            let prompt = out::fit_end(&printable(&g.prompt.split_whitespace().collect::<Vec<_>>().join(" ")), out::width().saturating_sub(2).max(20));
-            println!("{}", out::paint(&format!("“{prompt}”"), Paint::Bold));
-            println!("{}", out::paint(&format!("group {} in {}", printable(&g.id), printable(&out::short_path(&g.repo))), Paint::Dim));
-            println!("  {header}");
-        }
-        for l in lines.by_ref().take(g.members.len()) {
-            if out::tty() { println!("  {l}") } else { println!("{}\t{l}", printable(&g.id)) }
-        }
-    }
-    if out::tty() {
-        println!("\n{}", out::paint("`dino diff <id>` shows what one changed, `dino keep <id>` applies it.", Paint::Dim));
-        println!("{}", out::paint("`dino discard <group>` stops a group and removes its worktrees.", Paint::Dim));
-    }
     Ok(())
 }
 

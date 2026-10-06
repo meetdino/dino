@@ -111,7 +111,7 @@ struct AutomationTrigger: Codable, Equatable {
 
 /// What an automation does.
 struct AutomationAction: Codable, Equatable {
-    /// "agent", "continue", "fanout" or "command".
+    /// "agent", "continue", "fanout" (several agents, a worktree each) or "command".
     var kind = "agent"
     var session = ""
     var agents: [String] = []
@@ -124,7 +124,7 @@ struct AutomationAction: Codable, Equatable {
     }
 
     static let kinds: [(id: String, label: String)] = [
-        ("agent", "Start an agent"), ("continue", "Continue a session"), ("fanout", "Fan out to several agents"), ("command", "Run a command"),
+        ("agent", "Start an agent"), ("continue", "Continue a session"), ("fanout", "Start several agents"), ("command", "Run a command"),
     ]
 
     init() {}
@@ -273,7 +273,6 @@ struct ScheduledRun: Codable, Equatable {
     var event: AutomationEvent?
     var attempt: UInt32?
     var sessions: [String]?
-    var group: String?
     var finished_at: UInt64?
     /// "success" or "failure", once it's over.
     var result: String?
@@ -571,7 +570,7 @@ extension DinoModel {
             if let finished {
                 return RunState(label: finished, color: finishedColor, title: nil, help: "\(finished)\(when)", reachable: false)
             }
-            let label = run.group != nil ? "Fanned out" : run.outcome == "started" ? "Running" : run.outcome.capitalized
+            let label = run.outcome == "started" ? "Running" : run.outcome.capitalized
             return RunState(label: label, color: run.outcome == "started" ? SessionStatus.working.color : .secondary, title: nil, help: label + when, reachable: false)
         }
         if let s = sessions.first(where: { $0.id == id }), let finished, !s.exited {
@@ -701,10 +700,7 @@ struct ScheduleSheet: View {
                     Divider().padding(.vertical, 2)
                     Field(label: "Do") {
                         Picker("", selection: $task.action.kind) {
-                            // Fan out is experimental: offered while it's on, kept for one that already does it.
-                            ForEach(AutomationAction.kinds.filter { $0.id != "fanout" || model.fanoutOn || task.action.kind == "fanout" }, id: \.id) {
-                                Text($0.label).tag($0.id)
-                            }
+                            ForEach(AutomationAction.kinds, id: \.id) { Text($0.label).tag($0.id) }
                         }
                         .labelsHidden()
                         .fixedSize()
