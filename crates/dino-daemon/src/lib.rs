@@ -261,7 +261,6 @@ struct Daemon {
     /// Agent id → the models its own files list (see `watch_catalogs`).
     catalogs: RwLock<HashMap<String, Catalog>>,
     sessions: Mutex<Vec<Arc<Session>>>,
-    groups: Mutex<Vec<Group>>,
     worktrees: Mutex<Vec<SessionWorktree>>,
     /// Session id → the PR from its branch, as of the last poll.
     prs: Mutex<HashMap<String, ipc::PrInfo>>,
@@ -724,7 +723,6 @@ fn watch_catalogs(d: &Daemon, mut seen: CatalogStamps) {
 /// The daemon's state, with what was saved of it (all but the sessions, see `restore`).
 fn new_daemon(home: PathBuf, proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
     let daemon = Arc::new(Daemon {
-        groups: Mutex::new(load_groups(&home)),
         worktrees: Mutex::new(load_worktrees(&home)),
         subagents: Mutex::new(load_subagents(&home)),
         archived: Mutex::new(lifecycle::load_archived(&home)),
@@ -1051,12 +1049,9 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::New { .. }
                 | Request::Fork { .. }
                 | Request::Start { .. }
-                | Request::Fanout { .. }
                 | Request::Kill { .. }
                 | Request::Close { .. }
                 | Request::Reopen { .. }
-                | Request::Keep { .. }
-                | Request::Discard { .. }
                 | Request::RemoveWorktree { .. }
                 | Request::CleanWorktree { .. }
                 | Request::Archive { .. }
@@ -1412,14 +1407,6 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::Fanout { prompt, launchers, cwd } => match fanout(d, &prompt, &launchers, cwd, None) {
-                Ok(group) => {
-                    save(d);
-                    Response::Created { id: group }
-                }
-                Err(e) => Response::Error { message: e.to_string() },
-            },
-            Request::Groups => Response::Groups { groups: groups(d) },
             Request::Tree { folders, known } => {
                 let (repos, version) = cached_tree(d, folders);
                 if known.as_ref() == Some(&version) {
@@ -1428,10 +1415,6 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     Response::Tree { repos: (*repos).clone(), version: Some(version), same: false }
                 }
             }
-            Request::Diff { session } => match member_diff(d, &session) {
-                Ok((stat, text)) => Response::Diff { stat, text },
-                Err(e) => Response::Error { message: e.to_string() },
-            },
             Request::Changes { id } => changes(d, &id).unwrap_or_else(|e| Response::Error { message: e.to_string() }),
             // Each connection has its own thread, so a review blocks only the one asking.
             Request::Review { id } => match review(d, &id) {
@@ -1597,14 +1580,6 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::PreviewLog { id, name } => match d.previews.lock().unwrap().iter().find(|s| s.session == id && s.config.name == name) {
                 Some(s) => Response::PreviewLog { text: s.log() },
                 None => Response::Error { message: format!("{name} hasn't been started") },
-            },
-            Request::Keep { session } => match keep(d, &session) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error { message: e.to_string() },
-            },
-            Request::Discard { group } => match close_group(d, &group) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error { message: e.to_string() },
             },
             Request::RemoveWorktree { path, apply } => match remove_worktree(d, &path, apply) {
                 Ok(()) => Response::Ok,
@@ -2662,10 +2637,8 @@ fn finished(d: &Daemon, s: &Session) -> bool {
 }
 
 fn state(d: &Daemon) -> Response {
-    let groups = d.groups.lock().unwrap().clone();
     let prs = d.prs.lock().unwrap().clone();
     let previews = d.previews.lock().unwrap().clone();
-    let group_of = |id: &str| groups.iter().find(|g| g.members.iter().any(|m| m.session == id)).map(|g| g.id.clone());
     let live = d.sessions.lock().unwrap().clone();
     let moving: HashSet<String> = d.moves.lock().unwrap().keys().cloned().collect();
     let sessions = live
@@ -2734,7 +2707,6 @@ fn state(d: &Daemon) -> Response {
                 last_model: st.last_model,
                 tier: st.tier,
                 activity,
-                group: group_of(&s.id),
                 error: st.last_error,
                 cwd: if s.host.is_some() { s.cwd.display().to_string() } else { real(&s.cwd) },
                 host: s.host.clone(),
@@ -3825,85 +3797,11 @@ fn preview_start(d: &Daemon, id: &str, name: &str, approved: Option<&dino_core::
     Ok(())
 }
 
-// ---- Fan-out: one prompt, several agents, each in its own worktree; keep the best. ----
-
-#[derive(Serialize, Deserialize, Clone)]
-struct Group {
-    id: String,
-    prompt: String,
-    repo: PathBuf,
-    /// The commit every worktree started from (the user's checkout, uncommitted edits included).
-    base: String,
-    members: Vec<Member>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct Member {
-    session: String,
-    launcher: String,
-    branch: String,
-    worktree: PathBuf,
-}
-
-fn groups_path(home: &Path) -> PathBuf {
-    home.join("groups.json")
-}
-
-fn load_groups(home: &Path) -> Vec<Group> {
-    std::fs::read(groups_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-}
-
-fn save_groups(home: &Path, groups: &[Group]) {
-    let _ = write_private(&groups_path(home), &serde_json::to_vec_pretty(groups).unwrap_or_default());
-}
-
-/// `route`: run the agents that can on a provider's model (an automation's), the rest on their own accounts.
-fn fanout(d: &Daemon, prompt: &str, launchers: &[String], cwd: Option<String>, route: Option<&ProviderRoute>) -> anyhow::Result<String> {
-    let prompt = prompt.trim();
-    anyhow::ensure!(!prompt.is_empty(), "fan-out needs a prompt");
-    // Refused before any worktree is made, rather than by the first `spawn`.
-    dino_core::agent::check_prompt(prompt)?;
-    let mut picked: Vec<LauncherInfo> = vec![];
-    for short in launchers {
-        let l = d.allowed_launcher(short)?;
-        anyhow::ensure!(l.agent_id != "shell", "a shell can't take a prompt");
-        if !picked.iter().any(|p| p.short == l.short) {
-            picked.push(l);
-        }
-    }
-    anyhow::ensure!(!picked.is_empty(), "pick at least one agent");
-
-    let dir = work_dir(cwd.as_deref());
-    let repo = worktree::repo_root(&dir)?;
-    let base = worktree::snapshot(&repo)?;
-    let id = format!("{}-{}", session_name(prompt), &new_uuid()[..4]);
-    let mut group = Group { id: id.clone(), prompt: prompt.into(), repo: repo.clone(), base: base.clone(), members: vec![] };
-    let prefix = Settings::load().worktrees.prefix();
-    for l in picked {
-        let branch = format!("{prefix}{id}/{}", l.short);
-        let wt = worktree::add(&repo, &format!("{id}/{}", l.short), &branch, &base)?;
-        // Same folder inside the worktree as the user was in inside the repo.
-        let cwd = wt.join(dir.strip_prefix(&repo).unwrap_or(std::path::Path::new("")));
-        carry_trust(&l, carried_trust(&l, &dir, &repo).as_deref(), &wt);
-        let session = spawn(d, Launch {
-            name: Some(format!("{}·{}", l.short, &id[id.len() - 4..])),
-            prompt: Some(prompt.into()),
-            route: route.filter(|r| provider_route(&l, (*r).clone()).is_ok()).cloned(),
-            ..Launch::new(&l.short, vec![], Some(cwd.display().to_string()))
-        })?;
-        group.members.push(Member { session, launcher: l.short.clone(), branch, worktree: wt });
-    }
-    let mut groups = d.groups.lock().unwrap();
-    groups.push(group);
-    save_groups(&d.home, &groups);
-    Ok(id)
-}
-
 fn real(p: &Path) -> String {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
 }
 
-/// Every repo a session runs in (or a fan-out came from), and each extra folder, once.
+/// Every repo a session runs in, and each extra folder, once.
 struct TreeCache {
     repos: Arc<Vec<ipc::RepoInfo>>,
     /// Changes when the tree does (see `Request::Tree`).
@@ -4019,12 +3917,9 @@ fn tree_until(d: &Daemon, folders: Vec<String>, until: Option<Instant>) -> Vec<i
         .filter(|s| s.host.is_none())
         .map(|s| s.pane.shared.cwd.lock().unwrap().clone().filter(|_| s.agent_id == "shell").unwrap_or_else(|| real(&s.cwd)))
         .collect();
-    dirs.extend(d.groups.lock().unwrap().iter().map(|g| real(Path::new(&g.repo))));
     // A session's worktree stays after the session ends, until the user closes it.
     let made: Vec<String> = d.worktrees.lock().unwrap().iter().map(|w| real(&w.path)).collect();
     dirs.extend(made.iter().cloned());
-    let fanned: HashSet<String> =
-        d.groups.lock().unwrap().iter().flat_map(|g| g.members.iter().map(|m| real(&m.worktree))).collect();
     let owners = subagent_owners(d);
     dirs.extend(folders.iter().map(|f| real(Path::new(f))));
     // Shallowest first, so a folder comes before the folders inside it.
@@ -4070,20 +3965,17 @@ fn tree_until(d: &Daemon, folders: Vec<String>, until: Option<Instant>) -> Vec<i
                 // Compared with what the main checkout has out.
                 let base = w[0].branch.clone().unwrap_or_else(|| "HEAD".into());
                 let base = if base == "HEAD" { worktree::head(Path::new(&w[0].path)) } else { base };
-                // Fan-out members show their own stat.
-                let read = gitstate::summaries(d, &w, &paths, &base, |p| !fanned.contains(p), until);
+                let read = gitstate::summaries(d, &w, &paths, &base, until);
                 let dino_dir = real(&worktree::worktrees_dir(Path::new(&w[0].path)));
                 let now = now_secs();
                 for ((w, path), (git, reading)) in w.iter_mut().zip(&paths).skip(1).zip(read) {
                     w.dino = made.contains(path);
-                    let by_dino = w.dino || fanned.contains(path) || inside(path, &dino_dir);
+                    let by_dino = w.dino || inside(path, &dino_dir);
                     w.made_by = if by_dino { Some("dino".into()) } else { worktree::made_by_path(path).map(String::from) };
                     w.users = working_in(path);
-                    if !fanned.contains(path) {
-                        w.git = git;
-                        w.reading = reading;
-                        w.owner = owners.iter().find(|o| &o.0 == path).map(|o| o.1.clone());
-                    }
+                    w.git = git;
+                    w.reading = reading;
+                    w.owner = owners.iter().find(|o| &o.0 == path).map(|o| o.1.clone());
                     w.in_use = !w.users.is_empty()
                         || w.owner.as_ref().is_some_and(|o| o.running)
                         || worktree::recently(w.git.as_ref().and_then(|g| g.changed), now);
@@ -4316,44 +4208,8 @@ fn base_name(path: &str) -> String {
     Path::new(path).file_name().map_or(path.to_string(), |n| n.to_string_lossy().into_owned())
 }
 
-fn groups(d: &Daemon) -> Vec<ipc::GroupInfo> {
-    let groups = d.groups.lock().unwrap().clone();
-    groups
-        .into_iter()
-        .map(|g| ipc::GroupInfo {
-            members: g
-                .members
-                .iter()
-                .map(|m| ipc::MemberInfo {
-                    session: m.session.clone(),
-                    launcher: m.launcher.clone(),
-                    branch: m.branch.clone(),
-                    worktree: m.worktree.display().to_string(),
-                    stat: dino_core::worktree::stat(&m.worktree, &g.base).ok(),
-                })
-                .collect(),
-            id: g.id,
-            prompt: g.prompt,
-            repo: g.repo.display().to_string(),
-        })
-        .collect()
-}
-
-fn find_member(d: &Daemon, session: &str) -> anyhow::Result<(Group, Member)> {
-    let groups = d.groups.lock().unwrap();
-    groups
-        .iter()
-        .find_map(|g| g.members.iter().find(|m| m.session == session).map(|m| (g.clone(), m.clone())))
-        .ok_or_else(|| anyhow::anyhow!("session {session} isn't part of a fan-out"))
-}
-
-fn member_diff(d: &Daemon, session: &str) -> anyhow::Result<(ipc::DiffStat, String)> {
-    let (g, m) = find_member(d, session)?;
-    Ok((dino_core::worktree::stat(&m.worktree, &g.base)?, dino_core::worktree::diff(&m.worktree, &g.base)?))
-}
-
-/// What `id` changed: a fan-out member since its fan-out began (edits it committed included),
-/// any other session since the last commit of the checkout it runs in.
+/// What `id` changed: a session in a worktree dino made since the worktree began (edits it
+/// committed included), any other since the last commit of the checkout it runs in.
 fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
     Ok(match changes_base(d, id)? {
         Ok((dir, base, label)) => Response::Changes { root: real(&dir), files: worktree::changes(&dir, &base)?, base: label, note: None },
@@ -4365,10 +4221,9 @@ fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
 /// Not in a repo: its cwd and why.
 fn changes_base(d: &Daemon, id: &str) -> anyhow::Result<Result<(PathBuf, String, String), (PathBuf, String)>> {
     let cwd = local_session(d, id)?.cwd.clone();
-    Ok(match (find_member(d, id), session_worktree(d, &cwd)) {
-        (Ok((g, m)), _) => Ok((m.worktree, g.base, "where the fan-out started".to_string())),
-        (Err(_), Some(w)) => Ok((w.path, w.base, "where the worktree started".to_string())),
-        (Err(_), None) => match worktree::repo_root(&cwd) {
+    Ok(match session_worktree(d, &cwd) {
+        Some(w) => Ok((w.path, w.base, "where the worktree started".to_string())),
+        None => match worktree::repo_root(&cwd) {
             Ok(root) => {
                 let head = worktree::head(&root);
                 Ok((root, head, "the last commit".to_string()))
@@ -4382,11 +4237,6 @@ fn changes_base(d: &Daemon, id: &str) -> anyhow::Result<Result<(PathBuf, String,
 fn review(d: &Daemon, id: &str) -> anyhow::Result<Vec<dino_core::review::Finding>> {
     let (dir, base, _) = changes_base(d, id)?.map_err(|(_, note)| anyhow::anyhow!(note))?;
     dino_core::review::run(id, &dir, &base)
-}
-
-/// The fan-out group session `id` belongs to.
-fn group_of(d: &Daemon, id: &str) -> Option<String> {
-    d.groups.lock().unwrap().iter().find(|g| g.members.iter().any(|m| m.session == id)).map(|g| g.id.clone())
 }
 
 /// The worktree dino made that `dir` is in: its commits count as changes too.
@@ -4593,32 +4443,6 @@ fn send_input(s: &Session, text: &str, submit: bool) {
     }
 }
 
-/// The winner's changes land in the user's checkout, uncommitted; the whole group closes.
-fn keep(d: &Daemon, session: &str) -> anyhow::Result<()> {
-    let (g, m) = find_member(d, session)?;
-    dino_core::worktree::apply(&m.worktree, &g.base, &g.repo)?;
-    close_group(d, &g.id)
-}
-
-fn close_group(d: &Daemon, id: &str) -> anyhow::Result<()> {
-    let group = {
-        let mut groups = d.groups.lock().unwrap();
-        let i = groups.iter().position(|g| g.id == id).ok_or_else(|| anyhow::anyhow!("no fan-out {id}"))?;
-        let g = groups.remove(i);
-        save_groups(&d.home, &groups);
-        g
-    };
-    for m in &group.members {
-        kill(d, &m.session);
-    }
-    save(d);
-    for m in &group.members {
-        dino_core::worktree::remove(&group.repo, &m.worktree, &m.branch);
-        let _ = trust::claude_forget(&m.worktree);
-    }
-    Ok(())
-}
-
 /// Where a worktree is made from, symlinks resolved like git's paths (`/tmp` is `/private/tmp`),
 /// so the folder the user was in maps to the same one in the worktree.
 fn work_dir(cwd: Option<&str>) -> PathBuf {
@@ -4640,7 +4464,7 @@ fn carry_trust(l: &LauncherInfo, rel: Option<&Path>, wt: &Path) {
     }
 }
 
-// ---- A session in its own worktree: fan-out's isolation for one agent, kept until closed. ----
+// ---- A session in its own worktree, kept until closed. ----
 
 /// A worktree dino made for a session. It outlives the session: when to close it is the user's call.
 #[derive(Serialize, Deserialize, Clone)]
@@ -4660,9 +4484,44 @@ fn worktrees_path(home: &Path) -> PathBuf {
 }
 
 fn load_worktrees(home: &Path) -> Vec<SessionWorktree> {
-    let all: Vec<SessionWorktree> = std::fs::read(worktrees_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut all: Vec<SessionWorktree> = std::fs::read(worktrees_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    // Fan-outs, from before it was removed: kept with the rest, and the file goes.
+    let groups = home.join("groups.json");
+    if let Ok(bytes) = std::fs::read(&groups) {
+        adopt_fanouts(&bytes, &mut all);
+        if write_private(&worktrees_path(home), &serde_json::to_vec_pretty(&all).unwrap_or_default()).is_ok() {
+            let _ = std::fs::remove_file(&groups);
+        }
+    }
     // Ones removed by hand are gone.
     all.into_iter().filter(|w| w.path.exists()).collect()
+}
+
+/// Fan-outs from before it was removed (`groups.json`, as `bytes`): each agent's worktree that's
+/// still there becomes one dino made for its session, so the session shows, deletes and cleans
+/// up like any other.
+fn adopt_fanouts(bytes: &[u8], worktrees: &mut Vec<SessionWorktree>) {
+    #[derive(Deserialize)]
+    struct Group {
+        repo: PathBuf,
+        base: String,
+        members: Vec<Member>,
+    }
+    #[derive(Deserialize)]
+    struct Member {
+        branch: String,
+        worktree: PathBuf,
+    }
+    let groups: Vec<Group> = serde_json::from_slice(bytes).unwrap_or_default();
+    for g in groups {
+        for m in g.members {
+            if !m.worktree.is_dir() || worktrees.iter().any(|w| real(&w.path) == real(&m.worktree)) {
+                continue;
+            }
+            let repo = worktree::list(&m.worktree).ok().and_then(|l| l.into_iter().next()).map_or_else(|| g.repo.clone(), |w| PathBuf::from(w.path));
+            worktrees.push(SessionWorktree { path: m.worktree, branch: m.branch, repo, checkout: g.repo.clone(), base: g.base.clone() });
+        }
+    }
 }
 
 fn save_worktrees(home: &Path, worktrees: &[SessionWorktree]) {
@@ -5679,14 +5538,51 @@ while (sysread(STDIN, my $c, 1)) {
     }
 
     #[test]
+    fn fan_outs_become_session_worktrees() {
+        let tmp = std::env::temp_dir().join(format!("dino-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]);
+        let wt = tmp.join("wt/fix-ab12/claude");
+        git(&repo, &["worktree", "add", "-q", "-b", "dino/fix-ab12/claude", wt.to_str().unwrap(), &base]);
+        let groups = serde_json::json!([{
+            "id": "fix-ab12", "prompt": "fix it", "repo": repo, "base": base,
+            "members": [
+                {"session": "s1", "launcher": "claude", "branch": "dino/fix-ab12/claude", "worktree": wt},
+                {"session": "s2", "launcher": "codex", "branch": "dino/fix-ab12/codex", "worktree": tmp.join("wt/fix-ab12/gone")},
+            ],
+        }]);
+        let bytes = serde_json::to_vec(&groups).unwrap();
+        let mut all = vec![];
+        adopt_fanouts(&bytes, &mut all);
+        assert_eq!(all.len(), 1, "one removed by hand stays gone");
+        assert_eq!((all[0].path.as_path(), all[0].branch.as_str(), all[0].base.as_str()), (wt.as_path(), "dino/fix-ab12/claude", base.as_str()));
+        assert_eq!(real(&all[0].repo), real(&repo));
+        assert_eq!(all[0].checkout, repo);
+        adopt_fanouts(&bytes, &mut all);
+        assert_eq!(all.len(), 1, "once");
+        adopt_fanouts(b"not json", &mut all);
+        assert_eq!(all.len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn state_files_are_private() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("dino-private-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("groups.json");
+        let path = dir.join("worktrees.json");
         // One a crash left, open to all.
-        let tmp = dir.join("groups.json.tmp");
+        let tmp = dir.join("worktrees.json.tmp");
         std::fs::write(&tmp, "x").unwrap();
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
         write_private(&path, b"[]").unwrap();

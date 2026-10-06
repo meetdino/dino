@@ -537,3 +537,30 @@ private struct CommentComposer: View {
         .onAppear { focused = true }
     }
 }
+
+/// An agent's last upstream failure, so a dead agent never looks merely idle.
+struct ErrorLine: View {
+    let message: String
+
+    var body: some View {
+        // Not a Label: sidebar rows tint Label icons with the accent color.
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Image(systemName: "xmark.octagon.fill")
+            Text(message).lineLimit(2)
+        }
+        .font(.caption).foregroundStyle(SessionStatus.exited.color)
+        .help(message)
+    }
+}
+
+struct StatText: View {
+    let stat: DiffStat
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text("+\(stat.added)").foregroundStyle(Brand.green)
+            Text("−\(stat.removed)").foregroundStyle(SessionStatus.exited.color)
+            Text("· \(stat.files) file\(stat.files == 1 ? "" : "s")").foregroundStyle(.secondary)
+        }
+    }
+}

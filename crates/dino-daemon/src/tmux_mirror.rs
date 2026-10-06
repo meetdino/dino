@@ -60,7 +60,7 @@ fn wait(d: &Daemon, most: Duration) {
     let guard = d.asked.0.lock().unwrap();
     let before = *guard;
     let _ = d.asked.1.wait_timeout_while(guard, most, |n| *n == before);
-    // A burst of requests (a fan-out starting) settles before it looks.
+    // A burst of requests (several sessions starting) settles before it looks.
     std::thread::sleep(Duration::from_millis(300));
 }
 
