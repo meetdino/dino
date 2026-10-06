@@ -379,7 +379,7 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
             known.extend([w.path.clone(), w.repo.clone()]);
         }
         known.retain(|k| k.is_absolute() && k.parent().is_some());
-        procs::settle(&ids, &known)
+        procs::settle(&daemon.home, &ids, &known)
     };
     *daemon.leftovers.lock().unwrap() = leftovers;
     restore(&daemon, saved);
@@ -1407,7 +1407,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     go
                 };
                 for (l, started) in picked {
-                    procs::stop_leftover(l.pid, started);
+                    procs::stop_leftover(&d.home, l.pid, started);
                 }
                 Response::Ok
             }
@@ -1538,7 +1538,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             },
             Request::SessionCost { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
                 Some(s) if s.host.is_some() => Response::Error { message: format!("{id} runs on {}, so dino can't measure it from this Mac", s.host.as_deref().unwrap_or_default()) },
-                Some(s) => match d.costs.measure(&id, s.pane.pid().filter(|_| !s.pane.is_exited())) {
+                Some(s) => match d.costs.measure(&d.home, &id, s.pane.pid().filter(|_| !s.pane.is_exited())) {
                     Some(cost) => Response::SessionCost { cost },
                     None => Response::Error { message: format!("{id} has exited") },
                 },
@@ -2047,7 +2047,7 @@ fn local_spec(
     // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
     env.insert("DINO_SESSION".into(), id.to_string());
     // And for dinod: what it runs, wherever it goes, stops with the session (see `procs`).
-    env.insert(procs::TAG.into(), procs::tag(id));
+    env.insert(procs::TAG.into(), procs::tag(&d.home, id));
     // What draws it is Ghostty's engine: say so, so programs (tmux among them) use what it can do.
     // Over SSH, `ssh` falls back to xterm-256color (see the shell integration).
     if let Some(dir) = shell::terminfo() {
@@ -2848,7 +2848,7 @@ fn stop_all(d: &Daemon) {
     // without them), and all of what closed ones left.
     for (s, builds_only) in sessions.iter().map(|s| (s, true)).chain(closed.iter().map(|s| (s, false))) {
         if s.host.is_none() {
-            stopping.extend(procs::stop_session(&s.id, builds_only));
+            stopping.extend(procs::stop_session(&d.home, &s.id, builds_only));
         }
     }
     for s in d.previews.lock().unwrap().drain(..) {
@@ -3156,7 +3156,7 @@ fn restart_with(d: &Daemon, id: &str, change: impl FnOnce(&mut SavedSession)) ->
     s.pane.kill();
     // The builds its agent left in the background: the one taking its place can't see them.
     if s.host.is_none() {
-        procs::stop_session(id, true);
+        procs::stop_session(&d.home, id, true);
     }
     d.proxy.stats.restarted(id);
     change(&mut saved);
@@ -3772,7 +3772,7 @@ fn end(d: &Daemon, s: &Session) {
     s.pane.kill();
     // What it started outside its terminal, too.
     if s.host.is_none() {
-        procs::stop_session(id, false);
+        procs::stop_session(&d.home, id, false);
     }
     dino_core::agent::qwen::forget(id);
     forget_session_files(id);
@@ -5621,6 +5621,35 @@ while (sysread(STDIN, my $c, 1)) {
         assert_eq!(question_answered(&s, "claude", "Run: ls?", 2, true), Answer::Dismissed);
         kill(&d, &id);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A session's processes are its dino's: tagged with its folder, so closing session 1 of one
+    /// dino (another test's daemon, here) never stops what session 1 of another runs. Python
+    /// shows its environment to dinod; with SIP off (GitHub's runners) the shell's shows too.
+    #[test]
+    fn a_session_is_its_own_dinos() {
+        let Some(py) = procs::tests::python() else { return };
+        let (a, b) = (shell_daemon(), shell_daemon());
+        let run = |d: &Daemon| {
+            let id = spawn(d, Launch::new("shell", vec![], Some(test_home().display().to_string()))).unwrap();
+            session(d, &id).pane.write(format!("'{py}' -c 'import time; time.sleep(60)'\r").into_bytes());
+            id
+        };
+        let (ia, ib) = (run(&a), run(&b));
+        assert_eq!(ia, ib, "one id in both");
+        let python = |found: &[u32]| found.iter().copied().find(|&p| dino_core::procinfo::name(p).is_some_and(|n| n.to_lowercase().starts_with("python")));
+        wait_for("both Pythons", || python(&procs::of_session(&a.home, &ia)).is_some() && python(&procs::of_session(&b.home, &ib)).is_some());
+        let (in_a, in_b) = (procs::of_session(&a.home, &ia), procs::of_session(&b.home, &ib));
+        assert!(in_a.iter().all(|p| !in_b.contains(p)), "{in_a:?} {in_b:?}");
+        // Closing one leaves the other's running.
+        let theirs = python(&in_b).unwrap();
+        let started = dino_core::procinfo::process(theirs).unwrap().started_us;
+        kill(&a, &ia);
+        let running = |p: u32| dino_core::procinfo::process(p).is_some_and(|q| dino_core::procinfo::alive(p, q.started_us));
+        wait_for("the first's to stop", || !in_a.iter().any(|&p| running(p)));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(dino_core::procinfo::alive(theirs, started), "the other dino's session kept its Python");
+        kill(&b, &ib);
     }
 
     /// The socket's directory is made private, one dinod holds it at a time, a socket left
