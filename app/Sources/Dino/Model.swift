@@ -758,12 +758,19 @@ final class DinoModel: ObservableObject {
         if on != fanoutOn { fanoutOn = on }
     }
 
+    /// What a pane's `dino attach` runs with: the scrollback the pane keeps (Ghostty's
+    /// `scrollback-limit`) is what a reattach brings back.
+    static var attachEnv: [String: String] {
+        ["PATH": DinoEnvironment.loginPath, "DINO_HOME": DinoEnvironment.home,
+         "DINO_SCROLLBACK_LIMIT": String(terminals.configCount("scrollback-limit") ?? 10_000_000)]
+    }
+
     func terminal(for id: String) -> TerminalViewState {
         if let t = terminals[id] { return t }
         let t = TerminalViewState(controller: Self.terminals)
         t.configuration = TerminalSurfaceOptions(
             backend: .exec,
-            envVars: ["PATH": DinoEnvironment.loginPath, "DINO_HOME": DinoEnvironment.home],
+            envVars: Self.attachEnv,
             command: "\(DinoEnvironment.dinoBinary) attach --fresh \(id)",
             waitAfterCommand: false
         )
