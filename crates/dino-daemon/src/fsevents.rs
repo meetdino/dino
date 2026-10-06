@@ -25,6 +25,8 @@ unsafe extern "C" {
     fn FSEventStreamCreate(alloc: CFRef, callback: Callback, context: *const Context, paths: CFRef, since: u64, latency: f64, flags: u32) -> Stream;
     fn FSEventStreamSetDispatchQueue(stream: Stream, queue: *mut c_void);
     fn FSEventStreamStart(stream: Stream) -> u8;
+    #[cfg(test)]
+    fn FSEventStreamFlushSync(stream: Stream);
     fn FSEventStreamStop(stream: Stream);
     fn FSEventStreamInvalidate(stream: Stream);
     fn FSEventStreamRelease(stream: Stream);
@@ -226,6 +228,14 @@ impl Folders {
     /// `new`, with each file that changed rather than its folder.
     pub(crate) fn files(roots: &[PathBuf], on: impl Fn(&[(PathBuf, u32)]) + Send + Sync + 'static) -> anyhow::Result<Folders> {
         Ok(Folders { stream: stream(roots, 1.0, NO_DEFER | WATCH_ROOT | FILE_EVENTS, Box::new(on))? })
+    }
+
+    /// Hands over now what macOS holds back for the latency: back once every change made before
+    /// the call has reached `on`.
+    #[cfg(test)]
+    pub(crate) fn flush(&self) {
+        // SAFETY: a started stream, not released while `self` lives; called off its queue.
+        unsafe { FSEventStreamFlushSync(self.stream) }
     }
 }
 

@@ -316,6 +316,23 @@ fn watch(d: &Daemon, main: &str, worktrees: &[String]) -> Option<(u64, Arc<Marks
     }
 }
 
+/// Every change the watch of the repo whose main checkout is `main` has seen (macOS made to hand
+/// over what it held back first) has been read: each worktree's summary carries the watch's count.
+/// False without a watch, when summaries are read on a timer instead.
+#[cfg(test)]
+pub(crate) fn settled(d: &Daemon, main: &str) -> bool {
+    let watches = d.git.watches.lock().unwrap();
+    let Some(w) = watches.get(main) else { return false };
+    w._folders.iter().chain(&w._git).for_each(|f| f.flush());
+    let (lost, remotes) = (w.marks.lost.load(Ordering::Relaxed), w.marks.remotes.load(Ordering::Relaxed));
+    let seen = w.marks.seen.lock().unwrap();
+    let known = d.summaries.lock().unwrap();
+    w.worktrees.iter().all(|p| {
+        let now = seen.get(p).copied().unwrap_or(0) + lost;
+        known.get(p).and_then(|k| k.stamp.as_ref()).is_some_and(|s| s.watch == w.id && s.seen == now && s.remotes == remotes)
+    })
+}
+
 /// How many git runs for summaries go at once, across every tree being read: enough to read a
 /// repo's worth quickly, few enough to leave the Mac's cores to what the user is doing.
 fn workers() -> usize {
