@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
-  <a href="https://github.com/asdf9384/dino-releases/releases/latest"><img src="https://img.shields.io/github/v/release/asdf9384/dino-releases?label=release" alt="Latest release"></a>
+  <a href="https://github.com/meetdino/dino-releases/releases/latest"><img src="https://img.shields.io/github/v/release/meetdino/dino-releases?label=release" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-lightgrey?logo=apple" alt="macOS 14 or later">
 </p>
 
@@ -38,10 +38,10 @@ sidebar and it's a plain terminal. Free and open source, no account.
 macOS 14 or later, on Apple silicon.
 
 ```sh
-brew install asdf9384/tap/dino
+brew install meetdino/tap/dino
 ```
 
-Or download [Dino.dmg](https://github.com/asdf9384/dino-releases/releases/latest/download/Dino.dmg).
+Or download [Dino.dmg](https://github.com/meetdino/dino-releases/releases/latest/download/Dino.dmg).
 Both include the `dino` command. For just the command line:
 
 ```sh
@@ -127,7 +127,7 @@ You need the Xcode Command Line Tools (`xcode-select --install`) and Rust
 ([rustup](https://rustup.rs), 1.85 or later). No Apple developer account or signing keys.
 
 ```sh
-git clone https://github.com/asdf9384/dino.git
+git clone https://github.com/meetdino/dino.git
 cd dino
 cargo build --release      # the dino command and dinod: target/release/dino
 ./app/build.sh --install   # Dino.app with both inside: ~/Applications/Dino.app

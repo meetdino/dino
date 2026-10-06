@@ -15,5 +15,5 @@
 
 - [ ] `scripts/check.sh` passes
 - [ ] Tests cover the change, where it can be tested
-- [ ] Every commit is signed off (`git commit -s`, see [CONTRIBUTING.md](https://github.com/asdf9384/dino/blob/main/CONTRIBUTING.md#sign-off-your-commits-dco))
+- [ ] Every commit is signed off (`git commit -s`, see [CONTRIBUTING.md](https://github.com/meetdino/dino/blob/main/CONTRIBUTING.md#sign-off-your-commits-dco))
 - [ ] The title says what changes in one line: it becomes the commit's message on main

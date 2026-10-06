@@ -6,7 +6,7 @@ accounts and synced settings, so we take reports seriously.
 ## Reporting a vulnerability
 
 Please don't open a public issue, pull request or discussion. Report it privately, through
-GitHub: [**Report a vulnerability**](https://github.com/asdf9384/dino/security/advisories/new)
+GitHub: [**Report a vulnerability**](https://github.com/meetdino/dino/security/advisories/new)
 (the repository's **Security** tab → **Report a vulnerability**). Only the maintainers see it, and
 we work on the fix with you there, in a private fork when it needs one.
 
