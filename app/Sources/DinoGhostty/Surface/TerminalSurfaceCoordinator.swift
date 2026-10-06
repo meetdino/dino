@@ -100,20 +100,27 @@ final class TerminalSurfaceCoordinator {
     /// speed, not display speed; rendering straight from them draws far more
     /// often than the screen can show and starves input handling under heavy
     /// output. The link paces draws to vsync instead, and is released after
-    /// a stretch of idle frames so a quiet terminal costs no per-frame
+    /// a stretch of idle time so a quiet terminal costs no per-frame
     /// wakeups at all. All instances share one platform link.
+    ///
+    /// The stretch is time, not frames, and outlasts a working agent's
+    /// cadence: Claude Code changes its title about once a second, and each
+    /// change wakes the app. Every release stops the CVDisplayLink and the
+    /// next frame starts a new one, thread and all; released after a quarter
+    /// second, the link was rebuilt on every one of those title changes.
     ///
     /// The range floors at 60: letting the system drop to 30 while output
     /// streams read as flicker on a scrolling screen. ProMotion displays may
     /// go to 120.
     private var displayLink: DisplayLink?
-    private var idleFrameCount = 0
+    /// When the link last had a frame owed, on the system uptime clock.
+    private var lastFrameOwed: TimeInterval = 0
     private static let displayLinkFrameRateRange = DisplayLinkFrameRateRange(
         minimum: 60,
         maximum: 120,
         preferred: 120
     )
-    private static let idleFramesBeforeRelease = 30
+    private static let idleBeforeRelease: TimeInterval = 1.5
 
     init() {
         bridge.onCellSizeChange = { [weak self] width, height in
@@ -479,14 +486,14 @@ final class TerminalSurfaceCoordinator {
             releaseDisplayLink()
             return
         }
+        let now = ProcessInfo.processInfo.systemUptime
         guard pendingImmediateTick else {
-            idleFrameCount += 1
-            if idleFrameCount >= Self.idleFramesBeforeRelease {
+            if now - lastFrameOwed >= Self.idleBeforeRelease {
                 releaseDisplayLink()
             }
             return
         }
-        idleFrameCount = 0
+        lastFrameOwed = now
         pendingImmediateTick = false
         TerminalDebugLog.log(.render, "tick")
         controller?.tick()
@@ -587,7 +594,7 @@ final class TerminalSurfaceCoordinator {
             releaseDisplayLink()
             return
         }
-        idleFrameCount = 0
+        lastFrameOwed = ProcessInfo.processInfo.systemUptime
         guard displayLink == nil else { return }
         let link = DisplayLink(preferredFrameRateRange: Self.displayLinkFrameRateRange)
         link.delegatingObject(self)
@@ -598,7 +605,6 @@ final class TerminalSurfaceCoordinator {
     private func releaseDisplayLink() {
         guard displayLink != nil else { return }
         displayLink = nil
-        idleFrameCount = 0
         TerminalDebugLog.log(.lifecycle, "display link released")
     }
 
