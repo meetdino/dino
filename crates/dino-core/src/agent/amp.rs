@@ -152,7 +152,7 @@ impl Agent for Amp {
     fn catalog(&self, program: &str) -> Option<Catalog> {
         let help = output(Path::new(program), &["--help"], Duration::from_secs(5))?;
         let models: Vec<ModelInfo> = modes_in(&help).into_iter().map(|m| ModelInfo { label: capitalized(&m), id: m, ..ModelInfo::default() }).collect();
-        (!models.is_empty()).then_some(Catalog { models, default_model: None })
+        (!models.is_empty()).then_some(Catalog { models, default_model: None, ..Catalog::default() })
     }
 
     // Its agent runs on Amp's servers, on the user's Amp account; dino leaves it be.

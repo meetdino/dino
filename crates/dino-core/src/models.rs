@@ -35,6 +35,9 @@ pub struct Catalog {
     pub models: Vec<ModelInfo>,
     /// The model it starts with when none is chosen, as the agent's settings say.
     pub default_model: Option<String>,
+    /// Effort levels the agent says it takes, whatever the model (Claude's `--effort`, as its help
+    /// lists them): for an agent that keeps no list of its models here.
+    pub efforts: Vec<String>,
 }
 
 impl Catalog {
@@ -44,7 +47,7 @@ impl Catalog {
 
     /// Every model's effort levels in one order, lowest first.
     pub fn efforts(&self) -> Vec<String> {
-        let mut out: Vec<String> = vec![];
+        let mut out: Vec<String> = self.efforts.clone();
         for m in &self.models {
             for (i, e) in m.efforts.iter().enumerate() {
                 if out.contains(e) {
@@ -115,7 +118,7 @@ pub fn codex(cache: &str, config: Option<&str>) -> Option<Catalog> {
     }
     listed.sort_by_key(|(p, _)| *p);
     let default_model = config.and_then(|c| toml::from_str::<toml::Table>(c).ok()).and_then(|t| t.get("model")?.as_str().map(String::from));
-    Some(Catalog { models: listed.into_iter().map(|(_, m)| m).collect(), default_model })
+    Some(Catalog { models: listed.into_iter().map(|(_, m)| m).collect(), default_model, ..Catalog::default() })
 }
 
 /// Codex's model cache as it's on disk (the models its ChatGPT account may use).
@@ -192,7 +195,7 @@ pub fn claude(catalog: &str, version: Option<&str>, allowed: Option<&[String]>) 
         return None;
     }
     let default_model = c.pointer("/state/model").and_then(Value::as_str).map(String::from);
-    Some(Catalog { models, default_model })
+    Some(Catalog { models, default_model, ..Catalog::default() })
 }
 
 /// `availableModels` from Claude's settings: the organization's, else the user's.
@@ -208,6 +211,21 @@ fn claude_allowed() -> Option<Vec<String>> {
 pub fn claude_from_files(version: Option<&str>) -> Option<Catalog> {
     let text = std::fs::read_to_string(claude_catalog_file()?).ok()?;
     claude(&text, version, claude_allowed().as_deref())
+}
+
+/// The levels Claude's `--effort` takes, as `claude --help` lists them after it: "(low, medium,
+/// high, xhigh, max)". Empty when it lists none.
+pub fn claude_help_efforts(help: &str) -> Vec<String> {
+    let Some(at) = help.find("--effort ") else { return vec![] };
+    // Its description runs to the next option.
+    let desc = &help[at..];
+    let desc = &desc[..desc.find("\n  -").unwrap_or(desc.len())];
+    let Some(list) = desc.split_once('(').and_then(|(_, r)| r.split_once(')')).map(|(l, _)| l) else { return vec![] };
+    let levels: Vec<String> = list.split(',').map(|l| l.trim().to_string()).collect();
+    if levels.iter().any(|l| l.is_empty() || !l.chars().all(|c| c.is_ascii_alphanumeric())) {
+        return vec![];
+    }
+    levels
 }
 
 /// "2.1.285 (Claude Code)" → "2.1.285".
@@ -263,6 +281,18 @@ mod tests {
         let ids: Vec<&str> = c.models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["claude-sonnet-5-5", "claude-haiku-4-5-20251001"]);
         assert!(claude("{}", None, None).is_none());
+    }
+
+    /// Claude Code 2.1.292's help, as it prints it when not on a terminal.
+    #[test]
+    fn claudes_effort_levels_from_its_help() {
+        let help = "  --disallowedTools <tools...>          Comma or space-separated list of tool names\n                                        to deny (e.g. \"Bash(git:*) Edit\")\n  --effort <level>                      Effort level for the current session\n                                        (low, medium, high, xhigh, max)\n  --environment <environment_id>        Create a new cloud session that runs on\n                                        the given self-hosted environment (see\n";
+        assert_eq!(claude_help_efforts(help), ["low", "medium", "high", "xhigh", "max"]);
+        assert!(claude_help_efforts("  --model <model>  Model for the current session (e.g. sonnet)\n").is_empty(), "no --effort");
+        assert!(claude_help_efforts("  --effort <level>  Effort level\n  --environment <id>  (see docs)\n").is_empty(), "not the next option's");
+        // Without its models: those levels for any of them.
+        let c = Catalog { efforts: claude_help_efforts(help), ..Default::default() };
+        assert_eq!(c.efforts(), ["low", "medium", "high", "xhigh", "max"]);
     }
 
     #[test]

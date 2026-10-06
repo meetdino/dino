@@ -16,8 +16,9 @@ use super::{Daemon, Launch, SavedSession, Session, mode, now_secs, save, session
 /// fork (written at once) from a new conversation (`/clear`, written at its first prompt).
 const RECORD_WAIT: Duration = Duration::from_secs(3);
 
-/// What a session is called where people see it: the name given it, else its agent's title
-/// without the spinner or status mark in front (Claude's "✳"), else its name.
+/// What a session is called where people see it: the name given it, else what its agent's
+/// records call its conversation (Codex's), else its agent's title without the spinner or status
+/// mark in front (Claude's "✳"), else its name.
 fn shown(s: &Session) -> String {
     let title = || {
         let t = s.pane.title()?;
@@ -25,7 +26,8 @@ fn shown(s: &Session) -> String {
         let t = t.trim_start_matches(|c: char| !c.is_alphanumeric()).trim().to_string();
         (!t.is_empty()).then_some(t)
     };
-    s.label.lock().unwrap().clone().or_else(title).unwrap_or_else(|| s.name.clone())
+    let named = s.rollout.lock().unwrap().title.clone();
+    s.label.lock().unwrap().clone().or(named).or_else(title).unwrap_or_else(|| s.name.clone())
 }
 
 /// The first of `stem`, `stem-2`, … no session is called.

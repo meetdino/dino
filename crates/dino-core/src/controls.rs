@@ -224,6 +224,10 @@ mod tests {
         assert_eq!(args("claude", &c(Some("yolo"), Some("  "), Some("huge")), &claude), Vec::<String>::new());
         // Without its catalog there's no effort to be sure of.
         assert_eq!(args("claude", &c(None, Some("opus"), Some("high")), &knobs("claude", true, None)), ["--model", "opus"]);
+        // With only the levels its help lists (no catalog here): those, whichever model it's on.
+        let bare = knobs("claude", true, Some(&Catalog { efforts: vec!["low".into(), "medium".into(), "high".into()], ..Catalog::default() }));
+        assert_eq!(bare.efforts_for(Some("claude-sonnet-5-5")), ["low", "medium", "high"]);
+        assert_eq!(args("claude", &c(None, Some("claude-sonnet-5-5"), Some("high")), &bare), ["--model", "claude-sonnet-5-5", "--effort", "high"]);
     }
 
     #[test]

@@ -287,6 +287,12 @@ impl Agent for Codex {
         StatusSource::Rollout
     }
 
+    // Its terminal's title is its folder by default (`tui.terminal_title`: spinner, project), not
+    // its conversation: dinod names it from Codex's records (see `history::codex_thread_name`).
+    fn shown_title(&self, _title: &str) -> Option<String> {
+        None
+    }
+
     // What each turn runs with (`turn_context`), and a change of it between turns, written as it's
     // made (`/model`: `thread_settings_applied`, Codex 0.160).
     fn log_model(&self, line: &Value) -> Option<String> {

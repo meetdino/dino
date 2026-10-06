@@ -2826,11 +2826,13 @@ fn state(d: &Daemon) -> Response {
             let conversation = s.agent_session.lock().unwrap().clone();
             let shell_cwd = s.pane.shared.cwd.lock().unwrap().clone();
             let last_exit = *s.pane.shared.last_exit.lock().unwrap();
+            // What its agent's records call its conversation (Codex's), over its terminal's title.
+            let named = s.rollout.lock().unwrap().title.clone();
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 agent_id: s.agent_id.clone(),
-                title: label.clone().or_else(|| s.pane.title().and_then(|t| agent(&s.agent_id).map_or(Some(t.clone()), |a| a.shown_title(&t))).and_then(|t| undecorated(&t))),
+                title: label.clone().or(named).or_else(|| s.pane.title().and_then(|t| agent(&s.agent_id).map_or(Some(t.clone()), |a| a.shown_title(&t))).and_then(|t| undecorated(&t))),
                 exited: s.pane.is_exited(),
                 exit_code: s.pane.exit_code(),
                 output_ms_ago,
@@ -5356,6 +5358,53 @@ while (sysread(STDIN, my $c, 1)) {
         spawn(&d, Launch { restore: Some(ended.clone()), ..Launch::new("claude", vec![], Some(ended.cwd.clone())) }).unwrap();
         assert!(session(&d, "9402").pane.is_exited());
         assert!(claude_config::homes().contains(&other));
+    }
+
+    /// A Codex session is named for its conversation, as Codex's own records name it: its first
+    /// prompt, then the thread name Codex gives it (`session_index.jsonl` beside its `sessions`),
+    /// never the folder Codex puts on its terminal (its default title is the project), which
+    /// named every Codex session "work" like a shell tab.
+    #[test]
+    fn a_codex_session_is_named_for_its_conversation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_home().join("fake-codex-title");
+        let _ = std::fs::remove_dir_all(&dir);
+        let work = dir.join("work");
+        let home = dir.join("codex-home");
+        let day = home.join("sessions/2026/10/05");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&day).unwrap();
+        let id = "01a0e93b-2fcf-7a20-8efb-cccccccccccc";
+        let rollout = day.join(format!("rollout-2026-10-05T12-00-00-{id}.jsonl"));
+        let lines = [
+            format!(r#"{{"timestamp":"2026-10-05T12:00:00.000Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}","originator":"codex_cli_rs","cli_version":"0.160.1","source":"cli"}}}}"#, work.display()),
+            r#"{"timestamp":"2026-10-05T12:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"add a dark mode"}}"#.to_string(),
+        ];
+        std::fs::write(dir.join("lines"), lines.join("\n") + "\n").unwrap();
+        // Its terminal titled with its folder, its rollout held open.
+        let program = dir.join("codex");
+        std::fs::write(&program, format!("#!/bin/sh\nprintf '\\033]0;%s\\007' \"$(basename \"$PWD\")\"\nexec 3>>'{}'\ncat '{}' >&3\nexec sleep 600\n", rollout.display(), dir.join("lines").display())).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let codex = LauncherInfo { short: "codex".into(), agent_id: "codex".into(), label: "Codex".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let d = test_daemon(vec![codex]);
+        let sid = spawn(&d, Launch::new("codex", vec![], Some(work.display().to_string()))).unwrap();
+        let s = session(&d, &sid);
+        let title = |d: &Daemon| match state(d) {
+            Response::State { sessions, .. } => sessions.into_iter().find(|x| x.id == sid).and_then(|x| x.title),
+            _ => None,
+        };
+        wait_for("its rollout and its terminal's title", || {
+            codex::watch(&d);
+            s.rollout.lock().unwrap().path.is_some() && s.pane.title().is_some()
+        });
+        assert_eq!(s.pane.title().as_deref(), Some("work"), "Codex's own title: its folder");
+        assert_eq!(title(&d).as_deref(), Some("add a dark mode"), "before Codex names it, its first prompt");
+        std::fs::write(home.join("session_index.jsonl"), format!(r#"{{"id":"{id}","thread_name":"Dark mode for settings","updated_at":"2026-10-05T12:00:09Z"}}"#) + "\n").unwrap();
+        wait_for("the name Codex gave it", || {
+            codex::watch(&d);
+            title(&d).as_deref() == Some("Dark mode for settings")
+        });
+        s.pane.kill();
     }
 
     /// With bypass allowed and Claude's warning about it accepted in its config folder, Claude

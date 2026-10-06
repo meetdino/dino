@@ -174,7 +174,7 @@ fn catalog_in(list: &str, levels: &[String], settings: &Value) -> Option<Catalog
         m
     });
     let models: Vec<ModelInfo> = models.collect();
-    (!models.is_empty()).then_some(Catalog { models, default_model })
+    (!models.is_empty()).then_some(Catalog { models, default_model, ..Catalog::default() })
 }
 
 /// The extension that points Anthropic's API at dino for one free-tier session, written where

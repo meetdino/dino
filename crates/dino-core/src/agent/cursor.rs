@@ -174,7 +174,7 @@ fn catalog_in(out: &str) -> Option<Catalog> {
         }
         models.push(ModelInfo { id: id.into(), label: name.trim().into(), ..ModelInfo::default() });
     }
-    (!models.is_empty()).then_some(Catalog { models, default_model })
+    (!models.is_empty()).then_some(Catalog { models, default_model, ..Catalog::default() })
 }
 
 /// Its arguments after its `index.js`, if `args` (a process's, without the program) are Cursor Agent's.
