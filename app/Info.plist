@@ -16,7 +16,7 @@
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSPrincipalClass</key><string>DinoApplication</string>
     <!-- What a terminal opens, as Terminal declares it: scripts and programs (run in a new shell),
          folders (a shell there, for `open -a`). Alternate: dino is the default only when you say so. -->
     <key>CFBundleDocumentTypes</key>

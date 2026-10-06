@@ -21,6 +21,8 @@ struct WelcomeCard: View {
     /// Out of the way while an install or sign-in runs in its tab (a sign-in asks you things there);
     /// back with the outcome when it ends.
     @State private var away = false
+    /// Taken down for a quit (DinoApplication), not closed: unseen, it's there at the next launch.
+    @State private var quitting = false
 
     /// The ones dino works with best, in this order.
     private static let featured = ["claude", "codex", "copilot", "cursor", "amp", "kimi", "qwen", "pi", "hermes", "codewhale", "opencode"]
@@ -47,9 +49,11 @@ struct WelcomeCard: View {
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
-            .sheet(isPresented: Binding(get: { shown && !away }, set: { if !$0, shown, !away { close() } })) {
+            .sheet(isPresented: Binding(get: { shown && !away && !quitting }, set: { if !$0, shown, !away { close() } })) {
                 card.onAppear(perform: look)
             }
+            .onReceive(NotificationCenter.default.publisher(for: DinoApplication.quitting)) { _ in quitting = true }
+            .onReceive(NotificationCenter.default.publisher(for: DinoApplication.quitCalledOff)) { _ in quitting = false }
             // Watched here rather than on the card, which is away while they run.
             .task {
                 while !Task.isCancelled {
@@ -407,6 +411,8 @@ struct WelcomeCard: View {
     }
 
     private func close() {
+        // Taken down for a quit, never closed: it's unseen.
+        guard !quitting else { return }
         // The agent it showed for ⌘N is the one ⌘N starts.
         if store.settings?.policies.default_agent == nil, let s = suggested, s != "claude",
            store.agents.contains(where: { $0.short == s }) {

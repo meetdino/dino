@@ -7,6 +7,9 @@ import SwiftUI
 enum Launch {
     static func main() {
         DinodHost.runIfAsked()
+        // The app is dino's (it quits with a sheet up): made first, as SwiftUI's own setup asks
+        // for `NSApp` before reading Info.plist's `NSPrincipalClass`.
+        _ = DinoApplication.shared
         DinoApp.main()
     }
 }
@@ -206,6 +209,11 @@ struct DinoApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_: Notification) {
+        // The quit Apple Event (macOS's Quit & Reopen, logout, `osascript … quit`): AppKit's own
+        // handler refuses it while a sheet is up without calling `terminate`, so it's dino's.
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(quitEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEQuitApplication))
         // Before the first window draws: no flash of the Mac's look when dino is set otherwise.
         Appearance.current.apply()
         // Opening the app shows the sessions, even if it quit while looking at the archive.
@@ -310,6 +318,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
         return true
+    }
+
+    /// Quits as ⌘Q does. Still running after it, the quit was called off: its sender hears so, as
+    /// from AppKit's own handler.
+    @objc private func quitEvent(_: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        NSApp.terminate(nil)
+        reply.setParam(NSAppleEventDescriptor(int32: Int32(userCanceledErr)), forKeyword: AEKeyword(keyErrorNumber))
     }
 
     // Closing the window (⌘W with nothing else to close) hides it, as in Ghostty: dino keeps running
@@ -1906,5 +1921,44 @@ private struct ArchiveWhileWorking: ViewModifier {
         } message: { _ in
             Text("The agent stops in the middle of what it's doing. You can resume the session from Archived.")
         }
+    }
+}
+
+/// dino's application (Info.plist's `NSPrincipalClass`), which quits with a sheet up.
+///
+/// AppKit refuses to quit while a window has a sheet attached (the Welcome card, New Session…):
+/// `terminate` returns without asking the delegate ("App termination blocked by modal sheet"), so
+/// ⌘Q, the menu and macOS's Quit & Reopen after a permission grant did nothing. Asked to quit, it
+/// has the sheets taken down first, by their owners where they listen (the Welcome card, which a
+/// quit doesn't count as seen), else as Esc takes them down, then quits as asked. A quit called
+/// off (Cancel) puts the listening ones back.
+@objc(DinoApplication)
+final class DinoApplication: NSApplication {
+    /// Posted before a quit takes the sheets down, and when it's called off.
+    static let quitting = Notification.Name("dino.quitting")
+    static let quitCalledOff = Notification.Name("dino.quitCalledOff")
+    private var quitting = false
+
+    override func terminate(_ sender: Any?) {
+        let sheets = { self.windows.compactMap { w in w.attachedSheet.map { (w, $0) } } }
+        guard !quitting, !sheets().isEmpty else { return super.terminate(sender) }
+        quitting = true
+        defer { quitting = false }
+        NotificationCenter.default.post(name: Self.quitting, object: nil)
+        // They go as SwiftUI next draws: run till then, so the quit goes on from here (the quit
+        // Apple Event still current: a logout's never waits on the question). One whose owner
+        // doesn't listen is closed as Esc closes it (ended under SwiftUI, it comes straight back).
+        let until = Date.now.addingTimeInterval(1)
+        var escaped = false
+        while !sheets().isEmpty, Date.now < until {
+            RunLoop.current.run(mode: .default, before: .now.addingTimeInterval(0.05))
+            if !escaped, Date.now > until.addingTimeInterval(-0.8) {
+                escaped = true
+                for (_, sheet) in sheets() { (sheet.firstResponder ?? sheet).doCommand(by: #selector(NSResponder.cancelOperation(_:))) }
+            }
+        }
+        super.terminate(sender)
+        // Still running: the quit was called off.
+        NotificationCenter.default.post(name: Self.quitCalledOff, object: nil)
     }
 }
