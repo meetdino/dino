@@ -93,12 +93,14 @@ pub(crate) fn switchable(s: &Session, want: &str) -> bool {
     (order.contains(&want) || seen.steps.values().any(|m| m == want)) && !seen.unreachable.iter().any(|m| m == want)
 }
 
-/// The arguments `s`'s agent was started with, its mode flag included.
+/// The arguments `s`'s agent was started with, its mode flag and what put others in reach of its
+/// mode key included.
 fn launched(s: &Session) -> Vec<String> {
     let mut args = s.args.clone();
     if let (Some(a), Some(m)) = (agent(&s.agent_id), s.controls.mode.as_deref()) {
         args.extend(a.mode_args(m));
     }
+    args.extend(s.reach.iter().cloned());
     args
 }
 

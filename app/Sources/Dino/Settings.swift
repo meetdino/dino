@@ -1096,7 +1096,7 @@ private struct BypassSection: View {
         } header: {
             Text("Permissions")
         } footer: {
-            Footnote("In bypass permissions mode, an agent edits files and runs any command without asking you. When this is off, the mode isn't offered, and no session can start in it or switch to it. Sessions already in it keep running.")
+            Footnote("In bypass permissions mode, an agent edits files and runs any command without asking you. When this is on and you've accepted Claude Code's own warning about it, Claude Code starts with it in its Shift+Tab cycle, so switching to it needs no restart. Claude Code then doesn't block edits in plan mode either. When this is off, the mode isn't offered, and no session can start in it or switch to it. Sessions already in it keep running.")
         }
     }
 }

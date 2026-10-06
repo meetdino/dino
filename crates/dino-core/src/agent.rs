@@ -137,6 +137,13 @@ pub trait Agent: Sync {
     fn mode_cycle(&self, _args: &[String]) -> Option<(&'static str, Vec<&'static str>)> {
         None
     }
+    /// Arguments that put `mode` in its mode key's cycle (see `mode_cycle`) without starting in
+    /// it (Claude's `--allow-dangerously-skip-permissions` for bypass), for a session in `cwd`
+    /// whose config folder is `config` (its `CLAUDE_CONFIG_DIR`, if it has one). None when it has
+    /// no such flag, or when the flag would bring up a question as it starts.
+    fn reach_args(&self, _mode: &str, _cwd: &Path, _config: Option<&Path>) -> Vec<String> {
+        vec![]
+    }
 
     // ---- Models ----
 

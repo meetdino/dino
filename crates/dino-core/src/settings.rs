@@ -234,7 +234,9 @@ pub struct Policies {
     /// merge its dino worktree goes too when nothing would be lost (and comes back from the branch
     /// if it's started again); after a close the worktree stays.
     pub close_merged: bool,
-    /// Offer the permission mode that never asks (on unless turned off). Off, it's hidden and refused.
+    /// Offer the permission mode that never asks (on unless turned off). Off, it's hidden and
+    /// refused. On, agents that can are started with it in their mode key's cycle, to be switched
+    /// to without a restart (see `Agent::reach_args`).
     pub allow_bypass: bool,
     /// Opt-in: give Claude sessions dino's tools (`dino mcp`) to list, read, message and start other sessions.
     pub session_tools: bool,

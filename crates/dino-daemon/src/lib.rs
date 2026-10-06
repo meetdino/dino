@@ -100,8 +100,10 @@ struct Session {
     last_write: Arc<Mutex<Option<Instant>>>,
     /// The question it's waiting on the user for, as dinod watches its dialog (see [`Asked`]).
     asked: Mutex<Option<Asked>>,
-    /// The user's last keystroke, resize or attach.
+    /// The user's last keystroke, resize, focus change or attach.
     poked: Arc<Mutex<Option<Instant>>>,
+    /// The user's last keystroke: a message may be on its way (see `restartable`).
+    typed: Mutex<Option<Instant>>,
     /// The last local web address the agent printed.
     local_url: Arc<Mutex<Option<String>>>,
     attached: AtomicUsize,
@@ -110,6 +112,9 @@ struct Session {
     auto: Mutex<AutoState>,
     /// Mode, model and effort it was started with.
     controls: Controls,
+    /// What it was started with to put modes in its own mode key's cycle without starting in
+    /// them (see `Agent::reach_args`).
+    reach: Vec<String>,
     /// Asked for and not yet in effect: switched to in place (see `mode`) or restarted with
     /// once the turn is over.
     pending: Mutex<Option<Controls>>,
@@ -1794,17 +1799,17 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     {
         anyhow::bail!("its conversation is running in {} already", other.name);
     }
-    let (spec, cwd, server) = match &host {
-        _ if ended.is_some() => (None, PathBuf::from(ended.map(|r| r.cwd.clone()).unwrap_or_default()), None),
+    let (spec, cwd, server, reach) = match &host {
+        _ if ended.is_some() => (None, PathBuf::from(ended.map(|r| r.cwd.clone()).unwrap_or_default()), None, vec![]),
         Some(host) => {
             let folder = cwd.filter(|c| !c.is_empty()).or_else(|| settings.ssh.get(host).map(|h| h.folder.clone())).filter(|f| !f.is_empty());
             let folder = folder.unwrap_or_else(|| "~".into());
             let restoring = restore.is_some();
-            (Some(remote_spec(d, &settings, &l, host, &folder, &id, &mut agent_session, restoring, &controls, &args, prompt)?), PathBuf::from(folder), None)
+            (Some(remote_spec(d, &settings, &l, host, &folder, &id, &mut agent_session, restoring, &controls, &args, prompt)?), PathBuf::from(folder), None, vec![])
         }
         None => {
-            let (spec, cwd, server) = local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.as_ref(), &controls, &args, prompt, route.as_ref());
-            (Some(spec), cwd, server)
+            let (spec, cwd, server, reach) = local_spec(d, &settings, &l, cwd, &id, &mut agent_session, restore.as_ref(), &controls, &args, prompt, route.as_ref());
+            (Some(spec), cwd, server, reach)
         }
     };
 
@@ -1902,11 +1907,13 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         last_write,
         asked: Mutex::default(),
         poked,
+        typed: Mutex::default(),
         local_url,
         attached: AtomicUsize::new(0),
         clients: Mutex::default(),
         auto: Mutex::new(restore.as_ref().map(|r| r.auto.clone()).unwrap_or_default()),
         controls,
+        reach,
         pending: Mutex::default(),
         mode_seen: Mutex::default(),
         switching: AtomicBool::new(false),
@@ -2006,7 +2013,7 @@ fn local_spec(
     args: &[String],
     prompt: Option<String>,
     route: Option<&ProviderRoute>,
-) -> (SpawnSpec, PathBuf, Option<agentserver::Address>) {
+) -> (SpawnSpec, PathBuf, Option<agentserver::Address>, Vec<String>) {
     let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
     // Claude reports its context window to its statusline; wrap the user's, if they have one.
     let adapter = agent(&l.agent_id);
@@ -2109,6 +2116,15 @@ fn local_spec(
     // The provider's wiring names the model.
     let controls = Controls { model: if provider.is_some() { None } else { controls.model.clone() }, ..controls.clone() };
     wired_args.extend(controls::args(&l.agent_id, &controls, &d.knobs(&l.agent_id, true)));
+    // Bypass in the cycle of the agent's own mode key while the policies allow it (Claude's
+    // Shift+Tab): switching into it later is a keypress, not a restart once its turn is over.
+    let reach = match adapter {
+        Some(a) if settings.policies.allow_bypass && controls.mode.as_deref() != Some("bypass") => {
+            a.reach_args("bypass", &cwd, env.get("CLAUDE_CONFIG_DIR").map(Path::new))
+        }
+        _ => vec![],
+    };
+    wired_args.extend(reach.iter().cloned());
     wired_args.extend(args.iter().cloned());
     wired_args.extend(prompt.map(|p| prompt_args(&l.agent_id, p)).unwrap_or_default());
     private_settings(id, &mut wired_args);
@@ -2122,7 +2138,7 @@ fn local_spec(
             }
         }
     }
-    (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd, server)
+    (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd, server, reach)
 }
 
 /// Where a session's private files go: inside dino's own folder, which only its user can open.
@@ -2314,7 +2330,8 @@ fn kept_on_resume(s: &Session, have: &Controls, controls: &Controls) -> anyhow::
 /// See `state`: how long a working agent can be silent before its turn counts as over.
 const TURN_OVER_QUIET: std::time::Duration = std::time::Duration::from_millis(2500);
 
-/// See `restartable`: how long after the user's last keystroke a restart waits.
+/// See `restartable`: how long after the user's last keystroke a restart waits. Only a keystroke:
+/// choosing a mode in the app moves its focus, which isn't a message on its way.
 const TYPED_QUIET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long after a keystroke, resize or attach the agent's output is taken as its answer to
@@ -2448,6 +2465,7 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
                 // From an older client, includes the focus in/out reports agents ask for: Claude
                 // repaints on those.
                 s.poke();
+                *s.typed.lock().unwrap() = Some(Instant::now());
                 s.pane.write(payload)
             }
             ipc::RESIZE => {
@@ -2661,7 +2679,7 @@ fn restartable(d: &Daemon, s: &Session) -> bool {
     let st = d.proxy.stats.session(&s.id);
     // A message just typed may not have started a turn yet: on a busy Mac the agent can take
     // seconds to say so, and a restart then would lose it.
-    let typing = s.poked.lock().unwrap().is_some_and(|t| t.elapsed() < TYPED_QUIET);
+    let typing = s.typed.lock().unwrap().is_some_and(|t| t.elapsed() < TYPED_QUIET);
     idle(d, s) && !typing && !st.subagents.iter().any(|a| a.running) && !st.background.iter().any(|b| b.running)
 }
 
@@ -5245,6 +5263,70 @@ while (sysread(STDIN, my $c, 1)) {
         s.pane.kill();
     }
 
+    /// With bypass allowed and Claude's warning about it accepted in its config folder, Claude
+    /// starts with bypass in its Shift+Tab cycle without starting in it, so switching into it is a
+    /// keypress in the same process, as is switching back out; a stand-in that has bypass in its
+    /// cycle only when started with `--allow-dangerously-skip-permissions`, as Claude 2.1 does.
+    #[test]
+    fn bypass_switches_in_place_once_claude_starts_with_it_in_reach() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_home().join("fake-claude-bypass");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let program = dir.join("claude");
+        let fake = FAKE_CLAUDE
+            .replace("my $i = 0;", "push @modes, \"\\x{23F5}\\x{23F5} bypass permissions on (shift+tab to cycle)\" if grep { $_ eq \"--allow-dangerously-skip-permissions\" } @ARGV;\npush @modes, \"\\x{23F5}\\x{23F5} auto mode on (shift+tab to cycle)\";\nmy $i = $#modes;");
+        std::fs::write(&program, fake).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let claude = LauncherInfo { short: "claude".into(), agent_id: "claude".into(), label: "Claude Code".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let d = test_daemon(vec![claude]);
+        let start = |accepted: bool, id: &str| {
+            std::fs::write(config.join("settings.json"), format!(r#"{{"skipDangerousModePermissionPrompt": {accepted}}}"#)).unwrap();
+            // Its own config folder, as an agent continued from outside dino keeps its account.
+            let saved = SavedSession {
+                id: id.into(),
+                name: id.into(),
+                launcher: "claude".into(),
+                cwd: dir.display().to_string(),
+                controls: Controls { mode: Some("auto".into()), ..Controls::default() },
+                account: vec![("CLAUDE_CONFIG_DIR".into(), config.display().to_string())],
+                ..SavedSession::default()
+            };
+            spawn(&d, Launch { restore: Some(saved), ..Launch::new("claude", vec![], Some(dir.display().to_string())) }).unwrap();
+            let s = session(&d, id);
+            let t = Instant::now();
+            while mode::now(&s, None).as_deref() != Some("auto") {
+                assert!(t.elapsed() < std::time::Duration::from_secs(10), "its footer: {}", s.pane.text(0));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            s
+        };
+
+        // Never accepted: the flag would put Claude's warning up as it starts. A switch to bypass
+        // takes a restart, as before.
+        let s = start(false, "9301");
+        assert!(s.reach.is_empty());
+        assert!(!mode::switchable(&s, "bypass"));
+        s.pane.kill();
+
+        let s = start(true, "9302");
+        assert_eq!(s.reach, ["--allow-dangerously-skip-permissions"]);
+        let pid = s.pane.pid();
+        let want = |m: &str| Controls { mode: Some(m.into()), ..s.controls.clone() };
+        set_controls(&d, "9302", want("bypass")).unwrap();
+        apply_pending(&d);
+        assert_eq!(mode::now(&s, None).as_deref(), Some("bypass"), "{}", s.pane.text(0));
+        assert!(s.pending.lock().unwrap().is_none());
+        set_controls(&d, "9302", want("ask")).unwrap();
+        apply_pending(&d);
+        assert_eq!(mode::now(&s, None).as_deref(), Some("ask"));
+        set_controls(&d, "9302", want("bypass")).unwrap();
+        apply_pending(&d);
+        assert_eq!(mode::now(&s, None).as_deref(), Some("bypass"));
+        assert_eq!(session(&d, "9302").pane.pid(), pid, "the same process throughout");
+        s.pane.kill();
+    }
+
     /// Claude's settings carry the proxy's secret (its hook URL): they leave the command line for
     /// a file only this user can read.
     #[test]
@@ -5315,7 +5397,8 @@ while (sysread(STDIN, my $c, 1)) {
         kill(&d, &id);
     }
 
-    /// A mode switched right after a message is typed waits: the agent may not have started on it yet.
+    /// A mode switched right after a message is typed waits: the agent may not have started on it
+    /// yet. Not after a focus change or resize: choosing the mode in the app moves the focus.
     #[test]
     fn a_restart_waits_for_the_users_typing_to_settle() {
         let home = test_home().to_path_buf();
@@ -5324,9 +5407,10 @@ while (sysread(STDIN, my $c, 1)) {
         let s = session(&d, &id);
         let ago = |secs| Instant::now().checked_sub(std::time::Duration::from_secs(secs));
         *s.last_output.lock().unwrap() = ago(10);
-        *s.poked.lock().unwrap() = ago(10);
-        assert!(restartable(&d, &s));
-        *s.poked.lock().unwrap() = Some(Instant::now());
+        *s.typed.lock().unwrap() = ago(10);
+        s.poke();
+        assert!(restartable(&d, &s), "focus moved, nothing typed");
+        *s.typed.lock().unwrap() = Some(Instant::now());
         assert!(!restartable(&d, &s));
         kill(&d, &id);
     }

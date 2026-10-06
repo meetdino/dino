@@ -63,7 +63,7 @@ fn codex_home() -> PathBuf {
     std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".codex"))
 }
 
-fn claude_home() -> PathBuf {
+pub(crate) fn claude_home() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".claude"))
 }
 
@@ -84,7 +84,7 @@ pub fn claude_sources() -> Vec<PathBuf> {
     v
 }
 
-const CLAUDE_MANAGED: &str = "/Library/Application Support/ClaudeCode/managed-settings.json";
+pub(crate) const CLAUDE_MANAGED: &str = "/Library/Application Support/ClaudeCode/managed-settings.json";
 
 // ---- Codex ----
 
