@@ -93,8 +93,17 @@ pub fn request(req: &Request) -> io::Result<Response> {
     Control::open()?.request(req)
 }
 
-fn start_attach(id: &str, cols: u16, rows: u16) -> io::Result<UnixStream> {
-    attach_on(connect()?, id, cols, rows, false)
+/// The dinod `dino attach` attaches to. In a surface dino made for the session (`--fresh`: an app
+/// pane, the quick terminal, a tmux window) only a running one, waited for as a reattach waits:
+/// what made the surface starts dinod, with its own environment (the app's `dino ping`, launchd).
+/// Ghostty runs a pane's command under login(1), which sets HOME to the user's own, so a dinod
+/// started from a pane for a second dino (a test's own HOME and DINO_HOME) would resume its
+/// sessions in the user's home.
+fn attach_connection(fresh: bool) -> io::Result<UnixStream> {
+    if !fresh {
+        return connect();
+    }
+    wait_for(&ipc::socket_path(), Duration::from_secs(5)).ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "dinod isn't running"))
 }
 
 /// How much scrollback the terminal this runs in keeps, in bytes, when it says
@@ -164,7 +173,7 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
         set
     };
     let (cols, rows) = crossterm::terminal::size()?;
-    let stream = start_attach(id, cols, rows)?;
+    let stream = attach_on(attach_connection(fresh)?, id, cols, rows, false)?;
     let mut reader = stream.try_clone()?;
     let writer = Arc::new(Mutex::new(stream));
     crossterm::terminal::enable_raw_mode()?;
@@ -212,7 +221,7 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
             if end.load(Ordering::Relaxed) {
                 if keys.contains(&b'\r') && end.swap(false, Ordering::Relaxed) {
                     // The reader below is already waiting for it to come back.
-                    if let Ok(Response::Error { message }) = request(&Request::Resume { id: sid.clone() }) {
+                    if let Ok(Response::Error { message }) = attach_connection(fresh).and_then(|s| Control(s).request(&Request::Resume { id: sid.clone() })) {
                         end.store(true, Ordering::Relaxed);
                         let _ = write!(io::stdout(), "\r\n\x1b[2m{message}\x1b[0m\r\n");
                         let _ = io::stdout().flush();
