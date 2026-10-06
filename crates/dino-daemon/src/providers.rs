@@ -69,20 +69,21 @@ pub fn start() {
         .expect("providers thread");
 }
 
-/// Every provider, local ones whether or not they run.
+/// Every provider, local ones whether or not they run: each as it was last asked, else as it is
+/// before anything is asked of it. A look stores them one at a time as it asks them: one that
+/// dinod's first look hasn't stored yet is listed all the same, so a session started meanwhile
+/// keeps it among its fallbacks and can start on it.
 pub fn list() -> Vec<ProviderInfo> {
-    let c = cache().lock().unwrap();
-    let plans: Vec<String> = plans::presets().iter().map(Preset::provider_id).collect();
-    let ids = ["openrouter", "chatgpt"].into_iter().chain(LOCAL.iter().map(|l| l.0)).chain(plans.iter().map(String::as_str));
-    let mut out: Vec<ProviderInfo> = ids.filter_map(|id| c.providers.get(id).map(|(_, p)| p.clone())).collect();
-    if out.is_empty() {
-        let keys = dino_core::load_keys();
-        out = [openrouter_bare(), chatgpt_bare()]
-            .into_iter()
-            .chain(LOCAL.iter().filter_map(|(id, _, _)| dino_proxy::local::runtime(id).map(|(name, base)| local_bare(id, name, base))))
-            .chain(plans::presets().iter().map(|p| plan_bare(p, &keys)))
-            .collect();
-    }
+    listed(&cache().lock().unwrap(), dino_core::load_keys)
+}
+
+/// `list` from `c`. `keys` (the key store) is read only for a coding plan not stored yet.
+fn listed(c: &Cache, keys: impl Fn() -> HashMap<String, String>) -> Vec<ProviderInfo> {
+    let kept = |id: &str| c.providers.get(id).map(|(_, p)| p.clone());
+    let read = std::cell::OnceCell::new();
+    let mut out = vec![kept("openrouter").unwrap_or_else(openrouter_bare), kept("chatgpt").unwrap_or_else(chatgpt_bare)];
+    out.extend(LOCAL.iter().filter_map(|(id, _, _)| kept(id).or_else(|| dino_proxy::local::runtime(id).map(|(name, base)| local_bare(id, name, base)))));
+    out.extend(plans::presets().iter().map(|p| kept(&p.provider_id()).unwrap_or_else(|| plan_bare(p, read.get_or_init(&keys)))));
     out
 }
 
@@ -687,6 +688,29 @@ mod tests {
         store(p, true);
         assert!(at() > first, "asked again, the same answer");
         cache().lock().unwrap().providers.remove("test-age");
+    }
+
+    /// While dinod's first look is under way, the providers it hasn't stored yet are listed as
+    /// they are before they're asked, not left out (a session started then lost its model servers
+    /// and coding plans as fallbacks, and couldn't start on one).
+    #[test]
+    fn providers_not_stored_yet_are_listed() {
+        let ids = |l: &[ProviderInfo]| l.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+        let zai = plans::preset("plan-zai").unwrap();
+        let keys = || HashMap::from([(zai.key_name(), "k".to_string())]);
+        let before = listed(&Cache::default(), keys);
+        assert!(["openrouter", "chatgpt", "ollama", "plan-zai"].iter().all(|id| ids(&before).iter().any(|i| i == id)), "{:?}", ids(&before));
+
+        // It has stored OpenRouter and ChatGPT so far.
+        let mut c = Cache::default();
+        let asked = ProviderInfo { formats: vec![Format::Anthropic, Format::Chat], ..openrouter_bare() };
+        c.providers.insert("openrouter".into(), (Instant::now(), asked.clone()));
+        c.providers.insert("chatgpt".into(), (Instant::now(), chatgpt_bare()));
+        let during = listed(&c, keys);
+        assert_eq!(ids(&during), ids(&before), "every one");
+        assert_eq!(during[0], asked, "as last asked");
+        assert_eq!(during[1..], before[1..], "the others as before they're asked");
+        assert!(during.iter().any(|p| p.id == "plan-zai" && p.connected), "a coding plan with a key is connected");
     }
 
     /// OpenRouter's key exchange, as a local stand-in: answers once and says what it was sent.
