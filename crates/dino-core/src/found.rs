@@ -455,6 +455,34 @@ mod tests {
         assert_eq!(f.args, ["-f", "/dev/null"], "its arguments, read of the kernel");
     }
 
+    /// A plain `python3` in a dino shell is no agent: Hermes runs under Python too, and is told by
+    /// its own script, not by the Python running it. A stand-in named `python3` (the path of
+    /// Homebrew's or uv's Python has "python" in it, Xcode's not), started by a shell that waits.
+    #[test]
+    fn a_plain_python_is_no_agent() {
+        let dir = std::env::temp_dir().join(format!("dino-python-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let python = dir.join("python3");
+        let _ = std::fs::remove_file(&python);
+        std::os::unix::fs::symlink("/bin/sleep", &python).unwrap();
+        let mut sh = Command::new("/bin/sh").arg("-c").arg(format!("{} 30; true", python.display())).spawn().unwrap();
+        let fg = sh.id();
+        let since = Instant::now();
+        while crate::procinfo::children_of(fg).is_empty() && since.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let found = inside(fg);
+        let kids = crate::procinfo::children_of(fg);
+        for &kid in &kids {
+            unsafe { libc::kill(kid as i32, libc::SIGKILL) };
+        }
+        let _ = sh.kill();
+        let _ = sh.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!kids.is_empty(), "it ran");
+        assert_eq!(found.map(|f| f.agent), None);
+    }
+
     #[test]
     fn recognizes_agent_processes() {
         let codex = crate::agent::agent("codex").unwrap();

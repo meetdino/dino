@@ -276,8 +276,10 @@ impl Agent for Hermes {
         super::runs_with(args, &["-z", "--oneshot", "-Q", "--quiet", "--query-file", "--format"], &["acp", "serve", "gateway", "mcp", "dashboard"])
     }
 
+    // Its own command only: any Python may run it, and a Python is no agent until its arguments
+    // say it runs the `hermes` script (`inside`).
     fn may_be(&self, comm: &str) -> bool {
-        comm.contains("python") || comm.rsplit('/').next() == Some("hermes")
+        comm.rsplit('/').next() == Some("hermes")
     }
 
     // Found only in dino's shells: it runs under whatever Python installed it.
@@ -286,7 +288,7 @@ impl Agent for Hermes {
     }
 
     fn inside(&self, pid: u32, comm: &str, args: &dyn Fn() -> Vec<String>) -> Option<FoundSession> {
-        if self.free || !self.may_be(comm) {
+        if self.free || !(self.may_be(comm) || comm.contains("python")) {
             return None;
         }
         let args = args();
@@ -510,6 +512,7 @@ mod tests {
         assert!(is_hermes(&["/Users/x/.local/bin/hermes".into(), "--yolo".into()]));
         assert!(!is_hermes(&["/usr/bin/python3".into(), "-m".into(), "http.server".into()]));
         let h = Hermes { free: false };
+        assert!(!h.may_be("/opt/homebrew/bin/python3"), "a Python is it only by its arguments");
         let args: Vec<String> = ["--resume", "20260930_x", "-m", "auto", "--yolo", "-c"].iter().map(|s| s.to_string()).collect();
         assert_eq!(h.portable_flags(&args), ["-m", "auto", "--yolo"]);
         assert_eq!(h.read_mode(&[("--yolo", None)]).as_deref(), Some("bypass"));
