@@ -11,7 +11,10 @@ import SwiftUI
 
 @MainActor
 public final class TerminalViewState: ObservableObject {
-    @Published public internal(set) var title: String = ""
+    /// What the program last titled the terminal (OSC 0/2). Not published: a working agent
+    /// animates a spinner in it (Claude Code about once a second), and as published state each
+    /// frame made SwiftUI look at the pane again. Read it when it's needed.
+    public internal(set) var title: String = ""
     @Published public internal(set) var surfaceSize: TerminalGridMetrics?
     @Published public internal(set) var isFocused: Bool = false
 

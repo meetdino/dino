@@ -96,18 +96,16 @@ final class TerminalSurfaceCoordinator {
     private var isApplicationActive = true
     private var pendingImmediateTick = true
 
-    /// Held only while frames are owed. The engine's wakeups arrive at PTY
-    /// speed, not display speed; rendering straight from them draws far more
-    /// often than the screen can show and starves input handling under heavy
-    /// output. The link paces draws to vsync instead, and is released after
-    /// a stretch of idle time so a quiet terminal costs no per-frame
-    /// wakeups at all. All instances share one platform link.
+    /// Held only while frames are owed: the draws asked for here (Ghostty's
+    /// `render`, a resize, focus, the pane coming into view) are paced to
+    /// vsync, and the link is released after a stretch of idle time so a
+    /// quiet terminal costs no per-frame wakeups at all. All instances share
+    /// one platform link. Output doesn't come through here: Ghostty's
+    /// renderer thread draws it, and the app's wakeups only tick the app
+    /// (see `rebuildIfReady`).
     ///
-    /// The stretch is time, not frames, and outlasts a working agent's
-    /// cadence: Claude Code changes its title about once a second, and each
-    /// change wakes the app. Every release stops the CVDisplayLink and the
-    /// next frame starts a new one, thread and all; released after a quarter
-    /// second, the link was rebuilt on every one of those title changes.
+    /// The stretch is time, not frames: every release stops the
+    /// CVDisplayLink and the next frame starts a new one, thread and all.
     ///
     /// The range floors at 60: letting the system drop to 30 while output
     /// streams read as flicker on a scrolling screen. ProMotion displays may
@@ -224,14 +222,18 @@ final class TerminalSurfaceCoordinator {
         // thread on its next push. Only a detached surface or a
         // backgrounded app suspends ticks — visibility gates rendering
         // alone (canRenderFrame).
+        //
+        // A wakeup only ticks the app, as Ghostty's own app does: it
+        // carries the app mailbox, not frames. The renderer thread draws
+        // output by itself and asks for a draw here when it wants one
+        // (`render`). Drawing on every wakeup made each title change (an
+        // agent's spinner, in any session) draw the pane in view on the
+        // main thread and keep the frame pacer running.
         controller.addWakeupObserver(
             ObjectIdentifier(self),
             shouldProcess: { [weak self] in
                 guard let self else { return false }
                 return isApplicationActive && isAttached()
-            },
-            onWakeup: { [weak self] in
-                self?.requestImmediateTick()
             }
         )
         TerminalDebugLog.log(.lifecycle, "surface rebuild succeeded")

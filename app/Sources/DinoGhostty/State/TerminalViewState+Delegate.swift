@@ -55,11 +55,9 @@ extension TerminalViewState:
         }
     }
 
+    /// Not published (see `title`), so set now: nothing observes it to be updated mid-pass.
     public func terminalDidChangeTitle(_ title: String) {
-        publishSoon {
-            guard $0.title != title else { return }
-            $0.title = title
-        }
+        self.title = title
     }
 
     /// The metrics come from `synchronizeMetrics()`, which runs off the view's
