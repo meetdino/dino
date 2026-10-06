@@ -39,7 +39,7 @@ fn scans_150_agents_within_budget() {
         listed += 1;
     }
     for i in 0..30 {
-        let id = format!("01a0e93b-2fcf-7a20-8efb-{i:012}");
+        let id = lab.uuid(i);
         lab.spawn(Fake { name: "codex", tty: true, open: Some(lab.codex_rollout(&id)), ..Fake::default() });
         listed += 1;
     }
@@ -48,7 +48,7 @@ fn scans_150_agents_within_budget() {
         lab.claude_session(p, &format!("p-{i}"), &work, "interactive", lab::now_ms());
     }
     for i in 0..20 {
-        let id = format!("01a0e93b-2fcf-7a20-8efc-{i:012}");
+        let id = lab.uuid(100 + i);
         lab.spawn(Fake { name: "codex", args: strings(&["app-server"]), open: Some(lab.codex_rollout(&id)), ..Fake::default() });
     }
     for i in 0..10 {
@@ -61,7 +61,7 @@ fn scans_150_agents_within_budget() {
     }
     // Agents with helpers under them.
     for i in 0..10 {
-        let id = format!("01a0e93b-2fcf-7a20-8efd-{i:012}");
+        let id = lab.uuid(200 + i);
         lab.spawn(Fake { name: "claude", tty: true, child: Some(Box::new(Fake { name: "codex", open: Some(lab.codex_rollout(&id)), ..Fake::default() })), ..Fake::default() });
     }
     let started = lab::all_processes_of(&lab);

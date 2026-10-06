@@ -11,13 +11,6 @@ use dino_core::found::{self, LINGER, MIN_AGE};
 use dino_core::procinfo;
 use lab::{Fake, Lab, strings};
 
-const U1: &str = "01a0e93b-2fcf-7a20-8efb-000000000001";
-const U2: &str = "01a0e93b-2fcf-7a20-8efb-000000000002";
-const U3: &str = "01a0e93b-2fcf-7a20-8efb-000000000003";
-const U4: &str = "01a0e93b-2fcf-7a20-8efb-000000000004";
-const U5: &str = "01a0e93b-2fcf-7a20-8efb-000000000005";
-const U6: &str = "01a0e93b-2fcf-7a20-8efb-000000000006";
-
 fn tty(name: &str) -> Fake<'_> {
     Fake { name, tty: true, ..Fake::default() }
 }
@@ -25,6 +18,8 @@ fn tty(name: &str) -> Fake<'_> {
 #[test]
 fn lists_exactly_the_agents_a_person_could_take_over() {
     let mut lab = Lab::new("matrix");
+    // Codex's conversations.
+    let [u1, u2, u3, u4, u5, u6] = [1, 2, 3, 4, 5, 6].map(|n| lab.uuid(n));
     let t0 = Instant::now();
     let work = lab.dir("any");
     // (pid, agent, conversation): what must be listed.
@@ -39,8 +34,8 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
     want.push((p, "claude", "c-tty".into()));
     let claude_tty = p;
     // Codex in a terminal, its conversation open.
-    let p = lab.spawn(Fake { open: Some(lab.codex_rollout(U1)), ..tty("codex") });
-    want.push((p, "codex", U1.into()));
+    let p = lab.spawn(Fake { open: Some(lab.codex_rollout(&u1)), ..tty("codex") });
+    want.push((p, "codex", u1.clone()));
     let codex_tty = p;
     // Claude Code in a tmux pane: the server has no terminal; the pane is one.
     let server = lab.spawn(Fake { name: "tmux", args: strings(&["new-session", "-d"]), child: Some(Box::new(tty("claude"))), ..Fake::default() });
@@ -66,9 +61,9 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
     let p = lab.spawn(tty("amp"));
     want.push((p, "amp", String::new()));
     // A launcher (Codex's Node wrapper, say) and the agent it runs: the agent, once.
-    let wrapper = lab.spawn(Fake { child: Some(Box::new(Fake { name: "codex", open: Some(lab.codex_rollout(U2)), ..Fake::default() })), ..tty("codex") });
+    let wrapper = lab.spawn(Fake { child: Some(Box::new(Fake { name: "codex", open: Some(lab.codex_rollout(&u2)), ..Fake::default() })), ..tty("codex") });
     let p = lab.children(wrapper, 1)[0];
-    want.push((p, "codex", U2.into()));
+    want.push((p, "codex", u2.clone()));
     never.push(wrapper);
     // Two processes on one conversation: one row, the older process.
     let p = lab.spawn(tty("claude"));
@@ -79,7 +74,7 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
     lab.claude_session(p, "c-dup", &work, "interactive", lab::now_ms());
     never.push(p);
     // An agent and an agent it started (a worker, a subagent): only the one in the terminal.
-    let parent = lab.spawn(Fake { child: Some(Box::new(Fake { name: "codex", open: Some(lab.codex_rollout(U3)), ..Fake::default() })), ..tty("claude") });
+    let parent = lab.spawn(Fake { child: Some(Box::new(Fake { name: "codex", open: Some(lab.codex_rollout(&u3)), ..Fake::default() })), ..tty("claude") });
     lab.claude_session(parent, "c-parent", &work, "interactive", lab::now_ms());
     want.push((parent, "claude", "c-parent".into()));
     never.push(lab.children(parent, 1)[0]);
@@ -111,7 +106,7 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
     let p = lab.spawn(Fake { args: strings(&["-p", "hello"]), ..tty("claude") });
     lab.claude_session(p, "c-print", &work, "interactive", lab::now_ms());
     never.push(p);
-    never.push(lab.spawn(Fake { args: strings(&["exec", "hello"]), open: Some(lab.codex_rollout(U4)), ..tty("codex") }));
+    never.push(lab.spawn(Fake { args: strings(&["exec", "hello"]), open: Some(lab.codex_rollout(&u4)), ..tty("codex") }));
     let (dk2, dop2, dw2, dp2) = (lab.dir("kimi2"), lab.dir("opencode2"), lab.dir("whale2"), lab.dir("pi2"));
     never.push(lab.spawn(Fake { args: strings(&["--print", "-p", "hi"]), cwd: Some(dk2.clone()), ..tty("kimi-code") }));
     let p = lab.spawn(Fake { args: strings(&["-p", "hi"]), ..tty("copilot") });
@@ -126,12 +121,12 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
     let p = lab.spawn(Fake { name: "claude", ..Fake::default() });
     lab.claude_session(p, "c-notty", &work, "interactive", lab::now_ms());
     never.push(p);
-    never.push(lab.spawn(Fake { name: "codex", args: strings(&["app-server"]), open: Some(lab.codex_rollout(U5)), ..Fake::default() }));
+    never.push(lab.spawn(Fake { name: "codex", args: strings(&["app-server"]), open: Some(lab.codex_rollout(&u5)), ..Fake::default() }));
     // A dinod's sessions: its own pane, and one in a shell in another pane.
     let dinod = lab.spawn(Fake {
         name: "dino",
         args: strings(&["daemon"]),
-        child: Some(Box::new(Fake { child: Some(Box::new(Fake { name: "codex", open: Some(lab.codex_rollout(U6)), ..Fake::default() })), ..tty("zsh") })),
+        child: Some(Box::new(Fake { child: Some(Box::new(Fake { name: "codex", open: Some(lab.codex_rollout(&u6)), ..Fake::default() })), ..tty("zsh") })),
         ..Fake::default()
     });
     let shell = lab.children(dinod, 1)[0];
@@ -201,7 +196,7 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
     }
     // Those not listed are still running conversations: never offered as finished ones.
     let live: HashSet<String> = found::live().iter().map(|f| f.session_id.clone()).collect();
-    for id in ["c-print", "c-notty", "c-dinod", U4, U5, U6, "cp-2"] {
+    for id in ["c-print", "c-notty", "c-dinod", &u4, &u5, &u6, "cp-2"] {
         assert!(live.contains(id), "{id} isn't live");
     }
     let _ = pi_node;
