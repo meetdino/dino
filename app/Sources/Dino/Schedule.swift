@@ -44,8 +44,8 @@ struct Frequency: Codable, Equatable {
 /// What starts an automation (see `Trigger` in crates/dino-core/src/schedule.rs). One struct for
 /// every kind, each reading the fields it needs, so all of them travel.
 struct AutomationTrigger: Codable, Equatable {
-    /// "schedule", "pr_opened", "review_requested", "ci_failed", "issue_labeled", "comment",
-    /// "new_commits", "behind", "files" or "after".
+    /// "schedule", "pr_opened", "pr_merged", "review_requested", "ci_failed", "issue_labeled",
+    /// "comment", "new_commits", "behind", "files" or "after".
     var on = "schedule"
     var repo = ""
     var branch = ""
@@ -62,17 +62,26 @@ struct AutomationTrigger: Codable, Equatable {
     static let kinds: [(id: String, label: String, icon: String)] = [
         ("schedule", "On a schedule", "clock"),
         ("pr_opened", "A pull request opens", "arrow.triangle.pull"),
+        ("pr_merged", "A pull request merges", "arrow.triangle.merge"),
         ("review_requested", "Your review is requested", "eye"),
-        ("ci_failed", "CI fails", "xmark.octagon"),
-        ("issue_labeled", "An issue is labeled", "tag"),
-        ("comment", "A comment mentions…", "text.bubble"),
+        ("ci_failed", "A check fails", "xmark.octagon"),
+        ("issue_labeled", "An issue gets a label", "tag"),
+        ("comment", "A comment says something", "text.bubble"),
         ("new_commits", "New commits land", "arrow.down.circle"),
         ("behind", "The branch falls behind", "arrow.uturn.down.circle"),
         ("files", "Files change", "doc.badge.clock"),
         ("after", "Another run finishes", "link"),
     ]
 
-    var github: Bool { ["pr_opened", "review_requested", "ci_failed", "issue_labeled", "comment"].contains(on) }
+    /// The kinds as the editor's menu groups them.
+    static let groups: [(title: String, kinds: [String])] = [
+        ("Time", ["schedule"]),
+        ("GitHub", ["pr_opened", "pr_merged", "review_requested", "ci_failed", "issue_labeled", "comment"]),
+        ("Git and files", ["new_commits", "behind", "files"]),
+        ("Chains", ["after"]),
+    ]
+
+    var github: Bool { ["pr_opened", "pr_merged", "review_requested", "ci_failed", "issue_labeled", "comment"].contains(on) }
     var git: Bool { ["new_commits", "behind"].contains(on) }
     var icon: String { Self.kinds.first { $0.id == on }?.icon ?? "bolt" }
 
@@ -80,13 +89,14 @@ struct AutomationTrigger: Codable, Equatable {
     var placeholders: [String] {
         switch on {
         case "pr_opened", "review_requested": ["pr.url", "pr.title", "pr.number", "pr.author", "pr.branch", "repo"]
+        case "pr_merged": ["pr.url", "pr.title", "pr.number", "pr.author", "pr.branch", "pr.base", "pr.sha", "repo"]
         case "ci_failed": ["ci.check", "ci.log", "ci.branch", "ci.sha", "pr.url", "pr.number", "repo"]
         case "issue_labeled": ["issue.url", "issue.title", "issue.number", "label", "repo"]
         case "comment": ["comment.body", "comment.author", "comment.url", "issue.url", "issue.title", "issue.number", "repo"]
         case "new_commits": ["commits.log", "commits.range", "branch"]
         case "behind": ["branch", "behind", "commits.log"]
         case "files": ["files", "path"]
-        case "after": ["after.summary", "after.outcome", "after.name", "after.session"]
+        case "after": ["after.summary", "after.outcome", "after.name", "after.session", "after.dir", "after.base"]
         default: []
         }
     }
@@ -351,10 +361,24 @@ struct ScheduledRow: View {
                     ProgressView().controlSize(.mini).help("Running now")
                 } else if task.waiting > 0 {
                     Text("\(task.waiting) waiting").font(.caption).foregroundStyle(SessionStatus.needsYou.color)
-                } else if let next = task.next_run {
-                    Text(whenText(next)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 } else if !task.enabled {
                     Text("Paused").font(.caption).foregroundStyle(.tertiary)
+                } else {
+                    // How the last run went, and when the next one is (or else when that one was).
+                    HStack(spacing: 4) {
+                        if let last = task.history.last {
+                            let state = model.runState(last)
+                            Circle().fill(state.color).frame(width: 6, height: 6)
+                                .help("Last run: \(state.label.lowercased()), \(whenText(last.at))")
+                                .accessibilityLabel("Last run \(state.label)")
+                        }
+                        if let next = task.next_run {
+                            Text(whenText(next)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).help("Next run")
+                        } else if let last = task.history.last {
+                            Text(ago(last.at)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary).help("Last run \(whenText(last.at))")
+                        }
+                    }
+                    .fixedSize()
                 }
             }
             if let problem = task.problem, task.enabled {
@@ -626,16 +650,65 @@ struct ScheduledMenu: View {
 
 // MARK: - Editor
 
-/// A label column and its field, lined up with the others.
-private struct Field<Content: View>: View {
-    let label: String
+/// A step of an automation, read top to bottom as a sentence: When, Do, Only if, Then. A dot on a
+/// rail, the step's name and what it's set to in words, and its controls under them.
+private struct FlowStep<Content: View>: View {
+    let title: String
+    let icon: String
+    let tint: Color
+    var summary: String?
+    var last = false
     @ViewBuilder var content: Content
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(label).frame(width: 72, alignment: .trailing).foregroundStyle(label.isEmpty ? .clear : .primary)
-            content.frame(maxWidth: .infinity, alignment: .leading)
+        HStack(alignment: .top, spacing: 12) {
+            VStack(spacing: 0) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(tint.gradient))
+                if !last {
+                    Rectangle().fill(.quaternary).frame(width: 2).frame(maxHeight: .infinity).padding(.vertical, 3)
+                }
+            }
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(title).font(.headline)
+                    if let summary {
+                        Text(summary).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(minHeight: 24)
+                content
+            }
+            .padding(.bottom, last ? 0 : 16)
         }
+    }
+}
+
+/// Words and controls on one line, read as a phrase: "on [my pull requests] in [owner/name]".
+private struct Words<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) { content }
+    }
+}
+
+private extension View {
+    /// A step's controls, set apart from the rail.
+    func stepCard() -> some View {
+        padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.07)))
+    }
+
+    func inlinePicker() -> some View {
+        labelsHidden().fixedSize()
     }
 }
 
@@ -643,10 +716,20 @@ struct ScheduleSheet: View {
     @EnvironmentObject var model: DinoModel
     @Environment(\.dismiss) private var dismiss
     @State var task: ScheduledTask
+    /// A new one shows the templates first.
+    @State private var picking: Bool
     @State private var saving = false
     @State private var error: String?
     @State private var showConditions = false
+    /// The GitHub repo the folder is a clone of, for what an empty repo means.
+    @State private var origin: String?
     @FocusState private var focused: Bool
+
+    init(task: ScheduledTask) {
+        _task = State(initialValue: task)
+        _picking = State(initialValue: task.id.isEmpty && task.name.isEmpty)
+        _showConditions = State(initialValue: !task.conditions.isDefault)
+    }
 
     private var isNew: Bool { task.id.isEmpty }
     private var launcher: LauncherInfo? { model.launchers.first { $0.short == task.launcher } }
@@ -677,85 +760,19 @@ struct ScheduleSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label(isNew ? "New automation" : "Edit automation", systemImage: "bolt").font(.title2.weight(.semibold))
-            Text(explanation)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Field(label: "Name") {
-                        TextField("", text: $task.name, prompt: Text("Morning triage"))
-                            .textFieldStyle(.roundedBorder)
-                            .focused($focused)
-                    }
-                    Field(label: "When") {
-                        Picker("", selection: $task.trigger.on) {
-                            ForEach(AutomationTrigger.kinds, id: \.id) { Label($0.label, systemImage: $0.icon).tag($0.id) }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                        .accessibilityLabel("When")
-                    }
-                    triggerFields
-                    Divider().padding(.vertical, 2)
-                    Field(label: "Do") {
-                        Picker("", selection: $task.action.kind) {
-                            ForEach(AutomationAction.kinds, id: \.id) { Text($0.label).tag($0.id) }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                        .accessibilityLabel("Do")
-                    }
-                    actionFields
-                    Field(label: "Folder") {
-                        HStack(spacing: 6) {
-                            Image(systemName: "folder").foregroundStyle(.secondary)
-                            Text(shortPath(task.cwd)).lineLimit(1).truncationMode(.middle)
-                            Button("Change…") { chooseFolder() }.buttonStyle(.link)
-                        }
-                    }
-                    if task.usesAgent {
-                        Field(label: "") {
-                            Toggle("Run each time in a new worktree", isOn: $task.worktree)
-                                .help("Each run gets its own branch and checkout, so runs don't interfere with your work or with each other.")
-                        }
-                    }
-                    if needsPrompt || task.usesAgent {
-                        promptEditor
-                    }
-                    conditions
+            if picking {
+                TemplateGallery(folder: task.cwd, repo: origin, pick: pick, changeFolder: chooseFolder)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 }
-                .padding(.trailing, 4)
-            }
-            .frame(maxHeight: 560)
-            .fixedSize(horizontal: false, vertical: true)
-            if !task.history.isEmpty {
-                RecentRuns(runs: task.history)
-            }
-            if let error {
-                Text(error).foregroundStyle(SessionStatus.exited.color).font(.callout)
-            }
-            HStack {
-                if !isNew {
-                    Toggle("Paused", isOn: Binding(get: { !task.enabled }, set: { task.enabled = !$0 }))
-                        .toggleStyle(.checkbox)
-                }
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button {
-                    save()
-                } label: {
-                    if saving { ProgressView().controlSize(.small).frame(width: 90) } else { Text(isNew ? "Create" : "Save").frame(width: 90) }
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                .buttonStyle(.borderedProminent)
-                .tint(Brand.green)
-                .disabled(!ready || saving)
+            } else {
+                editor
             }
         }
         .padding(22)
-        .frame(width: 600)
-        .onAppear { focused = isNew }
+        .frame(width: 640)
+        .task(id: task.cwd) { origin = await githubRepo(of: task.cwd) }
         .onChange(of: task.action.kind) { _, kind in
             // Something sensible to start from.
             if kind == "fanout", task.action.agents.isEmpty {
@@ -767,177 +784,336 @@ struct ScheduleSheet: View {
         }
     }
 
-    private var ready: Bool {
-        let named = !task.name.trimmingCharacters(in: .whitespaces).isEmpty
-        let prompted = !needsPrompt || !task.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let commanded = task.action.kind != "command" || !task.action.command.trimmingCharacters(in: .whitespaces).isEmpty
-        return named && prompted && commanded
+    private func pick(_ template: AutomationTemplate?) {
+        if let template {
+            task = model.templated(template, base: task)
+            showConditions = !task.conditions.isDefault
+        }
+        withAnimation(.easeOut(duration: 0.15)) { picking = false }
+        focused = template == nil
     }
 
-    private var explanation: String {
-        switch task.trigger.on {
-        case "schedule": "Runs on schedule while your Mac is awake. If your Mac was asleep at a scheduled time, the automation runs once when it wakes."
-        case let k where task.trigger.github: "dino checks GitHub about once a minute\(k == "review_requested" && task.trigger.repo.isEmpty ? " (every few minutes when watching all repos)" : ""), using your gh sign-in, and runs once for each new event."
-        case "new_commits", "behind": "dino fetches every \(task.trigger.interval == 0 ? 10 : Int(task.trigger.interval)) minutes and runs once each time the branch changes."
-        case "files": "Runs once changes in the folder settle. Changes made during a run don't start another run."
-        default: "Runs when the automation or session you choose finishes."
+    @ViewBuilder private var editor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if isNew {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) { picking = true }
+                    } label: {
+                        Label("Templates", systemImage: "chevron.left").labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Back to the templates")
+                    .accessibilityLabel("Back to the templates")
+                }
+                TextField("", text: $task.name, prompt: Text("Name this automation"))
+                    .textFieldStyle(.plain)
+                    .font(.title2.weight(.semibold))
+                    .focused($focused)
+                    .accessibilityLabel("Name")
+            }
+            // What it does, in one sentence, as it's set up right now.
+            Text(model.sentence(task, origin: origin))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .accessibilityLabel("Summary: \(model.sentence(task, origin: origin))")
+        }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                FlowStep(title: "When", icon: task.trigger.icon, tint: .indigo, summary: nil) {
+                    whenStep.stepCard()
+                }
+                FlowStep(title: "Do", icon: "bolt.fill", tint: Brand.green, summary: nil) {
+                    doStep.stepCard()
+                }
+                FlowStep(title: "Only if", icon: "line.3.horizontal.decrease", tint: .orange, summary: conditionsSummary ?? "every time") {
+                    onlyIfStep
+                }
+                FlowStep(title: "Then", icon: "checkmark", tint: .teal, summary: nil, last: true) {
+                    thenStep.stepCard()
+                }
+            }
+            .padding(.trailing, 6)
+            .padding(.top, 4)
+        }
+        .frame(maxHeight: 560)
+        .fixedSize(horizontal: false, vertical: true)
+        if !task.history.isEmpty {
+            RecentRuns(runs: task.history)
+        }
+        if let error {
+            Text(error).foregroundStyle(SessionStatus.exited.color).font(.callout)
+        }
+        HStack {
+            if !isNew {
+                Toggle("Paused", isOn: Binding(get: { !task.enabled }, set: { task.enabled = !$0 }))
+                    .toggleStyle(.checkbox)
+            }
+            Spacer()
+            Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+            Button {
+                save()
+            } label: {
+                if saving { ProgressView().controlSize(.small).frame(width: 90) } else { Text(isNew ? "Create" : "Save").frame(width: 90) }
+            }
+            .keyboardShortcut(.return, modifiers: .command)
+            .buttonStyle(.borderedProminent)
+            .tint(Brand.green)
+            .disabled(!ready || saving)
+            .help(missing ?? "")
         }
     }
 
-    // MARK: Trigger
+    /// What still has to be filled in before it can be saved.
+    private var missing: String? {
+        let blank = { (s: String) in s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if blank(task.name) { return "Name it" }
+        if task.trigger.on == "issue_labeled", blank(task.trigger.label) { return "Name the label" }
+        if task.trigger.on == "comment", blank(task.trigger.phrase) { return "Give the words a comment has to say" }
+        if task.trigger.on == "after", task.trigger.after.isEmpty { return "Choose what it comes after" }
+        if task.action.kind == "command", blank(task.action.command) { return "Give the command to run" }
+        if task.action.kind == "continue", task.action.session.isEmpty { return "Choose the session to continue" }
+        if needsPrompt, blank(task.prompt) { return "Say what the agent should do" }
+        return nil
+    }
+
+    private var ready: Bool { missing == nil }
+
+    private var explanation: String {
+        switch task.trigger.on {
+        case "schedule": task.frequency.every == "manual" ? "It runs only when you choose Run Now." : "Runs on schedule while your Mac is awake. If your Mac was asleep at a scheduled time, the automation runs once when it wakes."
+        case let k where task.trigger.github: "dino checks GitHub about once a minute\(k == "review_requested" && task.trigger.repo.isEmpty ? " (every few minutes when watching all repos)" : ""), using your gh sign-in, and runs once for each new event."
+        case "new_commits", "behind": "dino fetches every \(task.trigger.interval == 0 ? 10 : Int(task.trigger.interval)) minutes and runs once each time the branch changes."
+        case "files": "Runs once changes in the folder settle. Files git ignores don't count, and changes made during a run don't start another run."
+        default: "Runs each time the automation or session you choose finishes."
+        }
+    }
+
+    // MARK: When
+
+    @ViewBuilder private var whenStep: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("", selection: $task.trigger.on) {
+                ForEach(AutomationTrigger.groups, id: \.title) { g in
+                    Section(g.title) {
+                        ForEach(g.kinds, id: \.self) { id in
+                            if let k = AutomationTrigger.kinds.first(where: { $0.id == id }) {
+                                Label(k.label, systemImage: k.icon).tag(k.id)
+                            }
+                        }
+                    }
+                }
+            }
+            .inlinePicker()
+            .accessibilityLabel("When")
+            triggerFields
+            Text(explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var repoPrompt: String {
+        if task.trigger.on == "review_requested" { return "any repo" }
+        return origin.map { "\($0) (this folder's)" } ?? "owner/name"
+    }
+
+    @ViewBuilder private var repoField: some View {
+        Words {
+            Text("in")
+            TextField("", text: $task.trigger.repo, prompt: Text(repoPrompt))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .frame(maxWidth: 300)
+                .accessibilityLabel("Repo")
+        }
+    }
+
+    /// Which pull requests' checks count: mine, any, or one branch's.
+    private var ciScope: Binding<String> {
+        Binding(
+            get: { !task.trigger.branch.isEmpty ? "branch" : task.trigger.mine ? "mine" : "any" },
+            set: {
+                switch $0 {
+                case "branch": task.trigger.branch = task.trigger.branch.isEmpty ? "main" : task.trigger.branch
+                case "mine": task.trigger.branch = ""; task.trigger.mine = true
+                default: task.trigger.branch = ""; task.trigger.mine = false
+                }
+            }
+        )
+    }
 
     @ViewBuilder private var triggerFields: some View {
         switch task.trigger.on {
         case "schedule":
-            Field(label: "Repeats") {
-                HStack(spacing: 10) {
-                    Picker("", selection: $task.frequency.every) {
-                        ForEach(Frequency.kinds, id: \.id) { Text($0.label).tag($0.id) }
+            Words {
+                Picker("", selection: $task.frequency.every) {
+                    ForEach(Frequency.kinds, id: \.id) { Text($0.label).tag($0.id) }
+                }
+                .inlinePicker()
+                .accessibilityLabel("Repeats")
+                switch task.frequency.every {
+                case "manual":
+                    EmptyView()
+                case "hourly":
+                    Text("at minute")
+                    Picker("", selection: $task.frequency.minute) {
+                        ForEach(Array(stride(from: 0, to: 60, by: 5)), id: \.self) { Text(String(format: ":%02d", $0)).tag($0) }
                     }
-                    .labelsHidden()
-                    .fixedSize()
-                    switch task.frequency.every {
-                    case "manual":
-                        Text("Only when you choose Run Now").foregroundStyle(.secondary)
-                    case "hourly":
-                        Text("at minute")
-                        Picker("", selection: $task.frequency.minute) {
-                            ForEach(Array(stride(from: 0, to: 60, by: 5)), id: \.self) { Text(String(format: ":%02d", $0)).tag($0) }
+                    .inlinePicker()
+                default:
+                    if task.frequency.every == "weekly" {
+                        Text("on")
+                        Picker("", selection: $task.frequency.weekday) {
+                            ForEach(0..<7, id: \.self) { Text(Calendar.current.weekdaySymbols[$0]).tag($0) }
                         }
-                        .labelsHidden()
-                        .fixedSize()
-                    default:
-                        if task.frequency.every == "weekly" {
-                            Picker("", selection: $task.frequency.weekday) {
-                                ForEach(0..<7, id: \.self) { Text(Calendar.current.weekdaySymbols[$0]).tag($0) }
-                            }
-                            .labelsHidden()
-                            .fixedSize()
-                        }
-                        Text("at")
-                        DatePicker("", selection: time, displayedComponents: .hourAndMinute)
-                            .labelsHidden()
-                            .fixedSize()
+                        .inlinePicker()
                     }
+                    Text("at")
+                    DatePicker("", selection: time, displayedComponents: .hourAndMinute).inlinePicker()
                 }
             }
-        case let k where task.trigger.github:
-            Field(label: "Repo") {
-                TextField("", text: $task.trigger.repo, prompt: Text(k == "review_requested" ? "owner/name, or empty for any repo" : "owner/name, or empty for this folder's"))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-            }
-            if k == "ci_failed" {
-                Field(label: "Branch") {
-                    HStack {
-                        TextField("", text: $task.trigger.branch, prompt: Text("main, or empty for open PRs"))
-                            .textFieldStyle(.roundedBorder)
-                        if task.trigger.branch.isEmpty {
-                            Toggle("Only my PRs", isOn: $task.trigger.mine).fixedSize()
-                        }
-                    }
+        case "ci_failed":
+            Words {
+                Text("on")
+                Picker("", selection: ciScope) {
+                    Text("my pull requests").tag("mine")
+                    Text("any pull request").tag("any")
+                    Text("a branch").tag("branch")
                 }
-            }
-            if k == "issue_labeled" {
-                Field(label: "Label") {
-                    TextField("", text: $task.trigger.label, prompt: Text("bug")).textFieldStyle(.roundedBorder)
-                }
-            }
-            if k == "comment" {
-                Field(label: "Says") {
-                    TextField("", text: $task.trigger.phrase, prompt: Text("@dino")).textFieldStyle(.roundedBorder)
-                }
-            }
-        case "new_commits", "behind":
-            Field(label: "Branch") {
-                HStack {
-                    TextField("", text: $task.trigger.branch, prompt: Text(task.trigger.on == "behind" ? "empty for the checked-out branch" : "empty for the default branch"))
+                .inlinePicker()
+                .accessibilityLabel("Which checks")
+                if !task.trigger.branch.isEmpty {
+                    TextField("", text: $task.trigger.branch, prompt: Text("main"))
                         .textFieldStyle(.roundedBorder)
-                    Text("every").foregroundStyle(.secondary)
-                    Picker("", selection: interval) {
-                        ForEach([0, 5, 15, 30, 60], id: \.self) { Text($0 == 0 ? "10 min" : "\($0) min").tag($0) }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
+                        .frame(maxWidth: 160)
+                        .accessibilityLabel("Branch")
                 }
+            }
+            repoField
+        case "issue_labeled":
+            Words {
+                Text("with the label")
+                TextField("", text: $task.trigger.label, prompt: Text("bug"))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 160)
+                    .accessibilityLabel("Label")
+            }
+            repoField
+        case "comment":
+            Words {
+                Text("that says")
+                TextField("", text: $task.trigger.phrase, prompt: Text("@dino"))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 160)
+                    .accessibilityLabel("Says")
+                Text("(any case), on an issue or PR").foregroundStyle(.secondary)
+            }
+            repoField
+        case _ where task.trigger.github:
+            repoField
+        case "new_commits", "behind":
+            Words {
+                Text(task.trigger.on == "behind" ? "for" : "on")
+                TextField("", text: $task.trigger.branch, prompt: Text(task.trigger.on == "behind" ? "the checked-out branch" : "the default branch"))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 200)
+                    .accessibilityLabel("Branch")
+                Text("checked every").foregroundStyle(.secondary)
+                Picker("", selection: interval) {
+                    ForEach([0, 5, 15, 30, 60], id: \.self) { Text($0 == 0 ? "10 min" : "\($0) min").tag($0) }
+                }
+                .inlinePicker()
+                .accessibilityLabel("Every")
             }
         case "files":
-            Field(label: "Files") {
-                TextField("", text: $task.trigger.glob, prompt: Text("*.swift, docs/**  (empty: any file)"))
+            Words {
+                Text("matching")
+                TextField("", text: $task.trigger.glob, prompt: Text(verbatim: "any file, or *.swift, docs/**"))
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
+                    .accessibilityLabel("Files")
             }
-            Field(label: "In") {
-                TextField("", text: $task.trigger.path, prompt: Text("a folder inside, or empty for the whole folder"))
+            Words {
+                Text("in")
+                TextField("", text: $task.trigger.path, prompt: Text("the whole folder, or a folder inside it"))
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("In")
             }
         default:
-            Field(label: "After") {
-                HStack {
-                    Picker("", selection: $task.trigger.after) {
-                        Text("Choose…").tag("")
-                        let others = model.scheduled.filter { $0.id != task.id }
-                        if !others.isEmpty {
-                            Section("Automations") {
-                                ForEach(others) { Text($0.name).tag($0.id) }
-                            }
-                        }
-                        let sessions = model.sessions.filter { !$0.exited && $0.agent_id != "shell" }
-                        if !sessions.isEmpty {
-                            Section("Sessions") {
-                                ForEach(sessions) { Text(model.tabName($0)).tag($0.id) }
-                            }
+            Words {
+                Picker("", selection: $task.trigger.after) {
+                    Text("Choose…").tag("")
+                    let others = model.scheduled.filter { $0.id != task.id }
+                    if !others.isEmpty {
+                        Section("Automations") {
+                            ForEach(others) { Text($0.name).tag($0.id) }
                         }
                     }
-                    .labelsHidden()
-                    .fixedSize()
-                    Picker("", selection: $task.trigger.when) {
-                        Text("finishes").tag("")
-                        Text("succeeds").tag("success")
-                        Text("fails").tag("failure")
+                    let sessions = model.sessions.filter { !$0.exited && $0.agent_id != "shell" }
+                    if !sessions.isEmpty {
+                        Section("Sessions") {
+                            ForEach(sessions) { Text(model.tabName($0)).tag($0.id) }
+                        }
                     }
-                    .labelsHidden()
-                    .fixedSize()
                 }
+                .inlinePicker()
+                .accessibilityLabel("After")
+                Picker("", selection: $task.trigger.when) {
+                    Text("finishes").tag("")
+                    Text("succeeds").tag("success")
+                    Text("fails").tag("failure")
+                }
+                .inlinePicker()
+                .accessibilityLabel("Outcome")
             }
         }
     }
 
-    // MARK: Action
+    // MARK: Do
 
     /// Agents' sessions a prompt can be sent into.
     private var continuable: [SessionInfo] { model.sessions.filter { $0.agent_id != "shell" && $0.host == nil } }
 
     @ViewBuilder private var agentPicker: some View {
-        HStack {
-            Picker("", selection: $task.launcher) {
-                ForEach(model.launchers) { l in Text(l.label).tag(l.short) }
-            }
-            .labelsHidden()
-            .fixedSize()
-            .accessibilityLabel("Agent")
-            if !isShell {
-                TextField("", text: $task.args, prompt: Text("Options: --model haiku"))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-            }
+        Picker("", selection: $task.launcher) {
+            ForEach(model.launchers) { l in Text(l.label).tag(l.short) }
+        }
+        .inlinePicker()
+        .accessibilityLabel("Agent")
+        if !isShell {
+            TextField("", text: $task.args, prompt: Text("options: --model haiku"))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.callout, design: .monospaced))
+                .accessibilityLabel("Agent options")
         }
     }
 
-    @ViewBuilder private var actionFields: some View {
-        switch task.action.kind {
-        case "continue":
-            Field(label: "Session") {
-                Picker("", selection: $task.action.session) {
-                    if task.action.session.isEmpty { Text("Choose…").tag("") }
-                    ForEach(continuable) { Text(model.tabName($0)).tag($0.id) }
+    @ViewBuilder private var doStep: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("", selection: $task.action.kind) {
+                ForEach(AutomationAction.kinds, id: \.id) {
+                    Text($0.label).tag($0.id)
                 }
-                .labelsHidden()
-                .fixedSize()
             }
-        case "fanout":
-            Field(label: "Agents") {
-                HStack(spacing: 10) {
+            .inlinePicker()
+            .accessibilityLabel("Do")
+            switch task.action.kind {
+            case "continue":
+                Words {
+                    Text("send the prompt into")
+                    Picker("", selection: $task.action.session) {
+                        if task.action.session.isEmpty { Text("Choose…").tag("") }
+                        ForEach(continuable) { Text(model.tabName($0)).tag($0.id) }
+                    }
+                    .inlinePicker()
+                    .accessibilityLabel("Session")
+                }
+            case "fanout":
+                Words {
+                    Text("each in its own worktree:")
                     ForEach(model.launchers.filter { $0.agent_id != "shell" }) { l in
                         Toggle(l.label, isOn: Binding(
                             get: { task.action.agents.contains(l.short) },
@@ -949,27 +1125,49 @@ struct ScheduleSheet: View {
                         .fixedSize()
                     }
                 }
-            }
-        case "command":
-            Field(label: "Command") {
-                TextField("", text: $task.action.command, prompt: Text("make test"))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-            }
-            Field(label: "Then") {
-                Picker("", selection: $task.action.then_agent) {
-                    Text("Nothing more").tag("never")
-                    Text("Start an agent if it fails").tag("failure")
-                    Text("Always start an agent").tag("always")
+            case "command":
+                Words {
+                    Text("run")
+                    TextField("", text: $task.action.command, prompt: Text("make test"))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                        .accessibilityLabel("Command")
                 }
-                .labelsHidden()
-                .fixedSize()
+                Words {
+                    Text("then")
+                    Picker("", selection: $task.action.then_agent) {
+                        Text("stop").tag("never")
+                        Text("start an agent if it fails").tag("failure")
+                        Text("always start an agent").tag("always")
+                    }
+                    .inlinePicker()
+                    .accessibilityLabel("Then")
+                    if task.action.then_agent != "never" {
+                        agentPicker
+                    }
+                }
+            default:
+                Words {
+                    Text("with")
+                    agentPicker
+                }
             }
-            if task.action.then_agent != "never" {
-                Field(label: "Agent") { agentPicker }
+            if needsPrompt || task.usesAgent {
+                promptEditor
             }
-        default:
-            Field(label: "Agent") { agentPicker }
+            Words {
+                Image(systemName: "folder").foregroundStyle(.secondary)
+                Text(shortPath(task.cwd)).lineLimit(1).truncationMode(.middle)
+                Button("Change…") { chooseFolder() }.buttonStyle(.link)
+                Spacer(minLength: 8)
+                if task.usesAgent {
+                    Toggle("Each run in its own worktree", isOn: $task.worktree)
+                        .toggleStyle(.checkbox)
+                        .fixedSize()
+                        .help("Each run gets its own branch and checkout, so runs don't interfere with your work or with each other.")
+                }
+            }
+            .font(.callout)
         }
     }
 
@@ -988,7 +1186,7 @@ struct ScheduleSheet: View {
                 .font(.body)
                 .scrollContentBackground(.hidden)
                 .padding(8)
-                .frame(height: 110)
+                .frame(height: 120)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
                 .overlay(alignment: .topLeading) {
@@ -1030,23 +1228,21 @@ struct ScheduleSheet: View {
         task.prompt += "{\(p)}"
     }
 
-    // MARK: Conditions and afterwards
+    // MARK: Only if
 
-    @ViewBuilder private var conditions: some View {
+    @ViewBuilder private var onlyIfStep: some View {
         Button {
             withAnimation(.easeOut(duration: 0.15)) { showConditions.toggle() }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: showConditions ? "chevron.down" : "chevron.right").font(.caption.weight(.semibold))
-                Text("Conditions and results").font(.callout.weight(.medium))
-                if !showConditions, let summary = conditionsSummary {
-                    Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
+                Text(showConditions ? "Hide conditions" : "Power, lid, changes, usage limits, retries…").font(.callout)
             }
+            .foregroundStyle(.secondary)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(showConditions ? "Hide conditions and results" : "Show conditions and results")
+        .accessibilityLabel(showConditions ? "Hide conditions" : "Show conditions")
         if showConditions {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("Only if the repo changed since the last run", isOn: $task.conditions.if_changed)
@@ -1055,19 +1251,18 @@ struct ScheduleSheet: View {
                 Toggle("Start a run while the one before is still going", isOn: $task.conditions.parallel)
                     .help("When off, a scheduled run is skipped and an event waits for the previous run to finish.")
                 if task.usesAgent {
-                    HStack {
+                    Words {
                         Text("When the agent is at its usage limit")
                         Picker("", selection: $task.conditions.on_limit) {
                             Text("skip the run").tag("skip")
                             Text("use its fallback agent").tag("fallback")
                             Text("start it anyway").tag("run")
                         }
-                        .labelsHidden()
-                        .fixedSize()
+                        .inlinePicker()
                         .help("The fallback agent is the one new sessions start with during a limit, set in Settings → Agents.")
                     }
                 }
-                HStack {
+                Words {
                     Toggle("Retry a failed run", isOn: Binding(get: { task.conditions.retries > 0 }, set: { task.conditions.retries = $0 ? max(task.conditions.retries, 2) : 0 }))
                     if task.conditions.retries > 0 {
                         Stepper("\(task.conditions.retries) times", value: Binding(get: { Int(task.conditions.retries) }, set: { task.conditions.retries = UInt32(max(1, min(10, $0))) }), in: 1...10)
@@ -1075,7 +1270,7 @@ struct ScheduleSheet: View {
                         Text("first after \(Int(task.conditions.backoff)) s, then twice as long").font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                HStack {
+                Words {
                     Toggle("Pause after", isOn: Binding(get: { task.conditions.max_runs > 0 }, set: { task.conditions.max_runs = $0 ? max(task.conditions.max_runs, 1) : 0 }))
                     if task.conditions.max_runs > 0 {
                         Stepper("\(task.conditions.max_runs) \(task.conditions.max_runs == 1 ? "run" : "runs")", value: Binding(get: { Int(task.conditions.max_runs) }, set: { task.conditions.max_runs = UInt32(max(1, $0)) }), in: 1...1000)
@@ -1084,27 +1279,49 @@ struct ScheduleSheet: View {
                         Text("a number of runs").foregroundStyle(.secondary)
                     }
                 }
-                Divider()
-                Toggle("Post the summary as a comment on the PR", isOn: $task.output.pr_comment)
-                    .help("Posts on the PR that started the run, or else on the PR for the run's branch.")
-                Toggle("Notify me when a run finishes", isOn: $task.output.notify)
             }
-            .padding(.leading, 20)
+            .stepCard()
         }
     }
 
     private var conditionsSummary: String? {
         var parts: [String] = []
         let c = task.conditions
-        if c.if_changed { parts.append("if changed") }
-        if c.ac_power { parts.append("on power") }
+        if c.if_changed { parts.append("if the repo changed") }
+        if c.ac_power { parts.append("plugged in") }
         if c.lid_open { parts.append("lid open") }
         if c.parallel { parts.append("overlapping") }
+        if c.on_limit != "skip", task.usesAgent { parts.append(c.on_limit == "run" ? "even at the limit" : "fallback at the limit") }
         if c.retries > 0 { parts.append("\(c.retries) retries") }
         if c.max_runs > 0 { parts.append("\(c.max_runs) runs") }
-        if task.output.pr_comment { parts.append("PR comment") }
-        if !task.output.notify { parts.append("no notification") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    // MARK: Then
+
+    /// Where the summary goes as a comment: the thread that started the run, or the run's own PR.
+    private var commentTarget: String {
+        switch task.trigger.on {
+        case "comment": "Reply in the thread with the summary"
+        case "issue_labeled": "Post the summary as a comment on the issue"
+        case "pr_opened", "pr_merged", "review_requested", "ci_failed": "Post the summary as a comment on the PR"
+        default: "Post the summary as a comment on the PR it opens"
+        }
+    }
+
+    @ViewBuilder private var thenStep: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label {
+                Text("Keep the agent's summary and what it changed, under the automation in the sidebar")
+            } icon: {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Brand.green)
+            }
+            .foregroundStyle(.secondary)
+            .help("Always: each run shows its summary and its diff stats; open it to review the changes.")
+            Toggle(commentTarget, isOn: $task.output.pr_comment)
+                .help("Posts on the issue or PR that started the run, or else on the PR for the run's branch. Comments dino posts never start a comment automation again.")
+            Toggle("Notify me when a run finishes", isOn: $task.output.notify)
+        }
     }
 
     private func chooseFolder() {

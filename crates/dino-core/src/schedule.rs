@@ -106,6 +106,8 @@ pub enum TriggerKind {
     Schedule,
     /// A pull request opened in a repo.
     PrOpened,
+    /// A pull request merged in a repo.
+    PrMerged,
     /// Your review requested on a pull request.
     ReviewRequested,
     /// A check or status failed on a branch.
@@ -126,7 +128,7 @@ pub enum TriggerKind {
 
 impl TriggerKind {
     pub fn github(self) -> bool {
-        matches!(self, Self::PrOpened | Self::ReviewRequested | Self::CiFailed | Self::IssueLabeled | Self::Comment)
+        matches!(self, Self::PrOpened | Self::PrMerged | Self::ReviewRequested | Self::CiFailed | Self::IssueLabeled | Self::Comment)
     }
 
     pub fn git(self) -> bool {
@@ -138,13 +140,14 @@ impl TriggerKind {
         match self {
             Self::Schedule => &[],
             Self::PrOpened | Self::ReviewRequested => &["pr.number", "pr.title", "pr.url", "pr.author", "pr.branch", "repo"],
+            Self::PrMerged => &["pr.number", "pr.title", "pr.url", "pr.author", "pr.branch", "pr.base", "pr.sha", "repo"],
             Self::CiFailed => &["ci.check", "ci.log", "ci.branch", "ci.sha", "pr.number", "pr.url", "repo"],
             Self::IssueLabeled => &["issue.number", "issue.title", "issue.url", "label", "repo"],
             Self::Comment => &["comment.body", "comment.url", "comment.author", "issue.number", "issue.title", "issue.url", "repo"],
             Self::NewCommits => &["commits.range", "commits.log", "branch"],
             Self::Behind => &["branch", "behind", "commits.log"],
             Self::Files => &["files", "path"],
-            Self::After => &["after.name", "after.outcome", "after.summary", "after.session"],
+            Self::After => &["after.name", "after.outcome", "after.summary", "after.session", "after.dir", "after.base"],
         }
     }
 }
@@ -325,6 +328,7 @@ impl ScheduledTask {
         match t.on {
             TriggerKind::Schedule => self.frequency.text(),
             TriggerKind::PrOpened => format!("PR opened in {repo}"),
+            TriggerKind::PrMerged => format!("PR merged in {repo}"),
             TriggerKind::ReviewRequested if t.repo.is_empty() => "Your review requested, any repo".into(),
             TriggerKind::ReviewRequested => format!("Your review requested in {repo}"),
             TriggerKind::CiFailed => match (t.branch.trim(), t.mine) {

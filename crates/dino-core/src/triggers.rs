@@ -57,6 +57,27 @@ pub fn prs_opened(pulls: &Value, repo: &str, since: u64) -> Vec<Event> {
     out
 }
 
+/// `GET /repos/{repo}/pulls?state=closed`: pull requests merged since `since` (closed unmerged
+/// ones aren't).
+pub fn prs_merged(pulls: &Value, repo: &str, since: u64) -> Vec<Event> {
+    let mut out: Vec<(u64, Event)> = pulls
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p["merged_at"].as_str().and_then(parse_time).filter(|t| *t >= since)?, p)))
+        .map(|(at, p)| {
+            let n = s(&p["number"]);
+            let mut fields = pr_fields(p, repo);
+            fields.push(("pr.base", s(&p["base"]["ref"])));
+            fields.push(("pr.sha", s(&p["merge_commit_sha"])));
+            (at, event(TriggerKind::PrMerged, format!("merged:{repo}#{n}"), format!("PR #{n} merged: {}", s(&p["title"])), &s(&p["html_url"]), fields))
+        })
+        .collect();
+    // Asked for by last update: run them in the order they merged.
+    out.sort_by_key(|(at, _)| *at);
+    out.into_iter().map(|(_, e)| e).collect()
+}
+
 /// `GET /repos/{repo}/pulls`: the open ones waiting on `me`'s review. Every PR still waiting is
 /// in it, however long ago it was asked: dinod remembers which it ran for, and forgets one once
 /// it no longer waits, so asking again runs again.
@@ -209,6 +230,21 @@ mod tests {
         assert_eq!(e[0].fields["pr.url"], "https://github.com/o/r/pull/7");
         assert_eq!(e[0].fields["pr.branch"], "fix");
         assert_eq!(e[0].title, "PR #7 opened: New");
+    }
+
+    #[test]
+    fn merged_prs_only() {
+        let pulls = json!([
+            {"number": 9, "title": "Later", "html_url": "u9", "merged_at": "2026-10-04T12:00:00Z", "merge_commit_sha": "m9", "user": {"login": "amy"}, "head": {"ref": "b9"}, "base": {"ref": "main"}},
+            {"number": 8, "title": "Closed", "html_url": "u8", "merged_at": null, "user": {"login": "amy"}, "head": {"ref": "b8"}},
+            {"number": 7, "title": "First", "html_url": "u7", "merged_at": "2026-10-04T10:00:00Z", "user": {"login": "bo"}, "head": {"ref": "b7"}, "base": {"ref": "main"}},
+            {"number": 2, "title": "Old", "html_url": "u2", "merged_at": "2026-01-01T00:00:00Z", "user": {"login": "bo"}, "head": {"ref": "b2"}}
+        ]);
+        let e = prs_merged(&pulls, "o/r", SINCE);
+        assert_eq!(e.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["merged:o/r#7", "merged:o/r#9"]);
+        assert_eq!(e[1].title, "PR #9 merged: Later");
+        assert_eq!(e[1].fields["pr.base"], "main");
+        assert_eq!(e[1].fields["pr.sha"], "m9");
     }
 
     #[test]
