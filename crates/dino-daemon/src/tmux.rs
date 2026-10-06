@@ -253,7 +253,7 @@ pub fn place(found: &mut [dino_core::found::FoundSession]) {
         });
         found[i].terminal = Some(format!("tmux {}", named(&p.label, &found[i].agent)));
         // An agent's own status says busy, not that it's asking: its dialog on screen does.
-        if ["claude", "codex"].contains(&found[i].agent.as_str()) && capture(&bin, &socket, &p.id).is_some_and(|t| dino_core::found::asking(&found[i].agent, &t)) {
+        if capture(&bin, &socket, &p.id).is_some_and(|t| dino_core::found::asking(&found[i].agent, &t)) {
             found[i].status = Some("needs".into());
         }
     }

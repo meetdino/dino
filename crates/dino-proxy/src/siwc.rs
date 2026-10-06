@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 pub(crate) const PROVIDER: &str = "siwc";
-/// Where the plan is spent: OpenAI's API, or what `DINO_SIWC_UPSTREAM` names (a stand-in to try
-/// the route against).
+/// Where the plan is spent: OpenAI's API, or in a debug build what `DINO_SIWC_UPSTREAM` names (a
+/// stand-in to try the route against).
 pub(crate) fn upstream() -> &'static str {
     static AT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    AT.get_or_init(|| std::env::var("DINO_SIWC_UPSTREAM").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| "https://api.openai.com".into()))
+    AT.get_or_init(|| std::env::var("DINO_SIWC_UPSTREAM").ok().filter(|u| cfg!(debug_assertions) && !u.is_empty()).unwrap_or_else(|| "https://api.openai.com".into()))
 }
 const ACCESS_KEY: &str = "CHATGPT_ACCESS_TOKEN";
 const PLAN_KEY: &str = "CHATGPT_PLAN_USAGE";

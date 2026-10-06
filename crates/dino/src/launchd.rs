@@ -124,15 +124,8 @@ fn legacy(app: &Path, bundle: &str) -> bool {
     kickstart(&label)
 }
 
-/// Start job `label` (already running: nothing to do). launchd's dinod gets this process's `PATH`,
-/// as one it started itself would (the app passes the login shell's): launchd's own is
-/// /usr/bin:/bin:/usr/sbin:/sbin.
+/// Start job `label` (already running: nothing to do). dinod takes the login shell's `PATH`.
 fn kickstart(label: &str) -> bool {
-    if let Some(path) = std::env::var_os("PATH") {
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(dino_core::launchd_path_file());
-        let _ = file.and_then(|mut f| std::io::Write::write_all(&mut f, path.as_encoded_bytes()));
-    }
     launchctl(&["kickstart", &format!("{}/{label}", domain())])
 }
 

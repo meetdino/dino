@@ -198,6 +198,14 @@ impl Agent for Codex {
     }
 
     // `-c` puts the proxy's URLs on its command line.
+    /// Its approvals ("Would you like to run the following command?", "…make the following
+    /// edits?", …) all offer this way out; its folder trust has its own.
+    fn asking(&self, screen: &str) -> Option<String> {
+        let approval = screen.contains("Would you like to ") && screen.contains("No, and tell Codex what to do differently");
+        let trust = screen.contains("Trust this folder?") && screen.contains("Trust and continue");
+        (approval || trust).then(|| "Codex asks".into())
+    }
+
     fn keyed_urls(&self) -> bool {
         true
     }
@@ -448,14 +456,5 @@ impl Agent for Codex {
 
     fn account_vars(&self) -> &'static [&'static str] {
         &["CODEX_HOME", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"]
-    }
-
-    fn login(&self) -> Option<String> {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        Some(match crate::discover::read_json(home.join(".codex/auth.json")) {
-            Some(v) if v["auth_mode"] == "chatgpt" && v["tokens"].is_object() => "ChatGPT login".into(),
-            Some(v) if v["OPENAI_API_KEY"].is_string() => "API key".into(),
-            _ => "signed out".into(),
-        })
     }
 }

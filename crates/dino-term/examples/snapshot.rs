@@ -49,14 +49,7 @@ fn main() -> anyhow::Result<()> {
 
     // DINO_SNAP_REPLAY: render a fresh emulator fed only with the replay, to check attach fidelity.
     let pane = if std::env::var_os("DINO_SNAP_REPLAY").is_some() {
-        struct Null;
-        impl dino_term::Transport for Null {
-            fn write(&self, _: Vec<u8>) {}
-            fn resize(&self, _: u16, _: u16) {}
-        }
-        let copy = Pane::remote(std::sync::Arc::new(Null), w, h);
-        copy.feed(&pane.replay(1000));
-        copy
+        Pane::ended(&pane.replay(1000), w, h, None)
     } else {
         pane
     };

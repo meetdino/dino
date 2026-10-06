@@ -247,11 +247,6 @@ pub fn launchd_record() -> PathBuf {
     config_dir().join("dinod.launchd")
 }
 
-/// The `PATH` of whoever last asked launchd to start dinod, for that dinod.
-pub fn launchd_path_file() -> PathBuf {
-    config_dir().join("dinod.path")
-}
-
 /// `~/.config/dino`, or `$DINO_HOME` (a second, isolated dino: tests, development).
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("DINO_HOME") {
