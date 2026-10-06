@@ -15,14 +15,18 @@ dino_build_id() {
 }
 
 # dinod as the app's launch agent, registered with SMAppService (app/Sources/Dino/LaunchAgent.swift):
-# what it runs then has the permissions given to the app. Restarted by launchd if it crashes, not
+# what it runs then has the permissions given to the app. It runs the app's own executable, which
+# runs `Contents/Helpers/dino daemon` and waits for it (`DinodHost`): run as the helper itself,
+# dinod's terminals asked for Accessibility as a "dino" executable of their own. Named apart from
+# that agent (`<bundle>.dinod`): launchd keeps the launch constraint an agent got when it was first
+# registered (signed as `dino`), and the app's executable wouldn't meet it. Restarted by launchd if it crashes, not
 # otherwise (`dino stop` stays stopped), and not started at login: dino starts it when used, as before.
 # Started again 2 s after it last started at the soonest, not launchd's 10: `dino stop` then a start.
 #   dino_agent APP BUNDLE_ID [AGENT_HOME]
 # AGENT_HOME: the $DINO_HOME of a second, isolated dino, which the app then runs with too, however
 # it's opened (Finder, or relaunched by an update).
 dino_agent() {
-    local app="$1" bundle_id="$2" agent_home="${3:-}" label="$2.dinod" env=""
+    local app="$1" bundle_id="$2" agent_home="${3:-}" label="$2.dinod-host" env=""
     if [ -n "$agent_home" ]; then
         label="$label.$(printf %s "$agent_home" | shasum -a 256 | cut -c1-8)"
         env="<key>DINO_HOME</key><string>$agent_home</string>"
@@ -35,8 +39,8 @@ dino_agent() {
 <plist version="1.0">
 <dict>
     <key>Label</key><string>$label</string>
-    <key>BundleProgram</key><string>Contents/Helpers/dino</string>
-    <key>ProgramArguments</key><array><string>dino</string><string>daemon</string></array>
+    <key>BundleProgram</key><string>Contents/MacOS/Dino</string>
+    <key>ProgramArguments</key><array><string>Dino</string><string>--dinod</string></array>
     <key>AssociatedBundleIdentifiers</key><array><string>$bundle_id</string></array>
     <key>EnvironmentVariables</key>
     <dict>

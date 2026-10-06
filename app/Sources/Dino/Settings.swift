@@ -664,7 +664,8 @@ private struct TerminalChoicesSync: ViewModifier {
     }
 }
 
-/// Settings → General: how dino starts and quits, updates, and where its files are.
+/// Settings → General: how dino starts and quits, updates, the permissions its terminals get, and
+/// where its files are.
 private struct GeneralPane: View {
     @AppStorage(QuitChoice.key) private var quitChoice = ""
     @AppStorage(StartWith.key) private var startWith = StartWith.last.rawValue
@@ -686,6 +687,7 @@ private struct GeneralPane: View {
             }
             UpdatesSection()
             DinodAgentSection()
+            PermissionsSection()
             Section {
                 LabeledContent("Settings and keys folder") {
                     HStack {
