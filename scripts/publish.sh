@@ -5,14 +5,14 @@
 #   scripts/publish.sh --dry-run    # print what it would do
 #   scripts/publish.sh              # do it (asks first)
 #
-#   RELEASES_REPO   default asdf9384/dino-releases
-#   TAP_REPO        default asdf9384/homebrew-tap
+#   RELEASES_REPO   default meetdino/dino-releases
+#   TAP_REPO        default meetdino/homebrew-tap
 # Needs `gh` signed in as an account that can push to both.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="${DIST:-$ROOT/dist}"
-RELEASES_REPO="${RELEASES_REPO:-asdf9384/dino-releases}"
-TAP_REPO="${TAP_REPO:-asdf9384/homebrew-tap}"
+RELEASES_REPO="${RELEASES_REPO:-meetdino/dino-releases}"
+TAP_REPO="${TAP_REPO:-meetdino/homebrew-tap}"
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
@@ -49,7 +49,7 @@ if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
     [ "$DRY" = 1 ] || exit 1
 fi
 run gh release create "$TAG" --repo "$RELEASES_REPO" --title "dino $VERSION" \
-    --notes "dino $VERSION. Install with \`brew install asdf9384/tap/dino\`, or the command line alone with \`curl -fsSL https://meetdino.com/install.sh | sh\`." \
+    --notes "dino $VERSION. Install with \`brew install meetdino/tap/dino\`, or the command line alone with \`curl -fsSL https://meetdino.com/install.sh | sh\`." \
     "$DMG" "$TAR" "$DIST/SHA256SUMS" ${UPDATES[@]+"${UPDATES[@]}"}
 # The same DMG under a name that never changes, for the website's releases/latest/download link.
 STABLE="$(mktemp -d)/Dino.dmg"

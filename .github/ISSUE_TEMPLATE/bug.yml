@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting it. A security issue? Please don't file it here: see [SECURITY.md](https://github.com/asdf9384/dino/blob/main/SECURITY.md).
+        Thanks for reporting it. A security issue? Please don't file it here: see [SECURITY.md](https://github.com/meetdino/dino/blob/main/SECURITY.md).
   - type: textarea
     id: what
     attributes:

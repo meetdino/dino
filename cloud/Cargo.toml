@@ -6,7 +6,7 @@ members = ["crates/server"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/asdf9384/dino"
+repository = "https://github.com/meetdino/dino"
 
 [profile.release]
 lto = "thin"
