@@ -2754,6 +2754,7 @@ fn state(d: &Daemon) -> Response {
                 in_flight: st.in_flight,
                 input_tokens: st.usage.total_input(),
                 output_tokens: st.usage.output,
+                cache_read_tokens: st.usage.cache_read,
                 last_model: st.last_model,
                 tier: st.tier,
                 activity,
@@ -2810,7 +2811,8 @@ fn state(d: &Daemon) -> Response {
         .collect();
     let limits = fallbacks::limits(d);
     let leftovers = d.leftovers.lock().unwrap().iter().map(|(l, _)| l.clone()).collect();
-    Response::State { sessions, quotas, power: Some(d.power_info()), limits, leftovers, version: None }
+    let claude_accounts = claude_accounts::now(d);
+    Response::State { sessions, quotas, power: Some(d.power_info()), limits, leftovers, claude_accounts, version: None }
 }
 
 /// Save and stop every session, ready to exit: the next dinod resumes them (`dino stop`).

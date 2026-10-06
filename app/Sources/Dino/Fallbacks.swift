@@ -275,9 +275,11 @@ struct FallbackChip: View {
     }
 
     static func detail(_ f: FallbackInfo, _ usage: [RouteUsage]) -> String {
-        var lines = ["\(f.isModel ? f.name : f.from) said: \(f.said)", "Answering: \(f.name) · \(f.model), since \(Clock.short(f.since))"]
+        // Another Claude account answers for Claude Code's own sign-in: account 1.
+        let from = f.isAccount ? "Claude account 1" : f.from
+        var lines = ["\(f.isModel ? f.name : from) said: \(f.said)", "Answering: \(f.name) · \(f.model), since \(Clock.short(f.since))"]
         if let r = f.retry_at {
-            lines.append("Switches back to \(f.from) at the first turn after \(Clock.short(r))")
+            lines.append("Switches back to \(from) at the first turn after \(Clock.short(r))")
         }
         if !usage.isEmpty {
             lines.append(usage.map { "\($0.name): ↑\(roundTokens($0.input_tokens)) ↓\(roundTokens($0.output_tokens))" }.joined(separator: " · "))
@@ -296,7 +298,7 @@ struct FallbackLine: View {
     let fallback: FallbackInfo
 
     var body: some View {
-        Label(fallback.label, systemImage: fallback.isAccount ? "person.2" : "arrow.triangle.branch")
+        Label(fallback.rowLabel, systemImage: fallback.isAccount ? "person.2" : "arrow.triangle.branch")
             .font(.caption)
             .foregroundStyle(.orange)
             .lineLimit(1)

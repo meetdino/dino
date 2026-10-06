@@ -1226,7 +1226,8 @@ struct SessionRow: View {
                 }
                 .help(usageHelp)
             }
-            if let f = session.fallback {
+            // On the account every other session is on too: the footer says it once.
+            if let f = session.fallback, !model.saysInFooter(f) {
                 FallbackLine(fallback: f).help(FallbackChip.detail(f, session.usage_by_route ?? []))
             }
             if let error = session.error {
@@ -1417,6 +1418,9 @@ final class PulseView: NSView {
 }
 
 /// Usage at the foot of the sidebar: one line with the fullest window, opening to all of them.
+/// It answers "can my agents work right now, and on what?": with more than one Claude account and
+/// one of them spent, the account Claude Code's calls go to now comes first with its own windows,
+/// a spent one is said in a line with when it's back, and which sessions move back when.
 struct UsagePanel: View {
     @EnvironmentObject var model: DinoModel
     @Environment(\.colorScheme) private var colorScheme
@@ -1424,16 +1428,30 @@ struct UsagePanel: View {
     @AppStorage("usage.open") private var open = false
     private static let names = ["anthropic": "Claude", "chatgpt": "Codex"]
 
-    private var windows: [(label: String, window: WindowInfo)] {
-        model.quotas.flatMap { q in
-            q.windows.filter { $0.name.hasSuffix("h") || $0.name.hasSuffix("d") }
-                .map { ("\(Self.names[q.provider] ?? q.provider) \($0.name)", $0) }
+    /// The accounts, when they're worth telling apart: one is spent, or sessions are on another.
+    private var accounts: [ClaudeAccountInfo]? {
+        let a = model.claudeAccounts
+        guard a.count > 1 else { return nil }
+        let split = a.contains { $0.spent } || a.first { $0.answering }?.number != 1 || model.sessions.contains { $0.fallback?.isAccount == true }
+        return split ? a : nil
+    }
+
+    /// The windows shown as bars: every provider's, but Claude's by account when they're told apart.
+    private func windows(_ accounts: [ClaudeAccountInfo]?) -> [(label: String, window: WindowInfo)] {
+        model.quotas.filter { accounts == nil || $0.provider != "anthropic" }.flatMap { q in
+            q.windows.filter(\.isWindow).map { ("\(Self.names[q.provider] ?? q.provider) \($0.name)", $0) }
         }
     }
 
     var body: some View {
-        let windows = windows
-        let fullest = windows.max { $0.window.utilization < $1.window.utilization }
+        let accounts = accounts
+        let answering = accounts?.first { $0.answering }
+        let windows = windows(accounts)
+        // The window closest to its limit is the one that stops work: of the account in use, and
+        // only windows still current (one past its reset hasn't been reported since).
+        let current = windows + (answering?.windows ?? []).filter(\.isWindow).map { ("Claude \($0.name)", $0) }
+        let fullest = current.filter { !$0.window.isPast }.max { $0.window.utilization < $1.window.utilization }
+        let allSpent = accounts != nil && answering == nil
         VStack(alignment: .leading, spacing: 8) {
             AwakeStatus()
             Button { withAnimation(.easeOut(duration: 0.15)) { open.toggle() } } label: {
@@ -1443,11 +1461,22 @@ struct UsagePanel: View {
                         .rotationEffect(.degrees(open ? 90 : 0))
                         .foregroundStyle(.tertiary)
                     Text("Usage").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    if !open, let fullest {
-                        // The window closest to its limit is the one that stops work.
-                        let pct = Double(fullest.window.utilization)
-                        ProgressView(value: min(max(pct, 0), 1)).tint(QuotaBar.color(pct)).controlSize(.mini)
-                        Text("\(Int((pct * 100).rounded()))%").font(.caption.monospacedDigit()).foregroundStyle(QuotaBar.color(pct))
+                    if !open {
+                        if allSpent, let back = accounts?.compactMap(\.backAt).min() {
+                            Spacer(minLength: 0)
+                            Text("Claude back \(Clock.short(back))").font(.caption).foregroundStyle(SessionStatus.exited.color).lineLimit(1)
+                        } else {
+                            if let answering, answering.number != 1 {
+                                Text("account \(answering.number)").font(.caption).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                            }
+                            if let fullest {
+                                let pct = Double(fullest.window.utilization)
+                                ProgressView(value: min(max(pct, 0), 1)).tint(QuotaBar.color(pct)).controlSize(.mini)
+                                Text("\(Int((pct * 100).rounded()))%").font(.caption.monospacedDigit()).foregroundStyle(QuotaBar.color(pct))
+                            } else {
+                                Spacer(minLength: 0)
+                            }
+                        }
                     } else {
                         Spacer(minLength: 0)
                     }
@@ -1455,21 +1484,28 @@ struct UsagePanel: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(fullest.map { "\($0.label): \(Int((Double($0.window.utilization) * 100).rounded()))% used. Click for every window." } ?? "Your plans' usage windows")
+            .help(summary(answering: answering, fullest: fullest) + " Click for every window.")
             .accessibilityLabel("Usage")
-            .accessibilityValue(fullest.map { "\($0.label) \(Int((Double($0.window.utilization) * 100).rounded())) percent" } ?? "No data yet")
+            .accessibilityValue(summary(answering: answering, fullest: fullest))
             .accessibilityHint(open ? "Collapses usage" : "Shows every usage window")
             .contextMenu {
                 Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
             }
             if open {
+                if let accounts {
+                    ClaudeAccountsUsage(accounts: accounts, sessions: model.sessions)
+                }
                 ForEach(windows, id: \.label) { w in
                     QuotaBar(label: w.label, window: w.window)
                 }
-                if windows.isEmpty {
+                if windows.isEmpty && accounts == nil {
                     Text("No quota data yet").font(.caption).foregroundStyle(.tertiary)
                 }
-                let used = model.sessions.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens }
+                // Tokens worked through, not the context read again from the prompt cache on every
+                // call: summed over a long session, those re-reads are billions and say little.
+                let sessions = model.sessions
+                let cached = sessions.reduce(UInt64(0)) { $0 + ($1.cache_read_tokens ?? 0) }
+                let used = sessions.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens } - cached
                 if used > 0 {
                     HStack {
                         Text("Open sessions").foregroundStyle(.secondary)
@@ -1477,9 +1513,11 @@ struct UsagePanel: View {
                         Text("\(tokens(used)) tok")
                     }
                     .font(.caption.monospacedDigit())
-                    .help("Tokens in (including cached) and out for the sessions in the sidebar, across their whole conversations. Only traffic routed through dino is counted, so Copilot, Cursor and Amp aren't included.")
+                    .help("Tokens in and out for the sessions in the sidebar, across their whole conversations"
+                        + (cached > 0 ? ", not counting the \(tokens(cached)) read again from the prompt cache (each call reads the conversation so far again)" : "")
+                        + ". Only traffic routed through dino is counted, so Copilot, Cursor and Amp aren't included.")
                 }
-                let free = model.sessions.filter { $0.tier != nil }.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens }
+                let free = sessions.filter { $0.tier != nil }.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens - ($1.cache_read_tokens ?? 0) }
                 if free > 0 {
                     HStack {
                         Text("Free models").foregroundStyle(.secondary)
@@ -1508,6 +1546,90 @@ struct UsagePanel: View {
         .background(colorScheme == .dark ? AnyShapeStyle(.bar) : AnyShapeStyle(.clear))
         .overlay(alignment: .top) { if colorScheme == .light { Divider() } }
     }
+
+    /// The collapsed line in words: "Claude account 2 in use, Claude 5h 12% used".
+    private func summary(answering: ClaudeAccountInfo?, fullest: (label: String, window: WindowInfo)?) -> String {
+        var parts: [String] = []
+        if let answering, answering.number != 1 { parts.append("\(answering.short) in use") }
+        if let fullest { parts.append("\(fullest.label) \(Int((Double(fullest.window.utilization) * 100).rounded()))% used") }
+        if accounts != nil, answering == nil { parts.append("Every Claude account is at its limit") }
+        return parts.isEmpty ? "No data yet." : parts.joined(separator: ", ") + "."
+    }
+}
+
+/// The footer's Claude accounts, once one is spent or sessions are on another: the one in use with
+/// its windows, each spent one in a line with when it's back, and when sessions move back.
+struct ClaudeAccountsUsage: View {
+    let accounts: [ClaudeAccountInfo]
+    let sessions: [SessionInfo]
+
+    var body: some View {
+        let answering = accounts.first { $0.answering }
+        VStack(alignment: .leading, spacing: 6) {
+            if let answering {
+                HStack(spacing: 5) {
+                    Text(answering.short).font(.caption.weight(.semibold))
+                    Spacer()
+                    Text("in use").font(.caption).foregroundStyle(Color(nsColor: .systemGreen))
+                }
+                .accessibilityElement(children: .combine)
+                .help("Claude Code's calls go to \(answering.short) now\(answering.isOwn ? ", the account it signed in with" : "").")
+                let windows = (answering.windows ?? []).filter(\.isWindow)
+                if windows.isEmpty {
+                    // Never a made-up 0%: Anthropic says an account's use on the calls it signs.
+                    Text("Its use isn't reported yet").font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                        .help("Anthropic reports an account's 5h and 7d use with the calls it answers; none has reported it to dino yet.")
+                } else {
+                    ForEach(windows, id: \.name) { w in
+                        QuotaBar(label: w.name, window: w)
+                    }
+                }
+            }
+            ForEach(accounts.filter { !$0.answering }) { a in
+                HStack(spacing: 5) {
+                    Circle().fill(a.spent ? Color.orange : Color.secondary.opacity(0.5)).frame(width: 6, height: 6)
+                    Text(a.short)
+                    Spacer()
+                    if a.spent {
+                        Text(a.backAt.map { "back at \(Clock.short($0))" } ?? "at its limit").foregroundStyle(.secondary)
+                    } else {
+                        Text("ready").foregroundStyle(.tertiary)
+                    }
+                }
+                .font(.caption.monospacedDigit())
+                .accessibilityElement(children: .combine)
+                .help(help(a))
+            }
+            if let note = note(answering) {
+                // At most two lines, never sized to its text: wrapped at the narrowest width the
+                // window measures, it would hold the window taller than the screen.
+                Text(note).font(.caption).foregroundStyle(.secondary).lineLimit(2).help(note)
+            }
+        }
+    }
+
+    private func help(_ a: ClaudeAccountInfo) -> String {
+        guard a.spent else { return "\(a.short) answers when the accounts before it are at their limit." }
+        let windows = (a.windows ?? []).filter(\.isWindow).map { "\($0.name) \(Int((Double($0.utilization) * 100).rounded()))%" }
+        let back = a.resets_at.map { "Its limit resets \(Clock.short($0))." } ?? a.retry_at.map { "dino tries it again \(Clock.short($0))." } ?? ""
+        return (["\(a.short)\(a.isOwn ? ", the one Claude Code signed in with," : "") is at its limit.", back] + (windows.isEmpty ? [] : ["Last reported: " + windows.joined(separator: ", ") + "."])).filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// One line on when sessions move: back to account 1 once it resets, or now, at their next turn.
+    private func note(_ answering: ClaudeAccountInfo?) -> String? {
+        let elsewhere = sessions.filter { s in s.fallback.map { $0.isAccount && $0.name != answering?.short } ?? false }
+        if let answering, !elsewhere.isEmpty {
+            let n = elsewhere.count
+            return "\(n == 1 ? "1 session" : "\(n) sessions") on another account \(n == 1 ? "moves" : "move") to account \(answering.number) at \(n == 1 ? "its" : "their") next turn."
+        }
+        guard let answering else {
+            // Every one spent: Claude Code's calls are turned down until the first is back.
+            let back = accounts.compactMap(\.backAt).min()
+            return "Every Claude account is at its limit" + (back.map { ": the first is back at \(Clock.short($0))." } ?? ".")
+        }
+        guard answering.number != 1, let own = accounts.first(where: \.isOwn), own.spent, let back = own.backAt else { return nil }
+        return "Sessions go back to account 1 at their next turn after \(Clock.short(back))."
+    }
 }
 
 struct QuotaBar: View {
@@ -1521,14 +1643,22 @@ struct QuotaBar: View {
             HStack {
                 Text(label)
                 Spacer()
-                Text("\(Int((pct * 100).rounded()))%").foregroundStyle(color)
-                if let reset = window.resets_at {
-                    Text("· \(resetText(reset))").foregroundStyle(.tertiary)
+                if window.isPast {
+                    // Its window ended: what it used since isn't known until a call reports it.
+                    Text("reset · not reported since").foregroundStyle(.tertiary)
+                } else {
+                    Text("\(Int((pct * 100).rounded()))%").foregroundStyle(color)
+                    if let reset = window.resets_at {
+                        Text("· \(resetText(reset))").foregroundStyle(.tertiary)
+                    }
                 }
             }
             .font(.caption.monospacedDigit())
-            ProgressView(value: min(max(pct, 0), 1)).tint(color).controlSize(.small)
+            if !window.isPast {
+                ProgressView(value: min(max(pct, 0), 1)).tint(color).controlSize(.small)
+            }
         }
+        .accessibilityElement(children: .combine)
     }
 
     static func color(_ pct: Double) -> Color {
@@ -1542,7 +1672,8 @@ func tokens(_ n: UInt64) -> String {
     switch n {
     case ..<1000: "\(n)"
     case ..<1_000_000: String(format: "%.1fk", Double(n) / 1e3)
-    default: String(format: "%.1fM", Double(n) / 1e6)
+    case ..<1_000_000_000: String(format: "%.1fM", Double(n) / 1e6)
+    default: String(format: "%.2fB", Double(n) / 1e9)
     }
 }
 

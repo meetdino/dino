@@ -58,6 +58,14 @@ enum Brand {
 final class DinoModel: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     @Published var quotas: [QuotaInfo] = []
+    /// Your Claude accounts with their windows, once Claude Code has more than one.
+    @Published var claudeAccounts: [ClaudeAccountInfo] = []
+
+    /// A session on another Claude account that the sidebar's footer names already: the one in use
+    /// now. Only a session on a different one says so in its row.
+    func saysInFooter(_ f: FallbackInfo) -> Bool {
+        f.isAccount && claudeAccounts.first(where: \.answering)?.short == f.name
+    }
     /// Agents at their limit, and what new sessions start with meanwhile (Settings → Agents).
     @Published var limits: [AgentLimit] = []
     /// Builds dinod found running for no session as it started (Leftovers.swift).
@@ -310,6 +318,8 @@ final class DinoModel: ObservableObject {
                     if limits != self.limits { self.limits = limits }
                     let leftovers = resp.leftovers ?? []
                     if leftovers != self.leftovers { self.leftovers = leftovers }
+                    let accounts = resp.claude_accounts ?? []
+                    if accounts != self.claudeAccounts { self.claudeAccounts = accounts }
                     self.stateSeen = resp.version
                     self.poll()
                 } else if refused {
