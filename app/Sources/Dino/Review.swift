@@ -102,7 +102,7 @@ struct ReviewPanel: View {
         SidePaneHeader(
             title: "Changes",
             subtitle: changes.flatMap { c in c.note == nil ? "\(session.display) · since \(c.base)" : nil } ?? session.display,
-            closeHelp: "Hide changes (⇧⌘D)",
+            closeHelp: "Hide changes (⌥⌘C)",
             close: { model.showReview = false }
         ) {
             Image(systemName: "plus.forwardslash.minus")

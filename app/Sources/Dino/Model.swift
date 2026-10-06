@@ -703,7 +703,7 @@ final class DinoModel: ObservableObject {
     /// keybinds for the same thing, and stay the user's to change). Ghostty's ⌘K (clear) is ⌥⌘K.
     /// A punctuation key goes by its name and by its character: Ghostty binds ⌘, (open its config)
     /// as `super+,`, and an unbind takes away only a binding written the same way.
-    static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "alt+k", "j", "o", "n", "t", "shift+n", "alt+n", "ctrl+n", "alt+shift+n",
+    static let menuKeys = ((["d", "shift+d", "alt+c", "w", "k", "alt+k", "j", "o", "n", "t", "shift+n", "alt+n", "ctrl+n", "alt+shift+n",
                              "comma", ",", "shift+backspace", "s", "shift+o", "alt+p", "alt+t", "shift+p", "shift+bracket_left", "shift+[",
                              "shift+bracket_right", "shift+]", "shift+semicolon", "shift+;", "backslash", "\\", "shift+m", "shift+i",
                              "shift+e", "alt+b"]
