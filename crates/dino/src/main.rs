@@ -139,7 +139,7 @@ fn dino() -> anyhow::Result<()> {
         Some("status") => return cmd_status(cli.iter().any(|a| a == "--tmux")),
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
         // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
-        Some("statusline") => std::process::exit(dino_core::statusline::run(cli.get(1).map(String::as_str))),
+        Some("statusline") => std::process::exit(dino_core::statusline::run(cli.get(1..).unwrap_or_default())),
         Some("--version" | "-V" | "version") => {
             match BUILD {
                 Some(build) => println!("dino {} ({build})", env!("CARGO_PKG_VERSION")),

@@ -1,7 +1,8 @@
 # An agent typed into a dino shell (`claude …`) reports to dino from its first moment, as a session
-# dino starts does: its turns, its questions, its tasks. dinod writes the settings that say where
-# (hooks to this session) into $DINO_CLAUDE_SETTINGS; they're read at each run, so "Keep as
-# terminal" and Settings → Agents take effect without a new shell. No hooks for a run with its own
+# dino starts does: its turns, its questions, its tasks, its context window (through the user's own
+# statusline, when they have one in the shell's folder). dinod writes the settings that say where
+# (hooks to this session, that statusline) into $DINO_CLAUDE_SETTINGS; they're read at each run, so
+# "Keep as terminal" and Settings → Agents take effect without a new shell. No hooks for a run with its own
 # --settings, or a one-off (-p, --version, subcommands); left alone altogether: a claude function of
 # the user's own, and tmux panes (tmux owns what runs there).
 #
