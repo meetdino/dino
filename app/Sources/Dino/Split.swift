@@ -365,9 +365,18 @@ extension View {
 /// A split pane's title: which session, how it's doing, and a close button.
 struct PaneHeader: View {
     @EnvironmentObject var model: DinoModel
-    let session: SessionInfo
+    /// The session as it is now: its title and how it's doing change here, redrawing this header.
+    @ObservedObject private var live: LiveSession
     let split: SplitTree
     let focused: Bool
+
+    init(session: SessionInfo, split: SplitTree, focused: Bool) {
+        _live = ObservedObject(wrappedValue: LiveSessions.of(session))
+        self.split = split
+        self.focused = focused
+    }
+
+    private var session: SessionInfo { live.info }
 
     var body: some View {
         let status = model.status(of: session)
@@ -531,7 +540,10 @@ struct SplitMenuItems: View {
             .disabled(session == nil)
         Menu("Open Beside") {
             ForEach(model.sessions.filter { $0.id != session?.id }) { s in
-                Button(s.label == nil ? s.title.map { "\(s.name) — \($0)" } ?? s.name : s.display) { model.openBeside(s.id) }
+                // A title changes with every command a shell runs: only its item redraws.
+                Live(s) { s in
+                    Button(s.label == nil ? s.title.map { "\(s.name) — \($0)" } ?? s.name : s.display) { model.openBeside(s.id) }
+                }
             }
         }
         .disabled(session == nil || model.sessions.count < 2)

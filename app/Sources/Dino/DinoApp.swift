@@ -571,7 +571,7 @@ struct Terminals: View {
                     ForEach(model.sessions) { s in
                         let rect = layout.surface(s.id)
                         let state = model.terminal(for: s.id)
-                        TerminalPane(state: state, id: s.id, visible: rect != nil, focused: s.id == model.selected)
+                        TerminalPane(model: model, state: state, id: s.id, visible: rect != nil, focused: s.id == model.selected)
                             // A new state (after reconnecting) must mean a new surface.
                             .id(ObjectIdentifier(state))
                             .overlay {
@@ -608,23 +608,27 @@ struct Terminals: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 if let s = model.sessions.first(where: { $0.id == model.selected }) {
-                    HStack(spacing: 8) {
-                        // The name gives way first: the chips beside it are what you click.
-                        SessionName(session: s, place: .toolbar, font: .body.weight(.semibold))
-                            .layoutPriority(-1)
-                            .help(s.inside?.title ?? s.title ?? s.display)
-                        Group {
-                            if let f = s.inside { AgentBadge(agent: f.agent) }
-                            if let f = s.inside, f.continuable { TakeOverButton(session: s, found: f) }
-                            if let host = s.host { HostChip(host: host) }
-                            if s.exited {
-                                ResumeButton(session: s).padding(.leading, 4)
-                            } else if s.agent_id != "shell" {
-                                // A plain shell has no mode or model to pick.
-                                SessionControlsBar(session: s).padding(.leading, 4)
+                    // Its title and how it's doing come from its own observable: a change there
+                    // redraws this, not the terminals.
+                    Live(s) { s in
+                        HStack(spacing: 8) {
+                            // The name gives way first: the chips beside it are what you click.
+                            SessionName(session: s, place: .toolbar, font: .body.weight(.semibold))
+                                .layoutPriority(-1)
+                                .help(s.inside?.title ?? s.title ?? s.display)
+                            Group {
+                                if let f = s.inside { AgentBadge(agent: f.agent) }
+                                if let f = s.inside, f.continuable { TakeOverButton(session: s, found: f) }
+                                if let host = s.host { HostChip(host: host) }
+                                if s.exited {
+                                    ResumeButton(session: s).padding(.leading, 4)
+                                } else if s.agent_id != "shell" {
+                                    // A plain shell has no mode or model to pick.
+                                    SessionControlsBar(session: s).padding(.leading, 4)
+                                }
                             }
+                            .fixedSize()
                         }
-                        .fixedSize()
                     }
                 }
             }
@@ -698,7 +702,8 @@ struct SidePanePicker: View {
 }
 
 struct TerminalPane: View {
-    @EnvironmentObject var model: DinoModel
+    /// Not watched: the pane draws nothing of the model's, so a change there needn't redraw every pane.
+    let model: DinoModel
     @ObservedObject var state: TerminalViewState
     let id: String
     let visible: Bool
@@ -1130,7 +1135,8 @@ struct SidebarHeading<Trailing: View>: View {
 
 struct SessionRow: View {
     @EnvironmentObject var model: DinoModel
-    let session: SessionInfo
+    /// The session as it is now: how it's doing changes here, redrawing this row, not the sidebar.
+    @ObservedObject private var live: LiveSession
     let index: Int
     /// The worktree's branch, on the row instead of a header above a single session.
     var branch: String?
@@ -1138,6 +1144,15 @@ struct SessionRow: View {
     var root: String?
     @State private var hovering = false
     @State private var anchor = CostAnchorView()
+
+    init(session: SessionInfo, index: Int, branch: String? = nil, root: String? = nil) {
+        _live = ObservedObject(wrappedValue: LiveSessions.of(session))
+        self.index = index
+        self.branch = branch
+        self.root = root
+    }
+
+    private var session: SessionInfo { live.info }
 
     var body: some View {
         let status = model.status(of: session)
