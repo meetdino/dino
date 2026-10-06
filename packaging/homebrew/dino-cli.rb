@@ -14,6 +14,7 @@ class DinoCli < Formula
     strategy :github_latest
   end
 
+  depends_on arch: :@ARCH@
   depends_on :macos
 
   conflicts_with cask: "dino", because: "the dino app includes the dino command"

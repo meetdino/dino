@@ -14,6 +14,7 @@ cask "dino" do
     strategy :github_latest
   end
 
+  depends_on arch: :@ARCH@
   depends_on macos: :sonoma
 
   app "Dino.app"
