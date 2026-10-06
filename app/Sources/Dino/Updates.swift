@@ -394,6 +394,8 @@ final class Updates: ObservableObject {
 
     /// The dino this app carries, as `dino --version` says it ("dino 0.2.0 (c1ddaea2f)": the
     /// version); nil in a build without one (app/build.sh without --install).
+    /// It waits for `dino` without `waitUntilExit`: that runs the run loop, and code it runs on
+    /// the way (a SwiftUI update) reaching this again while it's being set crashed the app.
     nonisolated static let bundledVersion: String? = {
         guard let bin = DinoEnvironment.bundledDino else { return nil }
         let p = Process()
@@ -402,9 +404,12 @@ final class Updates: ObservableObject {
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in exited.signal() }
         guard (try? p.run()) != nil else { return nil }
-        p.waitUntilExit()
-        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let said = out.fileHandleForReading.readDataToEndOfFile()
+        exited.wait()
+        let text = String(data: said, encoding: .utf8) ?? ""
         let words = text.split(whereSeparator: \.isWhitespace)
         return words.count > 1 ? String(words[1]) : nil
     }()
@@ -632,7 +637,9 @@ struct UpdatesSection: View {
             ))
             .disabled(store.settings == nil)
             // A build that isn't a release says which commit it is.
-            LabeledContent("dino \(Updates.bundledVersion ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""))"
+            // The app's version, which app/build.sh and scripts/release.sh set to its dino's: not
+            // `bundledVersion`, which runs `dino` and has no place in a view's body.
+            LabeledContent("dino \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")"
                 + (updates.available ? "" : Updates.bundledBuild.map { " (\($0))" } ?? "")) {
                 Button("Check Now") { updates.checkNow() }
                     .disabled(!updates.available || !updates.canCheck)
