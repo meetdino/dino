@@ -186,7 +186,7 @@ enum PaneSignals {
         let s = model?.sessions.first { $0.id == id }
         // An agent that tells dino how it's doing: dino already says when it needs you or is done,
         // and its own notification would say it twice.
-        if let s, s.agent_id != "shell", s.reportsStatus { return }
+        if let s, s.agent != "shell", s.reportsStatus { return }
         let name = s.flatMap { s in model?.tabName(s) } ?? "Quick terminal"
         Notifier.post(key: "program-\(UUID().uuidString)", title: title.isEmpty ? name : title, body: body, session: id)
     }

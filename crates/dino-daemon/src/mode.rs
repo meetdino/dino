@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use dino_core::agent::agent;
 use dino_core::controls::{self, Controls};
 use dino_proxy::Activity;
 
@@ -49,7 +48,7 @@ fn on_screen(s: &Session) -> Option<String> {
     if s.host.is_some() || s.pane.is_exited() {
         return None;
     }
-    let mode = agent(&s.agent_id)?.screen_mode(&s.pane.last_lines(FOOTER_LINES))?;
+    let mode = s.adapter()?.screen_mode(&s.pane.last_lines(FOOTER_LINES))?;
     s.mode_seen.lock().unwrap().now = Some(mode.clone());
     Some(mode)
 }
@@ -60,14 +59,14 @@ fn on_screen(s: &Session) -> Option<String> {
 pub(crate) fn now(s: &Session, hooked: Option<&str>) -> Option<String> {
     on_screen(s)
         .or_else(|| s.mode_seen.lock().unwrap().now.clone())
-        .or_else(|| hooked.and_then(|m| controls::reported_mode(&s.agent_id, m)))
+        .or_else(|| hooked.and_then(|m| controls::reported_mode(&s.agent_now(), m)))
 }
 
 /// The model `s`'s agent says it's on (`said`: `SessionStats::agent_model`), once it has said
 /// since it started; `None` until then, when it's on the one it was started with, and for an agent
 /// whose model dino picks for each turn (the free tier).
 pub(crate) fn model_now(s: &Session, said: Option<&str>) -> Option<String> {
-    said.filter(|_| agent(&s.agent_id).is_some_and(|a| a.picks_model())).map(String::from)
+    said.filter(|_| s.adapter().is_some_and(|a| a.picks_model())).map(String::from)
 }
 
 /// `s`'s controls as its agent runs with them now: its mode and model as it says they are (see
@@ -75,10 +74,11 @@ pub(crate) fn model_now(s: &Session, said: Option<&str>) -> Option<String> {
 /// doesn't undo a switch.
 pub(crate) fn current(d: &Daemon, s: &Session) -> Controls {
     let st = d.proxy.stats.session(&s.id);
+    let launched = s.launched_controls();
     Controls {
-        mode: now(s, st.agent_mode.as_deref()).or_else(|| s.controls.mode.clone()),
-        model: model_now(s, st.agent_model.as_deref()).or_else(|| s.controls.model.clone()),
-        ..s.controls.clone()
+        mode: now(s, st.agent_mode.as_deref()).or_else(|| launched.mode.clone()),
+        model: model_now(s, st.agent_model.as_deref()).or_else(|| launched.model.clone()),
+        ..launched
     }
 }
 
@@ -88,7 +88,7 @@ pub(crate) fn switchable(s: &Session, want: &str) -> bool {
     if s.host.is_some() || s.pane.is_exited() {
         return false;
     }
-    let Some((_, order)) = agent(&s.agent_id).and_then(|a| a.mode_cycle(&launched(s))) else { return false };
+    let Some((_, order)) = s.adapter().and_then(|a| a.mode_cycle(&launched(s))) else { return false };
     let seen = s.mode_seen.lock().unwrap();
     (order.contains(&want) || seen.steps.values().any(|m| m == want)) && !seen.unreachable.iter().any(|m| m == want)
 }
@@ -96,8 +96,8 @@ pub(crate) fn switchable(s: &Session, want: &str) -> bool {
 /// The arguments `s`'s agent was started with, its mode flag and what put others in reach of its
 /// mode key included.
 fn launched(s: &Session) -> Vec<String> {
-    let mut args = s.args.clone();
-    if let (Some(a), Some(m)) = (agent(&s.agent_id), s.controls.mode.as_deref()) {
+    let mut args = s.agent_args();
+    if let (Some(a), Some(m)) = (s.adapter(), s.launched_controls().mode.as_deref()) {
         args.extend(a.mode_args(m));
     }
     args.extend(s.reach.iter().cloned());
@@ -122,7 +122,7 @@ pub(crate) fn switch(d: &Daemon, s: &Session, want: &str) -> bool {
     if !switchable(s, want) {
         return false;
     }
-    let Some((key, order)) = agent(&s.agent_id).and_then(|a| a.mode_cycle(&launched(s))) else { return false };
+    let Some((key, order)) = s.adapter().and_then(|a| a.mode_cycle(&launched(s))) else { return false };
     // Two at once (the user choosing again while one runs) would overshoot each other.
     if s.switching.swap(true, Ordering::AcqRel) {
         return false;

@@ -28,9 +28,9 @@ fn store() -> &'static Mutex<Option<Store>> {
 fn describe(s: &Session) -> (String, Option<String>, Option<String>) {
     let cwd = s.host.is_none().then(|| s.cwd.display().to_string());
     if s.agent_id == "shell" {
-        let inside = s.inside.lock().unwrap();
-        if let Some(f) = &inside.found {
-            return (f.agent.clone(), Some(f.session_id.clone()).filter(|c| !c.is_empty()), f.cwd.clone().or(cwd));
+        if let Some(f) = s.typed() {
+            let conversation = s.agent_session.lock().unwrap().clone().or_else(|| Some(f.session_id.clone()).filter(|c| !c.is_empty()));
+            return (f.agent, conversation, f.cwd.or(cwd));
         }
         return ("shell".into(), None, cwd);
     }
@@ -120,7 +120,7 @@ fn link_sessions(d: &Daemon) {
     let Some(store) = guard.as_mut() else { return };
     for s in sessions {
         let (agent, conversation, _) = describe(&s);
-        let conversation = conversation.or_else(|| (s.agent_id != "shell").then(|| conversation_of(&s)).flatten());
+        let conversation = conversation.or_else(|| conversation_of(&s));
         if let Some(c) = conversation {
             let _ = store.link(&s.id, &agent, &c);
         }

@@ -1348,7 +1348,7 @@ private struct ManagedPane: View {
         case ("policies", "close_merged"): return make("Archive sessions after their PR merges or closes", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("routing", "proxy"): return make("Route agent traffic through dino", "Models & Providers → Providers", .models, .providers)
         case ("machine", "shell_integration"): return make("Shell integration", "Terminal", .terminal)
-        case ("machine", "shell_agents"): return make("Show Claude started in a shell in the sidebar", "Agents", .agents)
+        case ("machine", "shell_agents"): return make("Show agents started in a shell in the sidebar", "Agents", .agents)
         case ("machine", "keep_awake"): return make("Keep your Mac awake while automations are scheduled", "Power", .power)
         case ("machine", "awake_while_working"): return make("Keep your Mac awake while agents work", "Power", .power)
         case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", "Power", .power)
@@ -1575,14 +1575,14 @@ private struct AgentsPane: View {
             }
             AgentChoiceSection()
             Section {
-                Toggle("Show Claude started in a shell in the sidebar", isOn: Binding(
+                Toggle("Show agents started in a shell in the sidebar", isOn: Binding(
                     get: { store.settings?.machine.shell_agents ?? true },
                     set: { on in store.update { $0.machine.shell_agents = on } }
                 ))
                 .disabled(store.settings?.machine.shell_integration == false)
                 .orgLocked("machine.shell_agents")
             } footer: {
-                Footnote("When you run `claude` in a dino shell, it appears in the sidebar with its turns, questions and tasks, like any session dino starts. Requires Shell integration (Terminal). To keep a shell a plain terminal, choose Keep as Terminal from its menu.")
+                Footnote("When you run `claude`, `codex` or another agent in a dino shell, it's a session like any dino starts: in the sidebar with its turns, questions and tasks, its mode and model in the toolbar, and back on its conversation when dino restarts. When it exits, the shell is a plain shell again. Requires Shell integration (Terminal). To keep a shell a plain terminal, choose Keep as Terminal from its menu.")
             }
             Section {
                 Picker("Show when an agent uses your Mac", selection: $usingDisplay) {

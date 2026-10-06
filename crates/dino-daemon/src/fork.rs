@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use dino_core::agent::{StatusSource, agent};
+use dino_core::agent::StatusSource;
 use dino_core::ipc::ForkedFrom;
 
 use super::{Daemon, Launch, SavedSession, Session, mode, now_secs, save, session_name, spawn, spawn_in_worktree};
@@ -22,7 +22,7 @@ const RECORD_WAIT: Duration = Duration::from_secs(3);
 fn shown(s: &Session) -> String {
     let title = || {
         let t = s.pane.title()?;
-        let t = agent(&s.agent_id).map_or(Some(t.clone()), |a| a.shown_title(&t))?;
+        let t = s.adapter().map_or(Some(t.clone()), |a| a.shown_title(&t))?;
         let t = t.trim_start_matches(|c: char| !c.is_alphanumeric()).trim().to_string();
         (!t.is_empty()).then_some(t)
     };
@@ -38,12 +38,14 @@ fn free_name(d: &Daemon, stem: &str) -> String {
 }
 
 /// Fork session `id` (see `Request::Fork`): its launcher, flags, mode, model, effort, provider
-/// route and account, on a new conversation copied from its own.
+/// route and account, on a new conversation copied from its own. A shell's agent typed there forks
+/// into a session of its own, as one dino started does.
 pub(crate) fn fork(d: &Daemon, id: &str, name: Option<String>, worktree: bool, prompt: Option<String>) -> anyhow::Result<String> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
     anyhow::ensure!(s.host.is_none(), "forking runs on this Mac; {} is on {}", s.name, s.host.as_deref().unwrap_or_default());
-    let l = d.allowed_launcher(&s.launcher)?;
-    let a = agent(&s.agent_id).filter(|a| a.fork_args("", std::path::Path::new(""), &mut None).is_some());
+    let launcher = s.agent_launcher();
+    let l = d.allowed_launcher(&launcher)?;
+    let a = s.adapter().filter(|a| a.fork_args("", std::path::Path::new(""), &mut None).is_some());
     let a = a.ok_or_else(|| anyhow::anyhow!("{} can't fork a conversation from dino", l.label))?;
     let conversation = s.agent_session.lock().unwrap().clone().or_else(|| super::conversation_of(&s));
     let conversation = conversation.filter(|c| a.transcript(c).is_some());
@@ -56,16 +58,16 @@ pub(crate) fn fork(d: &Daemon, id: &str, name: Option<String>, worktree: bool, p
     let new = d.next_id.fetch_add(1, Ordering::Relaxed).to_string();
     let restore = SavedSession {
         id: new,
-        name: free_name(d, &s.launcher),
-        launcher: s.launcher.clone(),
-        args: s.args.clone(),
-        cwd: s.cwd.display().to_string(),
+        name: free_name(d, &launcher),
+        launcher,
+        args: s.agent_args(),
+        cwd: s.agent_cwd().display().to_string(),
         started_at: now_secs(),
         // The mode it's in now, which it may have switched to since it started.
         controls: mode::current(d, &s),
         label,
         route: s.route.clone(),
-        account: s.account.clone(),
+        account: s.agent_account(),
         forked_from: Some(ForkedFrom { session: s.id.clone(), name: shown(&s), conversation }),
         fork_pending: true,
         ..Default::default()
@@ -87,11 +89,11 @@ pub(crate) fn follow(d: &Daemon) {
         .unwrap()
         .iter()
         .filter(|s| s.host.is_none() && !s.pane.is_exited() && !s.replaced.load(Ordering::Relaxed))
-        .filter(|s| agent(&s.agent_id).is_some_and(|a| a.status_source() == StatusSource::Hooks))
+        .filter(|s| s.adapter().is_some_and(|a| a.status_source() == StatusSource::Hooks))
         .cloned()
         .collect();
     for s in sessions {
-        let Some(a) = agent(&s.agent_id) else { continue };
+        let Some(a) = s.adapter() else { continue };
         let Some(now) = super::conversation_of(&s) else { continue };
         let known = s.agent_session.lock().unwrap().clone();
         if known.as_deref() == Some(now.as_str()) {
@@ -122,7 +124,7 @@ pub(crate) fn follow(d: &Daemon) {
 /// Session `s`'s agent is on conversation `now` (it was on `known`): a fork of `known`, made in
 /// the agent, keeps `known` in dino as an ended session it came from, to resume when wanted.
 pub(crate) fn moved(d: &Daemon, s: &Arc<Session>, known: Option<String>, now: String) {
-    let Some(a) = agent(&s.agent_id) else { return };
+    let Some(a) = s.adapter() else { return };
     // A fork dino started goes through the original as it starts: it's the copy it's on.
     let forked = s.forked_from.lock().unwrap().clone();
     if forked.as_ref().is_some_and(|f| f.conversation == now) && known.as_deref().is_none_or(|k| a.transcript(k).is_none()) {
@@ -140,20 +142,20 @@ pub(crate) fn moved(d: &Daemon, s: &Arc<Session>, known: Option<String>, now: St
         save(d);
         return;
     }
-    let title = conversation_title(&s.agent_id, &old).unwrap_or_else(|| shown(s));
+    let title = conversation_title(&s.agent_now(), &old).unwrap_or_else(|| shown(s));
     let parent = d.next_id.fetch_add(1, Ordering::Relaxed).to_string();
     let restore = SavedSession {
         id: parent.clone(),
         name: free_name(d, &session_name(&title)),
-        launcher: s.launcher.clone(),
-        args: s.args.clone(),
-        cwd: s.cwd.display().to_string(),
+        launcher: s.agent_launcher(),
+        args: s.agent_args(),
+        cwd: s.agent_cwd().display().to_string(),
         started_at: s.started_at,
         agent_session: Some(old.clone()),
         controls: mode::current(d, s),
         label: Some(title.clone()),
         route: s.route.clone(),
-        account: s.account.clone(),
+        account: s.agent_account(),
         // What `s` came from, if anything, the original came from.
         forked_from: forked,
         ended: true,

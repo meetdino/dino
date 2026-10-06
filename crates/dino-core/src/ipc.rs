@@ -209,13 +209,10 @@ pub enum Request {
     /// Continue a found session in dino: running ones are handed off (waited on until idle,
     /// stopped, resumed here). `cwd` is where cloud sessions land.
     Adopt { session: crate::found::FoundSession, cwd: Option<String> },
-    /// Shell `id` is running an agent started by hand (`SessionInfo::inside`): once it's idle,
-    /// stop it and resume its conversation as session `id`, in the shell's place.
-    TakeOver { id: String },
-    /// Stop waiting to continue a conversation in dino (`TakeOver`, `Adopt`, which wait for its
-    /// turn to end): `id` is the shell's session id, or for `Adopt` the conversation's id. The
-    /// waiting request then fails with "cancelled", and the agent runs on where it is. An error
-    /// when nothing waits for it (it may have just moved).
+    /// Stop waiting to continue a conversation in dino (`Adopt`, which waits for its turn to end):
+    /// `id` is the conversation's id, or the process's for one that hasn't named it. The waiting
+    /// request then fails with "cancelled", and the agent runs on where it is. An error when
+    /// nothing waits for it (it may have just moved).
     CancelTakeOver { id: String },
     /// Repos (with their worktrees) and folders where sessions run, plus `folders` the app shows.
     /// `known`: the version of the tree the asker has; the same one is answered with `same`.
@@ -893,12 +890,11 @@ pub struct SessionInfo {
     /// What the agent tracks underneath: its task list, subagents and background commands.
     #[serde(default)]
     pub tasks: SessionTasks,
-    /// A shell's foreground agent that someone started by hand: its title and busy/idle status.
+    /// A shell's agent typed there by hand, while it runs: the session's agent, followed as one
+    /// dino started (its controls, conversation and status are the session's). Its title, and its
+    /// own busy/idle status for an agent that says nothing more.
     #[serde(default)]
     pub inside: Option<crate::found::FoundSession>,
-    /// A shell whose agent `TakeOver` waits on, until its turn ends (`CancelTakeOver` stops it).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub taking_over: bool,
     /// The agent's own conversation id, when dino knows it: one conversation is one session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,

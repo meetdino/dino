@@ -3,7 +3,7 @@ import SwiftUI
 
 extension SessionInfo {
     /// Whether its agent reports a task list, subagents or background commands (Claude's hooks).
-    var reportsTasks: Bool { agent_id == "claude" || !(tasks?.isEmpty ?? true) }
+    var reportsTasks: Bool { agent == "claude" || !(tasks?.isEmpty ?? true) }
 }
 
 extension DinoModel {

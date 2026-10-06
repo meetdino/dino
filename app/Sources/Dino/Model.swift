@@ -92,9 +92,6 @@ final class DinoModel: ObservableObject {
     /// Finished conversations on disk are in `found` (the browser has loaded them once).
     @Published var loadedHistory = false
     /// A handoff in progress: the session being moved, and whether we're waiting on its turn.
-    /// Shells whose agent is waiting for its turn to end to continue in dino, as asked here
-    /// (dinod says so too: `SessionInfo.taking_over`); see `takeOver`.
-    @Published var takingOver: Set<String> = []
     /// Found sessions waiting to continue in dino, by `FoundSession.id`; see `adopt`.
     @Published var adopting: Set<String> = []
     @Published var showContinue = false
@@ -1052,41 +1049,6 @@ final class DinoModel: ObservableObject {
     /// Reveals up to here are handled: ones from before the app started (and opened it) count too.
     private var revealedUpTo = UInt64(Date().timeIntervalSince1970 * 1000) - 10_000
 
-    /// Continue the agent started by hand in shell `s` as a dino session, in the same row (or in
-    /// the session that has its conversation already). It waits for the agent's turn to end; the
-    /// session's banner says so, with Cancel (Esc), and the rest of the app goes on.
-    func takeOver(_ s: SessionInfo) {
-        guard let f = s.inside, !isTakingOver(s) else { return }
-        takingOver.insert(s.id)
-        let id = s.id
-        Task.detached {
-            do {
-                // Own connection: it waits for the agent's turn to end.
-                try DinoConnection(path: DinoEnvironment.socketPath).takeOver(session: id)
-                await MainActor.run {
-                    self.takingOver.remove(id)
-                    // Continued in the session that had the conversation: show that one.
-                    if let other = self.sessions.first(where: { $0.conversation == f.session_id && $0.id != id }) {
-                        self.selected = other.id
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.takingOver.remove(id)
-                    if !Self.cancelled(error) { self.error = error.localizedDescription }
-                }
-            }
-        }
-    }
-
-    /// Shell `s`'s agent is waiting to continue in dino.
-    func isTakingOver(_ s: SessionInfo) -> Bool { s.taking_over == true || takingOver.contains(s.id) }
-
-    /// Stop waiting to take over shell `id`'s agent: it runs on in the shell.
-    func cancelTakeOver(_ id: String) {
-        Task.detached { try? DinoConnection(path: DinoEnvironment.socketPath).cancelTakeOver(id: id) }
-    }
-
     /// Automations, archived sessions and launchers (keys and policies change which agents can
     /// start) refresh slower than session state. Automations are looked at even with no window
     /// showing (their runs notify); the rest only while one shows.
@@ -1259,7 +1221,7 @@ final class DinoModel: ObservableObject {
 
     /// Models this Mac's sessions of `agent` are on or have answered with, for the model menus.
     func seenModels(_ agent: String) -> [String] {
-        Array(Set(sessions.filter { $0.agent_id == agent }.flatMap { [$0.agent_model, $0.last_model] }.compactMap { $0 })).sorted()
+        Array(Set(sessions.filter { $0.agent == agent }.flatMap { [$0.agent_model, $0.last_model] }.compactMap { $0 })).sorted()
     }
 
     func setAutoPR(_ session: String, fix: Bool? = nil, merge: Bool? = nil) async throws {

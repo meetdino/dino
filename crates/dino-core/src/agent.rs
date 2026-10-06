@@ -226,6 +226,12 @@ pub trait Agent: Sync {
     /// Arguments that start conversation `session` (set when dino picks the id up front), or
     /// resume it when `restoring`: those before dino's other arguments, and those after.
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>);
+    /// What a person types after its command to continue conversation `session` at a shell's
+    /// prompt (`--resume <id>`, `resume <id>`), before and after their other flags: `session_args`
+    /// without what dino adds for itself.
+    fn resume_args(&self, session: &str) -> (Vec<String>, Vec<String>) {
+        self.session_args(&mut Some(session.to_string()), true)
+    }
     /// What a conversation it resumes keeps as it was saved, whatever its flags say: "model", or a
     /// mode id. Those can't be changed for a session that has one.
     fn resume_keeps(&self) -> &'static [&'static str] {
@@ -324,6 +330,12 @@ pub trait Agent: Sync {
     /// (`\x03`) quits some at their prompt, so it's only sent while a turn runs.
     fn interrupt_keys(&self) -> &'static [u8] {
         b"\x1b"
+    }
+    /// What its terminal takes to quit it at its prompt and leave the terminal as it found it, as
+    /// the user would press it; empty when a SIGTERM does that (Claude Code says how to resume and
+    /// goes). Sent to one typed into a dino shell that dino starts again there.
+    fn quit_keys(&self) -> &'static [u8] {
+        b""
     }
     /// With `StatusSource::Polled`: the model conversation `session` is on, as its store says,
     /// when that was written since a process of it started at `since` (seconds); see `log_model`.

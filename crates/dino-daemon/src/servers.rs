@@ -26,7 +26,7 @@ pub(crate) fn watch(d: &Daemon) {
         let found = if running.is_empty() {
             vec![]
         } else {
-            s.pane.pid().map(|agent| serving(&processes(agent), agent, &running)).unwrap_or_default()
+            s.agent_pid().map(|agent| serving(&processes(agent), agent, &running)).unwrap_or_default()
         };
         let mut servers = s.servers.lock().unwrap();
         if *servers != found {
@@ -101,7 +101,7 @@ fn listening(pids: &[u32]) -> Vec<u16> {
 pub(crate) fn stop(d: &Daemon, s: &Session, task: &str) -> anyhow::Result<()> {
     let command = running_commands(d, s).into_iter().find(|(id, _)| id == task).map(|(_, c)| c);
     let command = command.ok_or_else(|| anyhow::anyhow!("that command isn't running any more"))?;
-    let agent = s.pane.pid().ok_or_else(|| anyhow::anyhow!("its agent isn't running"))?;
+    let agent = s.agent_pid().ok_or_else(|| anyhow::anyhow!("its agent isn't running"))?;
     let tree = processes(agent);
     let shell = shell_for(&tree, agent, &command).ok_or_else(|| anyhow::anyhow!("couldn't find that command's process"))?;
     let pids = subtree(&tree, shell);

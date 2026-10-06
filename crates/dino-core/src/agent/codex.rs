@@ -34,6 +34,84 @@ pub fn open_rollout(pid: u32) -> Option<PathBuf> {
         .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())
 }
 
+/// How long after a Codex starts its server has begun its conversation, at most (seconds): it
+/// begins it as the terminal's Codex connects, in a second or two. Short, so one started a moment
+/// later in the same folder, whose first prompt comes first, isn't taken for it.
+const BEGUN_WITHIN: u64 = 5;
+
+/// The conversation begun in `cwd` as a Codex started there at `since` (seconds since the epoch):
+/// the earliest begun from a second before then to `BEGUN_WITHIN` after, but `claimed`. Its rollout
+/// is written once it has a first prompt: until then, none.
+pub fn begun_at(cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
+    begun_in(&Path::new(&std::env::var_os("HOME")?).join(".codex/sessions"), cwd, since, claimed)
+}
+
+/// `begun_at`, with Codex's rollouts kept in `root` (`~/.codex/sessions`).
+fn begun_in(root: &Path, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
+    let want = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut days: Vec<PathBuf> = [since.saturating_sub(1), since + BEGUN_WITHIN].into_iter().filter_map(|t| day_dir(root, t)).collect();
+    days.dedup();
+    days.iter()
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")))
+        .filter_map(|p| {
+            let id = history::rollout_id(&p)?;
+            let at = begun(&id).filter(|at| at + 1 >= since && *at <= since + BEGUN_WITHIN)?;
+            Some((at, id, p))
+        })
+        .filter(|(_, id, p)| {
+            let meta = history::codex_meta(p);
+            !claimed.contains(id) && !meta.hidden && meta.cwd.is_some_and(|c| std::fs::canonicalize(&c).unwrap_or_else(|_| PathBuf::from(&c)) == want)
+        })
+        .min_by_key(|(at, _, _)| *at)
+        .map(|(_, id, _)| id)
+}
+
+/// Conversation `id`'s rollout, once it's written: looked for in the day's folder its id says it
+/// began on (Codex's ids are UUIDv7s), else everywhere.
+pub fn rollout_path(id: &str) -> Option<PathBuf> {
+    match begun(id) {
+        Some(at) => rollout_in(&Path::new(&std::env::var_os("HOME")?).join(".codex/sessions"), id, at),
+        None => crate::transcript::codex_path(id),
+    }
+}
+
+/// `rollout_path` of conversation `id`, begun at `at`, with Codex's rollouts kept in `root`.
+fn rollout_in(root: &Path, id: &str, at: u64) -> Option<PathBuf> {
+    let suffix = format!("-{id}.jsonl");
+    // Its folder is the day it began on this Mac's clock; a clock changed since, the day either side.
+    let mut days: Vec<PathBuf> = [at, at.saturating_sub(86_400), at + 86_400].into_iter().filter_map(|t| day_dir(root, t)).collect();
+    days.dedup();
+    days.iter()
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+        .map(|e| e.path())
+        .find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix)))
+}
+
+/// When conversation `id` began, in seconds since the epoch: Codex's ids are UUIDv7s, which begin
+/// with that time in milliseconds. `None` for an id of another kind.
+fn begun(id: &str) -> Option<u64> {
+    let hex: String = id.split('-').take(2).collect();
+    (hex.len() == 12 && id.as_bytes().get(14) == Some(&b'7')).then(|| u64::from_str_radix(&hex, 16).ok()).flatten().map(|ms| ms / 1000)
+}
+
+/// The conversation `codex resume <id>` names among `args` (after the program), options before it.
+fn resumed_in(args: &[String]) -> Option<String> {
+    let at = args.iter().position(|a| a == "resume")?;
+    args[at + 1..].iter().find(|a| a.len() == 36 && a.chars().filter(|&c| c == '-').count() == 4 && a.chars().all(|c| c == '-' || c.is_ascii_hexdigit())).cloned()
+}
+
+/// Where Codex keeps the rollouts it began on the day (this Mac's) of `t`, under `root`: `YYYY/MM/DD`.
+fn day_dir(root: &Path, t: u64) -> Option<PathBuf> {
+    // SAFETY: an all-zero `tm` is valid, and localtime_r writes only into it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&(t as libc::time_t), &mut tm) }.is_null() {
+        return None;
+    }
+    Some(root.join(format!("{:04}/{:02}/{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)))
+}
+
 /// Each Codex process's open conversation: when it started, the descriptor, the file.
 static HELD: std::sync::Mutex<Option<std::collections::HashMap<u32, (u64, i32, String)>>> = std::sync::Mutex::new(None);
 
@@ -270,6 +348,24 @@ impl Agent for Codex {
         (before, after)
     }
 
+    // Without the notices dino asks of the sessions it starts: what a person types.
+    fn resume_args(&self, session: &str) -> (Vec<String>, Vec<String>) {
+        (vec!["resume".into()], vec![session.into()])
+    }
+
+    // ⌃C twice at its prompt: the first says how to quit, the second quits, saying how to come
+    // back. A signal leaves its screen behind (Codex 0.160.1 draws in the terminal's own screen).
+    fn quit_keys(&self) -> &'static [u8] {
+        b"\x03\x03"
+    }
+
+    // Codex 0.160.1 runs its conversations in a background server its terminals share (`codex
+    // app-server --managed-daemon`): the process in the terminal has no file of its own open, and
+    // its conversation is the one that server began for it as it started, in its folder.
+    fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
+        begun_at(cwd, since, claimed)
+    }
+
     // `codex fork <id> [prompt]` (Codex 0.160): a new conversation, its rollout naming the original
     // as `forked_from_id`; its id is known once the rollout is open. Started anywhere but the
     // original's folder it asks which folder to work in, unless told with `-C`.
@@ -394,7 +490,13 @@ impl Agent for Codex {
             }
         }
         s.cwd = found::run("lsof", &["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]).and_then(|t| t.lines().find_map(|l| l.strip_prefix('n').map(String::from)));
-        s.args = self.portable_flags(&args());
+        let args = args();
+        // Its conversations in Codex's shared server (0.160.1), it has no rollout open: one it
+        // resumes is the one it was told.
+        if s.session_id.is_empty() {
+            s.session_id = resumed_in(&args).unwrap_or_default();
+        }
+        s.args = self.portable_flags(&args);
         Some(s)
     }
 
@@ -474,5 +576,62 @@ impl Agent for Codex {
 
     fn account_vars(&self) -> &'static [&'static str] {
         &["CODEX_HOME", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Codex 0.160.1's TUI holds no file of its conversation open: it's the one Codex's shared
+    /// server began for it as it started, in its folder, by the time its UUIDv7 id starts with
+    /// (its rollout is written once it has a first prompt). One begun later, in another folder, or
+    /// that another session has isn't it.
+    #[test]
+    fn its_conversation_is_the_one_begun_as_it_started_in_its_folder() {
+        let root = std::env::temp_dir().join(format!("dino-codex-begun-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (here, there, sessions) = (root.join("proj"), root.join("other"), root.join("sessions"));
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::create_dir_all(&there).unwrap();
+        let since: u64 = 1_791_318_223;
+        let id = |at_ms: u64, tail: &str| format!("{:08x}-{:04x}-7{tail}", at_ms >> 16, at_ms & 0xffff);
+        let write = |id: &str, cwd: &Path| {
+            let day = day_dir(&sessions, since).unwrap();
+            std::fs::create_dir_all(&day).unwrap();
+            let meta = format!(r#"{{"timestamp":"2026-10-06T20:23:43.400Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}","originator":"codex-tui","cli_version":"0.160.1","source":"vscode"}}}}"#, cwd.display());
+            std::fs::write(day.join(format!("rollout-2026-10-06T13-23-43-{id}.jsonl")), meta + "\n").unwrap();
+        };
+        let its = id(since * 1000 + 600, "cd2-b4cb-58e3cc582ab7");
+        let later = id((since + 30) * 1000, "cd2-b4cb-000000000001");
+        let elsewhere = id(since * 1000 + 300, "cd2-b4cb-000000000002");
+        let taken = id(since * 1000 - 400, "cd2-b4cb-000000000003");
+        write(&its, &here);
+        write(&later, &here);
+        write(&elsewhere, &there);
+        write(&taken, &here);
+        assert_eq!(begun(&its), Some(since));
+        assert_eq!(begun("8b0a3c52-29a1-4e37-9a1c-5d1a1f1b2c3d"), None, "not a UUIDv7");
+        assert_eq!(begun_in(&sessions, &here, since, std::slice::from_ref(&taken)).as_deref(), Some(its.as_str()));
+        assert_eq!(begun_in(&sessions, &here, since, &[taken.clone(), its.clone()]), None, "the later one began too long after it started");
+        assert_eq!(begun_in(&sessions, &there, since + 1, &[]).as_deref(), Some(elsewhere.as_str()), "a second after: the other folder's");
+        // Found again by its id, in the day's folder it says it began on.
+        let found = rollout_in(&sessions, &its, begun(&its).unwrap()).unwrap();
+        assert!(found.starts_with(day_dir(&sessions, since).unwrap()) && found.to_string_lossy().ends_with(&format!("{its}.jsonl")));
+        assert_eq!(rollout_in(&sessions, &id(since * 1000, "cd2-b4cb-0000000000ff"), since), None, "not written yet");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_resumed_conversation_is_the_one_it_was_told() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let id = "01a112e2-c11f-7cd2-b4cb-58e3cc582ab7";
+        assert_eq!(resumed_in(&args(&["resume", "-m", "gpt-5.5", id])).as_deref(), Some(id));
+        assert_eq!(resumed_in(&args(&["-m", "gpt-5.5", "resume", id, "go on"])).as_deref(), Some(id));
+        assert_eq!(resumed_in(&args(&["resume"])), None, "its picker");
+        assert_eq!(resumed_in(&args(&["fork", id])), None, "a fork is a new conversation");
+        // What a person types to continue it, without the notices dino asks of its own sessions.
+        assert_eq!(Codex.resume_args(id), (vec!["resume".to_string()], vec![id.to_string()]));
+        assert_eq!(Codex.quit_keys(), b"\x03\x03");
     }
 }

@@ -385,10 +385,8 @@ struct PaneHeader: View {
             StatusDot(status: status)
             Text(session.display).font(.system(.callout, design: .monospaced).weight(.semibold))
                 .foregroundStyle(focused ? Brand.green : .secondary)
-            if let f = session.inside { AgentBadge(agent: f.agent) }
-            if session.label == nil, let t = session.inside?.title ?? session.title, DinoModel.undecorated(t) != session.display { Text(t).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
+            if session.label == nil, let t = session.title, DinoModel.undecorated(t) != session.display { Text(t).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
             Spacer(minLength: 4)
-            if let f = session.inside, f.continuable { TakeOverButton(session: session, found: f) }
             Text(status.label).font(.caption).foregroundStyle(status.color)
             if zoomed {
                 Text(split.panes.count == 2 ? "1 more pane" : "\(split.panes.count - 1) more panes").font(.caption).foregroundStyle(.secondary)
@@ -501,7 +499,7 @@ struct SessionMenu: View {
             .disabled(session.exited)
             .help("Show it under Needs you until you look at it again")
         Button("Rename…") { model.renaming = Renaming(id: session.id, place: .sidebar) }
-        if session.agent_id != "shell" {
+        if session.agent != "shell" {
             Button("Fork Session…") { model.forking = session }
                 .disabled(!model.canFork(session))
                 .help(model.whyNoFork(session) ?? "Fork (⌥⌘B): start a new session with a copy of this conversation. The original doesn't change.")
@@ -650,11 +648,11 @@ extension DinoModel {
         dropTab(s.id, archiving: true)
     }
 
-    /// What a tab is called: a shell by its folder, as in Ghostty, or by the agent run in it.
+    /// What a tab is called: a shell by its folder, as in Ghostty; one running an agent typed
+    /// there as any agent's session is (see `display`).
     func tabName(_ s: SessionInfo) -> String {
-        guard s.label == nil, s.agent_id == "shell" else { return s.display }
+        guard s.label == nil, s.agent_id == "shell", s.inside == nil else { return s.display }
         if let t = s.tmux { return t.label }
-        if let f = s.inside { return f.title.isEmpty ? launcherLabel(f.agent) : f.title }
         return s.here.map { URL(fileURLWithPath: $0).lastPathComponent } ?? s.display
     }
 }

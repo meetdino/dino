@@ -1,14 +1,16 @@
 //! Codex's own record of where it is, read without adding anything to Codex: the rollout it
 //! writes each turn to (`~/.codex/sessions/…/rollout-<time>-<id>.jsonl`), named exactly by the
 //! file its process has open, and the notices (OSC 9) it puts on its terminal when it waits on
-//! the user. Both hold with routing off, when no model call passes through dino.
+//! the user. Both hold with routing off, when no model call passes through dino. Codex 0.160.1
+//! runs its conversations in a background server its terminals share, and the process in the
+//! terminal has no rollout open: its rollout is then the one of the conversation dino knows it's on,
+//! else the one begun for it as it started (see `Agent::new_conversation`).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use dino_core::agent::codex::open_rollout;
-use dino_core::agent::agent;
 use dino_core::history;
 use dino_proxy::Activity;
 
@@ -50,22 +52,42 @@ pub(crate) struct Rollout {
     pub(crate) title: Option<String>,
 }
 
-/// Look at every Codex session on this Mac: which conversation it's on, and where its turn is.
+/// Look at every Codex session on this Mac (a shell's typed there among them): which conversation
+/// it's on, and where its turn is.
 pub(crate) fn watch(d: &Daemon) {
     let sessions: Vec<_> = d.sessions.lock().unwrap().iter().filter(|s| super::watched(s) && !s.pane.is_exited()).cloned().collect();
+    let claimed: Vec<(String, String)> = sessions.iter().filter_map(|s| Some((s.id.clone(), s.agent_session.lock().unwrap().clone()?))).collect();
     for s in sessions {
+        let others: Vec<String> = claimed.iter().filter(|(id, _)| *id != s.id).map(|(_, c)| c.clone()).collect();
         // Another conversation: followed once its rollout's lock is let go (a fork made in Codex
         // starts a session for the original).
-        if let Some((known, now)) = track(d, &s) {
+        if let Some((known, now)) = track(d, &s, &others) {
             super::fork::moved(d, &s, known, now);
         }
     }
 }
 
+/// The rollout Codex process `pid` of session `s` is on: the one it has open, else (its
+/// conversations in Codex's shared server) the one of the conversation dino knows it's on, or
+/// the one begun for it as it started in its folder, but `claimed`. Only a rollout it has open says
+/// it moved to another.
+fn rollout_of(a: &dyn dino_core::agent::Agent, s: &Session, pid: u32, followed: bool, claimed: &[String]) -> Option<PathBuf> {
+    if let Some(open) = open_rollout(pid) {
+        return Some(open);
+    }
+    if followed {
+        return None;
+    }
+    let known = s.agent_session.lock().unwrap().clone();
+    let id = known.or_else(|| a.new_conversation(&s.agent_cwd(), dino_core::procinfo::started(pid)?, claimed))?;
+    dino_core::agent::codex::rollout_path(&id)
+}
+
 /// The conversation it was on and the one it's on now, when it has moved to another.
-fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
+fn track(d: &Daemon, s: &Session, claimed: &[String]) -> Option<(Option<String>, String)> {
     let mut moved = None;
-    let a = agent(&s.agent_id)?;
+    let a = s.adapter()?;
+    let pid = s.agent_pid()?;
     // The model it says it's on, as of the lines read now.
     let mut model = None;
     let mut r = s.rollout.lock().unwrap();
@@ -73,7 +95,8 @@ fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
     let relook = r.path.is_none() || r.looked.is_none_or(|t| t.elapsed() >= RELOOK);
     if relook {
         r.looked = Some(Instant::now());
-        if let Some(path) = s.pane.pid().and_then(open_rollout).filter(|p| r.path.as_ref() != Some(p)) {
+        let followed = r.path.is_some();
+        if let Some(path) = rollout_of(a, s, pid, followed, claimed).filter(|p| r.path.as_ref() != Some(p)) {
             // Its first prompt, or another conversation: pick up where that one is.
             let known = s.agent_session.lock().unwrap().clone();
             moved = history::rollout_id(&path).filter(|now| known.as_ref() != Some(now)).map(|now| (known, now));
@@ -82,7 +105,7 @@ fn track(d: &Daemon, s: &Session) -> Option<(Option<String>, String)> {
             // One begun since it started (its first prompt, `/new`, a fork) says what it's been
             // on so far: a `/model` before that first prompt included. One it resumed says what an
             // earlier run was on.
-            if s.pane.pid().and_then(dino_core::procinfo::started).is_some_and(|since| born(&path) + 1 >= since) {
+            if dino_core::procinfo::started(pid).is_some_and(|since| born(&path) + 1 >= since) {
                 let mut from = r.offset.saturating_sub(MODEL_PEEK);
                 model = new_events(&path, &mut from).iter().filter_map(|v| a.log_model(v)).last();
             }

@@ -114,8 +114,9 @@ fn agents(d: &Daemon) -> (usize, bool) {
     let mut open = false;
     for s in sessions.iter().filter(|s| !s.pane.is_exited()) {
         let st = crate::stats(d, s);
-        if s.agent_id == "shell" {
-            // Only an agent reporting from the shell says it's working.
+        // An agent typed into a shell is the shell's agent (see `typed`); otherwise only hooks
+        // reporting from the shell say it's working.
+        if s.agent_id == "shell" && s.typed().is_none() {
             working += usize::from(st.activity == Some(Activity::Working));
             continue;
         }
