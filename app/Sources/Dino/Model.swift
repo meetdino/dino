@@ -439,7 +439,9 @@ final class DinoModel: ObservableObject {
             guard let prev = sessions.first(where: { $0.id == s.id }) else { continue }
             // Its route is spent and a fallback took over: said once, as it does.
             if let f = s.fallback, prev.fallback == nil {
-                if f.isAccount {
+                if f.isModel {
+                    Notifier.post(session: s, title: "\(s.display) switched to \(f.model)", body: "\(f.name) rejects \(f.from) for your account: \(f.said)")
+                } else if f.isAccount {
                     Notifier.post(session: s, title: "\(s.display) switched to \(f.name)", body: "\(f.why). \(f.name) answers until then.")
                 } else {
                     Notifier.post(session: s, title: "\(s.display) switched to \(f.name)", body: "\(f.why). \(f.name) answers with \(f.model) until then.")

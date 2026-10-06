@@ -275,14 +275,18 @@ struct FallbackChip: View {
     }
 
     static func detail(_ f: FallbackInfo, _ usage: [RouteUsage]) -> String {
-        var lines = ["\(f.from) said: \(f.said)", "Answering: \(f.name) · \(f.model), since \(Clock.short(f.since))"]
+        var lines = ["\(f.isModel ? f.name : f.from) said: \(f.said)", "Answering: \(f.name) · \(f.model), since \(Clock.short(f.since))"]
         if let r = f.retry_at {
             lines.append("Switches back to \(f.from) at the first turn after \(Clock.short(r))")
         }
         if !usage.isEmpty {
             lines.append(usage.map { "\($0.name): ↑\(roundTokens($0.input_tokens)) ↓\(roundTokens($0.output_tokens))" }.joined(separator: " · "))
         }
-        lines.append(f.isAccount ? "Manage accounts in Settings → Agents → Claude Code Accounts" : "Set fallbacks in Settings → Agents")
+        if f.isModel {
+            lines.append("dino asks for \(f.from) again within the hour")
+        } else {
+            lines.append(f.isAccount ? "Manage accounts in Settings → Agents → Claude Code Accounts" : "Set fallbacks in Settings → Agents")
+        }
         return lines.joined(separator: "\n")
     }
 }
