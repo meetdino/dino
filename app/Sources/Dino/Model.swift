@@ -1263,12 +1263,9 @@ final class DinoModel: ObservableObject {
 
     // MARK: Automations
 
-    /// A new automation as the editor opens it: daily at 9 in the current folder, with the first agent.
+    /// A new automation: the editor opens on its templates, for the current folder and first agent.
     func newTask() {
-        var t = ScheduledTask()
-        t.cwd = folder.path
-        t.launcher = launchers.first { $0.agent_id != "shell" }?.short ?? launchers.first?.short ?? ""
-        editingTask = t
+        editingTask = blankTask()
     }
 
     /// The editor, with a copy of `task` to save as a new one.
@@ -1303,6 +1300,7 @@ final class DinoModel: ObservableObject {
         switch tr.on {
         case "schedule": return t.frequency.label
         case "pr_opened": return "PR opened in \(repo)"
+        case "pr_merged": return "PR merged in \(repo)"
         case "review_requested": return tr.repo.isEmpty ? "Your review requested" : "Your review requested in \(repo)"
         case "ci_failed": return tr.branch.isEmpty ? (tr.mine ? "CI failed on your PRs" : "CI failed on a PR") + " in \(repo)" : "CI failed on \(tr.branch)"
         case "issue_labeled": return "Labeled \(tr.label) in \(repo)"
@@ -1325,6 +1323,68 @@ final class DinoModel: ObservableObject {
         case "command": return t.action.then_agent == "never" ? t.action.command : "\(t.action.command) → \(launcherLabel(t.launcher))"
         default: return launcherLabel(t.launcher)
         }
+    }
+
+    /// The whole automation in a sentence, as the editor shows it: "When a check fails on your pull
+    /// requests in o/r, start Claude in its own worktree, then comment on the PR and notify you."
+    /// `origin` is the repo an empty one means.
+    func sentence(_ t: ScheduledTask, origin: String? = nil) -> String {
+        let tr = t.trigger
+        let repo = tr.repo.isEmpty ? (origin ?? "this folder's repo") : tr.repo
+        let f = t.frequency
+        let lead: String
+        switch tr.on {
+        case "schedule":
+            switch f.every {
+            case "manual": lead = "When you choose Run Now"
+            case "hourly": lead = String(format: "Every hour at :%02d", f.minute)
+            case "weekdays": lead = "Every weekday at \(f.time)"
+            case "weekly": lead = "Every \(Calendar.current.weekdaySymbols[f.weekday]) at \(f.time)"
+            default: lead = "Every day at \(f.time)"
+            }
+        case "pr_opened": lead = "When a pull request opens in \(repo)"
+        case "pr_merged": lead = "When a pull request merges in \(repo)"
+        case "review_requested": lead = tr.repo.isEmpty ? "When your review is requested in any repo" : "When your review is requested in \(repo)"
+        case "ci_failed":
+            lead = !tr.branch.isEmpty ? "When a check fails on \(tr.branch) in \(repo)" : tr.mine ? "When a check fails on your pull requests in \(repo)" : "When a check fails on a pull request in \(repo)"
+        case "issue_labeled": lead = "When an issue gets the label “\(tr.label.isEmpty ? "…" : tr.label)” in \(repo)"
+        case "comment": lead = "When a comment says “\(tr.phrase.isEmpty ? "…" : tr.phrase)” in \(repo)"
+        case "new_commits": lead = "When new commits land on \(tr.branch.isEmpty ? "the default branch" : tr.branch)"
+        case "behind": lead = "When \(tr.branch.isEmpty ? "the checked-out branch" : tr.branch) falls behind its upstream"
+        case "files":
+            let what = tr.glob.isEmpty ? "files" : tr.glob
+            lead = "When \(what) change\(tr.path.isEmpty ? "" : " in \(tr.path)")"
+        default:
+            let name = scheduled.first { $0.id == tr.after }?.name ?? sessions.first { $0.id == tr.after }.map { tabName($0) }
+            let verb = tr.when == "success" ? "succeeds" : tr.when == "failure" ? "fails" : "finishes"
+            lead = name.map { "When \($0) \(verb)" } ?? "When another run \(verb)"
+        }
+        let agent = launcherLabel(t.launcher)
+        let place = t.worktree ? " in its own worktree" : ""
+        var action: String
+        switch t.action.kind {
+        case "continue": action = "send the prompt to \(sessions.first { $0.id == t.action.session }.map { tabName($0) } ?? "a session")"
+        case "fanout": action = "start \(t.action.agents.map(launcherLabel).joined(separator: ", ")), each in its own worktree"
+        case "command":
+            let cmd = t.action.command.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            action = "run “\(cmd.isEmpty ? "…" : cmd)”"
+            if t.action.then_agent == "failure" { action += " and, if it fails, start \(agent)\(place)" }
+            if t.action.then_agent == "always" { action += ", then start \(agent)\(place)" }
+        default: action = "start \(agent)\(place)"
+        }
+        var only: [String] = []
+        let c = t.conditions
+        if c.if_changed { only.append("the repo changed") }
+        if c.ac_power { only.append("your Mac is plugged in") }
+        if c.lid_open { only.append("the lid is open") }
+        let when = only.isEmpty ? "" : " (only if \(only.joined(separator: " and ")))"
+        var then: [String] = []
+        if t.output.pr_comment {
+            then.append(tr.on == "comment" ? "reply in the thread" : tr.on == "issue_labeled" ? "comment on the issue" : "comment on the PR")
+        }
+        if t.output.notify { then.append("notify you") }
+        let after = then.isEmpty ? "" : ", then \(then.joined(separator: " and "))"
+        return "\(lead), \(action)\(when)\(after)."
     }
 
     /// The sidebar's second line: when, and what.

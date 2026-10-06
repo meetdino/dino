@@ -74,8 +74,10 @@ dino updates itself.
 - **Keeps going at a limit.** When a subscription or plan runs out, the next call goes on to the
   routes you list for that agent (another plan, OpenRouter, a model on your Mac) until the limit
   resets, and the session says so.
-- **Automations.** Start or continue an agent on a schedule, when a PR opens or CI fails, when files
-  change, or after another run. Each run keeps its summary, its diff and its PR.
+- **Automations.** Start or continue an agent on a schedule, when a PR opens or merges, CI fails or
+  someone writes @dino, when files change, or after another run. Start from a ready one (fix CI on
+  my PRs, review new PRs, run tests on save) and adjust it. Each run keeps its summary, its diff
+  and its PR.
 - **Usage across every agent.** Tokens, models, streaks, speed per provider and what each session
   costs your Mac, from dino's proxy and each agent's own records.
 - **Shows when an agent uses your Mac.** When an agent drives your apps or your browser through

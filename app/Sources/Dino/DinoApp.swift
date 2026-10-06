@@ -939,12 +939,10 @@ struct Sidebar: View {
                 }
                 if filter == .all, !narrowed {
                     SidebarHeading(title: "Automations") {
-                        if !model.scheduled.isEmpty {
-                            Button { model.newTask() } label: { Image(systemName: "plus") }
-                                .buttonStyle(.plain)
-                                .help("New Automation")
-                                .accessibilityLabel("New Automation")
-                        }
+                        Button { model.newTask() } label: { Image(systemName: "plus") }
+                            .buttonStyle(.plain)
+                            .help("New Automation")
+                            .accessibilityLabel("New Automation")
                     }
                     ForEach(model.scheduled) { t in
                         ScheduledRow(task: t).tag("task:\(t.id)")
@@ -953,12 +951,24 @@ struct Sidebar: View {
                         }
                     }
                     if model.scheduled.isEmpty {
+                        // A few ready ones to start from, and the rest a click away.
+                        ForEach(AutomationTemplate.suggested, id: \.id) { s in
+                            if let t = AutomationTemplate.named(s.id) {
+                                Button { model.newTask(from: t) } label: {
+                                    Label { Text(s.short).lineLimit(1) } icon: { Image(systemName: t.icon).foregroundStyle(.secondary) }
+                                }
+                                .buttonStyle(.plain)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .help(t.blurb)
+                            }
+                        }
                         Button { model.newTask() } label: {
-                            Label("Automate something…", systemImage: "bolt")
+                            Label { Text("More templates…") } icon: { Image(systemName: "square.grid.2x2").foregroundStyle(.tertiary) }
                         }
                         .buttonStyle(.plain)
                         .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                     }
                 }
             }
