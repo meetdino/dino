@@ -462,6 +462,9 @@ pub enum Response {
         /// Hosts in `~/.ssh/config`, to suggest in Settings → Environments.
         #[serde(default)]
         ssh_config_hosts: Vec<String>,
+        /// Why `settings.toml` doesn't parse: `settings` are then the last good ones, and saving is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     Keys { keys: Vec<crate::settings::KeyInfo> },
     Providers { providers: Vec<crate::providers::ProviderInfo> },

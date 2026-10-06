@@ -422,10 +422,22 @@ impl Settings {
         Self::load_user().managed_by(&Managed::load())
     }
 
-    /// The user's own settings; on first use, what the old `config` file said.
+    /// The user's own settings; on first use, what the old `config` file said. A file that doesn't
+    /// parse stays as it is, and nothing saves over it (see `error`); until it's fixed, the last
+    /// settings read from it here are in effect, or the defaults.
     pub fn load_user() -> Self {
+        static LAST_GOOD: std::sync::Mutex<Option<Settings>> = std::sync::Mutex::new(None);
         match std::fs::read_to_string(Self::path()) {
-            Ok(text) => toml::from_str(&text).unwrap_or_default(),
+            Ok(text) => match toml::from_str::<Self>(&text) {
+                Ok(s) => {
+                    *LAST_GOOD.lock().unwrap() = Some(s.clone());
+                    s
+                }
+                Err(e) => {
+                    log_once(&parse_error(&text, &e));
+                    LAST_GOOD.lock().unwrap().clone().unwrap_or_default()
+                }
+            },
             Err(_) => {
                 let old = std::fs::read_to_string(config_dir().join("config")).unwrap_or_default();
                 let get = |k: &str| old.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=').map(str::trim).map(String::from));
@@ -437,6 +449,12 @@ impl Settings {
                 }
             }
         }
+    }
+
+    /// Why `settings.toml` doesn't parse, when it doesn't: "settings.toml has an error on line 3: …".
+    pub fn error() -> Option<String> {
+        let text = std::fs::read_to_string(Self::path()).ok()?;
+        toml::from_str::<Self>(&text).err().map(|e| parse_error(&text, &e))
     }
 
     /// What `agent_id` starts with where a new session leaves a control open.
@@ -478,6 +496,10 @@ impl Settings {
     }
 
     fn write(&self) -> anyhow::Result<()> {
+        // Saving now would write over the file the user is in the middle of fixing.
+        if let Some(e) = Self::error() {
+            anyhow::bail!("{e}. Fix it, then change the setting again");
+        }
         for k in self.repos.values().flat_map(|r| r.env.keys()) {
             let valid = !k.is_empty() && !k.starts_with(|c: char| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             anyhow::ensure!(valid, "{k:?} isn't a valid environment variable name");
@@ -491,6 +513,21 @@ impl Settings {
         drop(f);
         std::fs::rename(tmp, Self::path())?;
         Ok(())
+    }
+}
+
+fn parse_error(text: &str, e: &toml::de::Error) -> String {
+    let line = e.span().map_or(1, |s| text[..s.start.min(text.len())].matches('\n').count() + 1);
+    format!("settings.toml has an error on line {line}: {}", e.message().trim_end_matches('\n'))
+}
+
+/// Into dinod's log, once per different error: settings are read all the time.
+fn log_once(message: &str) {
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let mut last = LAST.lock().unwrap();
+    if *last != message {
+        eprintln!("dino: {message}; until it's fixed, the settings before it are in effect and nothing saves over it");
+        *last = message.to_string();
     }
 }
 
@@ -745,6 +782,20 @@ mod tests {
         assert_eq!(std::fs::metadata(Settings::path()).unwrap().permissions().mode() & 0o777, 0o600, "may hold secrets");
         s4.repos.insert("/x".into(), Repo { env: [("BAD NAME".to_string(), "v".to_string())].into() });
         assert!(s4.save().is_err());
+
+        // A typo in the file: the last good settings stay in effect, the file stays, and nothing
+        // saves over it.
+        let good = Settings::load_user();
+        let typo = "[routing]\nproxy = false\n\n[policies\nclose_merged = true\n";
+        std::fs::write(Settings::path(), typo).unwrap();
+        assert_eq!(Settings::load_user(), good);
+        let error = Settings::error().unwrap();
+        assert!(error.starts_with("settings.toml has an error on line 4: "), "{error}");
+        let err = Settings::default().save().unwrap_err().to_string();
+        assert!(err.starts_with(&error), "{err}");
+        assert_eq!(std::fs::read_to_string(Settings::path()).unwrap(), typo, "the user's file is untouched");
+        std::fs::write(Settings::path(), "").unwrap();
+        assert!(Settings::error().is_none());
 
         // Managed: wins, locks, and leaves the user's own value in the file.
         let managed = dir.join("managed-settings.json");
