@@ -10,6 +10,7 @@
 
 mod accounts;
 mod catalog;
+pub mod codex;
 pub mod computer;
 pub mod fallback;
 mod free;
@@ -40,14 +41,19 @@ pub const PROVIDERS: &[(&str, &str)] = &[
     ("chatgpt", "https://chatgpt.com/backend-api"),
 ];
 
-/// Where `provider` is: `PROVIDERS`, or for Anthropic what `DINO_ANTHROPIC_UPSTREAM` names (a
-/// stand-in to try a spent Claude account against, e.g. one that answers some calls itself and
-/// passes the rest on).
+/// Where `provider` is: `PROVIDERS`, or for Anthropic and ChatGPT what `DINO_ANTHROPIC_UPSTREAM`
+/// and `DINO_CHATGPT_UPSTREAM` name (a stand-in to try a spent Claude account or a rejected Codex
+/// model against, e.g. one that answers some calls itself and passes the rest on).
 fn provider_upstream(provider: &str) -> Option<&'static str> {
-    static ANTHROPIC: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    if provider == "anthropic"
-        && let Some(u) = ANTHROPIC.get_or_init(|| std::env::var("DINO_ANTHROPIC_UPSTREAM").ok().filter(|u| !u.is_empty())).as_deref()
-    {
+    use std::sync::OnceLock;
+    static ANTHROPIC: OnceLock<Option<String>> = OnceLock::new();
+    static CHATGPT: OnceLock<Option<String>> = OnceLock::new();
+    let (cell, var) = match provider {
+        "anthropic" => (&ANTHROPIC, "DINO_ANTHROPIC_UPSTREAM"),
+        "chatgpt" => (&CHATGPT, "DINO_CHATGPT_UPSTREAM"),
+        _ => return PROVIDERS.iter().find(|(p, _)| *p == provider).map(|&(_, u)| u),
+    };
+    if let Some(u) = cell.get_or_init(|| std::env::var(var).ok().filter(|u| !u.is_empty())).as_deref() {
         return Some(u);
     }
     PROVIDERS.iter().find(|(p, _)| *p == provider).map(|&(_, u)| u)
@@ -154,6 +160,8 @@ pub struct SessionStats {
     pub computer: Option<computer::ComputerUse>,
     /// Answered by a route it fell back to, while the one it uses is spent (see `fallback`).
     pub fallback: Option<fallback::OnFallback>,
+    /// Its Codex model the ChatGPT backend rejects, and the one answering instead (see `codex`).
+    pub substitute: Option<codex::Substitute>,
     /// What each route answered, the agent's own account and the routes it fell back to.
     pub by_route: Vec<RouteUsage>,
     /// The route its model calls go to, by key (see `fallback::route_key`), and its name.
@@ -521,6 +529,7 @@ impl Stats {
         s.waiting_on.clear();
         s.computer = None;
         s.fallback = None;
+        s.substitute = None;
         s.outages = (0, 0);
     }
 
@@ -579,6 +588,7 @@ impl Proxy {
             plans: Arc::default(),
             chains: Arc::default(),
             budget: budget.clone(),
+            substitutes: Arc::default(),
             port,
             secret: secret.clone().into(),
         };
@@ -771,6 +781,8 @@ pub(crate) struct AppState {
     chains: Arc<RwLock<HashMap<String, Arc<fallback::Chain>>>>,
     /// The session token budget; 0 means none.
     budget: Arc<AtomicU64>,
+    /// Codex models the backend rejected, and the one that answered instead.
+    substitutes: Arc<Mutex<HashMap<String, codex::Substitute>>>,
     /// The listener's port and the secret its paths must carry (see `admitted`).
     port: u16,
     secret: Arc<str>,
@@ -899,11 +911,28 @@ async fn forward(
     };
     let requested = model_of(&body);
     // The model the request names as it goes out.
-    let model = requested.clone();
+    let mut model = requested.clone();
     // The ChatGPT plan streams; an agent that asked for one JSON answer gets it put together.
     let collect = provider == siwc::PROVIDER && is_model_call && !siwc::wants_stream(&body);
     if provider == siwc::PROVIDER && is_model_call && let Some(b) = siwc::shape(&body) {
         body = Bytes::from(b);
+    }
+    // A Codex model the backend rejected lately: straight to the one that answered instead, and
+    // the session says so. Choosing another model the account lists clears that.
+    if provider == "chatgpt" && is_model_call {
+        let sub = requested.as_ref().and_then(|m| codex::remembered(&mut st.substitutes.lock().unwrap(), m));
+        if let Some(sub) = sub
+            && let Some(b) = codex::with_model(&body, &sub.using)
+        {
+            body = b;
+            model = Some(sub.using.clone());
+            st.stats.update(&session, |s| s.substitute = Some(sub));
+        } else if let Some(m) = &requested
+            && st.stats.sessions.lock().unwrap().get(&session).is_some_and(|s| s.substitute.is_some())
+            && codex::listed(m)
+        {
+            st.stats.update(&session, |s| s.substitute = None);
+        }
     }
     // The route this model call is for, as fallbacks know it (see `fallback`).
     let primary = is_model_call.then(|| {
@@ -1044,7 +1073,7 @@ async fn forward(
         }
     };
 
-    // A failed model call is a small JSON body: read it to say why.
+    // A failed model call is a small JSON body: read it to say why, and for Codex maybe retry another model.
     if is_model_call && !resp.status().is_success() {
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -1055,6 +1084,27 @@ async fn forward(
             Err(e) => return upstream_error(e),
         };
         resp = 'retry: {
+            if provider == "chatgpt" && status == StatusCode::NOT_FOUND && codex::model_not_found(&text) {
+                let rejected = requested.clone().unwrap_or_default();
+                let sent = model.clone().unwrap_or_default();
+                for using in codex::fallbacks(&[&rejected, &sent]) {
+                    let Some(retry) = codex::with_model(&body, &using) else { continue };
+                    match send(retry, None).await {
+                        Ok(r) if r.status().is_success() => {
+                            log(format_args!("{session} chatgpt: {rejected} rejected, using {using}"));
+                            let sub = codex::Substitute { rejected: rejected.clone(), using: using.clone(), said: error_message(&text), since: fallback::now() };
+                            st.substitutes.lock().unwrap().insert(rejected, sub.clone());
+                            st.stats.update(&session, |s| {
+                                s.last_model = Some(using);
+                                s.substitute = Some(sub);
+                            });
+                            break 'retry r;
+                        }
+                        Ok(r) => log(format_args!("{session} chatgpt: fallback {using} -> {}", r.status())),
+                        Err(e) => return upstream_error(e),
+                    }
+                }
+            }
             // The account that signed it is spent: its own, when another answered and its own
             // isn't known spent, then the user's other Claude accounts in order, until one answers.
             if !accounts.is_empty()
@@ -2448,6 +2498,61 @@ mod tests {
         let quota = proxy.stats.quotas.lock().unwrap().get("anthropic").cloned().expect("windows");
         let names: Vec<&str> = quota.windows.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["5h", "7d"], "only windows with a reset");
+    }
+
+    /// ChatGPT rejects a Codex model the account lists: the next one it lists answers, the session
+    /// says so, and later calls go straight to it. Choosing another listed model clears the note.
+    #[test]
+    fn a_rejected_codex_model_is_answered_by_the_next_and_shown() {
+        use std::io::{Read, Write};
+        let dir = std::env::temp_dir().join(format!("dino-codex-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = dir.join("models_cache.json");
+        std::fs::write(&cache, codex::tests::CACHE_JSON).unwrap();
+        *codex::tests::CACHE.lock().unwrap() = Some(cache);
+        let (base, seen) = stand_in(|req| {
+            if req.contains(r#""model":"gpt-5.5""#) {
+                reply("404 Not Found", "", r#"{"error":{"message":"The model `gpt-5.5` does not exist or you do not have access to it.","type":"invalid_request_error","param":null,"code":"model_not_found"}}"#)
+            } else {
+                reply("200 OK", "", r#"{"id":"r","object":"response","status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}"#)
+            }
+        });
+        let base = base.trim_end_matches("/api/anthropic").to_string();
+        STAND_INS.lock().unwrap().push(("codex-sub".into(), "chatgpt".into(), base));
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let ask = |model: &str| {
+            let path = proxy.base_url("codex-sub", "chatgpt").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/codex/responses";
+            let body = json!({"model": model, "input": [{"role": "user", "content": "hi"}], "stream": false}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer chatgpt-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        let model_of = |req: String| serde_json::from_str::<Value>(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap()["model"].as_str().unwrap().to_string();
+
+        assert!(ask("gpt-5.5").starts_with("HTTP/1.1 200"));
+        assert_eq!([model_of(seen.recv().unwrap()), model_of(seen.recv().unwrap())], ["gpt-5.5", "gpt-5.4"]);
+        let st = proxy.stats.session("codex-sub");
+        let sub = st.substitute.expect("shown on the session");
+        assert_eq!((sub.rejected.as_str(), sub.using.as_str()), ("gpt-5.5", "gpt-5.4"));
+        assert!(sub.said.contains("does not exist"), "{}", sub.said);
+        assert_eq!(st.last_model.as_deref(), Some("gpt-5.4"));
+
+        // Remembered: no second 404 first.
+        assert!(ask("gpt-5.5").starts_with("HTTP/1.1 200"));
+        assert_eq!(model_of(seen.recv().unwrap()), "gpt-5.4");
+        assert!(seen.try_recv().is_err());
+        assert!(proxy.stats.session("codex-sub").substitute.is_some());
+
+        // A hidden model Codex uses on its own leaves the note; another listed one clears it.
+        assert!(ask("codex-auto-review").starts_with("HTTP/1.1 200"));
+        assert!(proxy.stats.session("codex-sub").substitute.is_some());
+        assert!(ask("gpt-5.4-mini").starts_with("HTTP/1.1 200"));
+        assert_eq!(proxy.stats.session("codex-sub").substitute, None);
+        *codex::tests::CACHE.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The real thing, by hand: `DINO_CLAUDE_ACCOUNT_FILE=<file with a setup-token> cargo test -p
