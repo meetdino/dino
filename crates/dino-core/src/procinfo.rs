@@ -132,9 +132,15 @@ pub fn session_of(pid: u32) -> Option<u32> {
     (sid > 0).then_some(sid as u32)
 }
 
-/// A process's parent, like `ps -o ppid`.
+/// A process's parent, like `ps -o ppid`. Another user's process (the root-owned `login` that
+/// Terminal, iTerm2 and Ghostty put above the shell) gives no full BSD info, only the short one.
 pub fn parent_of(pid: u32) -> Option<u32> {
-    bsdinfo(pid).map(|i| i.pbi_ppid)
+    bsdinfo(pid).map(|i| i.pbi_ppid).or_else(|| {
+        let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+        let size = size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+        let n = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDT_SHORTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size) };
+        (n == size).then_some(info.pbsi_ppid)
+    })
 }
 
 /// The program a process runs, by its full path (`node` for a Node CLI), like lsof's `txt` entry.
@@ -345,6 +351,12 @@ fn path(v: &libc::vnode_info_path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parent_of_another_users_process() {
+        // launchd is root's: a parent from the short info, as for the `login` above a Terminal shell.
+        assert_eq!(parent_of(1), Some(0));
+    }
 
     #[test]
     fn sees_itself() {
