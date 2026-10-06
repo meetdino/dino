@@ -28,7 +28,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, HeaderName, Response, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode, header};
 use axum::routing::{any, post};
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -330,6 +330,15 @@ pub struct Call {
     pub cost: Option<f64>,
 }
 
+/// A refusal as the provider sent it: given to the agent again when its account is the one back
+/// first (see `Stats::refusals`).
+#[derive(Clone, Debug)]
+struct Refusal {
+    status: StatusCode,
+    headers: HeaderMap,
+    text: Bytes,
+}
+
 /// Calls kept for dinod at most; past that (dinod not taking them) the newest are dropped.
 const MAX_CALLS: usize = 100_000;
 
@@ -351,6 +360,9 @@ pub struct Stats {
     /// Routes found spent (a window, a balance) or down, by key (see `fallback::route_key`),
     /// until they're tried again.
     pub limited: Mutex<fallback::LimitedRoutes>,
+    /// Each Claude account's last subscription-limit refusal, by key (see `accounts::key`): with
+    /// every account spent, the agent is given the one of the account back first.
+    refusals: Mutex<HashMap<String, Refusal>>,
     /// Model calls not yet taken by dinod for usage statistics.
     calls: Mutex<Vec<Call>>,
 }
@@ -469,6 +481,23 @@ impl Stats {
     /// Every route found spent or down, whether or not it's time to try it again.
     pub fn limited_routes(&self) -> Vec<(String, fallback::Limited)> {
         self.limited.lock().unwrap().iter().map(|(k, l)| (k.clone(), l.clone())).collect()
+    }
+
+    /// Of the accounts `keys`, when every one is spent: the one back first, and the refusal it
+    /// last gave, its `retry-after` counted down to now. `None` while any isn't spent.
+    fn first_back(&self, keys: &[String]) -> Option<(String, Refusal)> {
+        let mut spent = vec![];
+        for k in keys {
+            let l = self.limited(k)?;
+            spent.push((l.resets_at.unwrap_or(l.retry_at), k));
+        }
+        let (at, key) = spent.into_iter().min()?;
+        let mut r = self.refusals.lock().unwrap().get(key)?.clone();
+        if r.headers.contains_key("retry-after") {
+            let left = at.saturating_sub(fallback::now()).max(1);
+            r.headers.insert("retry-after", HeaderValue::from(left));
+        }
+        Some((key.clone(), r))
     }
 
     /// Route `key` (`name`) said it's spent.
@@ -1100,6 +1129,8 @@ async fn forward(
             Ok(t) => t,
             Err(e) => return upstream_error(e),
         };
+        // With every Claude account spent, the refusal of the one back first (see below).
+        let mut first_back: Option<Refusal> = None;
         resp = 'retry: {
             if provider == "chatgpt" && status == StatusCode::NOT_FOUND && codex::model_not_found(&text) {
                 let rejected = requested.clone().unwrap_or_default();
@@ -1135,6 +1166,7 @@ async fn forward(
                 };
                 let (key, name) = signer(current);
                 st.stats.mark_limited(&key, &name, &t);
+                st.stats.refusals.lock().unwrap().insert(key.clone(), Refusal { status, headers: headers.clone(), text: text.clone() });
                 record_quota(&st.stats, &quota_key(&provider, account.as_ref()), &headers);
                 let own = (current.is_some() && st.stats.limited(&p.key).is_none()).then_some(None);
                 let others = accounts.iter().filter(|(n, _)| Some(*n) != current && spare(*n)).map(Some);
@@ -1153,13 +1185,20 @@ async fn forward(
                             let t2 = read_capped(r, MAX_BODY).await.unwrap_or_default();
                             log(format_args!("{session} {next_name} -> {s2}"));
                             record_quota(&st.stats, &quota_key(&provider, next), &h2);
-                            if let Some(t2) = fallback::classify(s2.as_u16(), &h2, &t2) {
-                                st.stats.mark_limited(&next_key, &next_name, &t2);
+                            if let Some(tr) = fallback::classify(s2.as_u16(), &h2, &t2) {
+                                st.stats.mark_limited(&next_key, &next_name, &tr);
+                                if tr.kind == fallback::Kind::Quota {
+                                    st.stats.refusals.lock().unwrap().insert(next_key, Refusal { status: s2, headers: h2, text: t2 });
+                                }
                             }
                         }
                         Err(e) => log(format_args!("{session} {next_name}: {}", reason(&e))),
                     }
                 }
+                // Every account is spent: the agent waits for the one back first, not for the
+                // last one asked (Claude Code says when it goes on from the refusal it gets).
+                let keys: Vec<String> = std::iter::once(p.key.clone()).chain(accounts.iter().map(|(n, _)| key_of(*n))).collect();
+                first_back = st.stats.first_back(&keys).filter(|(k, _)| *k != key).map(|(_, r)| r);
             }
             log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
             // Each Claude account's windows are its own: kept by the account that signed the call.
@@ -1219,6 +1258,13 @@ async fn forward(
                 s.call_failed(msg);
             });
             drop(guard);
+            let (status, headers, text) = match first_back {
+                Some(r) => {
+                    log(format_args!("{session} every Claude account is spent: passing on the refusal of the one back first"));
+                    (r.status, r.headers, r.text)
+                }
+                None => (status, headers, text),
+            };
             let mut builder = Response::builder().status(status.as_u16());
             for (name, value) in headers.iter().filter(|(n, _)| !hop_by_hop(n)) {
                 builder = builder.header(name, value);
@@ -2489,6 +2535,68 @@ mod tests {
         send("acct-api", "sk-ant-api03-a-key");
         assert_eq!(auth_of(&from.recv_timeout(wait()).unwrap()), "bearer sk-ant-api03-a-key");
         assert!(from.recv_timeout(std::time::Duration::from_millis(300)).is_err());
+    }
+
+    /// Every Claude account spent: the agent is given the refusal of the account back first, not
+    /// that of the last one asked, so it waits only as long as it has to.
+    #[test]
+    fn with_every_account_spent_the_agent_waits_for_the_first_back() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicBool;
+        let two_spent = Arc::new(AtomicBool::new(false));
+        let t = two_spent.clone();
+        let (own_back, two_back) = (fallback::now() + 1800, fallback::now() + 3 * 3600);
+        let (anthropic, from) = stand_in(move |req| {
+            if req.contains("authorization: bearer sk-ant-oat01-own") {
+                // Its own account says so with a wait too.
+                claude_spent(own_back).replacen("Content-Type", "retry-after: 1800\r\nContent-Type", 1)
+            } else if t.load(Ordering::Relaxed) {
+                claude_spent(two_back)
+            } else {
+                streamed("claude-opus-5-5", "TWO")
+            }
+        });
+        let base = anthropic.trim_end_matches("/api/anthropic").to_string();
+        STAND_INS.lock().unwrap().push(("allspent".into(), "anthropic".into(), base));
+        let keys = HashMap::from([("CLAUDE_ACCOUNT_2".to_string(), "sk-ant-oat01-two".to_string())]);
+        let proxy = Proxy::start(keys).unwrap();
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let send = || {
+            let path = proxy.base_url("allspent", "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+            let body = json!({"model": "claude-opus-5-5", "max_tokens": 10, "stream": true, "messages": [{"role": "user", "content": "hi"}]}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-own\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out.to_lowercase()
+        };
+        let asked = || {
+            let mut v = vec![];
+            while let Ok(r) = from.recv_timeout(std::time::Duration::from_millis(500)) {
+                v.push(r.lines().find_map(|l| l.strip_prefix("authorization: bearer ")).unwrap_or_default().to_string());
+            }
+            v
+        };
+        let reset = |out: &str| out.lines().find_map(|l| l.strip_prefix("anthropic-ratelimit-unified-reset: ")).and_then(|v| v.trim().parse::<u64>().ok());
+
+        // Its own account is spent: account 2 answers, and the session stays on it.
+        assert!(send().contains("two"));
+        assert_eq!(asked(), ["sk-ant-oat01-own", "sk-ant-oat01-two"]);
+
+        // Account 2 runs out too, later than its own comes back: asked alone (its own is known
+        // spent), it refuses, and the agent is told its own account's reset, not account 2's.
+        two_spent.store(true, Ordering::Relaxed);
+        let out = send();
+        assert!(out.starts_with("http/1.1 429"), "{out}");
+        assert_eq!(asked(), ["sk-ant-oat01-two"]);
+        assert_eq!(reset(&out), Some(own_back), "{out}");
+        let wait: u64 = out.lines().find_map(|l| l.strip_prefix("retry-after: ")).and_then(|v| v.trim().parse().ok()).unwrap();
+        assert!((1..=1800).contains(&wait), "counted down to now: {wait}");
+
+        // Asked again with every account spent: its own is, and says the same.
+        let out = send();
+        assert_eq!(reset(&out), Some(own_back), "{out}");
+        assert_eq!(asked(), ["sk-ant-oat01-own"]);
     }
 
     /// Claude Code's one-token check as it starts, which Anthropic answers with a bare 429 when
