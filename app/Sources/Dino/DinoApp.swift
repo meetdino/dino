@@ -729,6 +729,9 @@ struct TerminalPane: View {
             .overlay(alignment: .top) { PaneProgressBar(signal: PaneSignals.of(id)) }
             .overlay { PaneBellBorder(signal: PaneSignals.of(id)) }
             .overlay(alignment: .topTrailing) { SecureInputMark(id: id, focused: state.isFocused) }
+            // As Ghostty labels its panes for VoiceOver; the terminal's text is the view's own.
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Terminal pane")
             // Clicking into the other half of a split selects that session.
             .onChange(of: state.isFocused) { _, f in
                 if f {

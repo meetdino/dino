@@ -5,6 +5,7 @@
 //  Created by Lakr233 on 2026/3/16.
 //
 
+import CoreText
 import Foundation
 import GhosttyKit
 
@@ -308,6 +309,31 @@ public final class TerminalSurface {
             offsetStart: out.offset_start,
             offsetLength: out.offset_len
         )
+    }
+
+    // MARK: - Accessibility
+
+    /// All of the terminal's text, scrollback included, as Ghostty's own app reads it for
+    /// VoiceOver.
+    func readScreenText() -> String {
+        guard let s = surface else { return "" }
+        let selection = ghostty_selection_s(
+            top_left: ghostty_point_s(tag: GHOSTTY_POINT_SCREEN, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
+            bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_SCREEN, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: 0, y: 0),
+            rectangle: false
+        )
+        var out = ghostty_text_s()
+        guard ghostty_surface_read_text(s, selection, &out) else { return "" }
+        defer { ghostty_surface_free_text(s, &out) }
+        guard let text = out.text, out.text_len > 0 else { return "" }
+        let bytes = UnsafeBufferPointer(start: text, count: Int(out.text_len)).map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// The font the terminal draws with.
+    func quicklookFont() -> CTFont? {
+        guard let s = surface, let raw = ghostty_surface_quicklook_font(s) else { return nil }
+        return Unmanaged<CTFont>.fromOpaque(raw).takeRetainedValue()
     }
 
     // MARK: - IME
