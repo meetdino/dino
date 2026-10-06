@@ -2686,6 +2686,14 @@ fn finished(d: &Daemon, s: &Session) -> bool {
     idle(d, s) && d.proxy.stats.session(&s.id).waiting() == (0, 0)
 }
 
+/// A terminal title without the spinner or status glyphs an agent puts before its words (Claude
+/// cycles ◐◓◑◒ while it works): no client shows them, and in the state each frame was a change
+/// that woke every client waiting for one.
+fn undecorated(title: &str) -> Option<String> {
+    let t = title.trim_start_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '~' | '/' | '.'))).trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
 fn state(d: &Daemon) -> Response {
     let prs = d.prs.lock().unwrap().clone();
     let previews = d.previews.lock().unwrap().clone();
@@ -2745,7 +2753,7 @@ fn state(d: &Daemon) -> Response {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 agent_id: s.agent_id.clone(),
-                title: label.clone().or_else(|| s.pane.title().and_then(|t| agent(&s.agent_id).map_or(Some(t.clone()), |a| a.shown_title(&t)))),
+                title: label.clone().or_else(|| s.pane.title().and_then(|t| agent(&s.agent_id).map_or(Some(t.clone()), |a| a.shown_title(&t))).and_then(|t| undecorated(&t))),
                 exited: s.pane.is_exited(),
                 exit_code: s.pane.exit_code(),
                 output_ms_ago,
@@ -4729,6 +4737,15 @@ mod tests {
     fn chatgpt_refresh_backs_off() {
         let secs: Vec<u64> = (0..8).map(|n| refresh_wait(n).as_secs()).collect();
         assert_eq!(secs, [30, 60, 120, 240, 480, 900, 900, 900]);
+    }
+
+    #[test]
+    fn titles_leave_the_spinner_out() {
+        assert_eq!(undecorated("◐ Pelican essay").as_deref(), Some("Pelican essay"));
+        assert_eq!(undecorated("⠂ Pelican essay").as_deref(), Some("Pelican essay"));
+        assert_eq!(undecorated("✳"), None);
+        assert_eq!(undecorated("~/src/dino").as_deref(), Some("~/src/dino"));
+        assert_eq!(undecorated("2 tasks").as_deref(), Some("2 tasks"));
     }
 
     fn wait_for(what: &str, mut done: impl FnMut() -> bool) {

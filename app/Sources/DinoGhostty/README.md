@@ -46,6 +46,11 @@ models. Changes from upstream:
   nothing on the Mac.
 - `TerminalController.reapplyConfig(to:)`: Ghostty's soft `reload_config`, the loaded config given
   again to a surface or the app, so a `light:…,dark:…` theme follows each surface's light or dark.
+- A title change costs no redraw: `TerminalViewState.title` isn't `@Published` (nothing in dino
+  shows it, and an agent's spinner changes it every second or so), and a wakeup only ticks the app,
+  as Ghostty's own app does (`TerminalSurfaceCoordinator.rebuildIfReady`). Upstream also drew the
+  pane in view on the main thread at every wakeup and kept its frame pacer running; Ghostty's
+  renderer thread draws output itself.
 
 To take a newer upstream: copy its `Sources/GhosttyTerminal` over this folder, bump the package's
 version in `app/Package.swift`, and put the changes above back.
