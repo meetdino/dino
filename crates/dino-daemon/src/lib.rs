@@ -1114,6 +1114,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     locked: managed.locked_paths(),
                     locked_from: managed.locked_from(),
                     ssh_config_hosts: ssh::config_hosts(),
+                    error: Settings::error(),
                 }
             }
             Request::SetSettings { settings } => match settings.save() {
