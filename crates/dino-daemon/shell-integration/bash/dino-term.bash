@@ -4,7 +4,7 @@
 #
 # A tmux started here: its server, and so every pane in it, starts with this shell's environment.
 # DINO_SESSION goes for that one command, or every pane of that server would claim to be this dino
-# session. (bash in tmux panes doesn't load dino's integration; zsh does.)
+# session. The shells in its panes start as in any terminal, with none of dino's integration.
 
 if [[ ${TERM-} == xterm-ghostty ]]; then
     declare -F ssh >/dev/null || ssh() { TERM=xterm-256color builtin command ssh "$@"; }

@@ -5,19 +5,17 @@
 # drops it; zsh still calls a function named precmd, so that's the fallback.
 
 typeset -g _dino_zsh_dir=${${(%):-%x}:A:h}
+# What an agent typed here gets from dino (dino-agents.zsh) is this shell's alone: nothing it
+# starts, a tmux server among them, has it in its environment.
+(( ${+DINO_CLAUDE_SETTINGS} )) && typeset -g +x DINO_CLAUDE_SETTINGS
+(( ${+DINO_CLAUDE_BASE_URL} )) && typeset -g +x DINO_CLAUDE_BASE_URL
 builtin source -- "$_dino_zsh_dir/ghostty.zshenv"
 
-if [[ -n ${TMUX-} ]]; then
-    # A pane of a tmux started from a dino shell (see dino-tmux-start.zsh): the marks again, wrapped
-    # so they reach dino through tmux. No AI line: this pane may be shown in any terminal.
-    _dino_late_init() {
-        precmd_functions=(${precmd_functions:#_dino_late_init})
-        builtin unfunction _dino_late_init
-        builtin source -- "$_dino_zsh_dir/dino-tmux.zsh"
-    }
-else
-    # The AI line loads at the first prompt, after the user's .zshrc, so its keys win; so does
-    # what passes this integration on to a tmux started here.
+# The AI line loads at the first prompt, after the user's .zshrc, so its keys win. Nothing of
+# dino's in a pane of tmux: a server a dino shell started while dino still handed tmux this folder
+# as ZDOTDIR keeps it for its panes, and what runs in tmux is tmux's (a .zshrc can load
+# dino-tmux.zsh there).
+if [[ -z ${TMUX-} ]]; then
     _dino_late_init() {
         precmd_functions=(${precmd_functions:#_dino_late_init})
         builtin unfunction _dino_late_init
@@ -26,8 +24,8 @@ else
         builtin source -- "$_dino_zsh_dir/dino-term.zsh"
         builtin source -- "$_dino_zsh_dir/dino-agents.zsh"
     }
+    [[ -o interactive ]] && precmd_functions+=(_dino_late_init)
 fi
-[[ -o interactive ]] && precmd_functions+=(_dino_late_init)
 
 if [[ -o interactive ]] && (( ! ${+functions[precmd]} )); then
     precmd() {
