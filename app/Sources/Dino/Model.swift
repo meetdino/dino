@@ -60,6 +60,8 @@ final class DinoModel: ObservableObject {
     @Published var quotas: [QuotaInfo] = []
     /// Agents at their limit, and what new sessions start with meanwhile (Settings → Agents).
     @Published var limits: [AgentLimit] = []
+    /// Builds dinod found running for no session as it started (Leftovers.swift).
+    @Published var leftovers: [Leftover] = []
     /// Kept awake with the lid closed, why sleep came back last, and what keeps the Mac awake; nil
     /// from an older dinod. Views observe `PowerState` for it (see there).
     var power: PowerInfo? { PowerState.shared.info }
@@ -311,6 +313,8 @@ final class DinoModel: ObservableObject {
                     self.applyPower(resp.power)
                     let limits = resp.limits ?? []
                     if limits != self.limits { self.limits = limits }
+                    let leftovers = resp.leftovers ?? []
+                    if leftovers != self.leftovers { self.leftovers = leftovers }
                     self.stateSeen = resp.version
                     if wait != nil {
                         self.poll()

@@ -42,7 +42,9 @@ flowchart LR
 
 How a session starts: the terminal asks dinod for a session. dinod spawns the agent in its own pty,
 with its proxy route, controls and `DINO_SESSION`, and the terminal shows it through
-`dino attach`. The terminal never spawns an agent itself. An agent typed by hand into a dino shell
+`dino attach`. The terminal never spawns an agent itself. Everything a session starts carries its
+tag (`DINO_SESSION_TAG`), so what its agent runs in the background, outside its terminal, is still
+its own: shown under it, and stopped with it (crates/dino-daemon/src/procs.rs). An agent typed by hand into a dino shell
 is a process in that shell, which dinod notices; it can report to dino from the start, or dinod can
 take it over. Agents running elsewhere on the Mac (other terminals, tmux) are found the same way.
 

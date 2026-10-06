@@ -45,6 +45,7 @@ mod lifecycle;
 mod mode;
 mod peers;
 mod preview;
+mod procs;
 mod providers;
 mod schedule;
 mod servers;
@@ -308,6 +309,9 @@ struct Daemon {
     /// Conversations waiting for their turn to end to continue in dino (see `Waiting`), by the
     /// shell's session id (`TakeOver`) or the conversation's (`Adopt`): set to cancel.
     moves: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Builds found running for no session as dinod started (see `procs::settle`), each with
+    /// when its top process started, until they end or are stopped.
+    leftovers: Mutex<Vec<(ipc::Leftover, u64)>>,
 }
 
 /// `dino lid-watchdog <pid>`: see [`lid`].
@@ -332,6 +336,9 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     // other agents included: only the key store's goes out, and only to Claude Code.
     // SAFETY: as above.
     unsafe { std::env::remove_var(claude_token::KEY) };
+    // The session that started dinod (its tag): what dinod starts isn't that session's.
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(procs::TAG) };
     // dino's own wiring, inherited when dinod was started from a dino session (a Claude's Bash tool
     // there): another session's, maybe another dinod's. Shells don't override it, so it would send
     // their programs, and the agents typed there, to that session.
@@ -363,6 +370,17 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     // Before sessions restart, so they get the efforts their models take.
     let mut stamps = CatalogStamps::new();
     read_catalogs(&daemon, &mut stamps, true);
+    // What the sessions before left running, looked at before they come back.
+    let leftovers = {
+        let ids: Vec<String> = saved.iter().map(|s| s.id.clone()).collect();
+        let mut known: Vec<PathBuf> = saved.iter().filter(|s| s.host.is_none()).map(|s| PathBuf::from(&s.cwd)).collect();
+        for w in daemon.worktrees.lock().unwrap().iter() {
+            known.extend([w.path.clone(), w.repo.clone()]);
+        }
+        known.retain(|k| k.is_absolute() && k.parent().is_some());
+        procs::settle(&ids, &known)
+    };
+    *daemon.leftovers.lock().unwrap() = leftovers;
     restore(&daemon, saved);
     lid::start(daemon.clone());
     subtoken::start();
@@ -380,6 +398,12 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
                 save(&d);
                 save_live_screens(&d, false);
                 stats::tick(&d);
+                {
+                    let mut left = d.leftovers.lock().unwrap();
+                    if !left.is_empty() {
+                        left.retain(|(l, started)| dino_core::procinfo::alive(l.pid, *started));
+                    }
+                }
             }
         });
     }
@@ -752,6 +776,7 @@ fn new_daemon(home: PathBuf, proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<
         fallback_seen: Mutex::default(),
         costs: cost::Costs::default(),
         moves: Mutex::default(),
+        leftovers: Mutex::default(),
     });
     // Archived ids stay theirs, so a new session never takes one.
     let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
@@ -1363,6 +1388,18 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(id) => Response::Created { id },
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::StopLeftovers { pids } => {
+                let picked: Vec<(ipc::Leftover, u64)> = {
+                    let mut left = d.leftovers.lock().unwrap();
+                    let (go, stay) = left.drain(..).partition(|(l, _)| pids.is_empty() || pids.contains(&l.pid));
+                    *left = stay;
+                    go
+                };
+                for (l, started) in picked {
+                    procs::stop_leftover(l.pid, started);
+                }
+                Response::Ok
+            }
             Request::Resume { id } => match resume(d, &id) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
@@ -1490,8 +1527,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             },
             Request::SessionCost { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
                 Some(s) if s.host.is_some() => Response::Error { message: format!("{id} runs on {}, so dino can't measure it from this Mac", s.host.as_deref().unwrap_or_default()) },
-                Some(s) => match s.pane.pid().filter(|_| !s.pane.is_exited()) {
-                    Some(pid) => Response::SessionCost { cost: d.costs.measure(&id, pid) },
+                Some(s) => match d.costs.measure(&id, s.pane.pid().filter(|_| !s.pane.is_exited())) {
+                    Some(cost) => Response::SessionCost { cost },
                     None => Response::Error { message: format!("{id} has exited") },
                 },
                 None => Response::Error { message: format!("no session {id}") },
@@ -1998,6 +2035,8 @@ fn local_spec(
     }
     // Which session this is, for `dino mcp` run inside it (added to an agent's config by hand).
     env.insert("DINO_SESSION".into(), id.to_string());
+    // And for dinod: what it runs, wherever it goes, stops with the session (see `procs`).
+    env.insert(procs::TAG.into(), procs::tag(id));
     // What draws it is Ghostty's engine: say so, so programs (tmux among them) use what it can do.
     // Over SSH, `ssh` falls back to xterm-256color (see the shell integration).
     if let Some(dir) = shell::terminfo() {
@@ -2759,7 +2798,8 @@ fn state(d: &Daemon) -> Response {
         })
         .collect();
     let limits = fallbacks::limits(d);
-    Response::State { sessions, quotas, power: Some(d.power_info()), limits, version: None }
+    let leftovers = d.leftovers.lock().unwrap().iter().map(|(l, _)| l.clone()).collect();
+    Response::State { sessions, quotas, power: Some(d.power_info()), limits, leftovers, version: None }
 }
 
 /// Save and stop every session, ready to exit: the next dinod resumes them (`dino stop`).
@@ -2780,9 +2820,16 @@ fn stop_all(d: &Daemon) {
     // Each stopped for sure (see `Pane::kill`), all at once, outside the lock; dinod exits next,
     // and an agent that outlived it would be left running unowned.
     // Closed ones end with them: they weren't saved.
-    let mut sessions: Vec<_> = d.sessions.lock().unwrap().drain(..).collect();
-    sessions.extend(d.closed.lock().unwrap().drain(..).map(|c| c.session));
-    let stopping: Vec<_> = sessions.iter().filter_map(|s| s.pane.kill()).collect();
+    let sessions: Vec<_> = d.sessions.lock().unwrap().drain(..).collect();
+    let closed: Vec<_> = d.closed.lock().unwrap().drain(..).map(|c| c.session).collect();
+    let mut stopping: Vec<_> = sessions.iter().chain(&closed).filter_map(|s| s.pane.kill()).collect();
+    // What they run apart from their terminals: the builds their agents left (they come back
+    // without them), and all of what closed ones left.
+    for (s, builds_only) in sessions.iter().map(|s| (s, true)).chain(closed.iter().map(|s| (s, false))) {
+        if s.host.is_none() {
+            stopping.extend(procs::stop_session(&s.id, builds_only));
+        }
+    }
     for s in d.previews.lock().unwrap().drain(..) {
         s.stop();
     }
@@ -3080,6 +3127,10 @@ fn restart_with(d: &Daemon, id: &str, change: impl FnOnce(&mut SavedSession)) ->
     // Dropping the subscribers ends each client's stream without the exit the dying agent would send.
     s.subscribers.lock().unwrap().clear();
     s.pane.kill();
+    // The builds its agent left in the background: the one taking its place can't see them.
+    if s.host.is_none() {
+        procs::stop_session(id, true);
+    }
     d.proxy.stats.restarted(id);
     change(&mut saved);
     saved.ended = false;
@@ -3691,6 +3742,10 @@ fn end(d: &Daemon, s: &Session) {
         tmux::detach(&v);
     }
     s.pane.kill();
+    // What it started outside its terminal, too.
+    if s.host.is_none() {
+        procs::stop_session(id, false);
+    }
     dino_core::agent::qwen::forget(id);
     forget_session_files(id);
     d.previews.lock().unwrap().retain(|p| {

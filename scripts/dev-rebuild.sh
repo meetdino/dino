@@ -82,6 +82,8 @@ case "${1:-}" in
         root=$(git rev-parse --show-toplevel)
         mkdir -p "$root/app/build"
         unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE   # set for the hook; the build uses git -C
+        # The dino you use, not the work of the session that merged: it isn't stopped with it.
+        unset DINO_SESSION_TAG
         nohup "$0" --build "$root" </dev/null >/dev/null 2>&1 &
         ;;
     *) echo "usage: scripts/dev-rebuild.sh [--sync REV]" >&2; exit 2 ;;
