@@ -363,10 +363,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : "\(count) sessions"
         let alert = NSAlert()
         alert.messageText = "Keep your \(what) running?"
-        let they = count == 1 ? "it" : "they"
         alert.informativeText = (working > 0 ? (count == 1 ? "It's working right now. " : "\(working) \(working == 1 ? "is" : "are") working right now. ") : "")
-            + "If you keep \(count == 1 ? "it" : "them") running, \(they) continue while dino is closed."
-            + " If you stop \(count == 1 ? "it" : "them"), \(they) resume the next time you open dino."
+            + "If you keep \(count == 1 ? "it" : "them") running, \(count == 1 ? "it continues" : "they continue") while dino is closed."
+            + " If you stop \(count == 1 ? "it" : "them"), \(count == 1 ? "it resumes" : "they resume") the next time you open dino."
         alert.addButton(withTitle: "Keep Running")
         alert.addButton(withTitle: count == 1 ? "Stop It" : "Stop All")
         alert.addButton(withTitle: "Cancel")
