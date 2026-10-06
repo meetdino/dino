@@ -40,6 +40,10 @@ models. Changes from upstream:
   that turns on focus reports. Upstream focused the first responder of any window, key or not,
   so a pane in a hidden or background window reported itself focused (and `dino attach`, which
   follows focus to decide a session's size, took it for the one the user was looking at).
+- VoiceOver (`Platform/AppKit/AppTerminalView+Accessibility.swift`, `TerminalSurface.readScreenText`):
+  the view is a text area whose value is the terminal's text, scrollback included, with its
+  selection, lines and font, as Ghostty 1.2+'s `SurfaceView_AppKit` gives them. Upstream exposed
+  nothing on the Mac.
 - `TerminalController.reapplyConfig(to:)`: Ghostty's soft `reload_config`, the loaded config given
   again to a surface or the app, so a `light:…,dark:…` theme follows each surface's light or dark.
 
