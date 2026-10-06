@@ -1,7 +1,7 @@
 #!/bin/sh
 # Keep the dino you use (~/Applications/Dino.app) built from main on this Mac: installs the git
 # hooks that run scripts/dev-rebuild.sh when main moves in the main checkout, which
-# scripts/check.sh --push also fast-forwards from any worktree. Run once, from any checkout.
+# scripts/land.sh also fast-forwards from any worktree. Run once, from any checkout.
 #   scripts/install-hooks.sh            install
 #   scripts/install-hooks.sh --remove   remove
 set -eu
