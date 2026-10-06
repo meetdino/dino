@@ -538,12 +538,13 @@ impl Stats {
     }
 
     /// The agent a shell ran has exited: what its hooks said (its turn, tasks, mode, error) goes
-    /// with it, so the shell is a plain shell again. What it cost stays counted.
-    pub fn agent_left(&self, id: &str) {
+    /// with it, so the shell is a plain shell again. What it cost stays counted. True when its
+    /// hooks had said anything.
+    pub fn agent_left(&self, id: &str) -> bool {
         let mut sessions = self.sessions.lock().unwrap();
-        let Some(s) = sessions.get_mut(id) else { return };
+        let Some(s) = sessions.get_mut(id) else { return false };
         if !s.hooked && s.activity.is_none() {
-            return;
+            return false;
         }
         s.activity = None;
         s.hooked = false;
@@ -561,6 +562,7 @@ impl Stats {
         s.fallback = None;
         s.substitute = None;
         s.outages = (0, 0);
+        true
     }
 
     pub(crate) fn update(&self, id: &str, f: impl FnOnce(&mut SessionStats)) {

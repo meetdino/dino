@@ -145,31 +145,6 @@ pub fn cloud(program: &dyn Fn(&str) -> Option<PathBuf>) -> Vec<FoundSession> {
     crate::agent::all().into_iter().filter_map(|a| Some(a.cloud(&program(a.id())?))).flatten().collect()
 }
 
-/// Every process as (pid, parent, command path).
-fn process_table() -> Vec<(u32, u32, String)> {
-    let text = run("ps", &["-A", "-o", "pid=,ppid=,comm="]).unwrap_or_default();
-    text.lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let pid = it.next()?.parse().ok()?;
-            let ppid = it.next()?.parse().ok()?;
-            Some((pid, ppid, it.collect::<Vec<_>>().join(" ")))
-        })
-        .collect()
-}
-
-/// `root` and everything under it, parents before children.
-fn subtree(table: &[(u32, u32, String)], root: u32) -> Vec<u32> {
-    let mut out = vec![root];
-    let mut i = 0;
-    while i < out.len() && out.len() < 64 {
-        let parent = out[i];
-        out.extend(table.iter().filter(|(pid, ppid, _)| *ppid == parent && *pid != parent).map(|(pid, ..)| *pid));
-        i += 1;
-    }
-    out
-}
-
 /// A Claude transcript's title from its last `max` bytes: the latest `ai-title`, else the last
 /// prompt. Cheap on long conversations, where the title is rewritten as they go.
 pub(crate) fn tail_title(path: &Path, max: u64) -> Option<String> {
@@ -213,21 +188,25 @@ pub(crate) fn by_hand(agent: &str, pid: u32) -> FoundSession {
 /// group. Its session id is empty until the agent has written one; until then (at its trust
 /// prompt, before the first message) it's "starting".
 pub fn inside(fg: u32) -> Option<FoundSession> {
-    let table = process_table();
-    let pids = subtree(&table, fg);
-    for &pid in &pids {
-        let comm = table.iter().find(|(p, ..)| *p == pid).map(|(.., c)| c.as_str()).unwrap_or_default();
-        // Arguments cost a `ps` each, so only for the processes that may need them, and once.
-        let read = std::cell::OnceCell::new();
-        let args = || read.get_or_init(|| args_of(pid)).clone();
-        if let Some(s) = crate::agent::all().into_iter().find_map(|a| a.inside(pid, comm, &args)) {
+    // Each process, parents first, with its command as `ps -o comm` names it (its first argument,
+    // or the kernel's name for one this user can't read) and its arguments: asked of the kernel,
+    // microseconds each. A `ps` of every process cost tens of milliseconds at each new foreground.
+    let procs: Vec<(u32, String, Vec<String>)> = crate::procinfo::tree(fg)
+        .into_iter()
+        .take(64)
+        .map(|(pid, _)| match crate::procinfo::args_and_env(pid) {
+            Some((mut args, _)) if !args.is_empty() => (pid, args.remove(0).trim_end().to_string(), args),
+            _ => (pid, crate::procinfo::name(pid).unwrap_or_default(), vec![]),
+        })
+        .collect();
+    for (pid, comm, args) in &procs {
+        if let Some(s) = crate::agent::all().into_iter().find_map(|a| a.inside(*pid, comm, &|| args.clone())) {
             return Some(s);
         }
     }
-    pids.iter().find_map(|&pid| {
-        let comm = table.iter().find(|(p, ..)| *p == pid).map(|(.., c)| c.as_str())?;
+    procs.iter().find_map(|(pid, comm, _)| {
         let a = crate::agent::all().into_iter().find(|a| a.may_be(comm))?;
-        Some(FoundSession { status: Some("starting".into()), ..by_hand(a.id(), pid) })
+        Some(FoundSession { status: Some("starting".into()), ..by_hand(a.id(), *pid) })
     })
 }
 
@@ -447,11 +426,33 @@ mod tests {
         assert!(!asking("qwen", approval), "an agent dino can't read this way says nothing");
     }
 
+    /// An agent under the foreground (a wrapper's child) is found by its command, asked of the
+    /// kernel: here a stand-in named `amp`, started by a shell that waits for it.
     #[test]
-    fn subtree_walks_children_in_order() {
-        let t: Vec<(u32, u32, String)> = vec![(10, 1, "zsh".into()), (11, 10, "node".into()), (12, 11, "codex".into()), (13, 1, "other".into()), (14, 12, "rg".into())];
-        assert_eq!(subtree(&t, 11), [11, 12, 14]);
-        assert_eq!(subtree(&t, 13), [13]);
+    fn inside_finds_an_agent_under_the_foreground() {
+        let dir = std::env::temp_dir().join(format!("dino-inside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let amp = dir.join("amp");
+        let _ = std::fs::remove_file(&amp);
+        std::os::unix::fs::symlink("/usr/bin/tail", &amp).unwrap();
+        let mut sh = Command::new("/bin/sh").arg("-c").arg(format!("{} -f /dev/null; true", amp.display())).spawn().unwrap();
+        let fg = sh.id();
+        let since = Instant::now();
+        let mut found = None;
+        while found.is_none() && since.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+            found = inside(fg);
+        }
+        for kid in crate::procinfo::children_of(fg) {
+            unsafe { libc::kill(kid as i32, libc::SIGKILL) };
+        }
+        let _ = sh.kill();
+        let _ = sh.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        let f = found.expect("the stand-in is found");
+        assert_eq!(f.agent, "amp");
+        assert_ne!(f.pid, Some(fg), "the shell's child, not the shell");
+        assert_eq!(f.args, ["-f", "/dev/null"], "its arguments, read of the kernel");
     }
 
     #[test]
