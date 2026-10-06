@@ -704,14 +704,17 @@ final class DinoModel: ObservableObject {
     /// Hand every dino shortcut back to the menu, over whatever the user's Ghostty config binds it
     /// to. A shortcut added to a menu belongs here too (not Edit › Find's: those are Ghostty's own
     /// keybinds for the same thing, and stay the user's to change). Ghostty's ⌘K (clear) is ⌥⌘K.
+    /// A punctuation key goes by its name and by its character: Ghostty binds ⌘, (open its config)
+    /// as `super+,`, and an unbind takes away only a binding written the same way.
     static let menuKeys = ((["d", "alt+d", "shift+d", "w", "k", "alt+k", "j", "o", "n", "t", "shift+n", "alt+n", "ctrl+n", "alt+shift+n",
-                             "comma", "shift+backspace", "s", "shift+o", "alt+p", "alt+t", "shift+p", "shift+bracket_left",
-                             "shift+bracket_right", "shift+semicolon", "backslash", "shift+m", "shift+i", "shift+e", "alt+b"]
+                             "comma", ",", "shift+backspace", "s", "shift+o", "alt+p", "alt+t", "shift+p", "shift+bracket_left", "shift+[",
+                             "shift+bracket_right", "shift+]", "shift+semicolon", "shift+;", "backslash", "\\", "shift+m", "shift+i",
+                             "shift+e", "alt+b"]
         + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
         .map { "super+\($0)" }
         // Ctrl+Tab cycles sessions, ⌃` swaps split panes, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F
         // finds sessions.
-        + ["ctrl+tab", "ctrl+shift+tab", "ctrl+backquote", "super+slash", "super+shift+a", "super+shift+f"])
+        + ["ctrl+tab", "ctrl+shift+tab", "ctrl+backquote", "ctrl+`", "super+slash", "super+/", "super+shift+a", "super+shift+f"])
         .map { "keybind = \($0)=unbind" }.joined(separator: "\n")
 
     /// Each pane then takes the light or dark of its own window (the app's look: the Mac's mode or
