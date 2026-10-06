@@ -199,9 +199,12 @@ fi
 
 # The tap: the cask for the app (CLI included) and the formula for the CLI alone, filled in.
 mkdir -p "$DIST/tap/Casks" "$DIST/tap/Formula"
+# A build for one architecture says so, and brew refuses it on other Macs instead of installing a
+# dino that won't open there; a universal build runs on both.
+if [ "$LABEL" = universal ]; then ARCH_LINE=(-e '/@ARCH@/d'); else ARCH_LINE=(-e "s|@ARCH@|$LABEL|g"); fi
 fill() {
     sed -e "s|@VERSION@|$VERSION|g" -e "s|@DMG_SHA256@|$DMG_SHA|g" -e "s|@TAR_SHA256@|$TAR_SHA|g" \
-        -e "s|@RELEASES_REPO@|$RELEASES_REPO|g" -e "s|@LABEL@|$LABEL|g" "$1" > "$2"
+        -e "s|@RELEASES_REPO@|$RELEASES_REPO|g" -e "s|@LABEL@|$LABEL|g" "${ARCH_LINE[@]}" "$1" > "$2"
 }
 fill packaging/homebrew/dino.rb "$DIST/tap/Casks/dino.rb"
 fill packaging/homebrew/dino-cli.rb "$DIST/tap/Formula/dino-cli.rb"
