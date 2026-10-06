@@ -1,9 +1,10 @@
 //! Folder trust for the agents dino starts in its own worktrees.
 //!
 //! Claude asks "Do you trust the files in this folder?" once per project, keyed by path in
-//! `~/.claude.json` (`projects.<path>.hasTrustDialogAccepted`), and a fan-out worktree is a new
-//! path. When the repo it came from is trusted, dino marks the worktree trusted too, and forgets it
-//! when the worktree goes. Codex already carries a repo's trust over to its worktrees.
+//! `~/.claude.json` (`projects.<path>.hasTrustDialogAccepted`). It takes a linked worktree's trust
+//! from its main repo (checked with 2.1.289), as Codex does, but not a trusted folder inside the
+//! repo: for one of those dino marks the same folder in the worktree trusted, and takes that mark
+//! back when the worktree goes.
 
 use serde_json::{Map, Value, json};
 use std::io::Write;
@@ -91,10 +92,20 @@ pub fn claude_trust(dir: &Path) -> anyhow::Result<()> {
     })
 }
 
-/// Drop what Claude keeps for `dir` and the folders in it: for a worktree that is gone.
+/// Take back the trust marked for `dir` and the folders in it, for a worktree that is gone. What
+/// Claude keeps there itself stays; an entry that held only the mark goes with it.
 pub fn claude_forget(dir: &Path) -> anyhow::Result<()> {
     let dirs = spellings(dir);
-    edit(|projects| projects.retain(|k, _| !dirs.iter().any(|d| k == d || k.starts_with(&format!("{d}/")))))
+    edit(|projects| {
+        projects.retain(|k, v| {
+            if !dirs.iter().any(|d| k == d || k.starts_with(&format!("{d}/"))) {
+                return true;
+            }
+            let Some(e) = v.as_object_mut() else { return true };
+            e.remove("hasTrustDialogAccepted");
+            !e.is_empty()
+        })
+    })
 }
 
 fn edit(change: impl Fn(&mut Map<String, Value>)) -> anyhow::Result<()> {
@@ -159,11 +170,21 @@ mod tests {
         assert_eq!(claude_trusted_in(&wt.join("sub"), &wt), Some(PathBuf::from("sub")));
         let text = std::fs::read_to_string(&config).unwrap();
         assert!(text.find("zeta").unwrap() < text.find("alpha").unwrap(), "keeps Claude's key order");
+        // What Claude keeps for the worktree itself is Claude's: forgetting leaves it.
+        edit(|p| {
+            p.insert(real(&wt), json!({"history": [2], "hasTrustDialogAccepted": true}));
+        })
+        .unwrap();
         claude_forget(&wt).unwrap();
         assert_eq!(claude_trusted_in(&wt.join("sub"), &wt), None);
         let v = read(&config).unwrap();
         assert_eq!(v["projects"][real(&repo.join("sub"))]["history"], json!([1]), "other projects untouched");
-        assert_eq!(v["projects"].as_object().unwrap().len(), 2);
+        assert_eq!(v["projects"][real(&wt)], json!({"history": [2]}), "Claude's own entry stays, without the mark");
+        edit(|p| {
+            p.remove(&real(&wt));
+        })
+        .unwrap();
+        assert_eq!(v["projects"].as_object().unwrap().len(), 3);
         assert_eq!(std::fs::metadata(&config).unwrap().permissions().mode() & 0o777, 0o600);
 
         // A worktree removed before it's forgotten: both spellings still go (/tmp is a symlink).

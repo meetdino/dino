@@ -226,7 +226,8 @@ pub struct Policies {
     pub allowed_agents: Vec<String>,
     /// What ⌘N starts; none means Claude Code, or the first allowed agent.
     pub default_agent: Option<String>,
-    /// A fan-out worktree is trusted when its repo is, so Claude doesn't ask again for each one.
+    /// A trusted folder inside a repo is trusted in its worktrees too, so Claude doesn't ask again
+    /// for each one (the repo's own trust carries over by itself).
     pub worktree_trust: bool,
     /// Most tokens (input, cache and output) one routed session may use; 0 means no limit.
     pub session_token_budget: u64,

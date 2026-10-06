@@ -4630,9 +4630,10 @@ fn carried_trust(l: &LauncherInfo, dir: &Path, repo: &Path) -> Option<PathBuf> {
     Settings::load().policies.worktree_trust.then(|| agent(&l.agent_id)?.trusted_in(dir, repo)).flatten()
 }
 
-/// Trust the same folder in worktree `wt`, so the agent starts there without asking again.
+/// Trust the same folder in worktree `wt`, so the agent starts there without asking again. The
+/// repo's own trust needs no carrying: the agents take it into its worktrees themselves.
 fn carry_trust(l: &LauncherInfo, rel: Option<&Path>, wt: &Path) {
-    let (Some(a), Some(rel)) = (agent(&l.agent_id), rel) else { return };
+    let (Some(a), Some(rel)) = (agent(&l.agent_id), rel.filter(|r| !r.as_os_str().is_empty())) else { return };
     if let Err(e) = a.trust(&trust::join(wt, rel)) {
         eprintln!("dinod: couldn't trust {} for {}: {e}", wt.display(), l.label);
     }

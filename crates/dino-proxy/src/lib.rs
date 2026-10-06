@@ -10,7 +10,6 @@
 
 mod accounts;
 mod catalog;
-mod codex;
 pub mod computer;
 pub mod fallback;
 mod free;
@@ -580,7 +579,6 @@ impl Proxy {
             plans: Arc::default(),
             chains: Arc::default(),
             budget: budget.clone(),
-            substitutes: Arc::default(),
             port,
             secret: secret.clone().into(),
         };
@@ -773,8 +771,6 @@ pub(crate) struct AppState {
     chains: Arc<RwLock<HashMap<String, Arc<fallback::Chain>>>>,
     /// The session token budget; 0 means none.
     budget: Arc<AtomicU64>,
-    /// Codex models the backend rejected, and the model that answered instead.
-    substitutes: Arc<Mutex<HashMap<String, String>>>,
     /// The listener's port and the secret its paths must carry (see `admitted`).
     port: u16,
     secret: Arc<str>,
@@ -903,23 +899,12 @@ async fn forward(
     };
     let requested = model_of(&body);
     // The model the request names as it goes out.
-    let mut model = requested.clone();
+    let model = requested.clone();
     // The ChatGPT plan streams; an agent that asked for one JSON answer gets it put together.
     let collect = provider == siwc::PROVIDER && is_model_call && !siwc::wants_stream(&body);
     if provider == siwc::PROVIDER && is_model_call && let Some(b) = siwc::shape(&body) {
         body = Bytes::from(b);
     }
-    // A Codex model the backend already rejected: go straight to the one that answered instead.
-    if provider == "chatgpt" {
-        let sub = requested.as_ref().and_then(|m| st.substitutes.lock().unwrap().get(m).cloned());
-        if let Some(m) = sub
-            && let Some(b) = codex::with_model(&body, &m)
-        {
-            body = b;
-            model = Some(m);
-        }
-    }
-
     // The route this model call is for, as fallbacks know it (see `fallback`).
     let primary = is_model_call.then(|| {
         let (path, name) = match (&coding_plan, &runtime) {
@@ -1059,7 +1044,7 @@ async fn forward(
         }
     };
 
-    // A failed model call is a small JSON body: read it to say why, and for Codex maybe retry another model.
+    // A failed model call is a small JSON body: read it to say why.
     if is_model_call && !resp.status().is_success() {
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -1070,22 +1055,6 @@ async fn forward(
             Err(e) => return upstream_error(e),
         };
         resp = 'retry: {
-            if provider == "chatgpt" && status == StatusCode::NOT_FOUND && codex::model_not_found(&text) {
-                let rejected = requested.clone().unwrap_or_default();
-                for model in codex::fallbacks(&rejected) {
-                    let Some(retry) = codex::with_model(&body, &model) else { continue };
-                    match send(retry, None).await {
-                        Ok(r) if r.status().is_success() => {
-                            log(format_args!("{session} chatgpt: {rejected} rejected, using {model}"));
-                            st.substitutes.lock().unwrap().insert(rejected, model.clone());
-                            st.stats.update(&session, |s| s.last_model = Some(model));
-                            break 'retry r;
-                        }
-                        Ok(r) => log(format_args!("{session} chatgpt: fallback {model} -> {}", r.status())),
-                        Err(e) => return upstream_error(e),
-                    }
-                }
-            }
             // The account that signed it is spent: its own, when another answered and its own
             // isn't known spent, then the user's other Claude accounts in order, until one answers.
             if !accounts.is_empty()
@@ -1138,7 +1107,7 @@ async fn forward(
                     Some(t) => {
                         // A plan's spent window is the plan's state, whoever answers instead.
                         if let Some((id, plan)) = &coding_plan {
-                            st.stats.plan_errors.lock().unwrap().insert(id.clone(), plan::refused(&plan.name, status.as_u16(), &codex::error_message(&text)));
+                            st.stats.plan_errors.lock().unwrap().insert(id.clone(), plan::refused(&plan.name, status.as_u16(), &error_message(&text)));
                         }
                         // Signed by another Claude account, spent too: its own stays as it was
                         // found, or else as that account is.
@@ -1146,7 +1115,7 @@ async fn forward(
                         Some(other.unwrap_or_else(|| st.stats.mark_limited(&p.key, &p.tag.name, &t)))
                     }
                     None if fallback::is_outage(status.as_u16()) && chain.as_ref().is_some_and(|c| c.on_outage) => {
-                        st.stats.outage(&session, &p.key, &p.tag.name, format!("{} {}", status.as_u16(), codex::error_message(&text)))
+                        st.stats.outage(&session, &p.key, &p.tag.name, format!("{} {}", status.as_u16(), error_message(&text)))
                     }
                     None => None,
                 };
@@ -1159,13 +1128,13 @@ async fn forward(
                 }
             }
             let msg = match provider.as_str() {
-                siwc::PROVIDER => siwc::refused(status.as_u16(), &codex::error_message(&text)),
-                local::PROVIDER => runtime.as_ref().map_or_else(String::new, |(id, name, _)| local::refused(id, name, status.as_u16(), &codex::error_message(&text), requested.as_deref())),
-                plan::PROVIDER => coding_plan.as_ref().map_or_else(String::new, |(_, p)| plan::refused(&p.name, status.as_u16(), &codex::error_message(&text))),
-                _ => format!("{} {}", status.as_u16(), codex::error_message(&text)),
+                siwc::PROVIDER => siwc::refused(status.as_u16(), &error_message(&text)),
+                local::PROVIDER => runtime.as_ref().map_or_else(String::new, |(id, name, _)| local::refused(id, name, status.as_u16(), &error_message(&text), requested.as_deref())),
+                plan::PROVIDER => coding_plan.as_ref().map_or_else(String::new, |(_, p)| plan::refused(&p.name, status.as_u16(), &error_message(&text))),
+                _ => format!("{} {}", status.as_u16(), error_message(&text)),
             };
             // The plan's key, balance or limit: the plan's state, not just this call's.
-            let limit = coding_plan.is_some() && plan::limited(status.as_u16(), &codex::error_message(&text)).is_some();
+            let limit = coding_plan.is_some() && plan::limited(status.as_u16(), &error_message(&text)).is_some();
             // A limit is a spent quota, window or balance. Another 429 (a short rate limit, or the
             // one-token check Claude Code makes as it starts, which Anthropic answers with a bare 429
             // when the account has no extra usage) is an error of the call, not the account's limit.
@@ -1438,7 +1407,7 @@ async fn steps(
             }
             let limit = trigger.is_some_and(|t| t.kind != fallback::Kind::Outage) || status == StatusCode::TOO_MANY_REQUESTS;
             st.stats.record_call(Call { duration_ms: Some(ms(step_started.elapsed())), ..call(if limit { CallStatus::Limit } else { CallStatus::Error }) });
-            log(format_args!("{session} fallback {} -> {status}: {}", step.route, codex::error_message(&text)));
+            log(format_args!("{session} fallback {} -> {status}: {}", step.route, error_message(&text)));
             continue;
         }
         record_quota(&st.stats, &step.route, resp.headers());
@@ -2001,6 +1970,17 @@ impl Meter {
             seen.cache_write = seen.cache_write.max(next.cache_write);
         }
     }
+}
+
+
+/// The human part of an upstream error body: `{"error":{"message":…}}`, `{"detail":…}` or the text.
+pub(crate) fn error_message(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let msg = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().or(v["detail"].as_str()).or(v["message"].as_str()).map(String::from))
+        .unwrap_or_else(|| text.trim().to_string());
+    msg.chars().take(200).collect()
 }
 
 #[cfg(test)]

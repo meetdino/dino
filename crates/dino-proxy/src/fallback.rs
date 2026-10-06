@@ -203,7 +203,7 @@ pub(crate) fn is_claude_subscription(value: &str) -> bool {
 pub fn classify(status: u16, headers: &HeaderMap, body: &[u8]) -> Option<Trigger> {
     let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty());
     let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-    let said = crate::codex::error_message(body);
+    let said = crate::error_message(body);
     let trigger = |kind, resets_at| Some(Trigger { kind, resets_at, said: said.clone() });
 
     // A Claude subscription (Pro, Max): its unified limiter turned the call down. Which window did

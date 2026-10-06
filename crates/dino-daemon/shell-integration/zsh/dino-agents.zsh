@@ -5,9 +5,11 @@
 # --settings, or a one-off (-p, --version, subcommands); a claude function of the user's own is left
 # alone altogether.
 #
-# Its model calls go through dino's proxy, for its usage and limits: $DINO_CLAUDE_BASE_URL becomes
-# its ANTHROPIC_BASE_URL, for that agent alone. The shell itself never has it, so other programs
-# using the Anthropic SDK go straight to the API. An ANTHROPIC_BASE_URL of the user's own wins.
+# While it reports (the settings file is there), its model calls go through dino's proxy too, for
+# its usage and limits: $DINO_CLAUDE_BASE_URL becomes its ANTHROPIC_BASE_URL, for that agent alone.
+# Off, or "Keep as terminal", it's a plain claude: no hooks and no proxy. The shell itself never
+# has the URL, so other programs using the Anthropic SDK go straight to the API. An
+# ANTHROPIC_BASE_URL of the user's own wins.
 
 (( ${+functions[claude]} )) && return 0
 
@@ -25,14 +27,12 @@ _dino_agent_run() {
 }
 
 claude() {
-    local url=
-    [[ -z ${ANTHROPIC_BASE_URL-} ]] && url=${DINO_CLAUDE_BASE_URL-}
-    if [[ -n ${DINO_CLAUDE_SETTINGS-} && -r $DINO_CLAUDE_SETTINGS ]] && _dino_agent_run "$@"; then
-        builtin set -- --settings "$DINO_CLAUDE_SETTINGS" "$@"
+    if [[ -n ${DINO_CLAUDE_SETTINGS-} && -r $DINO_CLAUDE_SETTINGS ]]; then
+        _dino_agent_run "$@" && builtin set -- --settings "$DINO_CLAUDE_SETTINGS" "$@"
+        if [[ -z ${ANTHROPIC_BASE_URL-} && -n ${DINO_CLAUDE_BASE_URL-} ]]; then
+            ANTHROPIC_BASE_URL=$DINO_CLAUDE_BASE_URL builtin command claude "$@"
+            return
+        fi
     fi
-    if [[ -n $url ]]; then
-        ANTHROPIC_BASE_URL=$url builtin command claude "$@"
-    else
-        builtin command claude "$@"
-    fi
+    builtin command claude "$@"
 }
