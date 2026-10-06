@@ -1,0 +1,38 @@
+name: Deploy cloud
+
+# Deploys the account server, cloud/, to Vercel when something it builds from changes on main.
+# Vercel's own Git deployments are off for it (cloud/vercel.json, git.deploymentEnabled): they
+# deployed every push to every branch, and on the Hobby plan even a build the Ignored Build Step
+# cancels counts toward the 100 deployments a day. So a push to main that touches cloud/,
+# crates/dino-sync or the root Cargo.toml (dino-sync's version) calls the project's deploy hook,
+# which deploys main's head to production; other pushes deploy nothing. The paths are CI's `cloud`
+# job's. The hook URL is the repository secret VERCEL_CLOUD_DEPLOY_HOOK, and it can deploy main
+# and nothing else (cloud/README.md). Run this by hand to redeploy.
+on:
+  push:
+    branches: [main]
+    paths:
+      - cloud/**
+      - crates/dino-sync/**
+      - Cargo.toml
+      - .github/workflows/deploy-cloud.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  deploy:
+    # A fork has no hook to call.
+    if: github.repository == 'meetdino/dino'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger the deploy hook for main
+        env:
+          HOOK: ${{ secrets.VERCEL_CLOUD_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::the repository secret VERCEL_CLOUD_DEPLOY_HOOK isn't set (see cloud/README.md)"
+            exit 1
+          fi
+          curl -fsS --retry 3 -X POST "$HOOK"

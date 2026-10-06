@@ -142,8 +142,15 @@ transaction-mode pooler never sees the lock.
    | `DINO_GITHUB_CLIENT_ID`, `DINO_GITHUB_CLIENT_SECRET` | optional: a GitHub OAuth app whose callback is `<DINO_CLOUD_URL>/signin/github/callback` |
    | `DINO_GOOGLE_CLIENT_ID`, `DINO_GOOGLE_CLIENT_SECRET` | optional: the same for Google |
 
-4. Deploy, then open `<your URL>/readyz`: it answers `200` once the database is reachable and
-   migrated.
+4. Vercel's Git integration deploys nothing on its own: `vercel.json` turns off
+   `git.deploymentEnabled`, so pushes that don't touch the server don't use up the Hobby plan's
+   deployments. `.github/workflows/deploy-cloud.yml` deploys instead, when a push to `main` changes
+   `cloud/`, `crates/dino-sync` or `Cargo.toml`. It calls a deploy hook: create one under the
+   project's **Settings → Git → Deploy Hooks** for the branch `main`, and save its URL as the
+   repository secret `VERCEL_CLOUD_DEPLOY_HOOK`. Leave the **Ignored Build Step** empty: the
+   workflow already decided, and the hook deploys `main`'s head, which may be a later commit.
+5. Deploy (run the **Deploy cloud** workflow), then open `<your URL>/readyz`: it answers `200`
+   once the database is reachable and migrated.
 
 Check it from a Mac: `DINO_HOME=/tmp/dino-try dino login <your URL>`.
 
