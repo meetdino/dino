@@ -56,7 +56,13 @@ enum Brand {
 
 @MainActor
 final class DinoModel: ObservableObject {
-    @Published var sessions: [SessionInfo] = []
+    /// Every session, as dinod last said. Only a change in what the window as a whole shows of them
+    /// (`outline`) is announced here, as that redraws the window, the menu bar and every pane; the
+    /// rest is announced by that session's `LiveSession`, to the views that show it.
+    var sessions: [SessionInfo] = [] {
+        willSet { if outline(newValue) != outline(sessions) { objectWillChange.send() } }
+        didSet { LiveSessions.follow(sessions) }
+    }
     @Published var quotas: [QuotaInfo] = []
     /// Your Claude accounts with their windows, once Claude Code has more than one.
     @Published var claudeAccounts: [ClaudeAccountInfo] = []
@@ -562,6 +568,40 @@ final class DinoModel: ObservableObject {
             Updates.shared.sessionsChanged(quiet: restartIsQuiet)
         }
         updateBadge(next)
+    }
+
+    /// What the whole window shows of each session: all dinod says of it but a shell's title (an
+    /// agent's is its name, which counts) and how it's doing within its sidebar group: thinking or
+    /// working, what it asks or waits on, its last output, what a shell runs and how its last command
+    /// ended, its bells, a password prompt. Those change all the time, and only the session's own
+    /// views show them (its row, its pane's header, the toolbar, Open Beside, an automation's run),
+    /// through its `LiveSession`.
+    private func outline(_ list: [SessionInfo]) -> [SessionOutline] {
+        // The sidebar's search matches titles: while it narrows the sidebar, a title counts too.
+        let searching = !sidebarQuery.trimmingCharacters(in: .whitespaces).isEmpty
+        return list.map { s in
+            var o = s
+            if !searching { o.title = nil }
+            o.activity = nil
+            o.in_flight = 0
+            o.output_ms_ago = nil
+            o.running = nil
+            o.foreground = nil
+            o.last_exit = nil
+            o.bells = 0
+            o.password = nil
+            // The sidebar's filters count and list sessions by their group (a plain shell isn't
+            // there, and its tab has no dot); whether it asks for something words the computer-use
+            // banner.
+            return SessionOutline(session: o, name: s.display, group: s.plainShell ? nil : status(of: s).label, asks: s.needs != nil)
+        }
+    }
+
+    private struct SessionOutline: Equatable {
+        var session: SessionInfo
+        var name: String
+        var group: String?
+        var asks: Bool
     }
 
     /// A terminal title without the spinner or status glyphs an agent puts before its words.

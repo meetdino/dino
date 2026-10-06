@@ -438,8 +438,17 @@ struct TaskRunRow: View {
     let run: ScheduledRun
 
     var body: some View {
+        // It shows its session's title, which changes without the model saying: redrawn as it does.
+        if let s = run.session.flatMap({ id in model.sessions.first { $0.id == id } }) {
+            Live(s) { _ in row }
+        } else {
+            row
+        }
+    }
+
+    private var row: some View {
         let state = model.runState(run)
-        VStack(alignment: .leading, spacing: 1) {
+        return VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 6) {
                 Circle().fill(state.color).frame(width: 6, height: 6).accessibilityHidden(true)
                 Text(whenText(run.at)).font(.caption.monospacedDigit())
