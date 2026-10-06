@@ -1,5 +1,5 @@
 //! The dino account: signing in to dino-cloud and talking to it as this Mac. The server only keeps
-//! the account, the devices signed in to it and settings sealed on the device (see `sync`); agent
+//! the account, the devices signed in to it and their synced settings (see `sync`); agent
 //! traffic never goes there. Its tokens go to dino's key store and are never printed or logged.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

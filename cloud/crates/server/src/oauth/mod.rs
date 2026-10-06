@@ -1,7 +1,6 @@
 //! The OAuth 2 authorization server: authorization code with PKCE for the app, the CLI and the
 //! harness (loopback redirects, RFC 8252), the device grant for machines without a browser
-//! (RFC 8628), rotating refresh tokens, revocation (RFC 7009), introspection (RFC 7662) and
-//! metadata (RFC 8414).
+//! (RFC 8628), rotating refresh tokens, revocation (RFC 7009) and metadata (RFC 8414).
 
 pub mod authorize;
 pub mod clients;
@@ -25,7 +24,6 @@ use crate::limits::{self, ClientIp};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/.well-known/oauth-authorization-server", get(metadata))
-        .route("/.well-known/openid-configuration", get(metadata))
         .route("/oauth/authorize", get(authorize::start))
         .route("/oauth/authorize/confirm", get(authorize::confirm))
         .route("/oauth/authorize/decide", post(authorize::decide))
@@ -35,8 +33,6 @@ pub fn routes() -> Router<AppState> {
         .route("/device/decide", post(device::decide))
         .route("/login/{token}", get(link::page).post(link::open))
         .route("/oauth/revoke", post(revoke))
-        .route("/oauth/introspect", post(introspect))
-        .route("/oauth/userinfo", get(userinfo))
 }
 
 async fn metadata(State(s): State<AppState>) -> Json<serde_json::Value> {
@@ -47,8 +43,6 @@ async fn metadata(State(s): State<AppState>) -> Json<serde_json::Value> {
         "token_endpoint": u("/oauth/token"),
         "device_authorization_endpoint": u("/oauth/device_authorization"),
         "revocation_endpoint": u("/oauth/revoke"),
-        "introspection_endpoint": u("/oauth/introspect"),
-        "userinfo_endpoint": u("/oauth/userinfo"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code"],
         "code_challenge_methods_supported": ["S256"],
@@ -123,44 +117,6 @@ async fn revoke(State(s): State<AppState>, ClientIp(ip): ClientIp, Form(f): Form
     Ok(StatusCode::OK)
 }
 
-#[derive(Deserialize)]
-struct IntrospectForm {
-    token: String,
-}
-
-/// RFC 7662, for resource servers other than this one (the harness). They authenticate with the
-/// shared introspection secret.
-async fn introspect(State(s): State<AppState>, headers: HeaderMap, Form(f): Form<IntrospectForm>) -> Result<Response> {
-    let Some(secret) = &s.cfg.introspect_secret else { return Err(Error::NotFound) };
-    let presented = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("");
-    if !crypto::eq(presented.as_bytes(), secret.as_bytes()) {
-        return Err(Error::Unauthorized);
-    }
-    let Some(b) = tokens::lookup_access(&s, &f.token).await? else { return Ok(no_store(json!({"active": false}))) };
-    Ok(no_store(json!({
-        "active": true,
-        "sub": b.account_id,
-        "aud": b.aud,
-        "client_id": b.client_id,
-        "scope": b.scope,
-        "exp": b.expires_at.timestamp(),
-        "iat": b.created_at.timestamp(),
-        "token_type": "Bearer",
-    })))
-}
-
 pub fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers.get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ").map(str::trim)
-}
-
-async fn userinfo(State(s): State<AppState>, headers: HeaderMap) -> Result<Response> {
-    let token = bearer(&headers).ok_or(Error::Unauthorized)?;
-    let b = tokens::lookup_access(&s, token).await?.ok_or(Error::Unauthorized)?;
-    let (email, verified): (String, bool) = sqlx::query_as("SELECT email, email_verified FROM accounts WHERE id = $1").bind(b.account_id).fetch_one(&s.db).await?;
-    let mut body = json!({"sub": b.account_id});
-    if b.scope.split(' ').any(|x| x == "email") || b.aud == "dino" {
-        body["email"] = json!(email);
-        body["email_verified"] = json!(verified);
-    }
-    Ok(no_store(body))
 }

@@ -1,6 +1,6 @@
 //! Terminal panes: an emulator (`alacritty_terminal`) fed with a program's output, for replays,
 //! text and the state dinod reports. Output arrives from a local PTY or is fed in; input goes out
-//! through a [`Transport`].
+//! to the PTY.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -128,20 +128,6 @@ pub struct SpawnSpec {
     pub env: HashMap<String, String>,
 }
 
-/// Where keystrokes and resizes go: a local PTY, or a socket to dinod.
-pub trait Transport: Send + Sync {
-    fn write(&self, bytes: Vec<u8>);
-    fn resize(&self, cols: u16, rows: u16);
-    /// The terminal's foreground process group, when it's a local PTY.
-    fn foreground(&self) -> Option<u32> {
-        None
-    }
-    /// Whether the program reads a password (see [`Shared::password`]), when it's a local PTY.
-    fn password(&self) -> Option<bool> {
-        None
-    }
-}
-
 /// State shared between the output pump and whoever owns the pane.
 pub struct Shared {
     pub bell: AtomicBool,
@@ -154,7 +140,7 @@ pub struct Shared {
     /// Answer the app's terminal queries (cursor position, colors). Turn off while a real
     /// terminal downstream receives the same bytes, or the app gets two answers.
     pub answer_queries: AtomicBool,
-    transport: OnceLock<Arc<dyn Transport>>,
+    transport: OnceLock<PtyTransport>,
     size: Mutex<(u16, u16)>,
     /// All output up to EOF has been processed.
     drained: AtomicBool,
@@ -281,7 +267,7 @@ struct PtyTransport {
     fd: Option<std::os::fd::RawFd>,
 }
 
-impl Transport for PtyTransport {
+impl PtyTransport {
     fn write(&self, bytes: Vec<u8>) {
         let mut w = self.writer.lock().unwrap();
         let _ = w.write_all(&bytes).and_then(|_| w.flush());
@@ -289,9 +275,11 @@ impl Transport for PtyTransport {
     fn resize(&self, cols: u16, rows: u16) {
         let _ = self.master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
     }
+    /// The terminal's foreground process group.
     fn foreground(&self) -> Option<u32> {
         self.master.lock().unwrap().process_group_leader().and_then(|p| u32::try_from(p).ok())
     }
+    /// Whether the program reads a password (see [`Shared::password`]).
     fn password(&self) -> Option<bool> {
         let fd = self.fd?;
         // SAFETY: `fd` is the master's, open while `self` is; `t` is written by tcgetattr.
@@ -404,7 +392,7 @@ impl Pane {
         let mut reader = pair.master.try_clone_reader()?;
         let fd = pair.master.as_raw_fd();
         let transport = PtyTransport { writer: Mutex::new(pair.master.take_writer()?), master: Mutex::new(pair.master), fd };
-        let _ = pane.shared.transport.set(Arc::new(transport));
+        let _ = pane.shared.transport.set(transport);
 
         let weak: Weak<Self> = Arc::downgrade(&pane);
         std::thread::Builder::new().name("pty-read".into()).spawn(move || {
@@ -447,13 +435,6 @@ impl Pane {
             shared.exited.store(true, Ordering::Relaxed);
         })?;
         Ok(pane)
-    }
-
-    /// An emulator whose bytes come from elsewhere (see [`Pane::feed`]) and whose input goes to `transport`.
-    pub fn remote(transport: Arc<dyn Transport>, cols: u16, rows: u16) -> Arc<Self> {
-        let pane = Arc::new(Self::emulator(cols, rows, true));
-        let _ = pane.shared.transport.set(transport);
-        pane
     }
 
     /// A program that has already exited, its last screen restored from `replay` bytes (see
@@ -849,14 +830,16 @@ impl Pane {
     /// breaks, DEL, C1) are dropped, so it can't end the bracketed paste early (`ESC[201~`) and go
     /// on to press keys in the program (`ESC[Z`, Shift+Tab).
     pub fn paste(&self, text: &str) {
-        let text: String = text.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || !c.is_control()).collect();
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
-        if bracketed {
-            self.write(format!("\x1b[200~{text}\x1b[201~"));
-        } else {
-            self.write(text.replace("\r\n", "\r").replace('\n', "\r"));
-        }
+        self.write(pasted(text, bracketed));
     }
+}
+
+/// What a paste of `text` sends: no control characters but tab and line breaks, so it can't end
+/// itself or press keys; bracketed, or with each line break as Return.
+fn pasted(text: &str, bracketed: bool) -> String {
+    let text: String = text.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || !c.is_control()).collect();
+    if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text.replace("\r\n", "\r").replace('\n', "\r") }
 }
 
 impl Drop for Pane {
@@ -1411,34 +1394,12 @@ mod tests {
         assert_eq!(file_url_path("http://x/y"), None);
     }
 
-    /// What the pane sends to its program.
-    #[derive(Default)]
-    struct Sent(Mutex<Vec<u8>>);
-
-    impl Transport for Sent {
-        fn write(&self, bytes: Vec<u8>) {
-            self.0.lock().unwrap().extend(bytes);
-        }
-        fn resize(&self, _cols: u16, _rows: u16) {}
-    }
-
-    impl Sent {
-        fn drain(&self) -> String {
-            String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap()
-        }
-    }
-
     #[test]
     fn a_paste_cant_end_itself_or_press_keys() {
-        let sent = Arc::new(Sent::default());
-        let p = Pane::remote(sent.clone(), 40, 6);
         // Unbracketed: line breaks become Return, and nothing else is a key.
-        p.paste("one\x1b[Z\u{9b}Z\x03\r\ntwo\n");
-        assert_eq!(sent.drain(), "one[ZZ\rtwo\r");
+        assert_eq!(pasted("one\x1b[Z\u{9b}Z\x03\r\ntwo\n", false), "one[ZZ\rtwo\r");
         // Bracketed: an embedded end of paste can't close it early.
-        p.feed(b"\x1b[?2004h");
-        p.paste("fix it\x1b[201~\x1b[Z\x7f\u{85}\tnow\n");
-        assert_eq!(sent.drain(), "\x1b[200~fix it[201~[Z\tnow\n\x1b[201~");
+        assert_eq!(pasted("fix it\x1b[201~\x1b[Z\x7f\u{85}\tnow\n", true), "\x1b[200~fix it[201~[Z\tnow\n\x1b[201~");
     }
 
     /// The OSC 133 marks and hyperlinks in a replay, in order, as `A`, `B`, `C`, `link:<uri>`

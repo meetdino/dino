@@ -22,7 +22,7 @@ use crate::identity::email;
 use crate::oauth::link;
 use crate::error::{Error, Result};
 use crate::limits::{self, ClientIp};
-use crate::oauth::clients::{self, Client, Kind};
+use crate::oauth::clients::{self, Client};
 use crate::oauth::tokens::{self, DeviceInfo, TokenResponse};
 use crate::web::pages;
 use crate::web::session::Session;
@@ -45,7 +45,7 @@ pub struct AuthorizationForm {
 
 pub async fn authorization(State(s): State<AppState>, ClientIp(ip): ClientIp, Form(f): Form<AuthorizationForm>) -> Result<Response> {
     limits::auth(&s, ip).await?;
-    let client = clients::find(&f.client_id).filter(|c| c.kind == Kind::Native).ok_or_else(|| Error::oauth("invalid_client", "Unknown client."))?;
+    let client = clients::find(&f.client_id).ok_or_else(|| Error::oauth("invalid_client", "Unknown client."))?;
     let scope = clients::scope(f.scope.as_deref()).ok_or_else(|| Error::oauth("invalid_scope", "Unknown scope."))?;
     let device = DeviceInfo::new(f.device_name.as_deref(), f.device_os.as_deref(), f.dino_version.as_deref());
     let email = match f.email.as_deref() {
