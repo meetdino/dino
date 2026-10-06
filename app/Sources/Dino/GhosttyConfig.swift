@@ -37,6 +37,11 @@ enum GhosttyConfig {
     /// the shell or agent behind it, in its own folder.
     static let ignored: Set<String> = ["command", "initial-command", "working-directory", "wait-after-command", "input", "env"]
 
+    /// Settings that name a file, which Ghostty finds from the folder of the config file setting it
+    /// (`custom-shader = shaders/crt.glsl`). What Ghostty reads here is one file put together in a
+    /// temporary folder, so their paths are written out in full from their own file's folder.
+    private static let pathKeys: Set<String> = ["custom-shader", "background-image", "bell-audio-path"]
+
     /// The settings that color a pane. With none of them, the pane takes dino's own light and dark
     /// colors; `background-opacity` and the like don't count.
     private static let colorKeys: Set<String> = ["theme", "background", "foreground", "palette", "cursor-color", "cursor-text",
@@ -261,11 +266,26 @@ enum GhosttyConfig {
                 guard !value.isEmpty else { continue }
                 let path = NSString(string: value).expandingTildeInPath
                 includes.append(path.hasPrefix("/") ? URL(fileURLWithPath: path) : url.deletingLastPathComponent().appendingPathComponent(path))
+            } else if pathKeys.contains(key) {
+                lines.append(fullPath(line, key: key, from: url.deletingLastPathComponent()))
             } else if !ignored.contains(key) {
                 lines.append(line)
             }
         }
         return lines + includes.flatMap { expand($0, depth: depth + 1, read: &read) }
+    }
+
+    /// `line` with its relative path made absolute from `folder`, as Ghostty does: the optional
+    /// mark (`?`) and quotes kept, absolute and `~/` paths left as they are.
+    private static func fullPath(_ line: String, key: String, from folder: URL) -> String {
+        var value = line.split(separator: "=", maxSplits: 1).dropFirst().first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        let optional = value.hasPrefix("?")
+        if optional { value.removeFirst() }
+        let quoted = value.count >= 2 && value.hasPrefix("\"") && value.hasSuffix("\"")
+        if quoted { value = String(value.dropFirst().dropLast()) }
+        guard !value.isEmpty, !value.hasPrefix("/"), !value.hasPrefix("~/") else { return line }
+        let path = folder.appendingPathComponent(value).standardizedFileURL.path
+        return "\(key) = \(optional ? "?" : "")\(quoted ? "\"\(path)\"" : path)"
     }
 
     /// The indexes of the lines among the first `count` that Ghostty's diagnostics name, as
