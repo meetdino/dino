@@ -1955,7 +1955,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
             let conversation = typed.as_ref().and_then(|t| t.conversation.clone()).or_else(|| s.agent_session.lock().unwrap().clone());
             stats::seed(d, &s.id, None, s.started_at, conversation.as_deref());
         }
-        fallbacks::set(d, &settings, &s);
+        fallbacks::set(d, &settings, &providers::list(), &s);
         sync_shell_agents(d, &s, &Settings::load());
         if let Some(t) = typed {
             typed::resume(d, &s, t);
@@ -5918,15 +5918,21 @@ while (sysread(STDIN, my $c, 1)) {
         settings.save().unwrap();
 
         let routes = |c: Option<dino_proxy::fallback::Chain>| c.map(|c| (c.steps.iter().map(|s| format!("{} {}", s.route, s.model)).collect::<Vec<_>>(), c.on_outage));
-        let own = fallbacks::chain(&settings, "claude", None, None);
+        // What the providers serve: the test's own, not what this Mac's model servers said when
+        // another test last had dinod look.
+        let provider = |id: &str, formats: Vec<Format>| dino_core::providers::ProviderInfo { id: id.into(), name: id.into(), formats, ..Default::default() };
+        let providers = [provider("plan-zai", vec![Format::Anthropic, Format::Chat]), provider("ollama", vec![])];
+        let own = fallbacks::chain(&settings, &providers, "claude", None, None);
         assert_eq!(routes(own), Some((vec!["plan/zai glm-5.3".into(), "local/ollama qwen3:4b".into()], true)), "OpenRouter not allowed, free models off, no model: left out");
+        let chat_only = [providers[0].clone(), provider("ollama", vec![Format::Chat])];
+        assert_eq!(routes(fallbacks::chain(&settings, &chat_only, "claude", None, None)).unwrap().0, ["plan/zai glm-5.3"], "not a server that doesn't speak Claude's API");
         let mut free_on = settings.clone();
         free_on.experimental.free_models = true;
-        assert_eq!(routes(fallbacks::chain(&free_on, "claude", None, None)).unwrap().0.len(), 3);
-        let on_zai = ProviderRoute { provider: "plan-zai".into(), model: "glm-5.3".into(), format: Some(dino_core::providers::Format::Anthropic), name: "GLM".into() };
-        assert_eq!(routes(fallbacks::chain(&settings, "claude", Some(&on_zai), None)).unwrap().0, ["local/ollama qwen3:4b"], "not the route it's on");
-        assert!(fallbacks::chain(&settings, "claude", None, Some("devbox")).is_none(), "over SSH its traffic isn't dino's");
-        assert!(fallbacks::chain(&settings, "shell", None, None).is_none());
+        assert_eq!(routes(fallbacks::chain(&free_on, &providers, "claude", None, None)).unwrap().0.len(), 3);
+        let on_zai = ProviderRoute { provider: "plan-zai".into(), model: "glm-5.3".into(), format: Some(Format::Anthropic), name: "GLM".into() };
+        assert_eq!(routes(fallbacks::chain(&settings, &providers, "claude", Some(&on_zai), None)).unwrap().0, ["local/ollama qwen3:4b"], "not the route it's on");
+        assert!(fallbacks::chain(&settings, &providers, "claude", None, Some("devbox")).is_none(), "over SSH its traffic isn't dino's");
+        assert!(fallbacks::chain(&settings, &providers, "shell", None, None).is_none());
 
         let sh = |agent: &str| LauncherInfo { short: agent.into(), agent_id: agent.into(), label: agent.into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
         let d = test_daemon(vec![sh("shell"), sh("claude"), sh("codex")]);

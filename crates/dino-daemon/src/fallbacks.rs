@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use dino_core::agent::agent;
 use dino_core::ipc::{AgentLimit, FallbackInfo, InsteadOf, LauncherInfo, RouteUsageInfo};
-use dino_core::providers::{Format, ProviderRoute, provider_of_route, route_path};
+use dino_core::providers::{Format, ProviderInfo, ProviderRoute, provider_of_route, route_path};
 use dino_core::settings::{AgentSwitch, Settings};
 use dino_proxy::fallback::{Chain, Kind, Step};
 use dino_proxy::SessionStats;
@@ -14,10 +14,10 @@ use dino_proxy::SessionStats;
 use crate::{Daemon, Session, providers};
 
 /// What a session of `agent_id` falls back to: the steps of its chain that serve the API it talks
-/// in (on `route`, or its own account), that the policies allow, and that are on: the free models
-/// only while they're turned on. A session over SSH, or an agent that doesn't talk through dino,
-/// has none.
-pub(crate) fn chain(settings: &Settings, agent_id: &str, route: Option<&ProviderRoute>, host: Option<&str>) -> Option<Chain> {
+/// in (on `route`, or its own account) as `providers` (`providers::list`) say, that the policies
+/// allow, and that are on: the free models only while they're turned on. A session over SSH, or
+/// an agent that doesn't talk through dino, has none.
+pub(crate) fn chain(settings: &Settings, providers: &[ProviderInfo], agent_id: &str, route: Option<&ProviderRoute>, host: Option<&str>) -> Option<Chain> {
     let f = settings.fallbacks.get(agent_id).filter(|f| !f.steps.is_empty())?;
     if host.is_some() || !settings.routing.proxy && route.is_none() {
         return None;
@@ -41,13 +41,13 @@ pub(crate) fn chain(settings: &Settings, agent_id: &str, route: Option<&Provider
                 }
                 "free models".to_string()
             } else {
-                let p = providers::find(&s.provider)?;
+                let p = providers.iter().find(|p| p.id == s.provider)?;
                 // What it serves isn't known yet (a model server not running when the session
                 // started): tried anyway; the proxy goes past a route that turns the call down.
                 if !p.formats.is_empty() && !p.formats.contains(&api) {
                     return None;
                 }
-                p.name
+                p.name.clone()
             };
             Some(Step { route: route_path(&s.provider), model: s.model.trim().to_string(), name })
         })
@@ -58,13 +58,14 @@ pub(crate) fn chain(settings: &Settings, agent_id: &str, route: Option<&Provider
 /// Give every session its chain as the settings now have it.
 pub(crate) fn sync(d: &Daemon) {
     let settings = Settings::load();
+    let providers = providers::list();
     for s in d.sessions.lock().unwrap().iter() {
-        set(d, &settings, s);
+        set(d, &settings, &providers, s);
     }
 }
 
-pub(crate) fn set(d: &Daemon, settings: &Settings, s: &Session) {
-    d.proxy.set_fallback(&s.id, chain(settings, &s.agent_id, s.route.as_ref(), s.host.as_deref()));
+pub(crate) fn set(d: &Daemon, settings: &Settings, providers: &[ProviderInfo], s: &Session) {
+    d.proxy.set_fallback(&s.id, chain(settings, providers, &s.agent_id, s.route.as_ref(), s.host.as_deref()));
 }
 
 /// Where session `st` is answered from, when it's a fallback: another route, or another of its
