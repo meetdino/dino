@@ -804,13 +804,11 @@ fn start_agent(d: &Daemon, t: &ScheduledTask, launcher: &str, prompt: &str) -> a
 pub(crate) fn check_trust(l: &LauncherInfo, dir: &Path, worktree: bool) -> anyhow::Result<()> {
     if let Some(a) = dino_core::agent::agent(&l.agent_id).filter(|a| a.asks_trust()) {
         let root = worktree::repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let trusted = a.trusted_in(dir, &root);
+        anyhow::ensure!(trusted.is_some(), "Claude doesn't trust {} yet. Start Claude there once and accept its trust prompt", dir.display());
+        // The repo's own trust carries into a worktree by itself; a folder inside it only through dino.
         anyhow::ensure!(
-            a.trusted_in(dir, &root).is_some(),
-            "Claude doesn't trust {} yet. Start Claude there once and accept its trust prompt",
-            dir.display()
-        );
-        anyhow::ensure!(
-            !worktree || Settings::load().policies.worktree_trust,
+            !worktree || trusted.is_some_and(|r| r.as_os_str().is_empty()) || Settings::load().policies.worktree_trust,
             "Claude would ask to trust the new worktree. Turn on worktree trust in Settings → Workspaces → Worktrees, or run without a worktree"
         );
     }
