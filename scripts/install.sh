@@ -8,7 +8,7 @@
 # dino-<version>-darwin-<arch>.tar.gz and SHA256SUMS. The download is checked against SHA256SUMS
 # before anything is installed. No sudo; safe to run again.
 #
-#   DINO_RELEASES_REPO   GitHub repository with the releases (default: asdf9384/dino-releases)
+#   DINO_RELEASES_REPO   GitHub repository with the releases (default: meetdino/dino-releases)
 #   DINO_DOWNLOAD_BASE   a plain web server instead, laid out <base>/dino/latest and
 #                        <base>/dino/<version>/<files>
 #   DINO_INSTALL_DIR     where the binary goes (default: ~/.local/bin)
@@ -17,7 +17,7 @@
 main() {
     set -eu
     product=dino
-    repo="${DINO_RELEASES_REPO:-asdf9384/dino-releases}"
+    repo="${DINO_RELEASES_REPO:-meetdino/dino-releases}"
     base="${DINO_DOWNLOAD_BASE:-}"
     dir="${DINO_INSTALL_DIR:-$HOME/.local/bin}"
     version=""

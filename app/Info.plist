@@ -11,7 +11,7 @@
     <key>CFBundleVersion</key><string>1</string>
     <!-- Updates: Sparkle looks here once a day (Settings → General). Release builds add SUPublicEDKey
          (scripts/release.sh); without it, as in development builds, there are no updates. -->
-    <key>SUFeedURL</key><string>https://github.com/asdf9384/dino-releases/releases/latest/download/appcast.xml</string>
+    <key>SUFeedURL</key><string>https://github.com/meetdino/dino-releases/releases/latest/download/appcast.xml</string>
     <key>SUEnableAutomaticChecks</key><true/>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
