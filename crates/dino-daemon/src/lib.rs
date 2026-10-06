@@ -2266,7 +2266,7 @@ fn set_controls(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> 
     if have.mode != controls.mode {
         check_bypass(&controls, &settings)?;
     }
-    kept_on_resume(&s, &controls)?;
+    kept_on_resume(&s, &have, &controls)?;
     if controls == have {
         *s.pending.lock().unwrap() = None;
         return Ok(());
@@ -2294,15 +2294,16 @@ fn in_place(s: &Session, have: &Controls, want: &Controls) -> bool {
 }
 
 /// A change session `s`'s agent would ignore on resuming its conversation (see
-/// `Agent::resume_keeps`) is refused, rather than shown as if it applied.
-fn kept_on_resume(s: &Session, controls: &Controls) -> anyhow::Result<()> {
+/// `Agent::resume_keeps`) is refused, rather than shown as if it applied. `have` is what it runs
+/// with now.
+fn kept_on_resume(s: &Session, have: &Controls, controls: &Controls) -> anyhow::Result<()> {
     let Some(a) = agent(&s.agent_id) else { return Ok(()) };
     if s.agent_session.lock().unwrap().is_none() {
         return Ok(());
     }
     let name = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == s.agent_id).map_or(s.agent_id.as_str(), |k| k.name);
     let keeps = a.resume_keeps();
-    anyhow::ensure!(!keeps.contains(&"model") || controls.model == s.controls.model, "{name} keeps a conversation's model; start a new session to change it");
+    anyhow::ensure!(!keeps.contains(&"model") || controls.model == have.model, "{name} keeps a conversation's model; start a new session to change it");
     if let Some(m) = controls.mode.as_deref().filter(|m| keeps.contains(m) && s.controls.mode.as_deref() != Some(*m)) {
         let label = a.mode_label(m).unwrap_or(m);
         anyhow::bail!("{name} can't resume a conversation in {label} mode; start a new session in {label} mode instead");
@@ -2707,6 +2708,8 @@ fn state(d: &Daemon) -> Response {
             let (context_tokens, context_limit) = context_use(s, &st);
             let label = s.label.lock().unwrap().clone();
             let agent_mode = mode::now(s, st.agent_mode.as_deref());
+            let agent_model = mode::model_now(s, st.agent_model.as_deref());
+            let model = agent_model.clone().or_else(|| s.controls.model.clone());
             let tasks = session_tasks(&st, &s.cwd, s.pane.is_exited());
             let (inside, running, tmux, foreground) = {
                 let i = s.inside.lock().unwrap();
@@ -2773,11 +2776,12 @@ fn state(d: &Daemon) -> Response {
                 auto,
                 previews: previews.iter().filter(|p| p.session == s.id).map(|p| p.info()).collect(),
                 local_url,
-                // What it runs with as its agent says (its screen, else its hooks), never what's
-                // only asked for: that's `pending` until it's in effect.
-                controls: Controls { mode: agent_mode.clone().or_else(|| s.controls.mode.clone()), ..s.controls.clone() },
+                // What it runs with as its agent says (its screen, its hooks, its record), never
+                // what's only asked for: that's `pending` until it's in effect.
+                controls: Controls { mode: agent_mode.clone().or_else(|| s.controls.mode.clone()), model: model.clone(), ..s.controls.clone() },
                 pending,
                 agent_mode,
+                agent_model,
                 context_tokens,
                 context_limit,
                 scheduled: s.scheduled.clone(),
@@ -2799,7 +2803,7 @@ fn state(d: &Daemon) -> Response {
                 last_exit,
                 servers: serving.into_iter().map(|x| ipc::ServerInfo { task: x.task, command: x.command, ports: x.ports }).collect(),
                 // With the model it runs on now.
-                route: s.route.clone().map(|r| ProviderRoute { model: s.controls.model.clone().unwrap_or(r.model), ..r }),
+                route: s.route.clone().map(|r| ProviderRoute { model: model.unwrap_or(r.model), ..r }),
                 using: st.computer.as_ref().filter(|c| c.active() && !s.pane.is_exited()).map(|c| c.reach.word().into()),
                 fallback,
                 usage_by_route,
@@ -5106,6 +5110,138 @@ while (sysread(STDIN, my $c, 1)) {
         apply_pending(&d);
         assert_eq!(mode::now(&s, None).as_deref(), Some("plan"));
         assert_eq!(session(&d, &id).pane.pid(), pid, "the same process throughout");
+        s.pane.kill();
+    }
+
+    /// The model shown, and the one Claude resumes with, is the one it says it switched to
+    /// (`/model` in it), not the one it was started with; across a dinod restart too.
+    #[test]
+    fn claudes_model_is_the_one_it_says_it_switched_to() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_home().join("fake-claude-model");
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("claude");
+        std::fs::write(&program, FAKE_CLAUDE).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let claude = LauncherInfo { short: "claude".into(), agent_id: "claude".into(), label: "Claude Code".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let d = test_daemon(vec![claude.clone()]);
+        let opus = Controls { model: Some("opus".into()), ..Controls::default() };
+        let id = spawn(&d, Launch { controls: opus, ..Launch::new("claude", vec![], Some(dir.display().to_string())) }).unwrap();
+        let s = session(&d, &id);
+        let shown = |d: &Daemon| match state(d) {
+            Response::State { sessions, .. } => sessions.into_iter().find(|x| x.id == id).unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!((shown(&d).controls.model.as_deref(), shown(&d).agent_model), (Some("opus"), None), "what it was started with, until it says");
+
+        // `/model sonnet` in Claude: its PostModelSwitch hook (Claude Code 2.1.291's fields).
+        let hook = |d: &Daemon, body: serde_json::Value| {
+            let r = reqwest::blocking::Client::new().post(d.proxy.base_url(&id, "hook")).body(body.to_string()).send().unwrap();
+            assert!(r.status().is_success());
+        };
+        hook(&d, serde_json::json!({"hook_event_name": "PostModelSwitch", "from_model": "claude-opus-5-5", "to_model": "claude-sonnet-5-5", "requested_model": "sonnet", "source": "command"}));
+        let now = shown(&d);
+        assert_eq!((now.controls.model.as_deref(), now.agent_model.as_deref()), (Some("claude-sonnet-5-5"), Some("claude-sonnet-5-5")));
+        assert_eq!(s.controls.model.as_deref(), Some("opus"), "what its flags say");
+        assert_eq!(mode::current(&d, &s).model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(snapshot(&d, &s).controls.model.as_deref(), Some("claude-sonnet-5-5"), "what it resumes with");
+
+        // Choosing the model it's on is no change (a choice builds on what it runs with, as the
+        // app's does); the one it was started with is one.
+        let pid = s.pane.pid();
+        set_controls(&d, &id, Controls { model: Some("claude-sonnet-5-5".into()), ..mode::current(&d, &s) }).unwrap();
+        assert!(s.pending.lock().unwrap().is_none());
+        assert_eq!(session(&d, &id).pane.pid(), pid);
+
+        // dinod restarts: the agent starts again on the model it was on, and that's what shows.
+        save(&d);
+        let saved = load_saved(&d.home);
+        assert_eq!(saved[0].controls.model.as_deref(), Some("claude-sonnet-5-5"));
+        s.pane.kill();
+        let d2 = new_daemon(d.home.clone(), Proxy::start(HashMap::new()).unwrap(), vec![claude]);
+        restore(&d2, saved);
+        let back = shown(&d2);
+        assert_eq!((back.controls.model.as_deref(), back.agent_model), (Some("claude-sonnet-5-5"), None));
+        let s2 = session(&d2, &id);
+        assert_eq!(s2.controls.model.as_deref(), Some("claude-sonnet-5-5"));
+
+        set_controls(&d2, &id, Controls { model: Some("opus".into()), ..mode::current(&d2, &s2) }).unwrap();
+        let restarted = session(&d2, &id);
+        assert!(s2.pending.lock().unwrap().is_some() || !Arc::ptr_eq(&restarted, &s2), "back to opus is a change");
+        restarted.pane.kill();
+        s2.pane.kill();
+    }
+
+    /// Codex's model is what its rollout says, as it writes it (Codex 0.160's lines, recorded):
+    /// a rollout begun since it started is read from its start (`/model` before its first
+    /// prompt included), one it resumed only from where it is (what an earlier run was on isn't
+    /// what this one is), and a `/model` between turns is followed as it's written.
+    #[test]
+    fn codexs_model_is_the_one_its_rollout_says() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_home().join("fake-codex-model");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = |id: &str| format!(r#"{{"timestamp":"2026-10-05T12:00:00.000Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/r","originator":"codex_cli_rs","cli_version":"0.160.0","source":"cli"}}}}"#);
+        let turn = |model: &str| format!(r#"{{"timestamp":"2026-10-05T12:00:01.000Z","type":"turn_context","payload":{{"turn_id":"t1","cwd":"/r","approval_policy":"on-request","model":"{model}","effort":"xhigh","summary":"none"}}}}"#);
+        let switched = |model: &str| format!(r#"{{"timestamp":"2026-10-05T12:00:09.000Z","type":"event_msg","payload":{{"type":"thread_settings_applied","thread_id":"t","thread_settings":{{"model":"{model}","model_provider_id":"openai","approval_policy":"on-request","reasoning_effort":"xhigh"}}}}}}"#);
+        let prompt = r#"{"timestamp":"2026-10-05T12:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"hi"}}"#;
+        // A Codex that holds its rollout open, writing what it's given: `<name>.lines` at once,
+        // then whatever `<name>.more` holds once it's there.
+        let fake = |name: &str| {
+            let program = dir.join(name);
+            let base = dir.join(name).display().to_string();
+            let rollout = dir.join(format!("rollout-2026-10-05T12-00-00-01a0e93b-2fcf-7a20-8efb-{name}.jsonl"));
+            std::fs::write(&program, format!("#!/bin/sh\nexec 3>>'{}'\ncat '{base}.lines' >&3\nwhile [ ! -e '{base}.more' ]; do sleep 0.05; done\ncat '{base}.more' >&3\nexec sleep 600\n", rollout.display())).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            (program, rollout, base)
+        };
+        let launcher = |program: &Path| LauncherInfo { short: "codex".into(), agent_id: "codex".into(), label: "Codex".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let more = |base: &str, line: String| {
+            std::fs::write(format!("{base}.tmp"), line + "\n").unwrap();
+            std::fs::rename(format!("{base}.tmp"), format!("{base}.more")).unwrap();
+        };
+        let said = |d: &Daemon, id: &str| d.proxy.stats.session(id).agent_model;
+
+        // A new conversation: `/model gpt-5.6-luna` before its first prompt, then that turn.
+        let (program, _, base) = fake("aaaaaaaaaaaa");
+        std::fs::write(format!("{base}.lines"), [meta("01a0e93b-2fcf-7a20-8efb-aaaaaaaaaaaa"), switched("gpt-5.6-luna"), prompt.to_string(), turn("gpt-5.6-luna")].join("\n") + "\n").unwrap();
+        let d = test_daemon(vec![launcher(&program)]);
+        let id = spawn(&d, Launch { controls: Controls { model: Some("gpt-5.5".into()), ..Controls::default() }, ..Launch::new("codex", vec![], Some(dir.display().to_string())) }).unwrap();
+        let s = session(&d, &id);
+        wait_for("its model, from the start of its new rollout", || {
+            codex::watch(&d);
+            said(&d, &id).is_some()
+        });
+        assert_eq!(said(&d, &id).as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(mode::current(&d, &s).model.as_deref(), Some("gpt-5.6-luna"), "what it resumes with, not -m gpt-5.5");
+        // `/model` between turns, written as it's made.
+        more(&base, switched("gpt-5.5-mini"));
+        wait_for("the switch", || {
+            codex::watch(&d);
+            said(&d, &id).as_deref() == Some("gpt-5.5-mini")
+        });
+        s.pane.kill();
+
+        // A conversation it resumed: what it says from now on, not what an earlier run was on.
+        let (program, rollout, base) = fake("bbbbbbbbbbbb");
+        std::fs::write(&rollout, [meta("01a0e93b-2fcf-7a20-8efb-bbbbbbbbbbbb"), prompt.to_string(), turn("gpt-5.4")].join("\n") + "\n").unwrap();
+        std::fs::write(format!("{base}.lines"), "").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        let d = test_daemon(vec![launcher(&program)]);
+        let id = spawn(&d, Launch::new("codex", vec![], Some(dir.display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        wait_for("its rollout", || {
+            codex::watch(&d);
+            s.rollout.lock().unwrap().path.is_some()
+        });
+        assert_eq!(said(&d, &id), None, "an earlier run's model");
+        more(&base, turn("gpt-5.6-luna"));
+        wait_for("its next turn", || {
+            codex::watch(&d);
+            said(&d, &id).is_some()
+        });
+        assert_eq!(said(&d, &id).as_deref(), Some("gpt-5.6-luna"));
         s.pane.kill();
     }
 

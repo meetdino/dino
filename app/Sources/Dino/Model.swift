@@ -1214,9 +1214,9 @@ final class DinoModel: ObservableObject {
         }
     }
 
-    /// Models this Mac's sessions of `agent` have answered with, for the model menus.
+    /// Models this Mac's sessions of `agent` are on or have answered with, for the model menus.
     func seenModels(_ agent: String) -> [String] {
-        Array(Set(sessions.filter { $0.agent_id == agent }.compactMap(\.last_model))).sorted()
+        Array(Set(sessions.filter { $0.agent_id == agent }.flatMap { [$0.agent_model, $0.last_model] }.compactMap { $0 })).sorted()
     }
 
     func setAutoPR(_ session: String, fix: Bool? = nil, merge: Bool? = nil) async throws {

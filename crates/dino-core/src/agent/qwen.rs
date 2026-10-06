@@ -54,7 +54,7 @@ fn hook_layer(hook_url: &str) -> Option<PathBuf> {
     let path = layer_path(session);
     let own = std::env::var_os("QWEN_CODE_SYSTEM_DEFAULTS_PATH").map(PathBuf::from).filter(|p| !p.starts_with(&dir));
     let theirs = std::fs::read_to_string(own.unwrap_or_else(|| PathBuf::from(SYSTEM_DEFAULTS))).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-    let hooks: Value = serde_json::from_str(&crate::claude_hook_settings(hook_url, None)).ok()?;
+    let hooks: Value = serde_json::from_str(&crate::hook_settings(hook_url, crate::HOOK_EVENTS, None)).ok()?;
     std::fs::write(&path, serde_json::to_vec_pretty(&with_hooks(theirs, &hooks)).ok()?).ok()?;
     Some(path)
 }
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn hooks_join_the_users_own_defaults() {
         let theirs = json!({"model": {"name": "x"}, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}});
-        let ours: Value = serde_json::from_str(&crate::claude_hook_settings("http://127.0.0.1:1/s/7/hook", None)).unwrap();
+        let ours: Value = serde_json::from_str(&crate::hook_settings("http://127.0.0.1:1/s/7/hook", crate::HOOK_EVENTS, None)).unwrap();
         let merged = with_hooks(theirs, &ours);
         assert_eq!(merged["model"]["name"], "x", "the rest is kept");
         let stop = merged["hooks"]["Stop"].as_array().unwrap();
@@ -460,6 +460,7 @@ mod tests {
         assert_eq!(stop[0]["hooks"][0]["command"], "say done", "theirs first");
         assert_eq!(stop[1]["hooks"][0]["url"], "http://127.0.0.1:1/s/7/hook");
         assert!(merged["hooks"]["SessionStart"].is_array());
+        assert!(merged["hooks"].get("PostModelSwitch").is_none(), "Claude Code's own");
         assert!(with_hooks(Value::Null, &ours)["hooks"]["PermissionRequest"].is_array());
     }
 

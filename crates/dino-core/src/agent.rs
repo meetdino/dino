@@ -297,6 +297,12 @@ pub trait Agent: Sync {
     fn tool_calls(&self, _line: &serde_json::Value) -> Vec<(String, bool)> {
         vec![]
     }
+    /// The model a line of its own record (that file, Codex's rollout) says its conversation is on
+    /// from then on, as its command line names it: a switch made in the agent itself (`/model`)
+    /// included, which the flags it was started with don't say. `None` for a line that doesn't say.
+    fn log_model(&self, _line: &serde_json::Value) -> Option<String> {
+        None
+    }
     /// For agents that can't be given a conversation id up front: the conversation a process of it
     /// started in `cwd` at `since` (seconds) began, not one of `claimed`.
     fn new_conversation(&self, _cwd: &Path, _since: u64, _claimed: &[String]) -> Option<String> {
@@ -311,6 +317,11 @@ pub trait Agent: Sync {
     /// (`\x03`) quits some at their prompt, so it's only sent while a turn runs.
     fn interrupt_keys(&self) -> &'static [u8] {
         b"\x1b"
+    }
+    /// With `StatusSource::Polled`: the model conversation `session` is on, as its store says,
+    /// when that was written since a process of it started at `since` (seconds); see `log_model`.
+    fn model_now(&self, _session: &str, _since: u64) -> Option<String> {
+        None
     }
     /// With `StatusSource::Polled`: the tools conversation `session` is calling right now, by name.
     fn tools_now(&self, _session: &str) -> Vec<String> {
@@ -819,6 +830,42 @@ mod tests {
         // A dialog over the prompt: no footer, nothing said; nor in what it wrote higher up.
         assert_eq!(claude.screen_mode("⏵⏵ accept edits on\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel"), None);
         assert_eq!(agent("codex").unwrap().screen_mode(&screen("⏵⏵ accept edits on")), None);
+    }
+
+    /// The model Codex says it's on, as Codex 0.160 wrote its rollout (from a real one, trimmed):
+    /// each turn's, and a change between turns as it's made.
+    #[test]
+    fn codexs_model_is_read_off_its_rollout() {
+        let codex = agent("codex").unwrap();
+        let line = |s: &str| codex.log_model(&serde_json::from_str(s).unwrap());
+        let turn = r#"{"timestamp":"2026-09-28T18:17:10.526Z","type":"turn_context","payload":{"turn_id":"01a0e93c-1aa1-7bc2-8f00-4781b282c05d","cwd":"/Users/me/x","approval_policy":"on-request","model":"gpt-5.6-luna","effort":"xhigh","collaboration_mode":{"mode":"default","settings":{"model":"gpt-5.6-luna","reasoning_effort":"xhigh"}},"summary":"none"}}"#;
+        assert_eq!(line(turn).as_deref(), Some("gpt-5.6-luna"));
+        let switched = r#"{"timestamp":"2026-09-28T18:17:37.738Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"01a0e93b-2fcf-7a20-8efb-916be31ad524","thread_settings":{"model":"gpt-5.5","model_provider_id":"dino","service_tier":"default","approval_policy":"on-request","reasoning_effort":"xhigh","personality":"pragmatic"}}}"#;
+        assert_eq!(line(switched).as_deref(), Some("gpt-5.5"));
+        let started = r#"{"timestamp":"2026-09-28T18:17:05.481Z","type":"event_msg","payload":{"type":"task_started","turn_id":"01a0e93c-1aa1-7bc2-8f00-4781b282c05d","model_context_window":258400}}"#;
+        assert_eq!(line(started), None);
+        assert_eq!(line(r#"{"type":"turn_context","payload":{"model":""}}"#), None);
+        assert_eq!(agent("claude").unwrap().log_model(&serde_json::from_str(turn).unwrap()), None, "Claude says it through its hooks");
+    }
+
+    /// The model other agents' records say they're on, as their command lines take it: Pi 0.99's
+    /// and Copilot CLI 1.0.91's as they wrote them; Kimi Code's as its source writes them.
+    #[test]
+    fn the_model_is_read_off_each_agents_record() {
+        let said = |id: &str, line: &str| agent(id).unwrap().log_model(&serde_json::from_str(line).unwrap());
+        let pi = r#"{"type":"model_change","id":"a1","parentId":null,"timestamp":"2026-09-30T04:05:59.200Z","provider":"anthropic","modelId":"claude-opus-4-8"}"#;
+        assert_eq!(said("pi", pi).as_deref(), Some("anthropic/claude-opus-4-8"), "as `--model` and its model list name it");
+        assert_eq!(said("pi", r#"{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-5"}}"#), None, "what answered, not its setting");
+        let start = r#"{"type":"session.start","data":{"sessionId":"b2fcbbeb-4980-4063-8e3d-4f1a5585ed36","copilotVersion":"1.0.91","selectedModel":"stub-model","context":{"cwd":"/private/tmp/proj"}},"id":"fb6cb0b2","timestamp":"2026-10-04T04:21:17.924Z"}"#;
+        assert_eq!(said("copilot", start).as_deref(), Some("stub-model"));
+        let change = r#"{"type":"session.model_change","data":{"newModel":"gpt-5.5","previousModel":"stub-model","source":"user"},"id":"3ffa6930","timestamp":"2026-10-04T04:21:18.137Z"}"#;
+        assert_eq!(said("copilot", change).as_deref(), Some("gpt-5.5"));
+        assert_eq!(said("copilot", r#"{"type":"assistant.usage","data":{"model":"stub-model"}}"#), None);
+        assert_eq!(said("kimi", r#"{"type":"profile.bind","agentId":"main","modelAlias":"k2","time":1790739703600}"#).as_deref(), Some("k2"));
+        assert_eq!(said("kimi", r#"{"type":"config.update","agentId":"main","modelAlias":"k3","time":1790739709600}"#).as_deref(), Some("k3"));
+        assert_eq!(said("kimi", r#"{"type":"config.update","agentId":"main","modelAlias":"__kimi_env_model__"}"#), None, "its environment's, which `-m` can't name");
+        assert_eq!(said("kimi", r#"{"type":"llm.request","agentId":"main","model":"kimi-k2","time":1790739703600}"#), None);
+        assert_eq!(said("cursor", r#"{"role":"user","message":{"content":[]}}"#), None, "its record names no model");
     }
 
     #[test]

@@ -1279,15 +1279,16 @@ struct SessionRow: View {
         return NSString(string: here).abbreviatingWithTildeInPath
     }
 
+    /// The model it's on: as its agent says (routing off too), else as its last call asked.
     private var modelText: String? {
-        guard session.requests > 0, session.last_model != nil else { return nil }
-        let m = shortModel(session.last_model)
+        guard session.agent_model != nil || session.requests > 0, let now = session.modelNow else { return nil }
+        let m = shortModel(now)
         return session.tier.map { "\($0) → \(m)" } ?? m
     }
 
     private var usageHelp: String {
         var lines: [String] = []
-        if let m = session.last_model { lines.append(m) }
+        if let m = session.modelNow { lines.append(m) }
         if session.requests > 0 {
             lines.append("↑\(tokens(session.input_tokens)) in · ↓\(tokens(session.output_tokens)) out, \(session.requests) request\(session.requests == 1 ? "" : "s")")
         }

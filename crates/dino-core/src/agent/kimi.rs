@@ -172,6 +172,9 @@ fn conversation_in(pid: u32) -> Option<(Entry, Value)> {
         .min_by_key(|(_, st)| st["createdAt"].as_u64().unwrap_or(0))
 }
 
+/// The alias Kimi gives a model its environment names (`KIMI_MODEL_NAME`), not one of its config's.
+const ENV_MODEL: &str = "__kimi_env_model__";
+
 /// The conversation ran on dino's free tier: its record says its requests went to the model its
 /// environment gave it, named as dino names the free tier's. (Its process can't say: Kimi's
 /// process title overwrites its environment.)
@@ -181,7 +184,7 @@ fn on_free_tier(dir: &Path) -> bool {
         .filter(|l| l.contains("\"llm.request\""))
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .next_back()
-        .is_some_and(|v| v["modelAlias"] == "__kimi_env_model__" && v["model"] == "auto")
+        .is_some_and(|v| v["modelAlias"] == ENV_MODEL && v["model"] == "auto")
 }
 
 impl Kimi {
@@ -344,6 +347,15 @@ impl Agent for Kimi {
 
     fn tool_calls(&self, line: &Value) -> Vec<(String, bool)> {
         tool_calls_in(line)
+    }
+
+    // The model alias (what `-m` takes) its profile is bound to as it starts, and changed to by
+    // `/model`. Not the one its environment gives it, which has no alias of its own.
+    fn log_model(&self, line: &Value) -> Option<String> {
+        if !matches!(line["type"].as_str()?, "profile.bind" | "config.update") {
+            return None;
+        }
+        line["modelAlias"].as_str().filter(|m| !m.is_empty() && *m != ENV_MODEL).map(String::from)
     }
 
     fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {

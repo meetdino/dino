@@ -202,16 +202,28 @@ pub fn new_uuid() -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
-/// Per-session settings layered on top of the user's own: HTTP hooks that report lifecycle events
-/// to dino, and optionally a `statusLine` (JSON). Hook entries merge with existing ones, and an
-/// unreachable URL never blocks Claude.
+/// The hook events dino follows, in Claude Code and in agents that take Claude's hooks (Qwen Code).
+pub const HOOK_EVENTS: &[&str] = &[
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+    "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop",
+];
+
+/// Claude Code's own on top of those: the model its session switches to, by `/model` or by itself
+/// (2.1.251; an older Claude ignores an event it doesn't know, with a warning).
+const CLAUDE_HOOK_EVENTS: &[&str] = &["PostModelSwitch"];
+
+/// Per-session settings layered on top of Claude Code's own: HTTP hooks that report lifecycle
+/// events to dino, and optionally a `statusLine` (JSON). Hook entries merge with existing ones,
+/// and an unreachable URL never blocks Claude.
 pub fn claude_hook_settings(url: &str, status_line: Option<String>) -> String {
-    const EVENTS: &[&str] = &[
-        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-        "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop",
-    ];
+    let events: Vec<&str> = HOOK_EVENTS.iter().chain(CLAUDE_HOOK_EVENTS).copied().collect();
+    hook_settings(url, &events, status_line)
+}
+
+/// Settings with HTTP hooks to `url` for `events`, and optionally a `statusLine` (JSON).
+pub fn hook_settings(url: &str, events: &[&str], status_line: Option<String>) -> String {
     let entry = format!(r#"[{{"hooks":[{{"type":"http","url":"{url}","timeout":5}}]}}]"#);
-    let hooks: Vec<String> = EVENTS.iter().map(|e| format!(r#""{e}":{entry}"#)).collect();
+    let hooks: Vec<String> = events.iter().map(|e| format!(r#""{e}":{entry}"#)).collect();
     let status_line = status_line.map(|s| format!(r#","statusLine":{s}"#)).unwrap_or_default();
     format!(r#"{{"hooks":{{{}}}{status_line}}}"#, hooks.join(","))
 }

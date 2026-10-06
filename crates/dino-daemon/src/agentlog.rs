@@ -59,8 +59,15 @@ fn track(d: &Daemon, s: &Session, claimed: &[String]) {
         };
     }
     let Some(id) = l.conversation.clone() else { return };
+    // The model it says it's on, as of what's read now (see `Agent::log_model`).
+    let mut model = None;
     if a.status_source() == StatusSource::Polled {
+        let was = l.turn;
         l.turn = a.turn_now(&id, since).unwrap_or(false);
+        // Its store says its model as a turn starts and as it ends: looked at then.
+        if l.turn != was {
+            model = a.model_now(&id, since);
+        }
         // Its store says only what's out now: each look at a call counts as a call made.
         if l.turn {
             for tool in a.tools_now(&id) {
@@ -70,10 +77,15 @@ fn track(d: &Daemon, s: &Session, claimed: &[String]) {
         // A question it asks on its screen, for agents whose store doesn't say.
         l.needs = if l.turn && a.asks_on_screen() { a.asking(&s.pane.text(0)) } else { None };
     } else {
-        for (tool, started) in read_log(a, &mut l, &id, since) {
+        let (calls, said) = read_log(a, &mut l, &id, since);
+        for (tool, started) in calls {
             let phase = if started { Phase::Started } else { Phase::Ended };
             d.proxy.stats.tool_call(&s.id, &tool, phase);
         }
+        model = said;
+    }
+    if let Some(m) = model {
+        d.proxy.stats.report_model(&s.id, m);
     }
     // Nothing yet: say nothing, as for an agent that hasn't been sent a prompt.
     if l.reported.is_none() && !l.turn && l.needs.is_none() {
@@ -90,22 +102,23 @@ fn track(d: &Daemon, s: &Session, claimed: &[String]) {
     }
 }
 
-/// Take in what conversation `id`'s file says since it was last read; the tool calls it started
-/// and ended meanwhile (see `Agent::tool_calls`).
-fn read_log(a: &dyn Agent, l: &mut Log, id: &str, since: u64) -> Vec<(String, bool)> {
+/// Take in what conversation `id`'s file says since it was last read: the tool calls it started
+/// and ended meanwhile (see `Agent::tool_calls`), and the model it last said it's on.
+fn read_log(a: &dyn Agent, l: &mut Log, id: &str, since: u64) -> (Vec<(String, bool)>, Option<String>) {
     if l.path.is_none() {
         // Some write it only once the first prompt is sent.
-        let Some(path) = a.log_path(id).filter(|p| p.exists()) else { return vec![] };
+        let Some(path) = a.log_path(id).filter(|p| p.exists()) else { return (vec![], None) };
         // A record begun since this process started is read from its start, so its first turn
         // counts; one it continues, from where it is now.
         let born = path.metadata().and_then(|m| m.created()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         l.offset = if born + 1 >= since { 0 } else { path.metadata().map_or(0, |m| m.len()) };
         l.path = Some(path);
     }
-    let Some(path) = l.path.clone() else { return vec![] };
-    let mut calls = vec![];
+    let Some(path) = l.path.clone() else { return (vec![], None) };
+    let (mut calls, mut model) = (vec![], None);
     for v in new_lines(&path, &mut l.offset) {
         calls.extend(a.tool_calls(&v));
+        model = a.log_model(&v).or(model);
         match a.log_event(&v) {
             LogEvent::TurnStarted => {
                 l.turn = true;
@@ -120,7 +133,7 @@ fn read_log(a: &dyn Agent, l: &mut Log, id: &str, since: u64) -> Vec<(String, bo
             LogEvent::Other => l.needs = None,
         }
     }
-    calls
+    (calls, model)
 }
 
 /// The whole lines written since `offset`, moving it past them.

@@ -858,6 +858,11 @@ pub struct SessionInfo {
     /// when changed in the agent itself (Claude's Shift+Tab).
     #[serde(default)]
     pub agent_mode: Option<String>,
+    /// The model the agent says it's on, as it names it, once it has said since it started:
+    /// `controls` shows it over the one it was started with, which it no longer is when changed in
+    /// the agent itself (`/model`). Unlike `last_model`, never a side call's (a title, a probe).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_model: Option<String>,
     /// Tokens the last model call read (cached ones included): how full the context window is.
     #[serde(default)]
     pub context_tokens: u64,
