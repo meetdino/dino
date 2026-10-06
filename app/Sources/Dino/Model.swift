@@ -997,8 +997,6 @@ final class DinoModel: ObservableObject {
     @Published var tabs: [String] = UserDefaults.standard.stringArray(forKey: "tabs") ?? [] {
         didSet { if tabs != oldValue { UserDefaults.standard.set(tabs, forKey: "tabs") } }
     }
-    /// Shells whose tab was put away without ending them (dropped from a split): not reopened.
-    var knownTabless = Set<String>()
     /// Closes that ⌘Z can still undo (and closes undone, that Redo can do again), until each one's
     /// time is up (UndoClose.swift).
     var undoRecords: [ClosedLayout] = []

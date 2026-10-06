@@ -1,8 +1,9 @@
 import AppKit
 
 /// Undo Close Tab and Undo Close Pane (⌘Z, ⇧⌘T: Ghostty's `undo`, and Edit › Undo), within
-/// Ghostty's `undo-timeout` (5 s unless set). An agent's tab only hid it, so undoing shows it
-/// again. A shell's process would be gone: dinod keeps a closed shell running, hidden, until the
+/// Ghostty's `undo-timeout` (5 s unless set). A pane put away with ⌘\ only hid its session, so
+/// undoing shows it again; an agent closed with ⌘W is archived, and Archived brings it back. A
+/// shell's process would be gone: dinod keeps a closed shell running, hidden, until the
 /// time to undo is up, so ⌘Z brings back the same shell with its scrollback; then it really ends.
 /// Each close is undone on its own and expires on its own, as in Ghostty.
 @MainActor
@@ -134,7 +135,6 @@ extension DinoModel {
             t.removeAll { $0 == id }
             t.insert(id, at: min(at, t.count))
         }
-        knownTabless.subtract(r.tabs.map(\.id))
         if t != tabs { tabs = t }
         for s in r.splits where !splits.contains(s) && s.panes.allSatisfy(live.contains) {
             var trees = splits.filter { t in !t.panes.contains(where: s.contains) }

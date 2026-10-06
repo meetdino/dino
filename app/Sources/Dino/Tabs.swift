@@ -1,8 +1,8 @@
 import SwiftUI
 
 // Two layers, as agreed for dino: the tabs along the top are what's open (every shell, and the
-// agents you opened), like Ghostty's; the sidebar is every agent, open or not. Closing an agent's
-// tab only closes the view: it keeps running in the sidebar.
+// agents you opened), like Ghostty's; the sidebar is every agent, open or not. Closing a tab closes
+// what's in it, as in a terminal: a shell ends, an agent is archived (Archived has it to resume).
 
 extension SessionInfo {
     /// A shell with no agent in it: it lives in the tabs only, not in the sidebar.
@@ -22,10 +22,9 @@ extension DinoModel {
     func syncTabs(_ next: [SessionInfo]) {
         let live = Set(next.map(\.id))
         var t = tabs.filter { live.contains($0) }
-        for s in next where s.agent_id == "shell" && !t.contains(s.id) && !knownTabless.contains(s.id) {
+        for s in next where s.agent_id == "shell" && !t.contains(s.id) {
             t.append(s.id)
         }
-        knownTabless = knownTabless.intersection(live)
         if t != tabs { tabs = t }
     }
 
@@ -34,7 +33,6 @@ extension DinoModel {
         guard !id.contains(":"), !tabs.contains(id) else { return }
         let at = selected.flatMap { tabs.firstIndex(of: $0) }.map { $0 + 1 } ?? tabs.endIndex
         tabs.insert(id, at: at)
-        knownTabless.remove(id)
     }
 
     /// The tabs as shown: a split is one tab, under whichever of its two comes first.
@@ -65,31 +63,33 @@ extension DinoModel {
         select(shown[((at + step) % shown.count + shown.count) % shown.count])
     }
 
-    /// Close tab `id` without asking: a shell ends, an agent only leaves the tabs (one beside a
-    /// shell in a split too). The next tab along takes over, as in Ghostty.
-    func dropTab(_ id: String, ending: Bool) {
+    /// Close tab `id` without asking: its shells end (⌘Z brings them back for a while) and, with
+    /// `archiving`, its agents are archived; otherwise they only leave the tabs. The next tab along
+    /// takes over, as in Ghostty.
+    func dropTab(_ id: String, archiving: Bool = false) {
         let shown = shownTabs
         let at = shown.firstIndex(of: tab(of: id) ?? id) ?? 0
         let members = split(of: id)?.panes ?? [id]
         let before = layoutBefore()
         tabs.removeAll { members.contains($0) }
-        let shells = ending ? members.filter { m in sessions.first { $0.id == m }?.agent_id == "shell" } : []
-        // ⌘Z puts it back: a shell is kept by dinod until the time to undo is up.
-        closed(since: before, members: members, shells: shells, name: "Close Tab") { [weak self] in
-            self?.dropTab(id, ending: ending)
+        let inTab = members.compactMap { m in sessions.first { $0.id == m } }
+        let shells = inTab.filter { $0.agent_id == "shell" }.map(\.id)
+        let agents = archiving ? inTab.filter { $0.agent_id != "shell" }.map(\.id) : []
+        // ⌘Z puts it back: a shell is kept by dinod until the time to undo is up. An archived
+        // agent comes back from Archived instead.
+        if agents.count < inTab.count {
+            closed(since: before, members: members, shells: shells, name: "Close Tab") { [weak self] in
+                self?.dropTab(id, archiving: archiving)
+            }
         }
-        if ending {
-            for m in shells { endShell(m) }
-        } else {
-            // A shell left without a tab would come straight back on the next sync.
-            knownTabless.formUnion(members)
-        }
+        for m in shells { endShell(m) }
         let rest = shownTabs
         if rest.isEmpty {
             selected = nil
         } else if members.contains(selected ?? "") || selected == nil {
             select(rest[min(at, rest.count - 1)])
         }
+        for a in agents { archiveNow(a) }
     }
 }
 
@@ -169,7 +169,7 @@ private struct TabItem: View {
             .buttonStyle(.plain)
             .opacity(hovering || selected ? 1 : 0)
             .help(session.tmux != nil ? "Close this tab and detach from tmux (⌘W). The session keeps running in tmux."
-                : session.plainShell ? "Close this tab (⌘W)" : "Close this tab (⌘W). \(session.display) keeps running in the sidebar.")
+                : session.agent_id == "shell" ? "Close this tab (⌘W)" : "Close this tab (⌘W). \(session.display) stops and is archived, to resume from Archived.")
         }
         .font(.subheadline)
         .foregroundStyle(selected ? .primary : .secondary)

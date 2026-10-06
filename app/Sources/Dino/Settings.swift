@@ -665,6 +665,7 @@ private struct TerminalChoicesSync: ViewModifier {
 private struct GeneralPane: View {
     @AppStorage(QuitChoice.key) private var quitChoice = ""
     @AppStorage(StartWith.key) private var startWith = StartWith.last.rawValue
+    @AppStorage(DinoModel.askBeforeClosingKey) private var askBeforeClosing = true
 
     var body: some View {
         Form {
@@ -678,8 +679,9 @@ private struct GeneralPane: View {
                     Text("Keep them running").tag(QuitChoice.keep.rawValue)
                     Text("Stop them").tag(QuitChoice.stop.rawValue)
                 }
+                Toggle("Ask before ⌘W closes an agent", isOn: $askBeforeClosing)
             } footer: {
-                Footnote("If there's no last session to open, dino opens a new shell. Quitting dino doesn't stop your agents unless you choose “Stop them”. Stopped agents resume their conversations the next time you open dino.")
+                Footnote("If there's no last session to open, dino opens a new shell. Quitting dino doesn't stop your agents unless you choose “Stop them”. Stopped agents resume their conversations the next time you open dino. Closing an agent's tab or pane stops it and archives the session, to resume from Archived.")
             }
             UpdatesSection()
             DinodAgentSection()

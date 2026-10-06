@@ -182,29 +182,57 @@ extension DinoModel {
         splits = trees
     }
 
-    /// ⌘W in a split: the pane goes, its session keeps running unless it was a shell dino started
-    /// for the split, which asks first when something runs in it.
+    /// ⌘\, a pane's ✕ and ⌃`: the pane goes, its session keeps running unless it was a shell dino
+    /// started for the split, which asks first when something runs in it.
     func closePane(_ id: String) {
         guard let t = split(of: id) else { return }
         if t.isHelper(id), let shell = sessions.first(where: { $0.id == id }), !confirmEnding([shell], in: "pane") { return }
         dropPane(id)
     }
 
-    /// The tree without pane `id`, without asking; ⌘Z puts the pane back. Focus goes where
-    /// Ghostty sends it: the pane before, or after the first one.
-    private func dropPane(_ id: String) {
+    /// ⌘W in a split: the pane closes with what's in it, as in Ghostty: a shell ends, an agent is
+    /// archived. Asks first (`confirmClosing`).
+    func closePaneAndSession(_ id: String) {
+        guard split(of: id) != nil, let s = sessions.first(where: { $0.id == id }) else { return }
+        guard confirmClosing([s], in: "pane") else { return }
+        dropPane(id, ending: true)
+    }
+
+    /// The tree without pane `id`, without asking; ⌘Z puts the pane back. `ending` (⌘W): its
+    /// session goes too, as a helper shell's always does: a shell ends (⌘Z brings it back for a
+    /// while) and an agent is archived (resumed from Archived; ⌘Z can't). Focus goes where Ghostty
+    /// sends it: the pane before, or after the first one.
+    private func dropPane(_ id: String, ending: Bool = false) {
         guard let i = splits.firstIndex(where: { $0.contains(id) }) else { return }
         let t = splits[i]
         let next = t.afterClosing(id)
-        let helper = t.isHelper(id)
+        let shell = sessions.first { $0.id == id }?.agent_id == "shell"
+        let endsShell = t.isHelper(id) || ending && shell
+        let archives = ending && !shell && sessions.contains { $0.id == id }
         let before = layoutBefore()
         if let rest = t.removing(id) { splits[i] = rest } else { splits.remove(at: i) }
-        closed(since: before, members: [id], shells: helper ? [id] : [], name: "Close Pane") { [weak self] in
-            guard let self, self.split(of: id) != nil else { return }
-            self.dropPane(id)
+        if ending { leaveTabs(id, splitWith: t) }
+        if !archives {
+            closed(since: before, members: [id], shells: endsShell ? [id] : [], name: "Close Pane") { [weak self] in
+                guard let self, self.split(of: id) != nil else { return }
+                self.dropPane(id, ending: ending)
+            }
         }
-        if helper { endShell(id) }
+        if endsShell { endShell(id) }
         if selected == id, let next { select(next) }
+        if archives { archiveNow(id) }
+    }
+
+    /// Session `id` leaves the tabs with its pane. Its split's tab stays where it was: when it
+    /// stood under `id`, the next of its panes takes that place.
+    private func leaveTabs(_ id: String, splitWith t: SplitTree) {
+        guard let at = tabs.firstIndex(of: id) else { return }
+        var next = tabs
+        next.remove(at: at)
+        if let heir = next.firstIndex(where: t.contains), heir >= at {
+            next.insert(next.remove(at: heir), at: at)
+        }
+        tabs = next
     }
 
     /// ⌘\ (Claude desktop's key): the pane with focus goes, a split's or else the side pane, never the window.
@@ -371,7 +399,7 @@ struct PaneHeader: View {
             .help(zoomed ? "Show all panes (⇧⌘↩)" : "Zoom (⇧⌘↩): show only this pane in the tab")
             .accessibilityLabel(zoomed ? "Unzoom Split" : "Zoom Split")
             Button { model.closePane(session.id) } label: { Image(systemName: "xmark") }
-                .help(split.isHelper(session.id) ? "Close this shell (⌘W)" : "Close this pane (⌘W). The session keeps running.")
+                .help(split.isHelper(session.id) ? "Close this shell (⌘W)" : "Close this pane (⌘\\). The session keeps running.")
                 .accessibilityLabel("Close Pane")
         }
         .buttonStyle(.borderless)
@@ -552,8 +580,8 @@ struct SplitMenuItems: View {
 }
 
 /// ⌘W closes what you're in, innermost first, like a tab in a terminal: the split pane you're
-/// typing in, else the side pane, else the session itself, and the window only when no session is
-/// open. dino's sessions are its tabs.
+/// typing in, else the side pane, else the tab, and the window only when no tab is open. What's in
+/// a pane or tab closes with it: a shell ends, an agent is archived.
 struct CloseCommand: View {
     @EnvironmentObject var model: DinoModel
 
@@ -594,24 +622,20 @@ extension DinoModel {
 
     func closeCurrent() {
         switch closeTarget {
-        case .pane(let id): closePane(id)
+        case .pane(let id): closePaneAndSession(id)
         case .sidePane: closeSidePane()
         case .tab(let s): closeTab(s)
         case .window: NSApp.keyWindow?.performClose(nil)
         }
     }
 
-    /// ⌘W on a tab. A shell's tab ends the shell (and a shell beside it in a split), asking first
-    /// when something runs in one, as Ghostty's `confirm-close-surface` says. An agent's tab only
-    /// closes: the agent keeps running in the sidebar, where archiving it is.
+    /// ⌘W on a tab, its ✕ and Ghostty's `close_tab`: the tab closes with every pane in it, as in
+    /// Ghostty: a shell ends, an agent is archived. Asks first (`confirmClosing`).
     func closeTab(_ s: SessionInfo) {
-        let shell = s.agent_id == "shell"
-        if shell {
-            let members = split(of: s.id)?.panes ?? [s.id]
-            let ending = members.compactMap { m in sessions.first { $0.id == m && $0.agent_id == "shell" } }
-            guard confirmEnding(ending, in: "tab") else { return }
-        }
-        dropTab(s.id, ending: shell)
+        let members = split(of: s.id)?.panes ?? [s.id]
+        let inTab = members.compactMap { m in sessions.first { $0.id == m } }
+        guard confirmClosing(inTab, in: "tab") else { return }
+        dropTab(s.id, archiving: true)
     }
 
     /// What a tab is called: a shell by its folder, as in Ghostty, or by the agent run in it.
