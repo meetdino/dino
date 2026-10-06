@@ -17,6 +17,7 @@ const FILES: [(&str, &str); 16] = [
     ("zsh/ghostty.zshenv", include_str!("../shell-integration/zsh/ghostty.zshenv")),
     ("zsh/ghostty-integration", include_str!("../shell-integration/zsh/ghostty-integration")),
     ("zsh/dino-tmux-start.zsh", include_str!("../shell-integration/zsh/dino-tmux-start.zsh")),
+    // Not loaded by dino: for a .zshrc to load in tmux panes (see the file).
     ("zsh/dino-tmux.zsh", include_str!("../shell-integration/zsh/dino-tmux.zsh")),
     ("zsh/dino-term.zsh", include_str!("../shell-integration/zsh/dino-term.zsh")),
     ("bash/dino-term.bash", include_str!("../shell-integration/bash/dino-term.bash")),
@@ -89,12 +90,13 @@ impl Shell {
 /// bash 4 and later through ENV in POSIX mode (Ghostty's way), older bash through --rcfile, fish,
 /// elvish and nushell through XDG_DATA_DIRS (nushell told to `use ghostty *`). zsh, bash, fish and
 /// nushell as login shells, as Terminal and Ghostty start them on macOS. `env` is what dinod adds
-/// to its own environment.
-pub fn wire(program: &str, env: &mut HashMap<String, String>, args: &mut Vec<String>, mode: &str, features: &str) {
-    wire_from(&dino_core::config_dir().join("shell-integration"), program, env, args, mode, features);
+/// to its own environment. True when what loads hands an agent typed there to dino (zsh's and
+/// bash's do, `dino-agents.*`).
+pub fn wire(program: &str, env: &mut HashMap<String, String>, args: &mut Vec<String>, mode: &str, features: &str) -> bool {
+    wire_from(&dino_core::config_dir().join("shell-integration"), program, env, args, mode, features)
 }
 
-fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args: &mut Vec<String>, mode: &str, features: &str) {
+fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args: &mut Vec<String>, mode: &str, features: &str) -> bool {
     let var = |env: &HashMap<String, String>, k: &str| env.get(k).cloned().or_else(|| std::env::var(k).ok()).filter(|v| !v.is_empty());
     // As Ghostty: the features go to every shell, for an integration loaded by hand too.
     if !features.is_empty() {
@@ -106,10 +108,10 @@ fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args:
         "detect" | "" => Shell::named(name),
         forced => Shell::named(forced),
     };
-    let Some(shell) = shell else { return };
+    let Some(shell) = shell else { return false };
     if let Err(e) = install(dir) {
         eprintln!("dinod: no shell integration: {e}");
-        return;
+        return false;
     }
     let ours: Vec<String> = match shell {
         Shell::Zsh => {
@@ -153,6 +155,7 @@ fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args:
         }
     };
     args.splice(0..0, ours);
+    matches!(shell, Shell::Zsh | Shell::Bash)
 }
 
 /// Writes the scripts to `dir`, where the shells read them, when they're missing or from another dino.
@@ -200,7 +203,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dino-shell-{}", std::process::id()));
 
         let (mut env, mut args) = (HashMap::from([("ZDOTDIR".to_string(), "/u/zdot".to_string())]), vec![]);
-        wire_from(&dir, "/bin/zsh", &mut env, &mut args, "detect", FEATURES);
+        assert!(wire_from(&dir, "/bin/zsh", &mut env, &mut args, "detect", FEATURES));
         assert_eq!(args, ["-l"]);
         assert_eq!(env["ZDOTDIR"], dir.join("zsh").display().to_string());
         assert_eq!(env["GHOSTTY_ZSH_ZDOTDIR"], "/u/zdot");
@@ -210,14 +213,15 @@ mod tests {
         // macOS's own bash is 3.2.
         if bash_major("/bin/bash") == 3 {
             let (mut env, mut args) = (HashMap::new(), vec![]);
-            wire_from(&dir, "/bin/bash", &mut env, &mut args, "detect", FEATURES);
+            assert!(wire_from(&dir, "/bin/bash", &mut env, &mut args, "detect", FEATURES));
             assert_eq!(args, ["--rcfile".to_string(), dir.join("bash/dino.bash").display().to_string()]);
             assert!(!env.contains_key("ENV"));
         }
 
         // fish, elvish and nushell: through XDG_DATA_DIRS, ahead of what was there.
         let (mut env, mut args) = (HashMap::from([("XDG_DATA_DIRS".to_string(), "/opt/share".to_string())]), vec![]);
-        wire_from(&dir, "/opt/homebrew/bin/fish", &mut env, &mut args, "detect", "cursor:blink,path,title");
+        // Nothing there hands an agent to dino.
+        assert!(!wire_from(&dir, "/opt/homebrew/bin/fish", &mut env, &mut args, "detect", "cursor:blink,path,title"));
         assert_eq!(args, ["-l"]);
         assert_eq!(env["XDG_DATA_DIRS"], format!("{}:/opt/share", dir.display()));
         assert_eq!(env["GHOSTTY_SHELL_INTEGRATION_XDG_DIR"], dir.display().to_string());
@@ -235,7 +239,7 @@ mod tests {
 
         // `shell-integration = none`: no integration, but the features still go, for one loaded by hand.
         let (mut env, mut args) = (HashMap::new(), vec![]);
-        wire_from(&dir, "/bin/zsh", &mut env, &mut args, "none", "sudo,title");
+        assert!(!wire_from(&dir, "/bin/zsh", &mut env, &mut args, "none", "sudo,title"));
         assert!(args.is_empty() && !env.contains_key("ZDOTDIR"));
         assert_eq!(env["GHOSTTY_SHELL_FEATURES"], "sudo,title");
         // A shell named there is set up as that one, whatever it's called.

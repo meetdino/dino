@@ -713,6 +713,9 @@ private struct TerminalSettingsPane: View {
     @State private var isDefault = false
     @State private var makingDefault = false
 
+    /// What loads dino's marks in zsh in tmux panes, for the user's .zshrc; dino never writes it there.
+    static let tmuxLine = #"[[ -n $TMUX ]] && source "${DINO_HOME:-$HOME/.config/dino}/shell-integration/zsh/dino-tmux.zsh" 2>/dev/null"#
+
     var body: some View {
         Form {
             Section {
@@ -749,7 +752,16 @@ private struct TerminalSettingsPane: View {
             } header: {
                 Text("Shell")
             } footer: {
-                Footnote("Lets dino see your prompts and current folder in zsh, bash, fish, elvish and nushell, as Ghostty does, so new tabs open in the same folder and you can jump between prompts. Follows shell-integration and shell-integration-features in your Ghostty config. Your shell startup files aren't changed. Applies to new shells.")
+                VStack(alignment: .leading, spacing: 6) {
+                    Footnote("Lets dino see your prompts and current folder in zsh, bash, fish, elvish and nushell, as Ghostty does, so new tabs open in the same folder and you can jump between prompts. Follows shell-integration and shell-integration-features in your Ghostty config. Your shell startup files aren't changed. Applies to new shells.\n\nA tmux you start runs as in any terminal: its panes load only your own startup files, as in Ghostty. For zsh in tmux panes to tell dino their exit codes and pass on notifications too, add this line to your .zshrc. It also turns on tmux's allow-passthrough for those panes.")
+                    Text(Self.tmuxLine)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 10)
+                }
             }
             ShellAISection()
             Section {

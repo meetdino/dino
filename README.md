@@ -116,6 +116,18 @@ dino --help               # the rest
 Settings live in `~/.config/dino/settings.toml`, which `dinod` reads and writes. The app's
 Settings window edits the same file.
 
+## Shell integration inside tmux
+
+dino's shells tell it their prompts, exit codes and folder, as Ghostty's do, without changing your
+startup files. A tmux you start in dino runs as in any terminal: its panes load only your own
+startup files, as in Ghostty, and dino still follows the active pane's folder and window name and
+its bells. For zsh in tmux panes to tell dino their exit codes and pass on notifications too, add
+this line to your `.zshrc` (it also turns on tmux's `allow-passthrough` for those panes):
+
+```zsh
+[[ -n $TMUX ]] && source "${DINO_HOME:-$HOME/.config/dino}/shell-integration/zsh/dino-tmux.zsh" 2>/dev/null
+```
+
 ## Building from source
 
 You need the Xcode Command Line Tools (`xcode-select --install`) and Rust

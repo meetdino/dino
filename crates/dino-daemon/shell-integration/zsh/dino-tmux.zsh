@@ -1,7 +1,12 @@
-# dino's marks from a pane of a tmux started in a dino shell. tmux keeps a pane's OSC 7 and 133 for
-# itself (they're how it knows the pane's folder and prompts); the same marks wrapped for
-# passthrough also reach dino, for the tab's exit code, prompt marks and folder.
+# dino's marks from zsh in a tmux pane, for a dino tab showing that tmux: its last command's exit
+# code, prompt marks and folder. tmux keeps a pane's OSC 7 and 133 for itself (they're how it
+# knows the pane's folder and prompts); the same marks wrapped for passthrough also reach dino.
+#
+# dino never loads this itself: tmux's panes start with only your own startup files, as in
+# Ghostty. To have them, this line in your .zshrc (README, "Shell integration inside tmux"):
+#   [[ -n $TMUX ]] && source "${DINO_HOME:-$HOME/.config/dino}/shell-integration/zsh/dino-tmux.zsh" 2>/dev/null
 
+[[ -n ${TMUX-} ]] || return 0
 (( ${+_dino_tmux_loaded} )) && return 0
 typeset -g _dino_tmux_loaded=1 _dino_tmux_ran=0
 
@@ -41,5 +46,3 @@ _dino_tmux_preexec() {
 
 precmd_functions=(_dino_tmux_precmd $precmd_functions)
 preexec_functions+=(_dino_tmux_preexec)
-# Loaded from the first prompt's hooks: that prompt's marks go out now.
-_dino_tmux_where
