@@ -51,10 +51,10 @@ struct DinoApp: App {
                 UpdateMenuItem()
                 Button("Ask Before Quitting") { quitChoice = "" }
                     .disabled(quitChoice.isEmpty)
-                    .help("Show the keep-running question again when you quit")
+                    .help("Ask again whether to keep agents running when you quit dino")
                 Button("Install Command Line Tool…") { CommandLineTool.install() }
                     .disabled(DinoEnvironment.bundledDino == nil)
-                    .help("Put the dino command this app carries on your PATH")
+                    .help("Install the dino command so you can run it from any terminal")
             }
             // One window: ⌘N starts a session rather than opening a second window.
             CommandGroup(replacing: .newItem) {}
@@ -360,9 +360,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : "\(count) sessions"
         let alert = NSAlert()
         alert.messageText = "Keep your \(what) running?"
-        alert.informativeText = (working > 0 ? "\(working) \(working == 1 ? "is" : "are") working right now. " : "")
-            + "They carry on in the background while dino is closed; open dino to pick up where you left off."
-            + " Stopping pauses them, and they resume the next time dino starts."
+        let they = count == 1 ? "it" : "they"
+        alert.informativeText = (working > 0 ? (count == 1 ? "It's working right now. " : "\(working) \(working == 1 ? "is" : "are") working right now. ") : "")
+            + "If you keep \(count == 1 ? "it" : "them") running, \(they) continue while dino is closed."
+            + " If you stop \(count == 1 ? "it" : "them"), \(they) resume the next time you open dino."
         alert.addButton(withTitle: "Keep Running")
         alert.addButton(withTitle: count == 1 ? "Stop It" : "Stop All")
         alert.addButton(withTitle: "Cancel")
@@ -481,7 +482,7 @@ struct ContentView: View {
             Button("Delete", role: .destructive) { model.deleteTask(t) }
             Button("Cancel", role: .cancel) {}
         } message: { _ in
-            Text("It won't run again. Sessions it already started keep running.")
+            Text("This automation won't run again. Sessions it already started keep running.")
         }
         .alert(
             "Delete “\(model.deleting.map { model.tabName($0.session) } ?? "")”?",
@@ -506,7 +507,7 @@ struct ContentView: View {
                 .keyboardShortcut(.defaultAction)
             Button("Cancel", role: .cancel) {}
         } message: { _ in
-            Text("They're applied to your checkout, uncommitted, for you to review. The other agents stop and every worktree of this fan-out is removed.")
+            Text("The changes are applied to your checkout, uncommitted, so you can review them. The other agents stop, and all of this fan-out's worktrees are removed.")
         }
         .alert(
             model.closingWorktree?.apply == true ? "Apply \(model.closingWorktree?.label ?? "")'s changes?" : "Discard \(model.closingWorktree?.label ?? "")?",
@@ -522,8 +523,8 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
         } message: { w in
             Text(w.apply
-                ? "They're applied to the checkout it came from, uncommitted, for you to review. Its sessions stop, and the worktree and its branch are removed."
-                : "Its sessions stop, and the worktree, its branch and every change in it are removed.")
+                ? "The changes are applied to the checkout the worktree came from, uncommitted, so you can review them. Its sessions stop, and the worktree and its branch are removed."
+                : "Its sessions stop. The worktree, its branch and all of its changes are removed.")
         }
         .modifier(CleanUpAlert(model: model))
         .alert(
@@ -544,8 +545,8 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
         } message: { f in
             Text(f.isBusy
-                ? "It's working right now. dino waits for the current turn to finish, closes it in \(f.terminal ?? "the other terminal") and continues the conversation here."
-                : "dino closes it in \(f.terminal ?? "the other terminal") and continues the same conversation here, with its history.")
+                ? "It's working right now. When its current turn ends, dino closes it in \(f.terminal ?? "the other terminal") and continues the conversation here."
+                : "dino closes it in \(f.terminal ?? "the other terminal") and continues the conversation here, with its full history.")
         }
         .background(WelcomeCard())
     }
@@ -685,19 +686,19 @@ struct SidePanePicker: View {
                 Toggle(isOn: Binding(get: { model.showReview }, set: { model.showReview = $0 })) {
                     Label("Changes", systemImage: "plus.forwardslash.minus")
                 }
-                .help(remote ?? "Changes (⇧⌘D): review this session's diff and comment on a line for the agent")
+                .help(remote ?? "Changes (⇧⌘D): review what this session changed and leave comments for the agent")
                 .disabled(session == nil || (remote != nil && !model.showReview))
                 Toggle(isOn: Binding(get: { preview }, set: { _ in model.togglePreview() })) {
                     Label("Preview", systemImage: "globe")
                 }
-                .help(remote ?? "Preview (⌥⌘P): a browser for this session's dev server or any local page")
+                .help(remote ?? "Preview (⌥⌘P): view this session's dev server or any local page")
                 .disabled(remote != nil && !preview)
                 Toggle(isOn: Binding(get: { tasks }, set: { _ in model.toggleTasks() })) {
                     Label(running > 0 ? "Tasks, \(running) running" : "Tasks", systemImage: "checklist")
                 }
                 .help(running > 0
-                    ? "Tasks (⌥⌘T): \(running) running in the background, subagents and commands"
-                    : session?.reportsTasks == true ? "Tasks (⌥⌘T): the agent's task list, subagents and background commands" : "Tasks (⌥⌘T): this session doesn't report tasks")
+                    ? "Tasks (⌥⌘T): \(running) subagents or commands running in the background"
+                    : session?.reportsTasks == true ? "Tasks (⌥⌘T): the agent's to-do list, subagents and background commands" : "Tasks (⌥⌘T): this agent doesn't report its tasks")
                 .disabled(!(session?.reportsTasks ?? false) && !tasks)
             }
             .toggleStyle(.button)
@@ -751,7 +752,7 @@ struct NewSessionButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
-        .help("New session: pick a folder or repository, then an agent (⌘N starts the default agent here)")
+        .help("New session: choose a folder or repository, then an agent. ⌘N starts your default agent in the current folder.")
         .accessibilityLabel("New Session")
         .disabled(model.launchers.isEmpty)
     }
@@ -763,21 +764,21 @@ struct EmptyState: View {
     var body: some View {
         VStack(spacing: 18) {
             DinoMark(size: 34)
-            Text("One place for every agent on this machine").foregroundStyle(.secondary)
+            Text("One place for every agent on your Mac").foregroundStyle(.secondary)
             if let error = model.error {
                 Text(error).foregroundStyle(SessionStatus.exited.color).font(.callout)
             }
             if model.daemonDown {
-                Text("dinod isn't running. Your sessions are saved and resume when it starts.")
+                Text("dino's background service isn't running. Your sessions are saved and resume when it starts.")
                     .foregroundStyle(.secondary).font(.callout)
-                Button("Start dinod") { model.startDaemon() }.controlSize(.large)
+                Button("Start Background Service") { model.startDaemon() }.controlSize(.large)
             }
             if !model.daemonDown {
                 Button {
                     model.loadFound()
                     model.showContinue = true
                 } label: {
-                    Label("Continue a session…", systemImage: "arrow.uturn.forward").frame(width: 240)
+                    Label("Continue a Session…", systemImage: "arrow.uturn.forward").frame(width: 240)
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
@@ -789,7 +790,7 @@ struct EmptyState: View {
                     Label("New Session…", systemImage: "plus").frame(width: 240)
                 }
                 .controlSize(.large)
-                .help("Pick a folder, a recent repository, one of yours on GitHub or a URL to clone, then an agent (⌘N starts the default agent here)")
+                .help("Choose a folder, a recent repository, one of your GitHub repositories or a URL to clone, then an agent. ⌘N starts your default agent in the current folder.")
             }
         }
         .padding(40)
@@ -1176,7 +1177,7 @@ struct SessionRow: View {
                     Image(systemName: "pin.fill")
                         .font(.caption2).foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(45))
-                        .help("Pinned: at the top of its group, and dino won't archive it on its own")
+                        .help("Pinned: stays at the top of its group and is never archived automatically")
                         .accessibilityLabel("Pinned")
                 }
                 if hovering, model.canArchive(session.id) {
@@ -1184,7 +1185,7 @@ struct SessionRow: View {
                     Button { model.archive(session.id) } label: { Image(systemName: "archivebox") }
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
-                        .help("Archive: stop it and keep it under Archived, to pick up again (⇧⌘A)")
+                        .help("Archive (⇧⌘A): stop this session and move it to Archived, where you can resume it later")
                         .accessibilityLabel("Archive")
                 } else {
                     Text(status.label).font(.caption).foregroundStyle(status.color).lineLimit(1).fixedSize()
@@ -1203,12 +1204,12 @@ struct SessionRow: View {
                         Text("continues in dino after this turn").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         Button("Cancel") { model.cancelTakeOver(session.id) }
                             .buttonStyle(.link).font(.caption)
-                            .help("Stop waiting: \(f.agentName) goes on in this shell")
+                            .help("Stop waiting. \(f.agentName) keeps running in this shell.")
                     } else {
                         Text("in a shell").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
-                .help("\(f.agentName) started by hand in this shell")
+                .help("\(f.agentName), started from the command line in this shell")
             }
             if detail != nil || modelText != nil {
                 HStack(spacing: 6) {
@@ -1477,7 +1478,7 @@ struct UsagePanel: View {
                         Text("\(tokens(used)) tok")
                     }
                     .font(.caption.monospacedDigit())
-                    .help("Tokens in (cached included) and out of the sessions in the sidebar, every turn dino's proxy carried for their conversations, also from before dino restarted. Agents dino doesn't route (Copilot, Cursor, Amp) aren't counted. Each row's tooltip has its own.")
+                    .help("Tokens in (including cached) and out for the sessions in the sidebar, across their whole conversations. Only traffic routed through dino is counted, so Copilot, Cursor and Amp aren't included.")
                 }
                 let free = model.sessions.filter { $0.tier != nil }.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens }
                 if free > 0 {
@@ -1608,11 +1609,11 @@ struct TakeOverButton: View {
         if model.isTakingOver(session) {
             Button("Cancel Continue") { model.cancelTakeOver(session.id) }
                 .controlSize(.small)
-                .help("Stop waiting to continue it in dino (Esc): \(found.agentName) goes on in this shell")
+                .help("Stop waiting (Esc). \(found.agentName) keeps running in this shell.")
         } else {
             Button("Continue in dino") { model.takeOver(session) }
                 .controlSize(.small)
-                .help("Continue this \(found.agentName) conversation as a dino session, once its turn is over: status, tasks, controls and previews then work. The shell goes.")
+                .help("When its current turn ends, continue this \(found.agentName) conversation as a dino session, with status, tasks, controls and previews. The shell closes.")
         }
     }
 }
@@ -1638,8 +1639,8 @@ struct TakeOverBanner: View {
                         .font(.callout.weight(.semibold))
                         .lineLimit(1)
                     Text(f.isBusy
-                        ? "Waiting for \(f.agentName)'s turn to end, then the conversation continues here as a dino session."
-                        : "\(f.agentName) stops in this shell and the conversation continues here as a dino session.")
+                        ? "Waiting for \(f.agentName)'s turn to end. Then the conversation continues here as a dino session."
+                        : "\(f.agentName) stops in this shell, and the conversation continues here as a dino session.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -1648,7 +1649,7 @@ struct TakeOverBanner: View {
                 Spacer(minLength: 8)
                 Button("Cancel") { model.cancelTakeOver(s.id) }
                     .controlSize(.regular)
-                    .help("Stop waiting (Esc): \(f.agentName) goes on in this shell")
+                    .help("Stop waiting (Esc). \(f.agentName) keeps running in this shell.")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
@@ -1713,13 +1714,13 @@ struct ElsewhereRow: View {
                     .accessibilityLabel("Continues in dino once its turn ends")
                 Button("Cancel") { model.cancelAdopt(session) }
                     .buttonStyle(.link).font(.caption)
-                    .help("Stop waiting: it goes on in \(session.terminal ?? "the other terminal")")
+                    .help("Stop waiting. The session keeps running in \(session.terminal ?? "the other terminal").")
             } else if session.asking {
                 Image(systemName: "exclamationmark.circle.fill").foregroundStyle(SessionStatus.needsYou.color)
-                    .help("Asking for something in tmux: click to go there")
+                    .help("Needs you in tmux. Click to go there.")
             } else if session.tmux != nil {
                 Image(systemName: "rectangle.split.2x1").foregroundStyle(.secondary)
-                    .help("Running in tmux, which keeps it: click to show it there")
+                    .help("Running in tmux. Click to show it there.")
             } else {
                 Image(systemName: "arrow.right.circle").foregroundStyle(Brand.green)
                     .help("Click to continue this session in dino")
@@ -1773,7 +1774,7 @@ private struct ArchiveWhileWorking: ViewModifier {
             Button("Archive") { model.archiveNow(session.id) }
             Button("Cancel", role: .cancel) {}
         } message: { _ in
-            Text("Its agent stops in the middle of what it's doing. You can pick it up again under Archived.")
+            Text("The agent stops in the middle of what it's doing. You can resume the session from Archived.")
         }
     }
 }

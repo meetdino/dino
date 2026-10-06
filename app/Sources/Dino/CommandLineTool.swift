@@ -13,8 +13,8 @@ enum CommandLineTool {
 
         let ask = NSAlert()
         ask.messageText = "Install the dino command?"
-        ask.informativeText = "This links \(home)/dino to the dino inside this app, so it stays up to date with the app. No password needed."
-            + (sharedWritable ? "\n\n\(shared) is writable here too, if you'd rather use it." : "")
+        ask.informativeText = "This links \(home)/dino to the dino command inside this app, so it stays up to date with the app. No password is needed."
+            + (sharedWritable ? "\n\nYou can also install the dino command in \(shared)." : "")
         ask.addButton(withTitle: "Install in ~/.local/bin")
         if sharedWritable { ask.addButton(withTitle: "Install in /usr/local/bin") }
         ask.addButton(withTitle: "Cancel")
@@ -34,7 +34,7 @@ enum CommandLineTool {
         if present {
             let replace = NSAlert()
             replace.messageText = "Replace \(target)?"
-            replace.informativeText = "Something is already there. Replacing it makes it a link to the dino inside this app."
+            replace.informativeText = "Something already exists there. Replacing it makes it a link to the dino command inside this app."
             replace.addButton(withTitle: "Replace")
             replace.addButton(withTitle: "Cancel")
             guard replace.runModal() == .alertFirstButtonReturn else { return }

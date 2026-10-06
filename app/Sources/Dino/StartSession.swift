@@ -351,7 +351,7 @@ struct StartSessionSheet: View {
                                 Spacer()
                                 if l.short == model.launchers.first?.short {
                                     Text("⌘N").font(.caption).foregroundStyle(.tertiary)
-                                        .help("⌘N starts this agent where you are, without this picker")
+                                        .help("⌘N starts this agent in the current folder, skipping this picker")
                                 }
                             }
                         }
@@ -363,7 +363,7 @@ struct StartSessionSheet: View {
             HStack {
                 if isRepo(folder) {
                     Toggle("In a new worktree", isOn: $worktree)
-                        .help("Its own worktree and branch: its edits stay off your checkout until you apply them")
+                        .help("Work in a separate worktree and branch. Changes stay out of your checkout until you apply them.")
                 }
                 Spacer()
                 Button("More Options…") {
@@ -371,7 +371,7 @@ struct StartSessionSheet: View {
                     dismiss()
                     DispatchQueue.main.async { model.showNewSession = true }
                 }
-                .help("Mode, model, effort, an SSH host or another provider's model (⌃⌘N)")
+                .help("Choose the mode, model, effort, an SSH host or another provider's model (⌃⌘N)")
             }
             Text(shortPath(folder)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
         }

@@ -152,7 +152,7 @@ struct FallbackSection: View {
             }
             let steps = setting.steps
             if steps.isEmpty {
-                Text("Nothing: a session sees its route's limit, as it would without dino.")
+                Text("No fallbacks. Sessions stop at the limit, as they would without dino.")
                     .foregroundStyle(.secondary)
             }
             ForEach(Array(steps.enumerated()), id: \.offset) { i, step in
@@ -162,20 +162,20 @@ struct FallbackSection: View {
                     Text(step.model).font(.callout.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     if step.provider != "free", !providers.isEmpty, !offered.contains(where: { $0.id == step.provider }) {
                         Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
-                            .help("Not used now: \(name(step.provider)) isn't connected, isn't allowed, or doesn't serve an API \(launcher.label) speaks")
+                            .help("Skipped: \(name(step.provider)) isn't connected, isn't allowed, or doesn't support \(launcher.label)'s API")
                     }
                     Spacer()
                     Button { change { f in f.steps.swapAt(i, i - 1) } } label: { Image(systemName: "chevron.up") }
-                        .buttonStyle(.borderless).disabled(i == 0).help("Try it earlier").accessibilityLabel("Move up")
+                        .buttonStyle(.borderless).disabled(i == 0).help("Move up").accessibilityLabel("Move up")
                     Button { change { f in f.steps.swapAt(i, i + 1) } } label: { Image(systemName: "chevron.down") }
-                        .buttonStyle(.borderless).disabled(i == steps.count - 1).help("Try it later").accessibilityLabel("Move down")
+                        .buttonStyle(.borderless).disabled(i == steps.count - 1).help("Move down").accessibilityLabel("Move down")
                     Button { change { f in f.steps.remove(at: i) } } label: { Image(systemName: "minus.circle") }
                         .buttonStyle(.borderless).help("Remove").accessibilityLabel("Remove \(name(step.provider))")
                 }
             }
             addRow
-            Toggle("Also when a route is down", isOn: Binding(get: { setting.onOutage }, set: { on in change { $0.onOutage = on } }))
-                .help("Server errors several times in a row, or unreachable: the next route answers for a few minutes")
+            Toggle("Also when the provider is down", isOn: Binding(get: { setting.onOutage }, set: { on in change { $0.onOutage = on } }))
+                .help("If the provider can't be reached or keeps returning errors, the next fallback answers for a few minutes")
             Picker("New sessions while it's at its limit", selection: Binding(get: { setting.newSessions ?? "" }, set: { v in change { $0.newSessions = v.isEmpty ? nil : v } })) {
                 Text("Start \(launcher.label) anyway").tag("")
                 ForEach(otherAgents) { l in Text("Start \(l.label)").tag(l.agent_id) }
@@ -183,7 +183,7 @@ struct FallbackSection: View {
         } header: {
             Text("When \(launcher.label) Hits a Limit")
         } footer: {
-            Footnote("When the route \(launcher.label) uses hits its limit (a plan's window, a subscription's limit, a balance), dino sends its calls to these routes in turn, each with its own key, and the session says so until the limit resets; then the route takes over again at the start of a turn. Short rate limits it waits out itself don't count. Only routes that serve the API it speaks are offered. A Claude subscription is only ever used by Claude Code with Anthropic.")
+            Footnote("When \(launcher.label)'s provider hits a usage limit, such as a plan's usage window or an empty balance, dino sends its requests to these fallbacks in order. The session shows which one is answering. Once the limit resets, the original provider takes over again at the start of the next turn. Short rate limits don't count. Only providers that support \(launcher.label)'s API are offered. A Claude subscription is only ever used by Claude Code.")
         }
         .disabled(locked)
     }
@@ -196,10 +196,10 @@ struct FallbackSection: View {
 
     @ViewBuilder private var addRow: some View {
         HStack(spacing: 8) {
-            Picker("Add a route", selection: $newProvider) {
+            Picker("Add fallback", selection: $newProvider) {
                 Text("Choose…").tag("")
                 ForEach(offered) { p in Text(p.name).tag(p.id) }
-                if freeOffered { Text("Free models (dino picks)").tag("free") }
+                if freeOffered { Text("Free models (dino chooses)").tag("free") }
             }
             .onChange(of: newProvider) { loadModels() }
             if newProvider == "free" {
@@ -223,7 +223,7 @@ struct FallbackSection: View {
                     }
                 } else {
                     Picker("Model", selection: $newModel) {
-                        Text(asking ? "Asking…" : models.isEmpty ? "No model it can use" : "Model…").tag("")
+                        Text(asking ? "Loading…" : models.isEmpty ? "No compatible models" : "Model…").tag("")
                         ForEach(models) { m in Text(m.name).tag(m.id) }
                     }
                     .labelsHidden()
@@ -277,12 +277,12 @@ struct FallbackChip: View {
     static func detail(_ f: FallbackInfo, _ usage: [RouteUsage]) -> String {
         var lines = ["\(f.from) said: \(f.said)", "Answering: \(f.name) · \(f.model), since \(Clock.short(f.since))"]
         if let r = f.retry_at {
-            lines.append("Back on \(f.from) at the start of a turn after \(Clock.short(r))")
+            lines.append("Switches back to \(f.from) at the first turn after \(Clock.short(r))")
         }
         if !usage.isEmpty {
             lines.append(usage.map { "\($0.name): ↑\(roundTokens($0.input_tokens)) ↓\(roundTokens($0.output_tokens))" }.joined(separator: " · "))
         }
-        lines.append(f.isAccount ? "Settings → Agents → Claude Code Accounts lists your Claude accounts" : "Settings → Agents says where each agent goes")
+        lines.append(f.isAccount ? "Manage accounts in Settings → Agents → Claude Code Accounts" : "Set fallbacks in Settings → Agents")
         return lines.joined(separator: "\n")
     }
 }
@@ -318,8 +318,8 @@ struct LimitNotice: View {
             }
         } footer: {
             Text(insteadLabel == nil
-                ? "Its fallbacks in Settings → Agents answer for it, if it has any."
-                : "Settings → Agents says what new sessions start with while it's at its limit.")
+                ? "If it has fallbacks (Settings → Agents), they answer instead."
+                : "Choose what new sessions start with during a limit in Settings → Agents.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }

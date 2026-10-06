@@ -53,7 +53,7 @@ struct ConversationView: View {
                 if loading {
                     ProgressView().controlSize(.small)
                 } else {
-                    Text(page == nil ? unreadable : "Nothing said yet.")
+                    Text(page == nil ? unreadable : "No messages yet.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
@@ -76,7 +76,7 @@ struct ConversationView: View {
                             if loadingEarlier {
                                 ProgressView().controlSize(.small)
                             } else {
-                                Button("Load earlier") { loadEarlier() }.buttonStyle(.link).font(.caption)
+                                Button("Load Earlier") { loadEarlier() }.buttonStyle(.link).font(.caption)
                             }
                             Spacer()
                         }

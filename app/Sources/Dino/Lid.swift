@@ -57,20 +57,20 @@ struct LidSection: View {
             .orgLocked("machine.lid")
             if lid.enabled {
                 Picker("While", selection: Binding(get: { lid.when }, set: { w in set { $0.when = w } })) {
-                    Text("an agent is working").tag("working")
-                    Text("dino has an agent open").tag("open")
+                    Text("An agent is working").tag("working")
+                    Text("Any agent session is open").tag("open")
                 }
                 Toggle("Also on battery", isOn: Binding(get: { lid.on_battery }, set: { on in set { $0.on_battery = on } }))
                 if lid.on_battery {
-                    Stepper("Down to \(lid.min_battery)%", value: Binding(get: { lid.min_battery }, set: { p in set { $0.min_battery = p } }), in: 10 ... 90, step: 5)
+                    Stepper("Until battery is at \(lid.min_battery)%", value: Binding(get: { lid.min_battery }, set: { p in set { $0.min_battery = p } }), in: 10 ... 90, step: 5)
                 }
-                Picker("At most", selection: Binding(get: { lid.max_hours }, set: { h in set { $0.max_hours = h } })) {
+                Picker("For up to", selection: Binding(get: { lid.max_hours }, set: { h in set { $0.max_hours = h } })) {
                     ForEach([2.0, 4, 8, 12, 24], id: \.self) { h in Text("\(Int(h)) hours").tag(h) }
                     Text("No limit").tag(0.0)
                 }
             }
             if let power = powerState.info, power.holding || power.external {
-                Label(power.holding ? "Awake now, with the lid closed or open" : "Sleep is already off, turned off outside dino; dino leaves it alone",
+                Label(power.holding ? "Your Mac is staying awake now, even with the lid closed" : "Sleep was turned off outside dino, so dino leaves it as it is",
                       systemImage: power.holding ? "laptopcomputer" : "info.circle")
                     .foregroundStyle(.secondary)
             }
@@ -81,18 +81,19 @@ struct LidSection: View {
                 Text(error).foregroundStyle(.red).textSelection(.enabled)
             }
             if ready == true {
-                LabeledContent("Permission") {
+                LabeledContent("Permission to turn off sleep") {
                     Button("Remove…") {
                         set { $0.enabled = false }
                         power("remove")
                     }
                     .disabled(busy)
+                    .help("Removes dino's permission to run “pmset -a disablesleep 0” and “1”")
                 }
             }
         } header: {
-            Text("Lid closed")
+            Text("Lid Closed")
         } footer: {
-            Footnote("dino turns system sleep off only while this holds, and back on when it stops: work done, unplugged (unless battery is allowed), battery low, the Mac running hot, or the time limit. Sleep also comes back if dino quits or crashes, and at every restart. The display still sleeps. The first time, macOS asks for your password to let dino run exactly “pmset -a disablesleep 0” and “1”, nothing else.")
+            Footnote("Your Mac sleeps normally again when the work is done, when it's unplugged (unless “Also on battery” is on), when the battery runs low, when it gets too hot, or when the time limit is reached. Sleep also turns back on if dino's background service stops, and whenever your Mac restarts. The display still turns off.\n\nThe first time, macOS asks for your password. It lets dino turn sleep off and on, and nothing else.")
         }
         .onAppear { power("status") }
     }

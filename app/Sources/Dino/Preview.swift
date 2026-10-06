@@ -303,7 +303,7 @@ extension DinoModel {
             // The launch file as it is now, not as the menu last polled it.
             let (configs, _) = await previewConfigs(session)
             guard let c = configs.first(where: { $0.name == name }) else {
-                page.failure = "\(name) isn't in the launch files any more."
+                page.failure = "\(name) is no longer in launch.json."
                 return
             }
             guard ServerApproval.confirm(c, repo: repo ?? c.cwd) else { return }
@@ -417,7 +417,7 @@ enum ServerApproval {
         if let env = c.env, !env.isEmpty {
             info += ", setting \(env.keys.sorted().joined(separator: ", "))"
         }
-        info += ".\n\nIt runs with the same access to your files as dino. Only start servers you trust; dino asks again if this one changes."
+        info += ".\n\nThe server can access your files, just as dino can. Only start servers you trust. If this command changes, dino asks again."
         let alert = NSAlert()
         alert.messageText = "Start “\(c.name)”?"
         alert.informativeText = info
@@ -631,7 +631,7 @@ private struct PreviewBody: View {
                         .frame(minWidth: 220)
                     }
                     .controlSize(.large)
-                    .help("Runs in \(shortPath(c.cwd)), from \(c.source); stops with the session")
+                    .help("Runs in \(shortPath(c.cwd)), as set in \(c.source). Stops when the session ends.")
                 }
                 if let configError {
                     ErrorLine(message: configError)
@@ -648,7 +648,7 @@ private struct PreviewBody: View {
                                 Text(p.command).font(.body.monospaced()).frame(minWidth: 220)
                             }
                             .controlSize(.large)
-                            .help("Saves it to .dino/launch.json; you see the command once more before it first runs")
+                            .help("Saves it to .dino/launch.json. dino shows you the command before it first runs.")
                         }
                     }
                     Button(scripts.isEmpty ? "Add .dino/launch.json…" : "Write .dino/launch.json by Hand…") { model.addLaunchFile(in: cwd) }

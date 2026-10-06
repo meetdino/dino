@@ -173,7 +173,7 @@ final class OpenFile: ObservableObject {
         guard dirty else { return true }
         let alert = NSAlert()
         alert.messageText = "Save your changes to \(name)?"
-        alert.informativeText = "They're lost if you don't."
+        alert.informativeText = "Your changes will be lost if you don't save them."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Don't Save")
         alert.addButton(withTitle: "Cancel")
@@ -331,11 +331,11 @@ struct FilePane: View {
                 .font(.callout).lineLimit(2)
             Spacer(minLength: 4)
             if c == .changed {
-                Button("Reload") { file.reload() }.help("Take the version on disk; your edits are dropped")
-                Button("Keep Mine") { file.keepMine() }.help("Keep your edits; saving replaces the version on disk")
+                Button("Reload") { file.reload() }.help("Load the version on disk and discard your edits")
+                Button("Keep Mine") { file.keepMine() }.help("Keep your edits. Saving replaces the version on disk.")
             } else {
                 Button("Close") { model.closeSidePane() }
-                Button("Keep Mine") { file.keepMine() }.help("Keep it open; saving puts it back")
+                Button("Keep Mine") { file.keepMine() }.help("Keep the file open. Saving creates it again.")
             }
         }
         .controlSize(.small)
@@ -685,7 +685,7 @@ struct OpenInEditorButton: View {
         .controlSize(.small)
         .fixedSize()
         .id(chosen)
-        .help(preferred.map { "Open in \($0.name); the arrow picks another editor" } ?? "Open with the default app")
+        .help(preferred.map { "Open in \($0.name). Use the arrow to choose another editor." } ?? "Open with the default app")
     }
 }
 

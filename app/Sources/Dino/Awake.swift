@@ -31,9 +31,9 @@ struct AwakeStatus: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("\(line). Click for everything keeping the Mac awake.")
+            .help("\(line). Click to see everything keeping your Mac awake.")
             .accessibilityLabel(line)
-            .accessibilityHint("Shows everything keeping the Mac awake")
+            .accessibilityHint("Shows everything keeping your Mac awake")
             .popover(isPresented: $showing, arrowEdge: .trailing) {
                 AwakePopover(close: { showing = false })
                     .environmentObject(model)
@@ -59,9 +59,9 @@ private struct AwakePopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Keeping the Mac awake").font(.headline)
+            Text("Keeping Your Mac Awake").font(.headline)
             if state.info?.holding == true {
-                Label("Awake with the lid closed: dino turned system sleep off while agents work", systemImage: "laptopcomputer")
+                Label("dino is keeping your Mac awake with the lid closed while agents work", systemImage: "laptopcomputer")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -79,7 +79,7 @@ private struct AwakePopover: View {
                 Text("Power Settings…").font(.callout)
             }
             .buttonStyle(.link)
-            .help("Keep the Mac awake while agents work, and with the lid closed")
+            .help("Choose when dino keeps your Mac awake")
         }
         .padding(14)
         .frame(width: 340, alignment: .leading)
@@ -101,7 +101,7 @@ struct AwakeList: View {
     var body: some View {
         let holders = holders
         if holders.isEmpty {
-            Text("Nothing is keeping the Mac awake: it sleeps when idle.")
+            Text("Nothing is keeping your Mac awake. It sleeps when idle.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         } else {
@@ -177,7 +177,7 @@ struct AwakeNow: View {
             AwakeList()
                 .padding(.vertical, 4)
         } label: {
-            LabeledContent("Keeping it awake now") {
+            LabeledContent("Keeping your Mac awake now") {
                 Text(all.isEmpty ? "Nothing" : count == 0 ? "Only macOS" : count == 1 ? "1 process" : "\(count) processes")
                     .foregroundStyle(.secondary)
             }
