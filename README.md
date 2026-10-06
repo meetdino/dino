@@ -136,7 +136,7 @@ open ~/Applications/Dino.app
 
 That's the dino to use every day: it runs dinod from the `dino` inside it, as a release does, and
 moves dinod over to a new build once nothing is working. Run `./app/build.sh --install` again after
-pulling (it replaces the app only once the new one is built), then quit and reopen dino. dino →
+pulling (while dino runs, the new build waits beside it), then choose Restart to Update in dino. dino →
 Install Command Line Tool links `~/.local/bin/dino` to the `dino` inside it. Builds are signed
 with your Developer ID if the keychain has one (macOS then keeps dino's permissions from one build
 to the next), ad hoc otherwise.
