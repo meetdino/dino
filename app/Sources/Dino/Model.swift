@@ -677,6 +677,9 @@ final class DinoModel: ObservableObject {
     /// Each pane then takes the light or dark of its own window (the app's look: the Mac's mode or
     /// View > Appearance) and follows it, as a Ghostty window does. The app starts in the app's.
     static let terminals: TerminalController = {
+        // The configs earlier runs put together for Ghostty, left behind: this one lives as long
+        // as the app does, so its own goes only when the next run starts.
+        try? FileManager.default.removeItem(at: TerminalController.managedConfigDirectory)
         let c = TerminalController(configSource: .generated(menuKeys))
         c.setColorScheme(NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light)
         GhosttyConfig.apply(to: c, overrides: menuKeys)
