@@ -6,6 +6,8 @@ struct StartRequest: Identifiable, Equatable {
     /// A folder already chosen (⌘O, a folder opened with dino): straight to the agent.
     var folder: String?
     var worktree = false
+    /// An agent already chosen (⌘N with nowhere to start it): it starts once a folder is picked.
+    var agent: String?
 }
 
 extension DinoModel {
@@ -17,18 +19,38 @@ extension DinoModel {
 
     /// ⌘N: the agent Settings → Agents says ⌘N starts, right where you are, like a new tab in a
     /// terminal; no picker. dinod lists that agent first (none chosen: Claude Code, or the first
-    /// allowed one).
-    func newSessionHere() {
-        guard let l = launchers.first(where: { $0.agent_id != "shell" }) ?? launchers.first else { return }
-        let dir = hereFolder
+    /// allowed one). `launcher`: another agent, started the same way (the Welcome card's Start).
+    func newSessionHere(_ launcher: LauncherInfo? = nil) {
+        guard let l = launcher ?? launchers.first(where: { $0.agent_id != "shell" }) ?? launchers.first else { return }
+        let here = hereFolder
+        guard let dir = l.agent_id == "shell" ? here : agentFolder(here) else {
+            // Nothing to go by: the picker asks where.
+            startRequest = StartRequest(agent: l.short)
+            return
+        }
         if folder.path != dir { folder = URL(fileURLWithPath: dir) }
         rememberLocalFolder(dir)
         newSession(l, in: dir)
     }
 
-    /// Where ⌘N starts: the selected session's folder or worktree (a shell's, wherever it has
-    /// `cd`d), a selected folder row, else the folder last used. A session on another host says
-    /// nothing about this Mac's folders.
+    /// Where an agent you didn't give a folder starts: `dir`, unless that's your home folder. Claude
+    /// Code never keeps its folder trust for your home folder, so an agent there asks "Do you trust
+    /// this folder?" at every start and resume: the folder last used, or the project you started in
+    /// last, instead. Nil when there's none. Your home folder chosen (the picker, ⌘O, `dino new`) is
+    /// still where it starts.
+    func agentFolder(_ dir: String) -> String? {
+        func key(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().path }
+        let home = key(FileManager.default.homeDirectoryForCurrentUser.path)
+        guard key(dir) == home else { return dir }
+        return ([folder.path] + recentPlaces).first { path in
+            var isDir: ObjCBool = false
+            return key(path) != home && FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+        }
+    }
+
+    /// Where ⌘N starts (an agent: not in your home folder, see `agentFolder`): the selected
+    /// session's folder or worktree (a shell's, wherever it has `cd`d), a selected folder row, else
+    /// the folder last used. A session on another host says nothing about this Mac's folders.
     var hereFolder: String {
         func isDir(_ path: String) -> Bool {
             var dir: ObjCBool = false
@@ -244,7 +266,7 @@ struct StartSessionSheet: View {
         .onAppear {
             worktree = request.worktree
             folder = request.folder
-            agent = model.launchers.first { $0.agent_id != "shell" }?.short ?? model.launchers.first?.short
+            agent = request.agent ?? model.launchers.first { $0.agent_id != "shell" }?.short ?? model.launchers.first?.short
             highlighted = folder == nil ? places.first?.id : agent
             searching = true
         }
@@ -271,7 +293,8 @@ struct StartSessionSheet: View {
                     .buttonStyle(.plain)
                     .help("Back to choosing the folder (Esc)")
             }
-            Text(folder == nil ? "New Session" : "New Session in \(URL(fileURLWithPath: folder!).lastPathComponent)")
+            Text(folder != nil ? "New Session in \(URL(fileURLWithPath: folder!).lastPathComponent)"
+                 : request.agent.flatMap { a in model.launchers.first { $0.short == a } }.map { "Start \($0.label) in:" } ?? "New Session")
                 .font(.title3.weight(.semibold))
                 .lineLimit(1)
             Spacer()
@@ -434,6 +457,7 @@ struct StartSessionSheet: View {
     }
 
     private func choose(_ path: String) {
+        if let agent = request.agent { return startAgent(agent, in: path) }
         folder = path
         query = ""
         highlighted = agent
@@ -446,8 +470,8 @@ struct StartSessionSheet: View {
         highlighted = places.first?.id
     }
 
-    private func startAgent(_ short: String) {
-        guard let folder, let l = model.launchers.first(where: { $0.short == short }) else { return }
+    private func startAgent(_ short: String, in chosen: String? = nil) {
+        guard let folder = chosen ?? folder, let l = model.launchers.first(where: { $0.short == short }) else { return }
         model.folder = URL(fileURLWithPath: folder)
         model.rememberLocalFolder(folder)
         model.newSession(l, worktree: worktree && isRepo(folder) && l.agent_id != "shell", in: folder)

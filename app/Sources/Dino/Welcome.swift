@@ -108,7 +108,7 @@ struct WelcomeCard: View {
                     // Without knowing ⌘N: the agent it starts, where you are.
                     Button("Start \(first.label)") {
                         close()
-                        model.newSession(first)
+                        model.newSessionHere(first)
                     }
                 }
                 DoneButton(action: close)
