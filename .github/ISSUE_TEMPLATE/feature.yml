@@ -1,6 +1,6 @@
 name: Idea
 description: Something dino could do, or do better
-labels: [idea]
+labels: [enhancement]
 body:
   - type: textarea
     id: problem

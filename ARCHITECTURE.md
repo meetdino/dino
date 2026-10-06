@@ -21,7 +21,7 @@ on the machine. This repository holds all of it, the account service included.
 | `dino-daemon` | dinod, putting it together. | all of the above |
 | `dino` | The CLI. It draws no terminal of its own: `dino attach` relays one. | all of the above but `dino-term` |
 
-`crates/boundaries` fails the build if a crate reaches across these lines.
+`crates/boundaries` is a test that fails if a crate reaches across these lines.
 
 `cloud/` is a Cargo workspace of its own: it builds on Linux (dino-core doesn't), pins the Rust
 version its host builds with, and keeps the server's dependencies and Postgres tests out of the
@@ -51,8 +51,9 @@ shell, on its conversation, when it restarts. Agents running elsewhere on the Ma
 tmux) are found the same way, and *Continue in dino* moves one over.
 
 Each agent has an adapter in `dino-core/src/agent/` that reads its status from the agent's own
-signals: its hooks, its session record or its server. The tool calls dinod reads there also tell it
-when an agent is using the computer or a browser.
+signals: its hooks, the log or database it keeps of its turns, or its server; for one that keeps
+none of those, its screen. The tool calls dinod reads there also tell it when an agent is using the
+computer or a browser.
 
 ## One machine, one dinod
 
@@ -73,8 +74,9 @@ sccache server, on its own socket, while sessions use it. Each worktree keeps it
 missing, broken or full cache falls back to plain rustc; a wrapper the repo or the user set up wins
 (crates/dino-core/src/build_cache.rs).
 
-Agent traffic goes through the proxy inside dinod and never leaves the machine except to the
-provider the agent talks to. dino-cloud sees only synced settings (over TLS, readable by the
+Claude Code's and Codex's traffic, and any agent's on a provider route, goes through the proxy
+inside dinod (unless routing is turned off) and never leaves the machine except to the provider the
+agent talks to. dino-cloud sees only synced settings (over TLS, readable by the
 service so the account page can show them); API keys and tokens never leave the Mac.
 Usage statistics (`dino stats`, the Stats window) live in `stats.db` in dino's config folder:
 the proxy's per-call records, written by dinod in batches, and what agents' own transcripts say,
@@ -85,10 +87,11 @@ read when asked or when a session ends. They are never synced.
 `~/.config/dino/` (or `$DINO_HOME`), read through `dino-core`, lowest first:
 
 1. Built-in defaults.
-2. Account-wide, synced: agents, providers, policies, keys (opt-in), SSH hosts, repo env.
-3. Per product, synced: `[terminal]` and the like; each product reads only its own.
-4. This machine only: paths, recent folders, onboarding.
-5. Managed by an organisation, over everything.
+2. Account-wide, synced (`crates/dino-sync/src/settings.rs`): routing, policies, each agent's
+   mode, model and effort, worktree options, fallback chains, SSH hosts, repo variables (by git
+   remote), `[terminal]` and `[tmux]`. API keys and tokens never sync.
+3. This machine only: paths, recent folders, onboarding, experiments.
+4. Managed by an organisation, over everything.
 
 ## Contracts
 
