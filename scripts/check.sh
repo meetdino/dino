@@ -3,6 +3,8 @@
 #   scripts/check.sh            build and test the workspace and the app
 # scripts/land.sh runs it, then lands the branch through a pull request; nothing pushes to main.
 set -eu
+. "$(dirname "$0")/build-lock.sh"
+build_lock "$0" "$@"
 cd "$(dirname "$0")/.."
 
 if [ "${1:-}" = "--push" ]; then

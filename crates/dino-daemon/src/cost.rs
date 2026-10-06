@@ -1,5 +1,5 @@
 //! What a session's processes cost the Mac: memory and CPU of its program and everything under
-//! it, for the sidebar's hover card. Measured only when a client asks (it asks while the card is
+//! it, and of what it runs apart from its terminal (see `procs`), for the sidebar's hover card. Measured only when a client asks (it asks while the card is
 //! open), never in the background: with nothing hovered, this costs nothing.
 
 use std::collections::HashMap;
@@ -33,24 +33,59 @@ struct Watch {
 }
 
 struct Sample {
+    /// Its program; 0 once it has ended.
     root: u32,
     at_ns: u64,
     procs: HashMap<u32, Proc>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Proc {
     parent: u32,
     usage: procinfo::Rusage,
+    name: String,
+    /// Not under its program: in the background, apart from its terminal.
+    apart: bool,
 }
 
 impl Sample {
-    fn take(root: u32) -> Sample {
-        let procs = procinfo::tree(root)
+    /// Session `id`'s processes now: its program `root` and everything under it, and what it
+    /// runs apart from them.
+    fn take(id: &str, root: u32) -> Sample {
+        let mut found: Vec<(u32, u32, bool)> = if root > 0 { procinfo::tree(root).into_iter().map(|(p, parent)| (p, parent, false)).collect() } else { vec![] };
+        for pid in crate::procs::of_session(id) {
+            if !found.iter().any(|f| f.0 == pid) {
+                found.push((pid, procinfo::parent_of(pid).unwrap_or(0), true));
+            }
+        }
+        let procs = found
             .into_iter()
-            .filter_map(|(pid, parent)| Some((pid, Proc { parent, usage: procinfo::rusage(pid)? })))
+            .filter_map(|(pid, parent, apart)| Some((pid, Proc { parent, usage: procinfo::rusage(pid)?, name: procinfo::name(pid).unwrap_or_default(), apart })))
             .collect();
         Sample { root, at_ns: procinfo::now_ns(), procs }
+    }
+
+    /// `top` and every process under it, by the parents this sample saw: of a process seen
+    /// since, only if it's the same one.
+    fn under(&self, top: u32, started_ns: u64) -> HashMap<u32, Proc> {
+        let mut out = HashMap::new();
+        if !self.procs.get(&top).is_some_and(|p| p.usage.started_ns == started_ns) {
+            return out;
+        }
+        for (&pid, p) in &self.procs {
+            let mut at = pid;
+            for _ in 0..64 {
+                if at == top {
+                    out.insert(pid, p.clone());
+                    break;
+                }
+                match self.procs.get(&at) {
+                    Some(q) => at = q.parent,
+                    None => break,
+                }
+            }
+        }
+        out
     }
 
     fn same(&self, pid: u32, p: &Proc) -> Option<&Proc> {
@@ -139,18 +174,50 @@ fn report(samples: &[Sample]) -> SessionCost {
         .filter(|(pid, _)| **pid != now.root)
         .max_by_key(|(_, p)| p.usage.footprint)
         .map(|(&pid, p)| ProcessCost {
-            name: procinfo::name(pid).unwrap_or_default(),
+            name: p.name.clone(),
             pid,
             mem_bytes: p.usage.footprint,
             cpu_pct: own_pct(prev, now, pid, p),
             ..Default::default()
         });
+    cost.builds = builds(prev, now);
     cost
 }
 
+/// The builds in `now`, each the topmost build program of its tree with everything under it, the
+/// busiest first.
+fn builds(prev: &Sample, now: &Sample) -> Vec<ProcessCost> {
+    let is_build = |p: &Proc| crate::procs::is_build(&p.name);
+    let mut out: Vec<ProcessCost> = now
+        .procs
+        .iter()
+        .filter(|(_, p)| is_build(p) && !now.procs.get(&p.parent).is_some_and(is_build))
+        .map(|(&top, p)| {
+            let (a, b) = (prev.under(top, p.usage.started_ns), now.under(top, p.usage.started_ns));
+            let cpu = if a.is_empty() {
+                pct(b.values().map(|q| q.usage.cpu_ns + q.usage.children_ns).sum(), now.at_ns.saturating_sub(p.usage.started_ns))
+            } else {
+                pct(used_between(&Sample { root: top, at_ns: prev.at_ns, procs: a }, &Sample { root: top, at_ns: now.at_ns, procs: b.clone() }), now.at_ns - prev.at_ns)
+            };
+            ProcessCost {
+                name: crate::procs::label(top, &p.name),
+                pid: top,
+                mem_bytes: b.values().map(|q| q.usage.footprint).sum(),
+                cpu_pct: cpu,
+                background: p.apart,
+                ..Default::default()
+            }
+        })
+        .collect();
+    out.sort_by(|x, y| y.cpu_pct.total_cmp(&x.cpu_pct).then(x.pid.cmp(&y.pid)));
+    out
+}
+
 impl Costs {
-    /// What session `id`, whose program is `root`, costs now.
-    pub(crate) fn measure(&self, id: &str, root: u32) -> SessionCost {
+    /// What session `id`, whose program is `root` (none once it has ended), costs now; none
+    /// with nothing of it running.
+    pub(crate) fn measure(&self, id: &str, root: Option<u32>) -> Option<SessionCost> {
+        let root = root.unwrap_or(0);
         let watch = {
             let mut watched = self.watched.lock().unwrap();
             let now = procinfo::now_ns();
@@ -166,17 +233,21 @@ impl Costs {
         if age.is_none_or(|a| a >= MIN_INTERVAL) {
             if age.is_none_or(|a| a >= FRESH) {
                 // CPU "now" needs two looks close together.
-                w.samples.push(Sample::take(root));
+                w.samples.push(Sample::take(id, root));
+                if w.samples.last().is_some_and(|s| s.procs.is_empty()) {
+                    w.samples.clear();
+                    return None;
+                }
                 std::thread::sleep(FIRST_LOOK);
             }
-            w.samples.push(Sample::take(root));
+            w.samples.push(Sample::take(id, root));
         }
         // Keep what the average needs: the newest, and back to the first older than `AVERAGE`.
         let newest = w.samples.last().map_or(0, |s| s.at_ns);
         if let Some(cut) = w.samples.iter().rposition(|s| newest - s.at_ns >= AVERAGE.as_nanos() as u64) {
             w.samples.drain(..cut);
         }
-        report(&w.samples)
+        Some(report(&w.samples))
     }
 }
 
@@ -185,11 +256,15 @@ mod tests {
     use super::*;
 
     fn proc(parent: u32, started_ns: u64, cpu_ns: u64, children_ns: u64, footprint: u64) -> Proc {
-        Proc { parent, usage: procinfo::Rusage { footprint, cpu_ns, children_ns, started_ns } }
+        Proc { parent, usage: procinfo::Rusage { footprint, cpu_ns, children_ns, started_ns }, name: String::new(), apart: false }
+    }
+
+    fn named(name: &str, apart: bool, p: Proc) -> Proc {
+        Proc { name: name.into(), apart, ..p }
     }
 
     fn sample(at_ns: u64, procs: &[(u32, Proc)]) -> Sample {
-        Sample { root: 1, at_ns, procs: procs.iter().copied().collect() }
+        Sample { root: 1, at_ns, procs: procs.iter().cloned().collect() }
     }
 
     const S: u64 = 1_000_000_000;
@@ -222,6 +297,42 @@ mod tests {
     }
 
     #[test]
+    fn builds_show_with_what_runs_under_them() {
+        // The agent (1) runs a shell running cargo with a rustc; another cargo runs apart from it
+        // (its shell gone), running a test. Pids no process has, so their arguments aren't read.
+        let (sh, cargo, rustc, apart, test) = (999_002, 999_003, 999_004, 999_005, 999_006);
+        let a = sample(
+            10 * S,
+            &[
+                (1, proc(0, 0, S, 0, 100)),
+                (sh, named("zsh", false, proc(1, S, 0, 0, 10))),
+                (cargo, named("cargo", false, proc(sh, 2 * S, S, 0, 50))),
+                (rustc, named("rustc", false, proc(cargo, 9 * S, S, 0, 500))),
+                (apart, named("cargo", true, proc(0, 3 * S, 0, 0, 20))),
+                (test, named("dino_daemon-1f2e", true, proc(apart, 8 * S, 2 * S, 0, 30))),
+            ],
+        );
+        // A second later: rustc used half of it, the test all of it.
+        let b = sample(
+            11 * S,
+            &[
+                (1, proc(0, 0, S, 0, 100)),
+                (sh, named("zsh", false, proc(1, S, 0, 0, 10))),
+                (cargo, named("cargo", false, proc(sh, 2 * S, S, 0, 50))),
+                (rustc, named("rustc", false, proc(cargo, 9 * S, S + S / 2, 0, 500))),
+                (apart, named("cargo", true, proc(0, 3 * S, 0, 0, 20))),
+                (test, named("dino_daemon-1f2e", true, proc(apart, 8 * S, 3 * S, 0, 30))),
+            ],
+        );
+        let got: Vec<(u32, u64, f64, bool)> = builds(&a, &b).into_iter().map(|c| (c.pid, c.mem_bytes, c.cpu_pct, c.background)).collect();
+        assert_eq!(got, vec![(apart, 50, 100.0, true), (cargo, 550, 50.0, false)]);
+        assert_eq!(builds(&a, &b)[0].name, "cargo");
+        // One that started since the last look: what it has used since it started.
+        let c = sample(11 * S, &[(1, proc(0, 0, S, 0, 100)), (7, named("make", false, proc(1, 10 * S + S / 2, S / 4, 0, 5)))]);
+        assert_eq!(builds(&a, &c).into_iter().map(|c| (c.name, c.cpu_pct)).collect::<Vec<_>>(), vec![("make".to_string(), 50.0)]);
+    }
+
+    #[test]
     fn a_reused_pid_and_a_leaver_cost_nothing() {
         let a = sample(10 * S, &[(1, proc(0, 0, S, 0, 1)), (5, proc(1, 2 * S, 3 * S, 0, 1))]);
         // 5 is now a different process that started before the last look (moved under the tree
@@ -251,9 +362,9 @@ mod tests {
         let root = sh.id();
         std::thread::sleep(Duration::from_millis(300));
         let costs = Costs::default();
-        let first = costs.measure("t", root);
+        let first = costs.measure("t", Some(root)).unwrap();
         std::thread::sleep(Duration::from_millis(1000));
-        let cost = costs.measure("t", root);
+        let cost = costs.measure("t", Some(root)).unwrap();
         for (pid, _) in procinfo::tree(root) {
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         }

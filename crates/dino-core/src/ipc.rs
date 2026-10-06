@@ -148,6 +148,12 @@ pub enum Request {
     SetControls { id: String, controls: Controls },
     /// Stop a background command session `id`'s agent left serving (see `SessionInfo::servers`).
     StopServer { id: String, task: String },
+    /// Stop builds left running by sessions that are gone (`Response::State`'s `leftovers`), by
+    /// their pids as listed there; none named: all of them.
+    StopLeftovers {
+        #[serde(default)]
+        pids: Vec<u32>,
+    },
     /// Switch this connection to a live terminal stream for session `id`. `wait`: if its agent
     /// has ended, wait until it runs again (see `Resume`) rather than answer right away.
     Attach {
@@ -411,6 +417,10 @@ pub enum Response {
         /// Agents at their limit (Settings → Agents says what new sessions start with instead).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         limits: Vec<AgentLimit>,
+        /// Builds dinod found running for no session as it started (an agent's, left behind
+        /// when its session or an older dinod went), until they end or are stopped.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leftovers: Vec<Leftover>,
         /// Tags this state for `StateChange`; only in a reply to one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<u64>,
@@ -546,15 +556,21 @@ pub struct SessionCost {
     /// The process under it using the most memory, on its own (none when it runs nothing).
     #[serde(default)]
     pub top_child: Option<ProcessCost>,
+    /// The builds it runs (Cargo, SwiftPM, Xcode, make…), each with everything under it, those
+    /// its agent started in the background included.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builds: Vec<ProcessCost>,
     /// Fields from a newer dinod, kept as they came.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// One process of a session's (`SessionCost::top_child`).
+/// One process of a session's (`SessionCost::top_child`), or one of its builds with everything
+/// under it (`SessionCost::builds`).
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct ProcessCost {
-    /// Its name, as Activity Monitor shows it ("rustc", "node").
+    /// Its name, as Activity Monitor shows it ("rustc", "node"); a build's says what it does
+    /// ("cargo test").
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -563,6 +579,28 @@ pub struct ProcessCost {
     pub mem_bytes: u64,
     #[serde(default)]
     pub cpu_pct: f64,
+    /// A build that runs apart from the agent's terminal: in the background, or left by an
+    /// earlier run of the agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A build running for no session (`Response::State`'s `leftovers`): what it is and where.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct Leftover {
+    /// The process it all runs under, which stopping it stops with everything under it.
+    pub pid: u32,
+    /// What it builds with ("cargo test", "swift-build").
+    #[serde(default)]
+    pub name: String,
+    /// The folder it builds in.
+    #[serde(default)]
+    pub cwd: String,
+    /// When it started, in seconds since the epoch.
+    #[serde(default)]
+    pub started: u64,
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
