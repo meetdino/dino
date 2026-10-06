@@ -133,6 +133,17 @@ struct WelcomeCard: View {
             }
             group("Optional") {
                 computerUse
+                // Not checked here: asking macOS whether dino may control the Mac lists dino in
+                // System Settings, which waits until you go to Permissions.
+                Button {
+                    settingsPane = .general
+                    openWindow(id: SettingsView.windowID)
+                } label: {
+                    Text("Let programs in dino's terminals record the screen and control apps").multilineTextAlignment(.leading)
+                }
+                .buttonStyle(.link)
+                .font(.callout)
+                .help("Settings → General → Permissions asks macOS for Screen Recording and \(Permission.accessibility.title)")
                 if !isDefault {
                     Button("Make dino your default terminal") {
                         guard Opening.makeDefault() else { return NSSound.beep() }

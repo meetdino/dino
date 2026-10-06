@@ -9,7 +9,8 @@ import SwiftUI
 /// SMAppService, the agent is the app's, and so is every shell and agent dinod starts.
 ///
 /// scripts/release.sh puts the agent in Contents/Library/LaunchAgents: `dino daemon` from
-/// Contents/Helpers, restarted by launchd if it crashes, not at login (dinod starts when dino is
+/// Contents/Helpers, kept by the app's own executable (`DinodHost`, so that its permissions are all
+/// dino's), restarted by launchd if it crashes, not at login (dinod starts when dino is
 /// used, as before, and keeps running when the app quits). The app writes the agent's label and
 /// state in `$DINO_HOME/dinod.launchd`, where `dino` (the app's, or one on the `PATH`) looks when it
 /// starts dinod: `launchctl kickstart` for this agent, the old way without it
@@ -68,6 +69,7 @@ enum DinodAgent {
     /// written for `dino`. `stopped`: dinod isn't running, so registering again can't stop it.
     static func setUp(stopped: Bool = false) {
         guard let service, let digest else { return }
+        if stopped { retirePredecessor() }
         let registered = UserDefaults.standard.string(forKey: registeredKey)
         switch service.status {
         case .notRegistered, .notFound:
@@ -82,6 +84,16 @@ enum DinodAgent {
             break
         }
         writeRecord()
+    }
+
+    /// The agent from before `DinodHost` (`<bundle>.dinod…`, which ran Contents/Helpers/dino):
+    /// launchd keeps an agent's launch constraint from when it was first registered, so the
+    /// app's executable couldn't run under it, and this one has a name of its own. The old one goes
+    /// once dinod has stopped (unregistering it stops what it runs).
+    private static func retirePredecessor() {
+        guard let bundled, bundled.label.contains(".dinod-host") else { return }
+        let old = SMAppService.agent(plistName: bundled.plist.replacingOccurrences(of: ".dinod-host", with: ".dinod"))
+        if old.status == .enabled || old.status == .requiresApproval { try? old.unregister() }
     }
 
     private static func register(_ service: SMAppService, _ digest: String) {
@@ -171,5 +183,50 @@ struct DinodAgentSection: View {
         needsApproval = DinodAgent.needsApproval
         DinodAgent.writeRecord()
         model.checkDaemonVersion()
+    }
+}
+
+/// What dinod's launch agent runs: the app's own executable with `--dinod`, which starts dinod
+/// (Contents/Helpers/dino daemon) and waits for it, nothing else (no window, no AppKit). macOS
+/// gives what launchd starts the privacy permissions of the program itself: run as
+/// Contents/Helpers/dino, dinod and everything in its terminals got dino's Screen Recording but
+/// asked for Accessibility as a "dino" executable of their own, which the app couldn't ask for
+/// and which Privacy & Security lists apart. Under the app's executable they're all dino's.
+///
+/// Signals launchd sends go on to dinod, and its end is this process's: an exit with its status,
+/// or the same signal, so launchd still tells a crash (restarted) from `dino stop` (not).
+enum DinodHost {
+    static let argument = "--dinod"
+
+    /// dinod, for the signal handlers (which can't capture anything).
+    nonisolated(unsafe) private static var child: pid_t = 0
+
+    static func runIfAsked() {
+        guard CommandLine.arguments.dropFirst().first == argument else { return }
+        exit(run())
+    }
+
+    private static func run() -> Int32 {
+        let dino = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/dino").path
+        let argv: [UnsafeMutablePointer<CChar>?] = [strdup("dino"), strdup("daemon"), nil]
+        var pid: pid_t = 0
+        let spawned = posix_spawn(&pid, dino, nil, nil, argv, environ)
+        guard spawned == 0 else {
+            FileHandle.standardError.write(Data("dino: couldn't start dinod at \(dino): \(String(cString: strerror(spawned)))\n".utf8))
+            return 1
+        }
+        child = pid
+        for sig in [SIGTERM, SIGINT, SIGHUP, SIGQUIT] {
+            signal(sig) { sig in if DinodHost.child > 0 { kill(DinodHost.child, sig) } }
+        }
+        var status: Int32 = 0
+        while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+        // WIFSIGNALED / WTERMSIG / WEXITSTATUS, which Swift doesn't import.
+        let sig = status & 0x7f
+        if sig != 0 && sig != 0x7f {
+            signal(sig, SIG_DFL)
+            kill(getpid(), sig)
+        }
+        return (status >> 8) & 0xff
     }
 }
