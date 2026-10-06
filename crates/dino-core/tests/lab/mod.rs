@@ -31,6 +31,8 @@ pub struct Lab {
     masters: Vec<OwnedFd>,
     pub pids: Vec<u32>,
     pub node: Option<PathBuf>,
+    /// This lab's alone, in the conversation ids it makes (`uuid`).
+    run: u64,
 }
 
 /// What `spawn` starts.
@@ -83,7 +85,16 @@ impl Lab {
             }
         }
         let node = ["/opt/homebrew/bin/node", "/usr/local/bin/node"].iter().map(PathBuf::from).find(|p| p.exists());
-        Lab { _one: one, root, home, bin, masters: vec![], pids: vec![], node }
+        let run = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+        Lab { _one: one, root, home, bin, masters: vec![], pids: vec![], node, run }
+    }
+
+    /// Conversation `n`'s id, a UUID as Codex names one, this lab's alone. Codex is found by the
+    /// file its process holds open, wherever that is, so another lab's Codex on the same id (a
+    /// test run beside this one, or one killed before it could clean up, its processes living on
+    /// for minutes) would be on the same conversation, and listed in this one's place as the older.
+    pub fn uuid(&self, n: u16) -> String {
+        format!("{:08x}-{n:04x}-7a20-8efb-{:012x}", std::process::id(), self.run & 0xffff_ffff_ffff)
     }
 
     pub fn dir(&self, name: &str) -> PathBuf {
