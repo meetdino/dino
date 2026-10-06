@@ -509,8 +509,9 @@ mod tests {
         // sccache's own failure: none, so rustc runs instead.
         let broken = fake("sc-broken", "echo 'sccache: error: Server startup failed' >&2; exit 2");
         assert_eq!(cached(&broken, &rustc, &[]), None);
-        // Crashed.
-        let crashed = fake("sc-crash", "kill -SEGV $$");
+        // Ended by a signal. SIGKILL, not a crash signal: those make macOS write a crash report
+        // (ReportCrash, spindump) on every test run, and `cached` reads any signal the same way.
+        let crashed = fake("sc-crash", "kill -KILL $$");
         assert_eq!(cached(&crashed, &rustc, &[]), None);
         // Not there, or not a program.
         assert_eq!(cached(&dir.join("missing"), &rustc, &[]), None);
