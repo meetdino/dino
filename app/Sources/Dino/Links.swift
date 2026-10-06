@@ -400,7 +400,7 @@ struct KeyIndicator: View {
         .padding(10)
         .help(keys.tables.isEmpty
             ? "A key sequence is waiting for its next key"
-            : "A key table is in effect: keys are read with its bindings until it's deactivated")
+            : "A key table is active: keys use its bindings until it ends")
     }
 }
 
@@ -591,7 +591,7 @@ enum LinkPolicy {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = app.map { "Open this link in \($0)?" } ?? "Open this link?"
-        alert.informativeText = "\(shown)\n\nA link can make another app act on it. Only open it if you trust where it came from."
+        alert.informativeText = "\(shown)\n\nOpening a link can make another app take an action. Only open it if you trust where it came from."
         alert.addButton(withTitle: "Open")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)

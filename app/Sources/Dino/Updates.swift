@@ -208,7 +208,7 @@ final class Updates: ObservableObject {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = impact.sentence + "\n\n"
-            + "Or install it once nothing is working, or the next time you quit dino."
+            + "You can also install it once nothing is working, or the next time you quit dino."
         alert.addButton(withTitle: "Restart Now")
         alert.addButton(withTitle: impact.working > 0 ? "When Agents Are Idle" : "When Commands Finish")
         alert.addButton(withTitle: "Later")
@@ -470,7 +470,7 @@ struct RestartImpact {
     }
 
     var sentence: String {
-        var parts = ["Installing restarts dino's background service, and your sessions with it."]
+        var parts = ["Installing restarts all your sessions."]
         let agents = working + idle
         if working > 0 {
             parts.append("\(count(working, "agent")) \(working == 1 ? "is" : "are") working and will be interrupted; "
@@ -502,15 +502,15 @@ struct UpdateBanner: View {
                 Image(systemName: "arrow.down.circle")
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
-                Text(pending.local == nil ? "dino \(pending.version) installs once nothing is working"
-                    : pending.whenIdle ? "dino restarts into the new build once nothing is working"
-                    : pending.local == .rebuilt ? "A new build of dino is ready" : "dinod needs a restart to run this dino")
+                Text(pending.local == nil ? "dino \(pending.version) will install once nothing is working"
+                    : pending.whenIdle ? "dino will restart into the new build once nothing is working"
+                    : pending.local == .rebuilt ? "A new build of dino is ready" : "dino's background service needs a restart to finish updating")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Button(pending.whenIdle ? "Restart Now" : "Restart to Update") { updates.installNow() }
                     .controlSize(.small)
-                    .help("Restart dino and its background service now; working agents are interrupted and resume afterwards")
+                    .help("Restarts dino now. Working agents are interrupted and resume afterwards.")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
@@ -547,7 +547,7 @@ extension DinoModel {
             let outdated = Updates.fromAnotherBuild(version: running, build: reply?.build, exe: reply?.exe)
             let unmanaged = DinodAgent.enabled && (reply?.launchd != DinodAgent.bundled?.label || DinodAgent.stale)
             await MainActor.run {
-                self.daemonVersion = running.map { v in reply?.build.map { "\(v) (\($0))" } ?? v } ?? "an older dino"
+                self.daemonVersion = running.map { v in reply?.build.map { "\(v) (\($0))" } ?? v } ?? "an older version"
                 self.daemonOutdated = outdated
                 self.daemonUnmanaged = unmanaged
                 Updates.shared.daemonMismatch(outdated || unmanaged, version: Updates.bundledBuild ?? Updates.bundledVersion ?? "")
@@ -611,7 +611,7 @@ struct UpdatesSection: View {
                     .disabled(!updates.available || !updates.canCheck)
             }
             if model.daemonOutdated {
-                LabeledContent("dinod is still \(model.daemonVersion ?? "an older dino")") {
+                LabeledContent("Background service is still on \(model.daemonVersion ?? "an older version")") {
                     Button("Restart Now") { confirming = true }
                         .disabled(model.restartingDaemon)
                 }
@@ -620,14 +620,14 @@ struct UpdatesSection: View {
             Text("Updates")
         } footer: {
             Footnote(updates.available
-                ? "Once a day. The dino command comes along with the app. Installing an update restarts dinod too, into the new dino: agents resume their conversations and shells start fresh. dino asks first if anything is working."
-                : "This build doesn't update itself (it isn't a release).")
+                ? "dino checks once a day. Updates include the dino command-line tool. Installing an update restarts your sessions: agents resume their conversations, and shells start fresh. If anything is working, dino asks first."
+                : "This build isn't a release, so it doesn't update itself.")
         }
-        .alert("Restart dinod now?", isPresented: $confirming) {
+        .alert("Restart dino's background service?", isPresented: $confirming) {
             Button("Restart") { model.restartDaemon() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Every session stops and resumes; an agent in the middle of a turn loses that turn, and commands running in shells stop.")
+            Text("Every session restarts. Agents resume their conversations, but a turn in progress is lost. Commands running in shells stop.")
         }
     }
 }

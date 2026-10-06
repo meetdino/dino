@@ -349,7 +349,7 @@ struct ScheduledRow: View {
                         .accessibilityLabel("Edit \(task.name)")
                 }
                 if model.isRunning(task) {
-                    ProgressView().controlSize(.mini).help("A run is going")
+                    ProgressView().controlSize(.mini).help("Running now")
                 } else if task.waiting > 0 {
                     Text("\(task.waiting) waiting").font(.caption).foregroundStyle(SessionStatus.needsYou.color)
                 } else if let next = task.next_run {
@@ -382,7 +382,7 @@ struct ScheduledRow: View {
         .opacity(task.enabled ? 1 : 0.7)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .help(task.history.isEmpty ? "\(model.triggerText(task)). Hasn't run yet" : "\(model.triggerText(task)). Click to see its runs")
+        .help(task.history.isEmpty ? "\(model.triggerText(task)). Hasn't run yet." : "\(model.triggerText(task)). Click to see its runs.")
         .contextMenu { ScheduledMenu(task: task) }
     }
 
@@ -398,7 +398,7 @@ struct TaskRuns: View {
     var body: some View {
         let runs = Array(task.history.enumerated().reversed())
         if runs.isEmpty {
-            Text(task.enabled ? (task.scheduled ? "No runs yet: it runs \(task.next_run.map(whenText) ?? "next time")" : "No runs yet: it runs when \(model.triggerText(task).lowercasedFirst)") : "No runs yet")
+            Text(task.enabled ? (task.scheduled ? "No runs yet. Next run: \(task.next_run.map(whenText) ?? "soon")" : "No runs yet. Runs when \(model.triggerText(task).lowercasedFirst)") : "No runs yet")
                 .font(.caption).foregroundStyle(.tertiary)
                 .lineLimit(2)
                 .padding(.leading, 22)
@@ -535,7 +535,7 @@ struct ArchivedRunPane: View {
                 Button("Delete", role: .destructive) { model.deleteArchived(session) }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text(session.branch.map { "It leaves the archive for good. Its branch \($0) stays in the repo." } ?? "It leaves the archive for good.")
+                Text(session.branch.map { "It's permanently removed from the archive. Its branch \($0) stays in the repo." } ?? "It's permanently removed from the archive.")
             }
     }
 }
@@ -721,7 +721,7 @@ struct ScheduleSheet: View {
                     if task.usesAgent {
                         Field(label: "") {
                             Toggle("Run each time in a new worktree", isOn: $task.worktree)
-                                .help("Each run gets its own branch and checkout, so runs don't step on your work or on each other.")
+                                .help("Each run gets its own branch and checkout, so runs don't interfere with your work or with each other.")
                         }
                     }
                     if needsPrompt || task.usesAgent {
@@ -780,11 +780,11 @@ struct ScheduleSheet: View {
 
     private var explanation: String {
         switch task.trigger.on {
-        case "schedule": "dino runs it on schedule while your Mac is awake. A time missed while it slept runs once when it wakes."
-        case let k where task.trigger.github: "dino looks at GitHub through your gh login about once a minute\(k == "review_requested" && task.trigger.repo.isEmpty ? " (every few minutes for every repo)" : ""), and runs it once for each new event."
-        case "new_commits", "behind": "dino fetches every \(task.trigger.interval == 0 ? 10 : Int(task.trigger.interval)) minutes and runs it once for each new state of the branch."
-        case "files": "dino watches the folder and runs it once the changes settle. Changes made while a run is going don't start another."
-        default: "dino runs it when the run or session you pick finishes."
+        case "schedule": "Runs on schedule while your Mac is awake. If your Mac was asleep at a scheduled time, the automation runs once when it wakes."
+        case let k where task.trigger.github: "dino checks GitHub about once a minute\(k == "review_requested" && task.trigger.repo.isEmpty ? " (every few minutes when watching all repos)" : ""), using your gh sign-in, and runs once for each new event."
+        case "new_commits", "behind": "dino fetches every \(task.trigger.interval == 0 ? 10 : Int(task.trigger.interval)) minutes and runs once each time the branch changes."
+        case "files": "Runs once changes in the folder settle. Changes made during a run don't start another run."
+        default: "Runs when the automation or session you choose finishes."
         }
     }
 
@@ -1054,10 +1054,10 @@ struct ScheduleSheet: View {
         if showConditions {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("Only if the repo changed since the last run", isOn: $task.conditions.if_changed)
-                Toggle("Only while the Mac is on power", isOn: $task.conditions.ac_power)
+                Toggle("Only while your Mac is plugged in", isOn: $task.conditions.ac_power)
                 Toggle("Only while the lid is open", isOn: $task.conditions.lid_open)
                 Toggle("Start a run while the one before is still going", isOn: $task.conditions.parallel)
-                    .help("Off: a scheduled time is skipped, and an event waits for the run before it.")
+                    .help("When off, a scheduled run is skipped and an event waits for the previous run to finish.")
                 if task.usesAgent {
                     HStack {
                         Text("When the agent is at its usage limit")
@@ -1068,7 +1068,7 @@ struct ScheduleSheet: View {
                         }
                         .labelsHidden()
                         .fixedSize()
-                        .help("Its fallback agent is the one new sessions start with while it's at its limit, in Settings → Agents.")
+                        .help("The fallback agent is the one new sessions start with during a limit, set in Settings → Agents.")
                     }
                 }
                 HStack {
@@ -1090,7 +1090,7 @@ struct ScheduleSheet: View {
                 }
                 Divider()
                 Toggle("Post the summary as a comment on the PR", isOn: $task.output.pr_comment)
-                    .help("On the PR that started the run, or else the PR of the run's branch.")
+                    .help("Posts on the PR that started the run, or else on the PR for the run's branch.")
                 Toggle("Notify me when a run finishes", isOn: $task.output.notify)
             }
             .padding(.leading, 20)

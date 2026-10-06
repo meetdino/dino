@@ -60,7 +60,7 @@ struct ForkSheet: View {
             Label("Fork “\(session.display)”", systemImage: "arrow.triangle.branch")
                 .font(.title2.weight(.semibold))
                 .lineLimit(1)
-            Text("A new session on a copy of this conversation, made by \(agentName) itself, with the same model and mode. The original stays as it is.\(session.agent_id.hasPrefix("claude") ? " Permissions you allowed for this session only don't carry over." : "")")
+            Text("Starts a new session with a copy of this conversation, made by \(agentName), with the same model and mode. The original session doesn't change.\(session.agent_id.hasPrefix("claude") ? " Permissions you allowed only for this session don't carry over." : "")")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             LabeledContent("Name") {
@@ -142,6 +142,6 @@ struct ForkedFromLine: View {
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .help(parent == nil ? "Forked from “\(from.name)”, since closed" : "Forked from “\(parent?.display ?? from.name)”: a copy of its conversation")
+        .help(parent == nil ? "Forked from “\(from.name)”, which has since closed" : "Forked from “\(parent?.display ?? from.name)”: a copy of its conversation")
     }
 }

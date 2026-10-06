@@ -63,7 +63,7 @@ struct ModelSearchList: View {
                         ForEach(rows, id: \.value) { o in row(o.value, o.label, o.help == o.value ? nil : o.help) }
                     }
                     if matches.isEmpty {
-                        Text(allowsOther ? "No match: Return uses “\(search)” as the model name" : "No models match")
+                        Text(allowsOther ? "No match. Press Return to use “\(search)” as the model name." : "No models match")
                             .font(.callout).foregroundStyle(.secondary).padding(4)
                     }
                 }

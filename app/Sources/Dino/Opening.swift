@@ -55,7 +55,7 @@ enum Opening {
     static func confirmRun(_ file: URL) -> Bool {
         let alert = NSAlert()
         alert.messageText = "Run “\(file.lastPathComponent)”?"
-        alert.informativeText = "It runs in a new shell in \(NSString(string: file.deletingLastPathComponent().path).abbreviatingWithTildeInPath), with the same access to your files as dino. Only run scripts you trust."
+        alert.informativeText = "It runs in a new shell in \(NSString(string: file.deletingLastPathComponent().path).abbreviatingWithTildeInPath) and can access your files, just as dino can. Only run scripts you trust."
         alert.addButton(withTitle: "Run")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)

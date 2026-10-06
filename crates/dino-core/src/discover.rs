@@ -53,7 +53,7 @@ pub fn setup(id: &str) -> Setup {
         _ => ("", None, None),
     };
     let sign_in_note = match id {
-        "pi" => Some("Pi has no models of its own. Sign in with an account you already have with an AI provider, or an API key; dino opens Pi, then type /login. Or run it on a provider from Settings → Models & Providers."),
+        "pi" => Some("Pi has no models of its own. Sign in to an AI provider you already use, with your account or an API key: click Sign In, then type /login in Pi. Or run Pi on a provider from Settings → Models & Providers."),
         "copilot" => Some("Copilot CLI runs on your GitHub account's Copilot plan (Copilot Free included). It also uses the GitHub CLI's sign-in when there is one."),
         _ => None,
     };

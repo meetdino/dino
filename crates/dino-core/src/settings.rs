@@ -608,9 +608,9 @@ fn put(v: &mut serde_json::Value, path: &[String], value: Option<serde_json::Val
 
 /// Keys dino itself uses, and what for. Others in the store are listed too, without a purpose.
 pub const KNOWN_KEYS: &[(&str, &str)] = &[
-    ("NVIDIA_API_KEY", "NVIDIA NIM: the free tier's models"),
-    ("TYPESAFE_API_KEY", "TypeSafe Jev: picks the model for each free-tier turn"),
-    ("CLAUDE_CODE_OAUTH_TOKEN", "Claude subscription token (claude setup-token): only Claude Code gets it"),
+    ("NVIDIA_API_KEY", "NVIDIA NIM: models for the free models pool"),
+    ("TYPESAFE_API_KEY", "TypeSafe Jev: picks a model for each turn in the free models pool"),
+    ("CLAUDE_CODE_OAUTH_TOKEN", "Claude subscription token from claude setup-token: only Claude Code uses it"),
 ];
 
 /// A key's name and where it comes from, never its value.

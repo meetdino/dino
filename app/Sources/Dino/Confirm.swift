@@ -36,11 +36,11 @@ enum ClipboardConfirmation {
         switch request.kind {
         case .paste:
             alert.messageText = "Paste text that may run commands?"
-            alert.informativeText = "Pasting this could run commands as soon as it lands: it has a line break, or the program\(place) can't tell a paste from typing. Look it over first."
+            alert.informativeText = "This text could run commands as soon as it's pasted, because it contains a line break or the program\(place) can't tell pasting from typing. Check it before you paste."
             allow = "Paste"
         case .osc52Read:
             alert.messageText = "Let \(program.map { "“\($0)”" } ?? "this program") read the clipboard?"
-            alert.informativeText = "\(who)\(place) asked for what's on your clipboard, shown below. Allow it only if you trust the program."
+            alert.informativeText = "\(who)\(place) wants to read your clipboard, shown below. Allow it only if you trust the program."
             allow = "Allow"
         case .osc52Write:
             alert.messageText = "Let \(program.map { "“\($0)”" } ?? "this program") change the clipboard?"
@@ -121,11 +121,11 @@ extension DinoModel {
             let here = busy.count > 1 || live.count > 1 ? "in “\(tabName(s))”" : "in this \(place)"
             alert.messageText = "\(what) is running \(here). Close it?"
             alert.informativeText = busy.count > 1
-                ? "Programs are running in \(busy.count) of its shells; closing ends them."
+                ? "Programs are running in \(busy.count) of its shells. Closing ends them."
                 : "Closing the \(place) ends it."
         } else {
             alert.messageText = "Close this \(place)?"
-            alert.informativeText = "Its shell ends. (Ghostty's confirm-close-surface is set to always.)"
+            alert.informativeText = "Its shell ends. dino asks because confirm-close-surface is set to always in your Ghostty config."
         }
         alert.addButton(withTitle: "Close")
         alert.addButton(withTitle: "Cancel")

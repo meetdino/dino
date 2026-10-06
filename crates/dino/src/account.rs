@@ -28,8 +28,8 @@ const USAGE: &str = "usage: dino login [--email [<address>] | --device] [<server
 Sign in to your dino account with GitHub, so your settings follow you to your other Macs. API
 keys and tokens, sessions, terminal content and agent logins never leave this Mac.
 
-  --email    Get a sign-in link by email instead.
-  --device   Show a code to enter on another device's browser (for a Mac over SSH).";
+  --email    get a sign-in link by email instead
+  --device   show a code to enter in a browser on another device (for a Mac you reach over SSH)";
 
 /// `dino login [--email [<address>] | --device] [<server>]`: sign in, and settings sync is on.
 pub fn login(args: &[String]) -> anyhow::Result<()> {
@@ -75,7 +75,7 @@ pub fn login(args: &[String]) -> anyhow::Result<()> {
         if s.phase != "signing_in" && s.phase != "joining" {
             break s;
         }
-        anyhow::ensure!(Instant::now() < until, "gave up waiting for the sign-in");
+        anyhow::ensure!(Instant::now() < until, "timed out waiting for you to finish signing in");
     };
     after(&s)
 }
@@ -91,15 +91,15 @@ fn after(s: &SyncStatus) -> anyhow::Result<()> {
 
 fn conflict(s: &SyncStatus) {
     let (here, there, differ) = s.conflict.unwrap_or_default();
-    println!("This Mac has settings of its own: {here} only here, {there} only in your account, {differ} set differently.");
-    println!("  dino sync resolve cloud   use your account's");
-    println!("  dino sync resolve local   make your account this Mac's");
-    println!("  dino sync resolve merge   keep both; where they differ, the newer one");
+    println!("This Mac's settings differ from your account's: {here} only on this Mac, {there} only in your account, {differ} set differently.");
+    println!("  dino sync resolve cloud   use your account's settings on this Mac");
+    println!("  dino sync resolve local   replace your account's settings with this Mac's");
+    println!("  dino sync resolve merge   keep both; where they differ, keep the newer");
 }
 
 pub fn logout() -> anyhow::Result<()> {
     expect_status(ask("logout", None)?)?;
-    println!("Signed out. This Mac's settings stay as they are.");
+    println!("Signed out. This Mac's settings haven't changed.");
     Ok(())
 }
 
@@ -112,7 +112,7 @@ pub fn sync(args: &[String]) -> anyhow::Result<()> {
         Some("resolve") => expect_status(ask("resolve", value)?)?,
         Some("undo") => {
             expect_status(ask("undo", None)?)?;
-            println!("Put back the settings from before the last sync changed them.");
+            println!("Restored your settings from before the last sync.");
             return Ok(());
         }
         Some(_) => anyhow::bail!("usage: dino sync [status | now | resolve cloud|local|merge | undo]"),
@@ -130,7 +130,7 @@ fn print(s: &SyncStatus) {
     match s.phase.as_str() {
         "signed_out" => println!("Not signed in. `dino login` turns on settings sync."),
         "signing_in" => match &s.email_sent_to {
-            Some(e) => println!("Waiting for the sign-in link sent to {e} to be opened."),
+            Some(e) => println!("Waiting for you to open the sign-in link sent to {e}."),
             None => println!("Signing in…"),
         },
         "joining" => println!("Signed in; fetching your settings…"),

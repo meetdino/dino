@@ -141,7 +141,7 @@ pub fn check_key(key: &str) -> Result<String, String> {
         return Err("Paste the plan's API key".into());
     }
     if is_subscription_token(k) {
-        return Err("That's a Claude subscription token: it's for Claude Code alone, so dino never gives it to a provider route. Paste the plan's own API key".into());
+        return Err("That's a Claude subscription token, which only Claude Code can use. Paste the plan's own API key".into());
     }
     if k.chars().any(|c| c.is_control() || c.is_whitespace() || c == '=') {
         return Err("That doesn't look like an API key".into());
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn a_claude_subscription_token_is_never_a_plans_key() {
         assert!(check_key("sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789").is_err());
-        assert!(check_key("  sk-ant-oat01-x  ").unwrap_err().contains("Claude Code alone"));
+        assert!(check_key("  sk-ant-oat01-x  ").unwrap_err().contains("only Claude Code can use"));
         assert!(check_key("").is_err() && check_key("a b").is_err() && check_key("a=b").is_err());
         assert_eq!(check_key(" sk-1234abcd \n").as_deref(), Ok("sk-1234abcd"));
     }

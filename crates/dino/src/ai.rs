@@ -133,7 +133,7 @@ fn private_temp(prefix: &str) -> std::io::Result<std::path::PathBuf> {
 /// whichever is here first. Each must be able to answer once with no tools (`Agent::answers_once`).
 fn asker(asked: Option<&str>, s: &Settings) -> anyhow::Result<(&'static dyn Agent, PathBuf)> {
     if let Some(id) = asked {
-        let a = agents::agent(one_shot_id(id)).filter(|a| a.answers_once()).ok_or_else(|| anyhow::anyhow!("{id} can't suggest a command: it has no way to answer once with no tools"))?;
+        let a = agents::agent(one_shot_id(id)).filter(|a| a.answers_once()).ok_or_else(|| anyhow::anyhow!("{id} can't suggest commands: it can't answer a single question without tools"))?;
         let program = agent_program(a.id()).ok_or_else(|| anyhow::anyhow!("{} isn't installed", agent_name(a.id())))?;
         return Ok((a, program));
     }
@@ -146,7 +146,7 @@ fn asker(asked: Option<&str>, s: &Settings) -> anyhow::Result<(&'static dyn Agen
         .filter_map(|id| agents::agent(one_shot_id(id)))
         .filter(|a| a.answers_once() && s.policies.allows(a.id()))
         .find_map(|a| Some((a, agent_program(a.id())?)))
-        .ok_or_else(|| anyhow::anyhow!("no agent here can suggest a command: install Claude Code or Codex"))
+        .ok_or_else(|| anyhow::anyhow!("no installed agent can suggest commands: install Claude Code or Codex"))
 }
 
 /// What ⌘⏎ starts, by launcher: `--agent`/`DINO_AI_AGENT`, else the one chosen in Settings →
@@ -586,7 +586,7 @@ fn agent(o: &Opts) -> anyhow::Result<()> {
         }
         Response::Created { id } => crate::client::attach_raw(&id, false),
         Response::Error { message } => anyhow::bail!(message),
-        other => anyhow::bail!("unexpected reply from dinod: {other:?}"),
+        other => anyhow::bail!("unexpected reply from dino's background service: {other:?}"),
     }
 }
 

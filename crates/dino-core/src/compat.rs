@@ -170,7 +170,7 @@ impl Compat {
 
         // 1. A shape both sides speak, or one dino translates.
         if p.formats.is_empty() {
-            lower(&mut v, Status::Caveat, format!("dino hasn't asked {} which APIs it serves yet", p.name), None);
+            lower(&mut v, Status::Caveat, format!("dino is still checking which APIs {} supports", p.name), None);
         } else if let Some(f) = needs.formats.iter().find(|f| p.formats.contains(f)) {
             v.via = Some(*f);
         } else if let Some((_, to)) = TRANSLATES.iter().find(|(from, to)| needs.formats.contains(from) && p.formats.contains(to)) {
@@ -179,7 +179,7 @@ impl Compat {
             lower(&mut v, Status::Caveat, format!("dino translates between {} and {}", needs.formats[0].label(), to.label()), None);
         } else {
             let wants = needs.formats.iter().map(|f| f.label()).collect::<Vec<_>>().join(" or ");
-            lower(&mut v, Status::No, format!("Needs {wants}, which {} doesn't serve", p.name), needs.source.clone());
+            lower(&mut v, Status::No, format!("Needs {wants}, which {} doesn't support", p.name), needs.source.clone());
         }
 
         // 2. Tool calling.

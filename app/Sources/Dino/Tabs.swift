@@ -168,8 +168,8 @@ private struct TabItem: View {
             }
             .buttonStyle(.plain)
             .opacity(hovering || selected ? 1 : 0)
-            .help(session.tmux != nil ? "Detach tmux and close this tab; tmux keeps everything (⌘W)"
-                : session.plainShell ? "Close this tab (⌘W)" : "Close this tab; \(session.display) keeps running in the sidebar (⌘W)")
+            .help(session.tmux != nil ? "Close this tab and detach from tmux (⌘W). The session keeps running in tmux."
+                : session.plainShell ? "Close this tab (⌘W)" : "Close this tab (⌘W). \(session.display) keeps running in the sidebar.")
         }
         .font(.subheadline)
         .foregroundStyle(selected ? .primary : .secondary)
@@ -283,7 +283,7 @@ struct TmuxSuggestion: View {
         if !answered, !model.tmuxOptionsOn, inTmux >= 2, inTmux * 2 > shells.count {
             HStack(spacing: 8) {
                 Image(systemName: "rectangle.split.3x1").foregroundStyle(.secondary)
-                Text("You use tmux: dino can show your agents as tmux windows and open new tabs in tmux.")
+                Text("You use tmux. dino can show your agents as tmux windows and open new tabs in tmux.")
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 8)

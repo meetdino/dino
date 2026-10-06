@@ -231,7 +231,7 @@ pub fn refresh(now: bool) {
                 None => plan_route(preset, &keys).map(|r| probe_plan(&r)).unwrap_or_default(),
             };
             if p.formats.is_empty() && p.error.is_none() {
-                p.error = Some(format!("Nothing at {} answered as Anthropic Messages or the OpenAI API", p.base));
+                p.error = Some(format!("{} didn't respond as an Anthropic or OpenAI API", p.base));
             }
         }
         if !p.connected {
@@ -367,7 +367,7 @@ fn list_plan(plan: &dino_proxy::plan::Plan, kind: &str) -> Result<Value, Option<
 /// Connect coding plan `id` (`plan-zai`) with `key`, and `base` for the generic entry: checked
 /// with the plan when it has a list to ask, then kept in the key store. `save` stores one key.
 pub fn connect_plan(id: &str, key: &str, base: Option<&str>, save: impl Fn(&str, Option<&str>) -> anyhow::Result<()>) -> Result<(), String> {
-    let preset = plans::preset(id).ok_or_else(|| format!("dino doesn't know a coding plan called {id}"))?;
+    let preset = plans::preset(id).ok_or_else(|| format!("there's no coding plan called {id}"))?;
     let key = plans::check_key(key)?;
     let other = preset.id == plans::OTHER;
     let base = if other { Some(plans::check_base(base.unwrap_or_default())?) } else { None };
@@ -395,7 +395,7 @@ pub fn connect_plan(id: &str, key: &str, base: Option<&str>, save: impl Fn(&str,
 
 /// Disconnect coding plan `id`: its key (and the generic entry's URL) leave the key store.
 pub fn disconnect_plan(id: &str, save: impl Fn(&str, Option<&str>) -> anyhow::Result<()>) -> anyhow::Result<()> {
-    let preset = plans::preset(id).ok_or_else(|| anyhow::anyhow!("dino doesn't know a coding plan called {id}"))?;
+    let preset = plans::preset(id).ok_or_else(|| anyhow::anyhow!("there's no coding plan called {id}"))?;
     save(&preset.key_name(), None)?;
     if preset.id == plans::OTHER {
         save(plans::OTHER_URL_KEY, None)?;

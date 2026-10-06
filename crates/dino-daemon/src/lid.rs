@@ -100,7 +100,7 @@ fn set_sleep_disabled(off: bool) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else if String::from_utf8_lossy(&out.stderr).contains("password") {
-        Err("dino doesn't have permission to keep the lid awake yet: set it up in Settings → Power".into())
+        Err("dino doesn't have permission to keep your Mac awake with the lid closed yet. Set it up in Settings → Power.".into())
     } else {
         Err(format!("pmset: {}", String::from_utf8_lossy(&out.stderr).trim()))
     }

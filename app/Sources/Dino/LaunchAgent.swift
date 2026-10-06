@@ -120,7 +120,7 @@ enum DinodAgent {
         UserDefaults.standard.set(true, forKey: key)
         let alert = NSAlert()
         alert.messageText = "Allow dino in Login Items"
-        alert.informativeText = "dino runs your agents and shells in the background through macOS. Until dino is allowed in System Settings → General → Login Items, programs in dino's terminals don't get the permissions you give dino, such as Screen Recording and Accessibility."
+        alert.informativeText = "Your agents and shells run in dino's background service. Until you allow dino in System Settings → General → Login Items, programs in your terminals don't get the permissions you give dino, such as Screen Recording and Accessibility."
         alert.addButton(withTitle: "Open Login Items")
         alert.addButton(withTitle: "Not Now")
         if alert.runModal() == .alertFirstButtonReturn { SMAppService.openSystemSettingsLoginItems() }
@@ -141,27 +141,27 @@ struct DinodAgentSection: View {
                         Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
                     }
                 } else if model.daemonUnmanaged {
-                    LabeledContent("dinod started outside launchd") {
+                    LabeledContent("Background service was started outside dino") {
                         Button("Restart Now") { confirming = true }
                             .disabled(model.restartingDaemon)
                     }
                 }
             } header: {
-                Text("Background")
+                Text("Running in the Background")
             } footer: {
                 Footnote(needsApproval
-                    ? "Allow dino there so programs in its terminals get the permissions you give dino in Privacy & Security, such as Screen Recording. dinod still runs without it, with only its own."
-                    : "dinod runs through macOS as part of dino, so programs in its terminals get the permissions you give dino in Privacy & Security, such as Screen Recording. It keeps running when you quit dino.")
+                    ? "Allow dino in Login Items so programs in your terminals get the permissions you give dino in Privacy & Security, such as Screen Recording. Your agents and shells still run without it, but without those permissions."
+                    : "Your agents and shells keep running after you quit dino. Programs in your terminals get the permissions you give dino in Privacy & Security, such as Screen Recording.")
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 refresh()
             }
             .onAppear { refresh() }
-            .alert("Restart dinod now?", isPresented: $confirming) {
+            .alert("Restart dino's background service?", isPresented: $confirming) {
                 Button("Restart") { model.restartDaemon() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Every session stops and resumes; an agent in the middle of a turn loses that turn, and commands running in shells stop.")
+                Text("Every session restarts. Agents resume their conversations, but a turn in progress is lost. Commands running in shells stop.")
             }
         }
     }

@@ -21,9 +21,9 @@ struct ContinueSheet: View {
     private var groups: [Bucket] {
         let all = model.found.filter(matches)
         return [
-            Bucket(id: "running", title: "Running", note: "Busy in another terminal; moves here when its turn ends",
+            Bucket(id: "running", title: "Running", note: "Working in another terminal. dino can continue one once its current turn ends.",
                   items: all.filter { $0.source == "running" && $0.isBusy }),
-            Bucket(id: "idle", title: "Idle", note: "Open in another terminal, waiting",
+            Bucket(id: "idle", title: "Idle", note: "Open in another terminal, waiting for a prompt",
                   items: all.filter { $0.source == "running" && !$0.isBusy }),
             Bucket(id: "done", title: "Done", note: nil, items: all.filter { $0.source == "recent" }),
             Bucket(id: "cloud", title: "Cloud", note: model.loadingCloud ? "Checking…" : nil,
@@ -156,7 +156,7 @@ struct ContinueSheet: View {
     private var footer: some View {
         HStack {
             let local = model.found.filter { $0.source != "cloud" }.count
-            Text("\(local) on this Mac · ↑↓ browse · ↵ continue in dino · esc close")
+            Text("\(local) on this Mac · ↑↓ to browse · ↩ to continue in dino · Esc to close")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
             Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -262,7 +262,7 @@ private struct SessionDetail: View {
                 model.confirmMove = session
             }
             .keyboardShortcut(.defaultAction)
-            .help(session.isBusy ? "Waits for its current turn, closes it in \(session.terminal ?? "its terminal") and continues it in dino" : "Closes it in \(session.terminal ?? "its terminal") and continues it in dino")
+            .help(session.isBusy ? "dino waits for its current turn to end, closes it in \(session.terminal ?? "its terminal") and continues it here" : "dino closes it in \(session.terminal ?? "its terminal") and continues it here")
         case "cloud":
             if let url = session.url.flatMap(URL.init(string:)) {
                 Button("Open in Browser") { NSWorkspace.shared.open(url) }.keyboardShortcut(.defaultAction)
@@ -326,9 +326,9 @@ private struct CloudNote: View {
         VStack(spacing: 10) {
             Image(systemName: "cloud").font(.system(size: 30)).foregroundStyle(.tertiary)
             if session.session_id.isEmpty {
-                Text("Claude Code on the web keeps its sessions in the cloud. Continuing opens the picker, and the one you choose is brought into a checkout here.")
+                Text("Claude Code on the web keeps its sessions in the cloud. Continue opens a picker, and the session you choose is brought into a checkout on your Mac.")
             } else {
-                Text("This task runs in \(AgentNames.of(session.agent))'s cloud; its conversation is read there.")
+                Text("This task runs in \(AgentNames.of(session.agent))'s cloud. Open it there to read its conversation.")
                 if let url = session.url, let u = URL(string: url) {
                     Link(url, destination: u).font(.caption)
                 }

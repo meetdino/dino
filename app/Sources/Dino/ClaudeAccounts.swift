@@ -14,7 +14,7 @@ struct ClaudeAccountInfo: Codable, Equatable, Identifiable {
 
     var id: UInt32 { number }
     var isOwn: Bool { number == 1 }
-    var name: String { isOwn ? "Your Claude Code login" : "Account \(number)" }
+    var name: String { isOwn ? "Your signed-in account" : "Account \(number)" }
 }
 
 struct ClaudeAccountsInfo: Codable, Equatable {
@@ -69,7 +69,7 @@ struct ClaudeAccountsSection: View {
                 if info?.creating != nil {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Waiting for claude setup-token: sign in with the other account in your browser")
+                        Text("Waiting for you to sign in with the other account in your browser…")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     .padding(.leading, 10)
@@ -78,7 +78,7 @@ struct ClaudeAccountsSection: View {
                     Text(e).font(.callout).foregroundStyle(.red).padding(.leading, 10)
                 }
                 HStack(alignment: .firstTextBaseline) {
-                    Footnote("When an account hits its limit, Claude Code goes on with the next one until it resets.")
+                    Footnote("When an account reaches its usage limit, Claude Code switches to the next account in the list until the limit resets.")
                     Button("Add Account…") { adding = true }
                         .disabled(info == nil)
                 }
@@ -151,7 +151,7 @@ struct ClaudeAccountsSection: View {
         if a.answering { return ("Answering now", .green) }
         guard a.spent else { return ("Ready", .secondary) }
         if let t = a.resets_at { return ("At its limit until \(Clock.short(t))", .orange) }
-        if let t = a.retry_at { return ("At its limit, tried again \(Clock.short(t))", .orange) }
+        if let t = a.retry_at { return ("At its limit, trying again at \(Clock.short(t))", .orange) }
         return ("At its limit", .orange)
     }
 
@@ -188,7 +188,7 @@ struct ClaudeAccountsSection: View {
     private func confirmRemove(_ a: ClaudeAccountInfo) {
         let alert = NSAlert()
         alert.messageText = "Remove Claude \(a.name.lowercased())?"
-        alert.informativeText = "dino forgets its token, and Claude Code no longer goes on with it when an account hits its limit. The token itself stays valid until it runs out or you revoke it."
+        alert.informativeText = "Claude Code will no longer switch to this account when another reaches its limit. The token stays valid until it expires or you revoke it."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
@@ -210,7 +210,7 @@ private struct AddClaudeAccountSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Add a Claude Account").font(.headline)
-            Text("In a terminal signed into that account, run `claude setup-token` and paste the token it prints.")
+            Text("Run `claude setup-token`, sign in with that account, and paste the token it prints.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -221,8 +221,8 @@ private struct AddClaudeAccountSheet: View {
                 Text(error).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
-                Button("Run It in a New Tab") { create() }
-                    .help("Runs claude setup-token in a new dino tab: sign in with that account in your browser, and dino adds the token it prints")
+                Button("Run in New Tab") { create() }
+                    .help("Runs claude setup-token in a new tab. Sign in with that account in your browser, and dino adds the token.")
                 Spacer()
                 Button("Cancel") { token = ""; cancel() }.keyboardShortcut(.cancelAction)
                 Button("Add Account") { keep() }

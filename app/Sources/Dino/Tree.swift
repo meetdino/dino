@@ -352,11 +352,11 @@ enum SessionFilter: String, CaseIterable, Identifiable {
     var help: String {
         switch self {
         case .all: "Every session"
-        case .needsYou: "Asking for something: a permission, an answer"
-        case .done: "Finished, and you haven't looked yet"
+        case .needsYou: "Waiting for you: a permission or an answer"
+        case .done: "Finished since you last looked"
         case .working: "Thinking, running tools, or waiting on its subagents and background commands"
         case .idle: "Waiting for a prompt, or exited"
-        case .archived: "Archived sessions: stopped and kept, to pick up again (⇧⌘A archives the current one)"
+        case .archived: "Stopped sessions you can resume later. ⇧⌘A archives the current session."
         }
     }
 
@@ -746,7 +746,7 @@ struct RepoRows: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("Listed: the \(listed.count) in use or changed most recently")
+                        .help("Showing the \(listed.count == 1 ? "worktree" : "\(listed.count) worktrees") in use or changed most recently")
                     }
                 }
             }
@@ -910,7 +910,7 @@ struct RepoRows: View {
 
 extension SessionInfo {
     /// Why features that need the session's folder on this Mac are off, for a session on an SSH host.
-    var remoteReason: String? { host.map { "Not available for sessions on \($0): the folder is there, not on this Mac" } }
+    var remoteReason: String? { host.map { "Not available for sessions on \($0): the folder is on that machine, not on your Mac" } }
 
     /// Where it is now: a shell follows its `cd`s (and so does an agent typed into it); everything
     /// else stays in the folder it started in.
@@ -1000,7 +1000,7 @@ struct OtherWorktreesHeader: View {
     var body: some View {
         let busy = others.filter { !$0.removable && !$0.reading }.count
         let reading = others.filter(\.reading).count
-        let detail = ["\(others.count)", busy > 0 ? "\(busy) in use" : nil, reading > 0 ? "reading \(reading)" : nil].compactMap { $0 }
+        let detail = ["\(others.count)", busy > 0 ? "\(busy) in use" : nil, reading > 0 ? "checking \(reading)" : nil].compactMap { $0 }
         PlaceRow(icon: "square.stack.3d.up", title: "Other worktrees", detail: detail.joined(separator: " · "))
             .help("""
                 Worktrees of this repo with no dino session in them: left by a dino session, made by \
@@ -1071,7 +1071,7 @@ struct OtherWorktreeRow: View {
         let use = usage(place)
         if let use { out.append(long ? use.prefix(1).uppercased() + use.dropFirst() : use) }
         guard let git = place.git else {
-            if place.reading { out.append(long ? "Reading what's in it…" : "reading…") }
+            if place.reading { out.append(long ? "Checking for changes…" : "checking…") }
             return out
         }
         let uncommitted = git.uncommitted ?? (git.dirty ? 1 : 0)
@@ -1133,14 +1133,14 @@ struct CleanUpPlan: Equatable {
     var title: String { places.count == 1 ? "Clean up “\(places[0].label)”?" : "Clean up \(places.count) worktrees?" }
 
     var message: String {
-        var lines = [places.count == 1 ? "Its folder is removed." : "Their folders are removed. None is in use."]
+        var lines = [places.count == 1 ? "The worktree's folder is removed." : "Their folders are removed. None of them is in use."]
         if !losing.isEmpty {
             lines.append("Uncommitted changes are lost in:\n" + losing.map { "• \($0.label) (\($0.git?.uncommitted.map { "\($0) file\($0 == 1 ? "" : "s")" } ?? "changes"))" }.joined(separator: "\n"))
         }
         if !unpushed.isEmpty {
             lines.append("Unpushed commits stay on their branches, which are kept:\n" + unpushed.map { "• \($0.label) (\($0.git?.unpushed ?? 0) commit\($0.git?.unpushed == 1 ? "" : "s"))" }.joined(separator: "\n"))
         }
-        lines.append("A branch goes too only when it's merged. The main checkout is never touched.")
+        lines.append("A branch is deleted only if it's merged. Your main checkout isn't touched.")
         return lines.joined(separator: "\n\n")
     }
 }
@@ -1185,9 +1185,9 @@ struct WorktreeRow: View {
     /// Icons, not words: the label needs the room in a narrow sidebar. The dirty dot already says "in progress".
     private var statusIcon: (String, String)? {
         switch place.git?.state {
-        case "ready": return ("checkmark.circle", "Ready: committed, not on the main branch yet")
+        case "ready": return ("checkmark.circle", "Ready: changes are committed but not yet on the main branch")
         case "merged": return ("arrow.triangle.merge", "Merged into the main branch")
-        case "empty": return place.owner == nil ? ("circle.dashed", "No changes yet: nothing committed or edited in this worktree") : ("checkmark", "Done: nothing changed")
+        case "empty": return place.owner == nil ? ("circle.dashed", "No changes yet") : ("checkmark", "Done, with no changes")
         default: return nil
         }
     }
@@ -1217,7 +1217,7 @@ struct WorktreeClosingItems: View {
             Divider()
         } else if place.cleanable {
             Button("Clean Up Worktree") { model.cleanWorktrees([place.path]) }
-                .help("Removes the worktree, and its branch if it's merged. Never forced.")
+                .help("Removes the worktree, and its branch if it's merged. Nothing is force-deleted.")
             Divider()
         }
     }

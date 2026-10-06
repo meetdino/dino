@@ -102,7 +102,7 @@ struct WelcomeCard: View {
             .scrollBounceBehavior(.basedOnSize)
             .frame(height: min(max(rowsHeight, 120), 560))
             HStack {
-                Text("Help → Show Welcome brings this back").font(.caption).foregroundStyle(.tertiary)
+                Text("To see this again, choose Help → Show Welcome.").font(.caption).foregroundStyle(.tertiary)
                 Spacer()
                 if let first = firstAgent {
                     // Without knowing ⌘N: the agent it starts, where you are.
@@ -128,7 +128,7 @@ struct WelcomeCard: View {
                 found
             }
             group("Try it") {
-                row("keyboard", "Press ⌘I in any shell to ask in plain English; Settings → Terminal chooses who answers")
+                row("keyboard", "In any shell, press ⌘I and say what you want in plain English. Choose which agent answers in Settings → Terminal.")
                 startsPicker
             }
             group("Optional") {
@@ -149,7 +149,7 @@ struct WelcomeCard: View {
                 }
                 .buttonStyle(.link)
                 .font(.callout)
-                .help("API keys and tokens never leave this Mac")
+                .help("API keys and tokens stay on this Mac and never sync")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -248,19 +248,19 @@ struct WelcomeCard: View {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(here) { a in computerUseRow(a) }
                     if here.contains(where: { !Self.hasOwnComputerUse($0) }) {
-                        Button("Computer use for the others (Experimental)…") {
+                        Button("Set up computer use for other agents (Experimental)…") {
                             settingsPane = .experimental
                             openWindow(id: SettingsView.windowID)
                         }
                         .buttonStyle(.link)
                         .font(.callout)
-                        .help("Adds open-computer-use to the agents you pick, with each agent's own command")
+                        .help("Adds open-computer-use to the agents you choose")
                     }
                 }
                 .padding(.top, 4)
             } label: {
                 Button { showComputerUse.toggle() } label: {
-                    Text("Agents can use your Mac's apps").font(.callout)
+                    Text("Let agents use your Mac's apps").font(.callout)
                 }
                 .buttonStyle(.plain)
             }
@@ -282,15 +282,15 @@ struct WelcomeCard: View {
             Group {
                 switch a.id {
                 case "claude" where Self.hasOwnComputerUse(a):
-                    Text("In Claude, run /mcp, select computer-use and choose Enable (once per project). The first time, it asks for Accessibility and Screen Recording. For your browser: with the Claude in Chrome extension installed, run /chrome and choose Enabled by default.")
+                    Text("In Claude, run /mcp, select computer-use and choose Enable (once per project). The first time, it asks for Accessibility and Screen Recording permission. To use your browser, install the Claude in Chrome extension, then run /chrome and choose Enabled by default.")
                 case "claude":
-                    Text("Its own computer use needs a Pro or Max plan\(a.account.map { " (this Mac: \($0))" } ?? ""). The option below can add open-computer-use instead.")
+                    Text("Claude Code's built-in computer use needs a Pro or Max plan\(a.account.map { " (you're signed in with \($0))" } ?? ""). The option below can add open-computer-use instead.")
                 case "codex":
-                    Text("In the Codex app: Plugins → Computer Use → Install plugin, then turn on its server and skill. OpenAI documents it for the app, not the Codex CLI.")
+                    Text("In the Codex app: Plugins → Computer Use → Install plugin, then turn on its server and skill. OpenAI documents it only for the app, not for the Codex CLI.")
                 case "copilot":
-                    Text("Has none of its own. The option below can add open-computer-use, where your organization's Copilot policy allows MCP servers.")
+                    Text("No built-in computer use. The option below can add open-computer-use, if your organization's Copilot policy allows MCP servers.")
                 default:
-                    Text("Has none of its own. The option below can add open-computer-use.")
+                    Text("No built-in computer use. The option below can add open-computer-use.")
                 }
             }
             .font(.caption)
@@ -324,7 +324,7 @@ struct WelcomeCard: View {
         }
         if GhosttyConfig.loaded.isEmpty {
             row("terminal", "Using dino's terminal defaults")
-                .help("Put a Ghostty config in ~/.config/ghostty/config and dino uses it")
+                .help("dino uses your Ghostty config if you add one at ~/.config/ghostty/config")
         } else {
             row("checkmark.circle", "Your Ghostty config is applied")
                 .help(GhosttyConfig.loaded.joined(separator: "\n"))

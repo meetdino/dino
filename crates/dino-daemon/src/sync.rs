@@ -315,7 +315,7 @@ fn signed_out_elsewhere(why: &str) {
     cloud::forget_tokens();
     let mut s = state().lock().unwrap();
     let server = s.server.clone();
-    *s = State { server, phase: "signed_out".into(), message: Some(format!("This Mac was signed out of your dino account ({why}). Your settings here are as they were.")), ..State::default() };
+    *s = State { server, phase: "signed_out".into(), message: Some(format!("This Mac was signed out of your dino account ({why}). Its settings haven't changed.")), ..State::default() };
     save_state(&s);
 }
 
@@ -706,7 +706,7 @@ fn prepare_login(server: Option<String>) -> anyhow::Result<String> {
     let server = server.filter(|s| !s.is_empty()).unwrap_or_else(cloud::default_server);
     let server = server.trim_end_matches('/').to_string();
     anyhow::ensure!(server.starts_with("https://") || server.starts_with("http://127.0.0.1") || server.starts_with("http://localhost"), "the account server must be https");
-    anyhow::ensure!(!cloud::signed_in() || state().lock().unwrap().phase == "signed_out", "already signed in; `dino logout` first");
+    anyhow::ensure!(!cloud::signed_in() || state().lock().unwrap().phase == "signed_out", "already signed in; run `dino logout` first");
     {
         let mut l = live().lock().unwrap();
         l.signing_in = true;

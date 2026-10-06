@@ -26,7 +26,7 @@ struct AskSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 Label("Ask about \(session.display)", systemImage: "bubble.left.and.text.bubble.right").font(.title2.weight(.semibold))
-                Text("Claude reads the session and its folder to answer. It can't type into the session or change files, and each question starts fresh.")
+                Text("Claude reads the session and its folder to answer. It can't type into the session or change files. Each question starts fresh.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

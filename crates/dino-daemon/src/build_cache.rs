@@ -166,9 +166,9 @@ fn start(sccache: &Path, socket: &Path, gb: u32) -> anyhow::Result<()> {
     // Up before the first compile asks, unless it's slow to start: that compile then runs as is.
     let started = Instant::now();
     while server_at(socket).is_none() {
-        anyhow::ensure!(SERVER_PID.load(Ordering::SeqCst) == pid, "it exited; see {}", log_path.display());
+        anyhow::ensure!(SERVER_PID.load(Ordering::SeqCst) == pid, "sccache exited; see {}", log_path.display());
         if started.elapsed() > Duration::from_secs(10) {
-            anyhow::bail!("it isn't answering at {} yet", socket.display());
+            anyhow::bail!("sccache isn't responding at {} yet", socket.display());
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -297,7 +297,7 @@ pub(crate) fn info() -> BuildCacheInfo {
     let unused = if !bc.enabled || sccache.is_none() {
         None
     } else if !build_cache::socket_fits(&socket) {
-        Some(format!("dino's folder is too deep for sccache's socket ({})", socket.display()))
+        Some(format!("dino's folder path is too long for sccache ({})", socket.display()))
     } else {
         own_setup(&HashMap::new())
     };

@@ -114,17 +114,17 @@ impl GitHub {
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_MODIFIED {
             let mut cache = self.cache.lock().unwrap();
-            let c = cache.get_mut(path).ok_or_else(|| anyhow::anyhow!("GitHub said nothing changed about something dino never saw"))?;
+            let c = cache.get_mut(path).ok_or_else(|| anyhow::anyhow!("GitHub sent an unexpected reply; dino will try again"))?;
             c.at = Instant::now();
             return Ok(c.body.clone());
         }
         if status == reqwest::StatusCode::UNAUTHORIZED {
             // Signed out or refreshed since: read the token again next time.
             *self.token.lock().unwrap() = None;
-            anyhow::bail!("GitHub turned gh's login down: run gh auth login");
+            anyhow::bail!("GitHub rejected gh's sign-in: run gh auth login");
         }
         if matches!(status.as_u16(), 403 | 429) && let Some(secs) = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()) {
-            *self.until.lock().unwrap() = Some((Instant::now() + Duration::from_secs(secs.clamp(30, 3600)), "GitHub asked dino to slow down".into()));
+            *self.until.lock().unwrap() = Some((Instant::now() + Duration::from_secs(secs.clamp(30, 3600)), "GitHub asked dino to slow down; checking again later".into()));
         }
         let new_etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(String::from);
         let text = resp.text()?;

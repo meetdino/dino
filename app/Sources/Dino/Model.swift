@@ -22,10 +22,10 @@ enum SessionStatus {
     var detail: String? {
         switch self {
         case .thinking: "Waiting on the model"
-        case .working: "Running tools or printing"
-        case .waiting: "Its turn is over; subagents or background commands still run"
+        case .working: "Running tools or writing output"
+        case .waiting: "Turn finished; subagents or background commands are still running"
         case .needsYou: "Asking for something"
-        case .done: "Finished; you haven't looked yet"
+        case .done: "Finished since you last looked"
         case .idle: "Waiting for a prompt"
         case .ended: "Exited; Enter resumes it"
         case .exited: "Exited with an error"
@@ -392,7 +392,7 @@ final class DinoModel: ObservableObject {
         guard next != power else { return }
         // A safety stop (battery, heat, time) is worth a notification; the first state isn't.
         if let note = next?.note, let at = next?.note_at, power != nil, at != power?.note_at {
-            Notifier.post(key: "lid", title: "Closing the lid sleeps the Mac again", body: note)
+            Notifier.post(key: "lid", title: "Closing the lid sleeps your Mac again", body: note)
         }
         PowerState.shared.info = next
     }
@@ -441,9 +441,9 @@ final class DinoModel: ObservableObject {
             // Its route is spent and a fallback took over: said once, as it does.
             if let f = s.fallback, prev.fallback == nil {
                 if f.isAccount {
-                    Notifier.post(session: s, title: "\(s.display) goes on with \(f.name)", body: "\(f.why). \(f.name) answers until then.")
+                    Notifier.post(session: s, title: "\(s.display) switched to \(f.name)", body: "\(f.why). \(f.name) answers until then.")
                 } else {
-                    Notifier.post(session: s, title: "\(s.display) is on a fallback: \(f.name)", body: "\(f.why). \(f.name) answers with \(f.model) until then.")
+                    Notifier.post(session: s, title: "\(s.display) switched to \(f.name)", body: "\(f.why). \(f.name) answers with \(f.model) until then.")
                 }
             }
             let looking = appActive && s.id == selected
@@ -467,7 +467,7 @@ final class DinoModel: ObservableObject {
                 }
                 // Not in front of you: say an agent started using the Mac or the browser.
                 if let sentence = s.usingSentence, prev.reach == nil, s.needs == nil, !appActive, UsingDisplay.current != .off {
-                    Notifier.post(session: s, title: sentence, body: "\(s.display) · Open it to watch or stop it")
+                    Notifier.post(session: s, title: sentence, body: "\(s.display) · Open the session to watch or stop it")
                 }
             }
             // CI runs for minutes: say when it's done, even about the session in front of you.

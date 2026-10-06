@@ -354,7 +354,7 @@ struct SessionControlsBar: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
-                .help("Runs on \(route.label) through dino, not \(session.agent_id)'s own account (⇧⌘M)")
+                .help("Runs on \(route.label) through dino, not \(AgentNames.of(session.agent_id))'s own account (⇧⌘M)")
                 .popover(isPresented: Binding(get: { model.controlPicker == .model }, set: { if !$0, model.controlPicker == .model { model.controlPicker = nil } }), arrowEdge: .bottom) {
                     ProviderModelPopover(session: session, route: route)
                 }
@@ -406,14 +406,14 @@ struct SessionControlsBar: View {
     /// When a choice not in effect yet applies; `mode` when only the mode is on its way.
     static func pendingHelp(_ knobs: Knobs, only mode: Bool) -> String {
         if mode, knobs.live_modes == true {
-            return "Not in effect yet: the agent switches to it as soon as it safely can (mid-turn only when no mode on the way lets more through), else it restarts with it once idle, keeping its conversation"
+            return "Not in effect yet. The agent switches as soon as it safely can. If it can't switch in place, it restarts with the new mode once idle and keeps its conversation."
         }
-        return "Not in effect yet: applies once the agent is idle and its subagents and background commands are done. It restarts with it, keeping its conversation"
+        return "Not in effect yet. Once the agent, its subagents and its background commands are done, the agent restarts with the new setting and keeps its conversation."
     }
 
     /// Why a session's model can't be changed from here.
     static func keptModel(_ s: SessionInfo) -> String {
-        "\(AgentNames.of(s.agent_id)) keeps a conversation's model; start a new session to change it"
+        "\(AgentNames.of(s.agent_id)) can't change a conversation's model. Start a new session to use another one."
     }
 
     private func help(_ kind: ControlKind) -> String {
@@ -421,7 +421,7 @@ struct SessionControlsBar: View {
         switch kind {
         case .model:
             if let other = session.otherModel, let chosen = session.controls?.model {
-                return "You chose \(chosen); the agent answered with \(other) (\(key))"
+                return "You chose \(chosen), but the agent answered with \(other) (\(key))"
             }
             return "Model: \(session.last_model.map { "answering with \($0)" } ?? "the agent's default") (\(key))"
         case .mode:
@@ -508,22 +508,22 @@ struct ControlPopover: View {
             }
             Divider().padding(.vertical, 6)
             if !dropped.isEmpty {
-                Text("\(AgentNames.of(session.agent_id)) drops \(dropped.map(knobs.modeLabel).joined(separator: ", ")) when it resumes a conversation; start a new session in it.")
+                Text("\(AgentNames.of(session.agent_id)) can't keep \(dropped.map(knobs.modeLabel).joined(separator: ", ")) when it resumes a conversation. Start a new session to use \(dropped.count == 1 ? "it" : "them").")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.bottom, 4)
             }
             Text(kind == .mode && knobs.live_modes == true
-                ? "The agent switches to it in place, as its own Shift+Tab would. Mid-turn it waits if a mode on the way lets more through; one Shift+Tab can't reach restarts the agent once idle, keeping its conversation."
+                ? "The agent switches in place, as if you pressed Shift+Tab in it. During a turn, it waits rather than pass through a less restrictive mode. A mode Shift+Tab can't reach restarts the agent once it's idle, keeping its conversation."
                 : model.busy(session)
-                ? "Applies once the agent is idle and its subagents and background commands are done. It restarts with it and keeps its conversation."
-                : "The agent restarts with it and keeps its conversation.")
+                ? "Applies once the agent, its subagents and its background commands are done. The agent restarts with the new setting and keeps its conversation."
+                : "The agent restarts with the new setting and keeps its conversation.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let next = session.pending(kind) {
-                Text("Chosen, not in effect yet: \(next.map { kind == .mode ? knobs.modeLabel($0) : kind == .model ? knobs.label($0) : $0.capitalized } ?? "Default").")
+                Text("Not in effect yet: \(next.map { kind == .mode ? knobs.modeLabel($0) : kind == .model ? knobs.label($0) : $0.capitalized } ?? "Default").")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -617,8 +617,8 @@ struct ProviderModelPopover: View {
             .frame(height: min(260, max(40, CGFloat(shown.count) * 44)))
             Divider()
             Text(model.busy(session)
-                ? "Applies once the agent is idle. It restarts on the model and keeps its conversation."
-                : "The agent restarts on the model and keeps its conversation.")
+                ? "Applies once the agent is idle. The agent restarts with the new model and keeps its conversation."
+                : "The agent restarts with the new model and keeps its conversation.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -758,7 +758,7 @@ struct NewSessionSheet: View {
                             }
                         }
                         Toggle("In a new worktree", isOn: $worktree)
-                            .help("Its own worktree and branch: its edits stay off your checkout until you apply them")
+                            .help("Work in a separate worktree and branch. Changes stay out of your checkout until you apply them.")
                     } else {
                         LabeledContent("Folder") {
                             HStack(spacing: 4) {
@@ -781,7 +781,7 @@ struct NewSessionSheet: View {
                     }
                 } footer: {
                     if !host.isEmpty {
-                        Text("A path on \(host); ~ is your home folder there. The agent must be installed on \(host).")
+                        Text("A folder on \(host). ~ means your home folder there. The agent must be installed on \(host).")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
@@ -821,21 +821,21 @@ struct NewSessionSheet: View {
                             }
                             if let v = verdict {
                                 let mark = v.status == "works" ? "✓" : v.status == "caveat" ? "~" : "✗"
-                                Text("\(mark) \(v.name)\(v.recommended ? " is the one to run it in" : "")\(v.reasons.first.map { ": \($0.text)" } ?? "")")
+                                Text("\(mark) \(v.name)\(v.recommended ? " is recommended for this model" : "")\(v.reasons.first.map { ": \($0.text)" } ?? "")")
                                     .font(.callout)
                                     .foregroundStyle(v.status == "works" ? .green : v.status == "caveat" ? .orange : .secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             if let r = chosen?.recommended, r.agent != launcher?.agent_id,
                                let l = model.launchers.first(where: { $0.agent_id == r.agent }) {
-                                Button("Use \(r.name) instead, recommended for it") { agent = l.short }
+                                Button("Use \(r.name) Instead") { agent = l.short }
                                     .buttonStyle(.link)
                             }
                         }
                     } footer: {
                         Text(provider.isEmpty
-                            ? "Or run the agent on a model from a provider in Settings → Models & Providers, through dino."
-                            : "The agent runs on this model through dino; its own login and settings stay as they are.")
+                            ? "You can also run the agent on a model from a provider in Settings → Models & Providers."
+                            : "The agent runs on this model through dino. Its own sign-in and settings don't change.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
@@ -844,7 +844,7 @@ struct NewSessionSheet: View {
                     Section {
                         ControlFields(knobs: k, controls: $controls, defaults: defaults[l.agent_id] ?? Controls(), seen: model.seenModels(l.agent_id))
                     } footer: {
-                        Text("Default follows Settings → Agents, then the agent's own settings. You can change these later from the toolbar.")
+                        Text("Default uses your choice in Settings → Agents, or else the agent's own setting. You can change these later from the toolbar.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }

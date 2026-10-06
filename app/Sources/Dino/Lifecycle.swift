@@ -74,22 +74,22 @@ struct DeletePlan: Identifiable, Equatable {
     var message: String {
         let d = deletion
         let shell = session.agent_id == "shell"
-        var what = shell ? "This closes the shell and removes it from dino." : "This stops its agent and removes the session from dino."
+        var what = shell ? "The shell closes and is removed from dino." : "The agent stops and the session is removed from dino."
         if let path = d.worktree {
-            what = "This stops its agent, removes the session from dino, and removes its worktree \(URL(fileURLWithPath: path).lastPathComponent)."
+            what = "The agent stops, the session is removed from dino, and its worktree \(URL(fileURLWithPath: path).lastPathComponent) is deleted."
             if d.uncommitted > 0 {
-                what += " Its \(Self.count(d.uncommitted, "uncommitted change")) will be lost."
+                what += " The worktree's \(Self.count(d.uncommitted, "uncommitted change")) will be lost."
             }
             if d.keeps_branch, let branch = d.branch {
                 what += d.unpushed > 0
-                    ? " Its \(Self.count(d.unpushed, "unpushed commit")) stay\(d.unpushed == 1 ? "s" : "") on branch \(branch), which isn't merged."
-                    : " Its branch \(branch) stays: it isn't merged."
+                    ? " Branch \(branch) isn't merged, so it's kept, with its \(Self.count(d.unpushed, "unpushed commit"))."
+                    : " Branch \(branch) isn't merged, so it's kept."
             }
         }
         if let other = d.kept_for {
-            what += " Its worktree stays: \(other) is in it."
+            what += " The worktree is kept because \(other) is using it."
         }
-        return shell ? what : what + "\n\nThe conversation stays under Continue a Session."
+        return shell ? what : what + "\n\nYou can still continue the conversation from Continue a Session."
     }
 
     private static func count(_ n: Int, _ thing: String) -> String { "\(n) \(thing)\(n == 1 ? "" : "s")" }
@@ -341,7 +341,7 @@ struct SessionName: View {
                     // Clicking away keeps what was typed, like Finder.
                     if !f, model.renaming?.id == session.id { commit() }
                 }
-                .help("Return to rename; empty goes back to the agent's own title")
+                .help("Press Return to rename. Leave it empty to use the agent's own title.")
         } else {
             // A shell goes by its tab's name everywhere: its folder, or the agent run in it.
             Text(model.tabName(session))
@@ -395,7 +395,7 @@ struct ArchivedSection: View {
     var body: some View {
         Section {
             if model.archived.isEmpty {
-                Text("Nothing archived. Archive a session from its row, its menu or ⇧⌘A: it stops, and waits here to pick up again.")
+                Text("Nothing archived. Archiving a session (⇧⌘A) stops it and keeps it here, so you can resume it later.")
                     .font(.callout).foregroundStyle(.tertiary)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -427,7 +427,7 @@ struct ArchivedSection: View {
             Button("Delete", role: .destructive) { model.deleteArchived(a) }
             Button("Cancel", role: .cancel) {}
         } message: { a in
-            Text(a.branch.map { "It leaves the archive for good. Its branch \($0) stays in the repo." } ?? "It leaves the archive for good.")
+            Text(a.branch.map { "It's permanently removed from the archive. Its branch \($0) stays in the repository." } ?? "It's permanently removed from the archive.")
         }
     }
 }
@@ -570,7 +570,7 @@ struct ShortcutSheet: View {
     ])
 
     /// Claude desktop's keys for what the menus list under dino's own (see `AppDelegate.desktopKey`).
-    private static let desktop = MenuGroup(menu: "Also, as in Claude desktop", entries: [
+    private static let desktop = MenuGroup(menu: "Claude desktop shortcuts", entries: [
         Entry(title: "Next Session", keys: "⇧⌘]"),
         Entry(title: "Previous Session", keys: "⇧⌘["),
         Entry(title: "Show or Hide Preview", keys: "⇧⌘B"),

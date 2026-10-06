@@ -299,7 +299,7 @@ struct StatsView: View {
                         .pickerStyle(.segmented)
                         .help("Which days the numbers cover")
                         Button { store.load(range) } label: { Label("Refresh", systemImage: "arrow.clockwise") }
-                            .help("Read what's new from dino's proxy and the agents' own records")
+                            .help("Load the latest usage")
                             .disabled(store.loading)
                         Menu {
                             Button("Clear Stats…", role: .destructive) { confirmClear = true }
@@ -314,7 +314,7 @@ struct StatsView: View {
         .confirmationDialog("Clear usage stats?", isPresented: $confirmClear) {
             Button("Clear Stats", role: .destructive) { store.clear(then: range) }
         } message: {
-            Text("What dino's proxy recorded (routes, speed, limits) is gone for good. Agents' own history is read again the next time stats are shown.")
+            Text("The route, speed and limit data dino recorded is deleted permanently. Usage from the agents' own history is read again the next time you open Usage Stats.")
         }
     }
 
@@ -355,7 +355,7 @@ struct StatsView: View {
             VStack(spacing: 10) {
                 ProgressView()
                 Text("Reading usage…").font(.callout).foregroundStyle(.secondary)
-                Text("The first time, dino reads every agent's own history; after that only what's new.")
+                Text("The first time takes longer: dino reads each agent's full history. After that, it reads only what's new.")
                     .font(.caption).foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -367,8 +367,8 @@ struct StatsView: View {
             Label("No usage in this range", systemImage: "chart.bar")
         } description: {
             Text(range == "all"
-                ? "Start an agent in dino, or use one you already have: dino reads Claude Code, Codex, OpenCode and the rest from their own records."
-                : "Nothing was used in the last \(range == "7d" ? "7" : "30") days. Try All.")
+                ? "Start an agent in dino, or keep using the ones you have. dino reads usage from the history Claude Code, Codex, OpenCode and other agents keep."
+                : "No usage in the last \(range == "7d" ? "7" : "30") days. Choose All to see earlier usage.")
         }
         .frame(maxWidth: .infinity, minHeight: 320)
     }
@@ -407,7 +407,7 @@ private struct OverviewPane: View {
                 }
             }
             PeriodStrip(p: r.periods)
-            StatsSection(title: "Activity", note: "the last year, whatever the range") { Heatmap(days: r.heatmap) }
+            StatsSection(title: "Activity", note: "the last 12 months, whatever the range") { Heatmap(days: r.heatmap) }
             StatsSection(title: "Requests by hour", note: "local time") { HoursChart(hours: r.hours) }
         }
     }
@@ -772,8 +772,8 @@ private struct AgentsPane: View {
                 .frame(height: CGFloat(max(r.agents.count, 1)) * 30 + 30)
                 .accessibilityLabel("Tokens by agent")
             }
-            StatsSection(title: "Every agent", note: "via dino's proxy, and from the agent's own records") {
-                StatsTable(headers: ["Agent", "Tokens", "Requests", "Sessions", "Active days", "Via proxy", "From records", "Top model", "Last used"]) {
+            StatsSection(title: "Every agent", note: "routed through dino, and from each agent's own history") {
+                StatsTable(headers: ["Agent", "Tokens", "Requests", "Sessions", "Active days", "Via dino", "From history", "Top model", "Last used"]) {
                     ForEach(r.agents, id: \.agent) { a in
                         GridRow {
                             HStack(spacing: 6) {
@@ -794,7 +794,7 @@ private struct AgentsPane: View {
             }
             let guessed = r.agents.filter { $0.undated > 0 }.map { AgentNames.of($0.agent) }
             if !guessed.isEmpty {
-                Text("\(ListFormatter.localizedString(byJoining: guessed)) \(guessed.count == 1 ? "keeps" : "keep") no time per answer: counted here, but on no day or hour.")
+                Text("\(ListFormatter.localizedString(byJoining: guessed)) \(guessed.count == 1 ? "doesn't" : "don't") record when each answer happened, so that usage counts here but not in the daily or hourly charts.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -809,10 +809,10 @@ private struct ProjectsPane: View {
 
     var body: some View {
         if r.projects.isEmpty {
-            Text("No project folders in this range: the agents' records didn't say where they ran.")
+            Text("No projects in this range. The agents' history doesn't say which folders they ran in.")
                 .foregroundStyle(.secondary)
         } else {
-            StatsSection(title: "Projects", note: "a worktree counts for its repo") {
+            StatsSection(title: "Projects", note: "worktrees count toward their repository") {
                 StatsTable(headers: ["Project", "Tokens", "Requests", "Sessions", "Agents", "Last used"]) {
                     ForEach(r.projects, id: \.name) { p in
                         GridRow {
@@ -842,7 +842,7 @@ private struct RoutesPane: View {
 
     var body: some View {
         if r.routes.isEmpty {
-            Text("Nothing went through dino's proxy in this range. Routes, limits and speed come from sessions dino runs; agents' own records only say what they used.")
+            Text("No traffic was routed through dino in this range. Route, limit and speed data comes only from traffic routed through dino.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
@@ -864,7 +864,7 @@ private struct RouteCard: View {
                 Spacer()
                 if let cost = route.cost {
                     Text(StatsFormat.money(cost)).font(.callout.weight(.medium).monospacedDigit())
-                        .help("What the route itself reported these calls cost")
+                        .help("The cost the provider reported for these calls")
                 }
             }
             HStack(spacing: 24) {
@@ -924,7 +924,7 @@ private struct SpeedPane: View {
 
     var body: some View {
         if r.speed.isEmpty {
-            Text("Speed is measured on calls through dino's proxy; none in this range.")
+            Text("Speed is measured only on traffic routed through dino, and there was none in this range.")
                 .foregroundStyle(.secondary)
         } else {
             let ttft = r.speed.filter { $0.ttft_p50_ms != nil }
@@ -1019,7 +1019,7 @@ private struct SourcesNote: View {
     let s: StatsSources
 
     var body: some View {
-        Text("\(count(s.proxied)) calls through dino's proxy · \(count(s.recorded)) from agents' own records · \(count(s.deduplicated)) left out as already counted. Kept on this Mac only, never synced.")
+        Text("\(count(s.proxied)) calls routed through dino · \(count(s.recorded)) from agents' own history · \(count(s.deduplicated)) duplicates skipped. Stats stay on this Mac and never sync.")
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)

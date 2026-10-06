@@ -80,7 +80,7 @@ struct NewProjectSheet: View {
         let fm = FileManager.default
         // An empty folder of that name is fine to use; anything else is someone's work.
         if fm.fileExists(atPath: path), !((try? fm.contentsOfDirectory(atPath: path).isEmpty) ?? false) {
-            problem = "\(shortPath(path)) already exists. Pick another name, or open it with Choose Folder (⌘O)."
+            problem = "\(shortPath(path)) already exists. Choose another name, or open it with Open Folder (⌘O)."
             return
         }
         do {
@@ -96,7 +96,7 @@ struct NewProjectSheet: View {
             p.currentDirectoryURL = URL(fileURLWithPath: path)
             let failed = (try? p.run()).map { p.waitUntilExit(); return p.terminationStatus != 0 } ?? true
             if failed {
-                problem = "Made \(shortPath(path)), but git init didn't work there."
+                problem = "Created \(shortPath(path)), but couldn't make it a git repository."
                 return
             }
         }

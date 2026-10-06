@@ -119,7 +119,7 @@ struct ComputerUseBanner: View {
                     .font(.callout)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .help("\(sentence): it \(detail). Stop ends its turn; the session stays open.")
+                    .help("\(sentence): it \(detail). Stop ends its turn without closing the session.")
                 Spacer(minLength: 8)
                 Button {
                     stopping.insert(s.id)
@@ -133,7 +133,7 @@ struct ComputerUseBanner: View {
                 }
                 .controlSize(.small)
                 .disabled(stopping.contains(s.id))
-                .help("Interrupt \(s.agentWord)'s turn, as pressing its interrupt key in its pane would. The session stays open.")
+                .help("Interrupts \(s.agentWord)'s current turn. The session stays open.")
                 Button {
                     model.hideUsing(s.id)
                 } label: {
@@ -144,7 +144,7 @@ struct ComputerUseBanner: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Hide until \(s.agentWord) next starts using \(reach.object). The sidebar and the session's menu still say so.")
+                .help("Hides this banner until \(s.agentWord) next starts using \(reach.object). The sidebar still shows it.")
                 .accessibilityLabel("Hide")
             }
             .padding(.horizontal, 10)
@@ -187,13 +187,13 @@ struct UsingMenuItems: View {
         if session.reach != nil, let sentence = session.usingSentence {
             Button(sentence) {}.disabled(true)
             Button("Stop \(session.agentWord)'s Turn") { model.interrupt(session.id) }
-                .help("Interrupt its turn, as its own interrupt key would. The session stays open.")
+                .help("Interrupts the current turn. The session stays open.")
             if display == UsingDisplay.banner.rawValue {
                 if model.usingHidden.contains(session.id) {
                     Button("Show Banner") { model.showUsing(session.id) }
                 } else {
                     Button("Hide Banner") { model.hideUsing(session.id) }
-                        .help("Until \(session.agentWord) next starts using it")
+                        .help("Hides the banner until \(session.agentWord) next starts using \(session.reach?.object ?? "it")")
                 }
             }
             Divider()
@@ -249,7 +249,7 @@ struct ComputerUseOptions: View {
                 if busy == "install" {
                     HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Installing…") }
                 } else if info?.installed == true {
-                    Text("Installed in dino's folder").foregroundStyle(.secondary)
+                    Text("Installed").foregroundStyle(.secondary)
                 } else if info != nil {
                     Button("Install") { act("install", ["type": "computer_use_install"]) }
                 }
@@ -274,7 +274,7 @@ struct ComputerUseOptions: View {
             }
             ForEach(info?.agents ?? []) { a in agentRow(a) }
             if let info, info.agents.isEmpty {
-                Text("None of the agents it works with is on this Mac.").font(.callout).foregroundStyle(.secondary)
+                Text("None of the agents it supports is installed on this Mac.").font(.callout).foregroundStyle(.secondary)
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -293,11 +293,11 @@ struct ComputerUseOptions: View {
 
     private var permissionsText: String {
         guard let info, let ax = info.accessibility, let sr = info.screen_recording else {
-            return "Accessibility and Screen Recording go to open-computer-use's own app, not to dino. Checking opens its setup window if one is missing."
+            return "open-computer-use needs its own Accessibility and Screen Recording permissions, separate from dino's. Check opens its setup if any are missing."
         }
-        if ax, sr { return "Accessibility and Screen Recording are granted to open-computer-use's app." }
+        if ax, sr { return "open-computer-use has Accessibility and Screen Recording permissions." }
         let missing = [ax ? nil : "Accessibility", sr ? nil : "Screen Recording"].compactMap { $0 }.joined(separator: " and ")
-        return "\(missing) not granted yet: its setup window walks you through System Settings. Check again once you have."
+        return "open-computer-use still needs \(missing) permission. Follow its setup window, then click Check Again."
     }
 
     @ViewBuilder private func agentRow(_ a: ComputerUseAgent) -> some View {
@@ -305,7 +305,7 @@ struct ComputerUseOptions: View {
         if let native = a.native, !a.on {
             LabeledContent(a.name) { Text(native).font(.caption).foregroundStyle(.secondary) }
         } else if a.theirs == true {
-            LabeledContent(a.name) { Text("Already has an open-computer-use of yours; dino leaves it alone").font(.caption).foregroundStyle(.secondary) }
+            LabeledContent(a.name) { Text("Already set up with your own open-computer-use. dino leaves it as is.").font(.caption).foregroundStyle(.secondary) }
         } else {
             Toggle(isOn: Binding(get: { a.on }, set: { on in
                 act(a.id, ["type": "computer_use_agent", "agent": a.id, "on": on])

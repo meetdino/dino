@@ -189,7 +189,7 @@ private struct SignedOut: View {
     var body: some View {
         Section {
             VStack(spacing: 14) {
-                Hero(title: "Dino Account", text: "Sign in to keep your settings the same on every Mac you use dino on.")
+                Hero(title: "Dino Account", text: "Sign in to sync your settings across your Macs.")
                 if byEmail {
                     HStack {
                         TextField("Email", text: $email, prompt: Text("you@example.com"))
@@ -215,12 +215,12 @@ private struct SignedOut: View {
             .frame(maxWidth: .infinity)
             .padding(.bottom, 6)
         }
-        Section("What syncs") {
+        Section("What Syncs") {
             Text("Agent defaults, which agents you use and their limits, worktree and terminal settings, SSH hosts, and repository variables (matched by git remote).")
                 .foregroundStyle(.secondary)
         }
-        Section("What never leaves this Mac") {
-            Text("API keys and tokens, sessions, conversations, terminal content, shell history, and your agents' own logins.")
+        Section("What Never Leaves This Mac") {
+            Text("API keys and tokens, sessions, conversations, terminal content, shell history, and your agents' own sign-ins.")
                 .foregroundStyle(.secondary)
         }
     }
@@ -240,7 +240,7 @@ private struct SigningIn: View {
         Section {
             VStack(spacing: 12) {
                 if let sent = status?.email_sent_to {
-                    Hero(symbol: "envelope.badge", title: "Check your email", text: "We sent a sign-in link to \(sent). Open it on any device, and this Mac signs in by itself.")
+                    Hero(symbol: "envelope.badge", title: "Check your email", text: "Open the sign-in link we sent to \(sent). You can open it on any device, and this Mac signs in automatically.")
                     ProgressView().controlSize(.small)
                     Button("Use a different email") { sync.act("cancel_login") }.buttonStyle(.link)
                 } else if let code = status?.device_code, let url = status?.device_url {
@@ -250,7 +250,7 @@ private struct SigningIn: View {
                     Button("Cancel") { sync.act("cancel_login") }
                 } else {
                     ProgressView()
-                    Text("Finish signing in in your browser.").foregroundStyle(.secondary)
+                    Text("Finish signing in with your browser.").foregroundStyle(.secondary)
                     Button("Cancel") { sync.act("cancel_login") }
                 }
             }
@@ -274,7 +274,7 @@ private struct Conflict: View {
                 Button("Merge") { sync.act("resolve", "merge") }.keyboardShortcut(.defaultAction)
             }
         } footer: {
-            Footnote("Merge keeps both; where they differ, the one changed more recently wins.")
+            Footnote("Merge keeps settings from both. Where they differ, the more recent change wins.")
         }
     }
 }
@@ -302,7 +302,7 @@ private struct Ready: View {
                 Button("Sync Now") { sync.act("now") }
             }
         } footer: {
-            Footnote("Settings sync is on. A setting you change from dino's default goes to your other Macs. API keys and tokens, sessions, terminal content and your agents' logins never leave this Mac.")
+            Footnote("Settings sync is on. Settings you change from their defaults sync to your other Macs. API keys and tokens, sessions, terminal content and your agents' sign-ins never leave this Mac.")
         }
         Section {
             if (status?.snapshots ?? 0) > 0 {
@@ -310,10 +310,10 @@ private struct Ready: View {
             }
             Button("Sign Out…") { confirmSignOut = true }
         }
-        .confirmationDialog("Sign out of your dino account?", isPresented: $confirmSignOut) {
+        .confirmationDialog("Sign out of your Dino Account?", isPresented: $confirmSignOut) {
             Button("Sign Out") { sync.act("logout") }
         } message: {
-            Text("This Mac stops syncing. Its settings stay as they are.")
+            Text("This Mac stops syncing. Its settings stay as they are now.")
         }
     }
 
@@ -321,10 +321,10 @@ private struct Ready: View {
     /// setting is at its default.
     private var syncedText: String {
         if let what = status?.synced_what {
-            return what.isEmpty ? "Nothing yet: all at their defaults" : what.joined(separator: ", ")
+            return what.isEmpty ? "None yet (all settings are at their defaults)" : what.joined(separator: ", ")
         }
         let n = status?.synced ?? 0
-        return n == 0 ? "Nothing yet: all at their defaults" : n == 1 ? "1 setting" : "\(n) settings"
+        return n == 0 ? "None yet (all settings are at their defaults)" : n == 1 ? "1 setting" : "\(n) settings"
     }
 
     private func ago(_ t: UInt64) -> String {

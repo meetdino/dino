@@ -362,10 +362,10 @@ struct PaneHeader: View {
             Button { model.toggleSplitZoom(session.id) } label: {
                 Image(systemName: zoomed ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
             }
-            .help(zoomed ? "Show every pane again (⇧⌘↩)" : "Zoom: this pane takes the whole tab (⇧⌘↩)")
+            .help(zoomed ? "Show all panes (⇧⌘↩)" : "Zoom (⇧⌘↩): show only this pane in the tab")
             .accessibilityLabel(zoomed ? "Unzoom Split" : "Zoom Split")
             Button { model.closePane(session.id) } label: { Image(systemName: "xmark") }
-                .help(split.isHelper(session.id) ? "Close this shell (⌘W)" : "Close this pane; the session keeps running (⌘W)")
+                .help(split.isHelper(session.id) ? "Close this shell (⌘W)" : "Close this pane (⌘W). The session keeps running.")
                 .accessibilityLabel("Close Pane")
         }
         .buttonStyle(.borderless)
@@ -446,13 +446,13 @@ struct SessionMenu: View {
         Divider()
         let pinned = session.pinned == true
         Button(pinned ? "Unpin" : "Pin") { model.pin(session.id, !pinned) }
-            .help(pinned ? "Let it sort with the others again" : "Keep it at the top of its group; dino won't archive it on its own")
+            .help(pinned ? "Sort it with the other sessions again" : "Keep it at the top of its group and never archive it automatically")
         if session.agent_id == "shell", session.host == nil {
             let keep = session.keep_terminal == true
             Button(keep ? "Let Agents Here Report to dino" : "Keep as Terminal") { model.keepTerminal(session.id, !keep) }
                 .help(keep
-                    ? "An agent you start in this shell shows in the sidebar with its turns and questions again"
-                    : "An agent you start in this shell stays a plain program: dino doesn't follow its turns")
+                    ? "Agents you start in this shell show in the sidebar again, with their turns and questions"
+                    : "Agents you start in this shell run as plain programs, and dino doesn't track their turns")
         }
         Button("Mark as Unread") { model.markUnread(session.id) }
             .disabled(session.exited)
@@ -461,16 +461,16 @@ struct SessionMenu: View {
         if session.agent_id != "shell" {
             Button("Fork Session…") { model.forking = session }
                 .disabled(!model.canFork(session))
-                .help(model.whyNoFork(session) ?? "A new session on a copy of its conversation; the original stays as it is (⌥⌘B)")
+                .help(model.whyNoFork(session) ?? "Fork (⌥⌘B): start a new session with a copy of this conversation. The original doesn't change.")
         }
         if model.canArchive(session.id) {
             Button("Archive") { model.archive(session.id) }
-                .help("Stop it and keep it in Archived, to pick up again later")
+                .help("Stop the session and move it to Archived, where you can resume it later")
         }
         Button("Close Session", role: .destructive) { model.closeSession(session.id) }
         Divider()
         Button("Delete…", role: .destructive) { model.confirmDelete(session.id) }
-            .help(session.agent_id == "shell" ? "Close it and remove it from dino" : "Stop it, remove it from dino, and remove the worktree dino made for it")
+            .help(session.agent_id == "shell" ? "Close the shell and remove it from dino" : "Stop the agent, remove the session from dino, and delete any worktree dino made for it")
     }
 }
 

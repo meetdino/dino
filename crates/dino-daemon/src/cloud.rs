@@ -283,7 +283,7 @@ pub fn call(server: &str, build: impl Fn(&str) -> reqwest::blocking::RequestBuil
     let at = renew(server, &refresh)?;
     let r = build(&at).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).send()?;
     if r.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(SignedOut("the account server no longer knows this Mac".into()).into());
+        return Err(SignedOut("your dino account no longer recognizes this Mac".into()).into());
     }
     Ok(r)
 }
