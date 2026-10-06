@@ -1,13 +1,14 @@
 //! Shell integration for the shells dinod starts, the way Ghostty loads it into its own: each
 //! prompt is marked (OSC 133, with the last command's exit code), the shell says which folder it's
-//! in (OSC 7) and sets the title. The scripts are in `shell-integration/`; nothing in the user's
-//! startup files changes.
+//! in (OSC 7) and sets the title. zsh, bash, fish, elvish and nushell, as Ghostty's
+//! `shell-integration` and `shell-integration-features` say. The scripts are in
+//! `shell-integration/`; nothing in the user's startup files changes.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-const FILES: [(&str, &str); 13] = [
+const FILES: [(&str, &str); 16] = [
     ("bash/ghostty.bash", include_str!("../shell-integration/bash/ghostty.bash")),
     ("bash/bash-preexec.sh", include_str!("../shell-integration/bash/bash-preexec.sh")),
     ("bash/dino.bash", include_str!("../shell-integration/bash/dino.bash")),
@@ -21,6 +22,10 @@ const FILES: [(&str, &str); 13] = [
     ("bash/dino-term.bash", include_str!("../shell-integration/bash/dino-term.bash")),
     ("zsh/dino-agents.zsh", include_str!("../shell-integration/zsh/dino-agents.zsh")),
     ("bash/dino-agents.bash", include_str!("../shell-integration/bash/dino-agents.bash")),
+    // Ghostty 1.3.1's own, found through XDG_DATA_DIRS.
+    ("fish/vendor_conf.d/ghostty-shell-integration.fish", include_str!("../shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish")),
+    ("elvish/lib/ghostty-integration.elv", include_str!("../shell-integration/elvish/lib/ghostty-integration.elv")),
+    ("nushell/vendor/autoload/ghostty.nu", include_str!("../shell-integration/nushell/vendor/autoload/ghostty.nu")),
 ];
 
 /// Ghostty's terminfo entries (from libghostty-spm, which draws dino's panes), as ncurses keeps
@@ -51,30 +56,63 @@ const AI: [(&str, &str); 2] = [
     ("bash/dino-ai.bash", include_str!("../../dino/shell/dino.bash")),
 ];
 
-/// What Ghostty turns on unless told otherwise: a bar cursor while editing, and the folder (at a
-/// prompt) or the command (while it runs) as the title.
-const FEATURES: &str = "cursor,title";
+/// What dino turns on when the app hasn't said what the user's Ghostty config does: a bar cursor
+/// while editing, and the folder (at a prompt) or the command (while it runs) as the title.
+pub const FEATURES: &str = "cursor,title";
 
-/// Start shell `program` with the integration loaded: zsh through ZDOTDIR, bash 4 and later
-/// through ENV in POSIX mode (Ghostty's way), older bash through --rcfile. Both as login shells,
-/// as Terminal and Ghostty start them on macOS. `env` is what dinod adds to its own environment;
-/// other shells are left as they are.
-pub fn wire(program: &str, env: &mut HashMap<String, String>, args: &mut Vec<String>) {
-    wire_from(&dino_core::config_dir().join("shell-integration"), program, env, args);
+/// The shells with an integration, as Ghostty's `shell-integration` names them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Shell {
+    Bash,
+    Elvish,
+    Fish,
+    Nushell,
+    Zsh,
 }
 
-fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args: &mut Vec<String>) {
-    let var = |env: &HashMap<String, String>, k: &str| env.get(k).cloned().or_else(|| std::env::var(k).ok()).filter(|v| !v.is_empty());
-    let name = Path::new(program).file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if !matches!(name, "zsh" | "bash") {
-        return;
+impl Shell {
+    fn named(name: &str) -> Option<Self> {
+        Some(match name {
+            "bash" => Self::Bash,
+            "elvish" => Self::Elvish,
+            "fish" => Self::Fish,
+            "nushell" | "nu" => Self::Nushell,
+            "zsh" => Self::Zsh,
+            _ => return None,
+        })
     }
+}
+
+/// Start shell `program` with the integration loaded, as Ghostty's `shell-integration` (`mode`:
+/// `detect` by the shell's name, `none`, or the shell to set up as) and
+/// `shell-integration-features` (`features`, as GHOSTTY_SHELL_FEATURES) say. zsh through ZDOTDIR,
+/// bash 4 and later through ENV in POSIX mode (Ghostty's way), older bash through --rcfile, fish,
+/// elvish and nushell through XDG_DATA_DIRS (nushell told to `use ghostty *`). zsh, bash, fish and
+/// nushell as login shells, as Terminal and Ghostty start them on macOS. `env` is what dinod adds
+/// to its own environment.
+pub fn wire(program: &str, env: &mut HashMap<String, String>, args: &mut Vec<String>, mode: &str, features: &str) {
+    wire_from(&dino_core::config_dir().join("shell-integration"), program, env, args, mode, features);
+}
+
+fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args: &mut Vec<String>, mode: &str, features: &str) {
+    let var = |env: &HashMap<String, String>, k: &str| env.get(k).cloned().or_else(|| std::env::var(k).ok()).filter(|v| !v.is_empty());
+    // As Ghostty: the features go to every shell, for an integration loaded by hand too.
+    if !features.is_empty() {
+        env.insert("GHOSTTY_SHELL_FEATURES".into(), features.into());
+    }
+    let name = Path::new(program).file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let shell = match mode {
+        "none" => None,
+        "detect" | "" => Shell::named(name),
+        forced => Shell::named(forced),
+    };
+    let Some(shell) = shell else { return };
     if let Err(e) = install(dir) {
         eprintln!("dinod: no shell integration: {e}");
         return;
     }
-    let ours: Vec<String> = match name {
-        "zsh" => {
+    let ours: Vec<String> = match shell {
+        Shell::Zsh => {
             // ghostty.zshenv puts the user's own back before anything else reads it.
             if let Some(z) = var(env, "ZDOTDIR") {
                 env.insert("GHOSTTY_ZSH_ZDOTDIR".into(), z);
@@ -82,7 +120,7 @@ fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args:
             env.insert("ZDOTDIR".into(), dir.join("zsh").display().to_string());
             vec!["-l".into()]
         }
-        _ if bash_major(program) >= 4 => {
+        Shell::Bash if bash_major(program) >= 4 => {
             // The contract ghostty.bash reads (libghostty's termio/shell_integration.zig).
             env.insert("GHOSTTY_BASH_INJECT".into(), "1".into());
             if let Some(e) = var(env, "ENV") {
@@ -98,9 +136,22 @@ fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args:
             }
             vec!["--posix".into(), "-l".into()]
         }
-        _ => vec!["--rcfile".into(), dir.join("bash/dino.bash").display().to_string()],
+        Shell::Bash => vec!["--rcfile".into(), dir.join("bash/dino.bash").display().to_string()],
+        Shell::Fish | Shell::Elvish | Shell::Nushell => {
+            // Each finds its part under the first of XDG_DATA_DIRS and takes it back out.
+            env.insert("GHOSTTY_SHELL_INTEGRATION_XDG_DIR".into(), dir.display().to_string());
+            let data = var(env, "XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+            env.insert("XDG_DATA_DIRS".into(), format!("{}:{data}", dir.display()));
+            match shell {
+                // Nushell's own `--commands` mode, or its language server: nothing to set up.
+                Shell::Nushell if args.iter().any(|a| a == "--commands" || a == "--lsp" || (a.starts_with('-') && !a.starts_with("--") && a.contains('c'))) => vec![],
+                Shell::Nushell => vec!["-l".into(), "--execute".into(), "use ghostty *".into()],
+                Shell::Fish => vec!["-l".into()],
+                // Elvish has no login mode; `use ghostty-integration` in rc.elv loads it, as in Ghostty.
+                _ => vec![],
+            }
+        }
     };
-    env.insert("GHOSTTY_SHELL_FEATURES".into(), FEATURES.into());
     args.splice(0..0, ours);
 }
 
@@ -149,7 +200,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dino-shell-{}", std::process::id()));
 
         let (mut env, mut args) = (HashMap::from([("ZDOTDIR".to_string(), "/u/zdot".to_string())]), vec![]);
-        wire_from(&dir, "/bin/zsh", &mut env, &mut args);
+        wire_from(&dir, "/bin/zsh", &mut env, &mut args, "detect", FEATURES);
         assert_eq!(args, ["-l"]);
         assert_eq!(env["ZDOTDIR"], dir.join("zsh").display().to_string());
         assert_eq!(env["GHOSTTY_ZSH_ZDOTDIR"], "/u/zdot");
@@ -159,14 +210,43 @@ mod tests {
         // macOS's own bash is 3.2.
         if bash_major("/bin/bash") == 3 {
             let (mut env, mut args) = (HashMap::new(), vec![]);
-            wire_from(&dir, "/bin/bash", &mut env, &mut args);
+            wire_from(&dir, "/bin/bash", &mut env, &mut args, "detect", FEATURES);
             assert_eq!(args, ["--rcfile".to_string(), dir.join("bash/dino.bash").display().to_string()]);
             assert!(!env.contains_key("ENV"));
         }
 
-        // Not a shell with an integration: untouched.
+        // fish, elvish and nushell: through XDG_DATA_DIRS, ahead of what was there.
+        let (mut env, mut args) = (HashMap::from([("XDG_DATA_DIRS".to_string(), "/opt/share".to_string())]), vec![]);
+        wire_from(&dir, "/opt/homebrew/bin/fish", &mut env, &mut args, "detect", "cursor:blink,path,title");
+        assert_eq!(args, ["-l"]);
+        assert_eq!(env["XDG_DATA_DIRS"], format!("{}:/opt/share", dir.display()));
+        assert_eq!(env["GHOSTTY_SHELL_INTEGRATION_XDG_DIR"], dir.display().to_string());
+        assert_eq!(env["GHOSTTY_SHELL_FEATURES"], "cursor:blink,path,title");
+        assert!(dir.join("fish/vendor_conf.d/ghostty-shell-integration.fish").exists());
+        let (mut env, mut args) = (HashMap::new(), vec![]);
+        wire_from(&dir, "/usr/local/bin/elvish", &mut env, &mut args, "detect", FEATURES);
+        assert!(args.is_empty());
+        assert!(env["XDG_DATA_DIRS"].ends_with(":/usr/local/share:/usr/share"));
+        assert!(dir.join("elvish/lib/ghostty-integration.elv").exists());
+        let (mut env, mut args) = (HashMap::new(), vec![]);
+        wire_from(&dir, "/opt/homebrew/bin/nu", &mut env, &mut args, "detect", FEATURES);
+        assert_eq!(args, ["-l", "--execute", "use ghostty *"]);
+        assert!(dir.join("nushell/vendor/autoload/ghostty.nu").exists());
+
+        // `shell-integration = none`: no integration, but the features still go, for one loaded by hand.
+        let (mut env, mut args) = (HashMap::new(), vec![]);
+        wire_from(&dir, "/bin/zsh", &mut env, &mut args, "none", "sudo,title");
+        assert!(args.is_empty() && !env.contains_key("ZDOTDIR"));
+        assert_eq!(env["GHOSTTY_SHELL_FEATURES"], "sudo,title");
+        // A shell named there is set up as that one, whatever it's called.
+        let (mut env, mut args) = (HashMap::new(), vec![]);
+        wire_from(&dir, "/usr/local/bin/my-fish", &mut env, &mut args, "fish", FEATURES);
+        assert_eq!(args, ["-l"]);
+        assert!(env.contains_key("GHOSTTY_SHELL_INTEGRATION_XDG_DIR"));
+
+        // Not a shell with an integration: untouched but for the features.
         let (mut env, mut args) = (HashMap::new(), vec!["-x".to_string()]);
-        wire_from(&dir, "/bin/sh", &mut env, &mut args);
+        wire_from(&dir, "/bin/sh", &mut env, &mut args, "detect", "");
         assert!(env.is_empty() && args == ["-x"]);
         let _ = std::fs::remove_dir_all(&dir);
     }

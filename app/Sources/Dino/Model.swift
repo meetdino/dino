@@ -719,9 +719,18 @@ final class DinoModel: ObservableObject {
                       var settings = try? conn.settings() else { return }
                 let tmux = settings.tmux
                 let experimental = settings.experimental
-                await MainActor.run {
+                let shell = await MainActor.run {
                     self.noteTmuxSettings(tmux)
                     self.noteExperimental(experimental)
+                    return GhosttyConfig.shellSetup
+                }
+                // The user's Ghostty `shell-integration` and its features, for the shells dinod
+                // starts (a dinod that knows them).
+                if settings.machine.shell_features != nil,
+                   settings.machine.shell_integration_mode != shell.mode || settings.machine.shell_features != shell.features {
+                    settings.machine.shell_integration_mode = shell.mode
+                    settings.machine.shell_features = shell.features
+                    try? conn.setSettings(settings)
                 }
                 guard let whole = settings.terminal else { return }
                 // Only what the app keeps for itself: the rest is dinod's alone.

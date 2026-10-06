@@ -328,6 +328,12 @@ pub struct Machine {
     pub check_updates: bool,
     /// One compiler cache shared by every session's builds on this Mac (see [`BuildCache`]).
     pub build_cache: BuildCache,
+    /// Ghostty's `shell-integration` in the user's Ghostty config, as the app last read it:
+    /// `detect` (by the shell's name), `none`, or the shell to set shells up as (`fish`…).
+    pub shell_integration_mode: String,
+    /// Ghostty's `shell-integration-features` as Ghostty hands them to a shell
+    /// (GHOSTTY_SHELL_FEATURES: `cursor:blink,path,title`), as the app last read them.
+    pub shell_features: String,
 }
 
 /// One compiler cache for the whole Mac: every agent dino starts, and every dino shell, builds Rust
@@ -380,7 +386,19 @@ impl Default for ClaudeTokenUse {
 
 impl Default for Machine {
     fn default() -> Self {
-        Self { onboarded: false, keep_awake: false, awake_while_working: true, shell_integration: true, shell_agents: true, lid: Lid::default(), claude_token: ClaudeTokenUse::default(), check_updates: true, build_cache: BuildCache::default() }
+        Self {
+            onboarded: false,
+            keep_awake: false,
+            awake_while_working: true,
+            shell_integration: true,
+            shell_agents: true,
+            lid: Lid::default(),
+            claude_token: ClaudeTokenUse::default(),
+            check_updates: true,
+            build_cache: BuildCache::default(),
+            shell_integration_mode: "detect".into(),
+            shell_features: "cursor,title".into(),
+        }
     }
 }
 

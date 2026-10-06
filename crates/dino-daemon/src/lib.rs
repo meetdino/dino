@@ -2056,7 +2056,7 @@ fn local_spec(
         peers::wire_claude(id, &mut wired_args);
     }
     if l.agent_id == "shell" && settings.machine.shell_integration {
-        shell::wire(&l.program, &mut env, &mut wired_args);
+        shell::wire(&l.program, &mut env, &mut wired_args, &settings.machine.shell_integration_mode, &settings.machine.shell_features);
         // Where the shell integration finds the settings that make an agent typed here report to
         // this session (see `sync_shell_agents`); it reads the file each time, so it can come and go.
         env.insert(SHELL_AGENT_ENV.into(), shell_agent_settings(id).display().to_string());
