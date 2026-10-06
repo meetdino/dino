@@ -190,16 +190,35 @@ pub fn is_proxy_url(v: &str) -> bool {
     v.starts_with("http://127.0.0.1:") && v.contains("/s/")
 }
 
-/// Random v4 UUID, for an agent's conversation id picked up front.
-pub fn new_uuid() -> String {
-    let mut b = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = std::io::Read::read_exact(&mut f, &mut b);
+/// Fills `buf` from the OS's random source, getentropy(2): the kernel's generator, with no file to
+/// open (reading /dev/urandom fails once dinod has no file descriptor left).
+pub fn random_bytes(buf: &mut [u8]) -> std::io::Result<()> {
+    // At most 256 bytes a call.
+    for chunk in buf.chunks_mut(256) {
+        // SAFETY: `chunk` is valid for writes of its length, which is at most 256.
+        if unsafe { libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
+    Ok(())
+}
+
+/// Random v4 UUID, for an agent's conversation id picked up front. Panics when the OS gives no
+/// random bytes (getentropy fails only for a bad buffer, too many bytes or a fatal error): the same
+/// id each time would mix up conversations. A secret takes `try_new_uuid`.
+pub fn new_uuid() -> String {
+    try_new_uuid().expect("getentropy")
+}
+
+/// Random v4 UUID, or why the OS gave no random bytes: for a secret, which fails rather than be
+/// guessable.
+pub fn try_new_uuid() -> std::io::Result<String> {
+    let mut b = [0u8; 16];
+    random_bytes(&mut b)?;
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    Ok(format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]))
 }
 
 /// The hook events dino follows, in Claude Code and in agents that take Claude's hooks (Qwen Code).
@@ -295,6 +314,37 @@ pub fn load_keys() -> std::collections::HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With no file descriptor left (dinod at its limit, say), ids still come from the OS's random
+    /// source: never the same zeros each time, which would make the secrets they lock guessable.
+    #[test]
+    fn ids_are_random_without_a_free_file_descriptor() {
+        const CHILD: &str = "DINO_TEST_NO_FILE_DESCRIPTORS";
+        if std::env::var_os(CHILD).is_none() {
+            // In a process of its own: the limit would starve the tests running beside it.
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::ids_are_random_without_a_free_file_descriptor", "--test-threads=1", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        // Every descriptor from the lowest free one up out of reach.
+        let lowest = std::os::fd::AsRawFd::as_raw_fd(&std::fs::File::open("/dev/null").unwrap());
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+        limit.rlim_cur = lowest as libc::rlim_t;
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        assert!(std::fs::File::open("/dev/urandom").is_err(), "no descriptor left to open it with");
+        let (a, b) = (new_uuid(), try_new_uuid().unwrap());
+        assert_ne!(a, b);
+        assert_ne!(a, "00000000-0000-4000-8000-000000000000");
+        // More than getentropy gives at once.
+        let mut many = [0u8; 600];
+        random_bytes(&mut many).unwrap();
+        assert!(many[512..].iter().any(|&x| x != 0));
+    }
 
     #[test]
     fn a_running_script_says_where_its_command_is() {
