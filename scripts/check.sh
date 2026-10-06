@@ -1,18 +1,13 @@
 #!/bin/sh
-# The checks main has to pass: run after merging and before pushing, against the current base.
+# The checks main has to pass: run on a branch rebased on origin/main, before it lands.
 #   scripts/check.sh            build and test the workspace and the app
-#   scripts/check.sh --push     also fetch, refuse if origin/main moved, and push only on success;
-#                               then, where scripts/install-hooks.sh ran, the main checkout's main
-#                               follows and the dino you use rebuilds (scripts/dev-rebuild.sh)
+# scripts/land.sh runs it, then lands the branch through a pull request; nothing pushes to main.
 set -eu
 cd "$(dirname "$0")/.."
 
 if [ "${1:-}" = "--push" ]; then
-    git fetch -q origin
-    if ! git merge-base --is-ancestor origin/main HEAD; then
-        echo "origin/main has commits this branch doesn't: merge them first, then run this again" >&2
-        exit 1
-    fi
+    echo "main takes pull requests only: scripts/land.sh rebases, runs these checks and lands the branch" >&2
+    exit 2
 fi
 
 # The dev profile: a check needs what compiles and what passes, not the shipping profile's full
@@ -21,19 +16,11 @@ fi
 cargo build
 cargo test --workspace
 (cd app && swift build)
-if git grep -n 'TEST-ONLY' -- crates app cloud >/dev/null; then
-    echo "TEST-ONLY code is still in the tree" >&2
+scripts/lint.sh
+# cloud/ builds crates/dino-sync, whose version is the workspace's: a version bump has to reach
+# cloud/Cargo.lock too, or cloud's --locked builds (CI, its Docker image) refuse to start.
+if ! cargo metadata --locked --format-version 1 --manifest-path cloud/Cargo.toml >/dev/null; then
+    echo "cloud/Cargo.lock is out of date: cargo update -p dino-sync --manifest-path cloud/Cargo.toml, and commit it" >&2
     exit 1
-fi
-# No DisclosureGroup in the sidebar's list: the list expanded an open one from inside making its
-# row and lost the row view of a row below, left drawn over another row (see OpeningRows).
-if git grep -n 'DisclosureGroup(' -- app/Sources/Dino/Tree.swift app/Sources/Dino/DinoApp.swift app/Sources/Dino/Schedule.swift; then
-    echo "the sidebar lists rows that open with OpeningRows, not DisclosureGroup" >&2
-    exit 1
-fi
-
-if [ "${1:-}" = "--push" ]; then
-    git push origin HEAD:main
-    scripts/dev-rebuild.sh --sync HEAD || true
 fi
 echo "all checks passed"

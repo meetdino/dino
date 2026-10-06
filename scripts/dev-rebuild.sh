@@ -5,7 +5,7 @@
 #
 #   scripts/dev-rebuild.sh              (post-commit, post-merge) rebuild, if this is the main
 #                                       checkout and it's on main; anywhere else, nothing
-#   scripts/dev-rebuild.sh --sync REV   (scripts/check.sh --push, from any worktree) fast-forward
+#   scripts/dev-rebuild.sh --sync REV   (scripts/land.sh, from any worktree) fast-forward
 #                                       the main checkout's main to REV, which rebuilds as above;
 #                                       nothing on CI or where the hooks aren't installed
 #
