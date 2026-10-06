@@ -136,7 +136,7 @@ async fn two_devices_converge_through_the_server() {
     assert_eq!(bd.store.get(&RecordId::new("agents", "codex.mode")).unwrap().extra["future_field"], json!({"kept": true}));
 
     // The export has every record, values as written.
-    let ex: Value = app().get(s.url("/v1/export")).bearer_auth(&a.at).send().await.unwrap().json().await.unwrap();
+    let ex: Value = b.get(s.url("/account/export")).send().await.unwrap().json().await.unwrap();
     assert_eq!(ex["records"].as_array().unwrap().len(), 3 + 25 + 1);
     assert!(ex["records"].as_array().unwrap().iter().any(|r| r["value"] == json!(["claude", "codex"])));
     assert!(ex.get("recovery_wrapped_key").is_none());
