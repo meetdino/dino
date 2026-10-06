@@ -103,18 +103,7 @@ extension DinoModel {
         let live = shells.filter { $0.agent_id == "shell" && !$0.exited }
         let setting = confirmClose
         guard !live.isEmpty, setting != "false" else { return true }
-        // Asked of dinod now: the last poll may predate the command just started.
-        let busy: [(SessionInfo, String)] = live.compactMap { s in
-            if s.tmux != nil { return nil }
-            if let inside = s.inside { return (s, launcherLabel(inside.agent)) }
-            guard s.host == nil else { return s.running == true ? (s, "A command") : nil }
-            switch Self.foregroundNow(s.id) {
-            case .some(.some(let fg)): return (s, fg.name.isEmpty ? "A command" : fg.name)
-            case .some(.none): return nil
-            // An older dinod, or none answering in time: what the last poll said.
-            case .none: return s.foreground.map { (s, $0.name) } ?? (s.running == true ? (s, "A command") : nil)
-            }
-        }
+        let busy = running(in: live)
         guard !busy.isEmpty || setting == "always" else { return true }
         let alert = NSAlert()
         if let (s, what) = busy.first {
@@ -132,6 +121,68 @@ extension DinoModel {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    /// What runs in each of `shells` besides its prompt, asked of dinod now (the last poll may
+    /// predate the command just started). A tmux client only detaches, and tmux keeps everything,
+    /// so it doesn't count.
+    private func running(in shells: [SessionInfo]) -> [(SessionInfo, String)] {
+        shells.compactMap { s in
+            if s.tmux != nil { return nil }
+            if let inside = s.inside { return (s, launcherLabel(inside.agent)) }
+            guard s.host == nil else { return s.running == true ? (s, "A command") : nil }
+            switch Self.foregroundNow(s.id) {
+            case .some(.some(let fg)): return (s, fg.name.isEmpty ? "A command" : fg.name)
+            case .some(.none): return nil
+            // An older dinod, or none answering in time: what the last poll said.
+            case .none: return s.foreground.map { (s, $0.name) } ?? (s.running == true ? (s, "A command") : nil)
+            }
+        }
+    }
+
+    /// ⌘W asks before closing an agent (Settings → General), until "Don't ask again".
+    static let askBeforeClosingKey = "askBeforeClosingAgents"
+    static var askBeforeClosing: Bool { UserDefaults.standard.object(forKey: askBeforeClosingKey) as? Bool ?? true }
+
+    /// Before ⌘W (or a tab's ✕, or Ghostty's `close_tab`) closes `sessions` with their tab or pane:
+    /// an agent stops and is archived, a shell ends. One question, "Close …?", saying so, asked for
+    /// an agent until "Don't ask again" is ticked. Shells alone ask as they always have, as Ghostty's
+    /// `confirm-close-surface` says, and never a second time. True to go ahead.
+    func confirmClosing(_ sessions: [SessionInfo], in place: String) -> Bool {
+        let agents = sessions.filter { $0.agent_id != "shell" }
+        let shells = sessions.filter { $0.agent_id == "shell" && !$0.exited }
+        guard !agents.isEmpty, Self.askBeforeClosing else { return confirmEnding(shells, in: place) }
+        let working = agents.filter { s in
+            switch status(of: s) {
+            case .thinking, .working, .waiting: true
+            default: false
+            }
+        }
+        var lines: [String] = []
+        if agents.count == 1, let a = agents.first {
+            let agent = launcherLabel(a.agent_id)
+            lines.append(a.exited ? "The session is archived, and you can resume it from Archived."
+                : working.isEmpty ? "\(agent) stops and the session is archived. You can resume it from Archived."
+                : "\(agent) is working: it stops in the middle of what it's doing, and the session is archived. You can resume it from Archived.")
+        } else {
+            lines.append("Its \(agents.count) agents stop and their sessions are archived. You can resume them from Archived."
+                + (working.isEmpty ? "" : working.count == agents.count ? " They're working." : " \(working.count) of them are working."))
+        }
+        if !shells.isEmpty {
+            let busy = running(in: shells)
+            lines.append(busy.isEmpty ? (shells.count == 1 ? "Its shell ends." : "Its shells end.")
+                : busy.map { s, what in "\(what) is running in “\(tabName(s))”, and closing ends it." }.joined(separator: " "))
+        }
+        let alert = NSAlert()
+        alert.messageText = "Close “\(sessions.map { tabName($0) }.joined(separator: " | "))”?"
+        alert.informativeText = lines.joined(separator: "\n")
+        alert.addButton(withTitle: "Close")
+        alert.addButton(withTitle: "Cancel")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't ask again"
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        if alert.suppressionButton?.state == .on { UserDefaults.standard.set(false, forKey: Self.askBeforeClosingKey) }
+        return true
+    }
+
     /// Session `id`'s foreground right now, from dinod: nil when it couldn't say (an older dinod,
     /// or no answer within half a second), `.some(nil)` at a shell's prompt.
     nonisolated static func foregroundNow(_ id: String) -> ForegroundProcess?? {
@@ -146,6 +197,6 @@ extension DinoModel {
         guard let s = sessions.first(where: { $0.id == id }), s.agent_id == "shell" else { return kill(id) }
         guard confirmEnding([s], in: "tab") else { return }
         // As closing its tab: ⌘Z brings the shell back.
-        dropTab(id, ending: true)
+        dropTab(id)
     }
 }
