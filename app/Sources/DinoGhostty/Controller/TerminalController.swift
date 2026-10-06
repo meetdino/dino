@@ -62,21 +62,19 @@ public final class TerminalController {
     /// consumed) and the wrapper does nothing more with it. Called on the main thread; an action
     /// sent from another thread arrives a turn later and its answer is not reported back.
     public var onAction: ((TerminalActionEvent) -> Bool)?
-    /// One surface's interest in a wakeup. Every surface shares this
-    /// controller, so a single handler is not enough.
+    /// One surface's say in whether a wakeup is processed. Every surface
+    /// shares this controller, so a single handler is not enough.
     struct WakeupObserver {
         let shouldProcess: () -> Bool
-        let onWakeup: () -> Void
     }
 
     private var wakeupObservers: [ObjectIdentifier: WakeupObserver] = [:]
 
     func addWakeupObserver(
         _ key: ObjectIdentifier,
-        shouldProcess: @escaping () -> Bool,
-        onWakeup: @escaping () -> Void
+        shouldProcess: @escaping () -> Bool
     ) {
-        wakeupObservers[key] = WakeupObserver(shouldProcess: shouldProcess, onWakeup: onWakeup)
+        wakeupObservers[key] = WakeupObserver(shouldProcess: shouldProcess)
     }
 
     func removeWakeupObserver(_ key: ObjectIdentifier) {
@@ -325,7 +323,6 @@ public final class TerminalController {
         }
 
         tick()
-        for observer in observers { observer.onWakeup() }
     }
 
     private static func initializeRuntimeIfNeeded() {
