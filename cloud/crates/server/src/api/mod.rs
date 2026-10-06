@@ -1,14 +1,13 @@
-//! `/v1`: the account API and settings sync for dino (bearer access tokens with audience `dino`).
+//! `/v1`: the signed-in account and settings sync for dino (bearer access tokens with audience
+//! `dino`). Devices, sign-out everywhere, export and deletion are on the account page, behind a
+//! browser sign-in and its CSRF checks, not open to a device's token.
 
 pub mod account;
-pub mod idempotency;
 pub mod sync;
 
-use axum::extract::{FromRequestParts, Path, State};
-use axum::http::HeaderMap;
+use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
-use axum::response::Response;
-use axum::routing::{delete, get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use uuid::Uuid;
 
@@ -20,11 +19,6 @@ use crate::oauth::{self, tokens};
 pub fn routes(push: bool) -> Router<AppState> {
     Router::new()
         .route("/me", get(me))
-        .route("/devices", get(devices))
-        .route("/devices/{id}", delete(revoke_device))
-        .route("/signout-everywhere", post(signout_everywhere))
-        .route("/account", delete(delete_account))
-        .route("/export", get(export))
         .merge(sync::routes(push))
 }
 
@@ -59,36 +53,4 @@ async fn me(State(s): State<AppState>, a: Authed) -> Result<Json<serde_json::Val
     v["device_id"] = serde_json::json!(a.device_id);
     v["scope"] = serde_json::json!(a.scope);
     Ok(Json(v))
-}
-
-async fn devices(State(s): State<AppState>, a: Authed) -> Result<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({ "devices": account::devices(&s, a.account_id).await? })))
-}
-
-async fn revoke_device(State(s): State<AppState>, a: Authed, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Response> {
-    idempotency::run(&s, &a.account_id.to_string(), &headers, "DELETE /v1/devices", async {
-        account::revoke_device(&s, a.account_id, id).await?;
-        Ok(serde_json::json!({"revoked": id}))
-    })
-    .await
-}
-
-async fn signout_everywhere(State(s): State<AppState>, a: Authed, headers: HeaderMap) -> Result<Response> {
-    idempotency::run(&s, &a.account_id.to_string(), &headers, "POST /v1/signout-everywhere", async {
-        account::signout_everywhere(&s, a.account_id).await?;
-        Ok(serde_json::json!({"signed_out": true}))
-    })
-    .await
-}
-
-async fn delete_account(State(s): State<AppState>, a: Authed, headers: HeaderMap) -> Result<Response> {
-    idempotency::run(&s, &a.account_id.to_string(), &headers, "DELETE /v1/account", async {
-        let at = account::delete(&s, a.account_id).await?;
-        Ok(serde_json::json!({"deleted": true, "erased_after": at}))
-    })
-    .await
-}
-
-async fn export(State(s): State<AppState>, a: Authed) -> Result<Json<serde_json::Value>> {
-    Ok(Json(account::export(&s, a.account_id).await?))
 }

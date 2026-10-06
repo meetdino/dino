@@ -23,9 +23,8 @@ async fn native_pkce_login_and_the_code_rules() {
     assert_eq!(s.me(at).await, 200);
     let me: Value = app().get(s.url("/v1/me")).bearer_auth(at).send().await.unwrap().json().await.unwrap();
     assert_eq!(me["email"], "pkce@example.com");
-    let devices: Value = app().get(s.url("/v1/devices")).bearer_auth(at).send().await.unwrap().json().await.unwrap();
-    assert_eq!(devices["devices"][0]["name"], "Ben's MacBook Pro");
-    assert_eq!(devices["devices"][0]["os"], "macOS 26");
+    let page = b.get(s.url("/account")).send().await.unwrap().text().await.unwrap();
+    assert!(page.contains("MacBook Pro") && page.contains("macOS 26"), "the account page lists the device");
 
     // A wrong verifier, another client, another redirect: all refused, and the code is spent.
     let (code, verifier, redirect) = s.authorize(&b, "dino", "Second Mac").await;
@@ -236,7 +235,7 @@ async fn github_and_google_link_to_one_account() {
 }
 
 #[tokio::test]
-async fn sign_out_everywhere_idempotency_delete_and_erase() {
+async fn sign_out_everywhere_revoke_delete_and_erase() {
     let s = start().await;
     let b = browser();
     s.email_signin(&b, "leaving@example.com").await;
@@ -244,9 +243,16 @@ async fn sign_out_everywhere_idempotency_delete_and_erase() {
     let two = s.native_login(&b, "dino", "Mac two").await;
     let at1 = one["access_token"].as_str().unwrap();
 
-    let key = "3f1c-signout";
-    let r = app().post(s.url("/v1/signout-everywhere")).bearer_auth(at1).header("idempotency-key", key).send().await.unwrap();
-    assert_eq!(r.status(), 200);
+    // A device's token reaches only `/v1/me` and sync: the rest is the account page's.
+    for (method, path) in [("GET", "/v1/devices"), ("POST", "/v1/signout-everywhere"), ("DELETE", "/v1/account"), ("GET", "/v1/export")] {
+        let r = app().request(method.parse().unwrap(), s.url(path)).bearer_auth(at1).send().await.unwrap();
+        assert_eq!(r.status(), 404, "{method} {path}");
+    }
+    assert_eq!(s.me(at1).await, 200);
+
+    let page = b.get(s.url("/account")).send().await.unwrap().text().await.unwrap();
+    let r = b.post(s.url("/account/signout-everywhere")).form(&[("csrf", csrf(&page).as_str())]).send().await.unwrap();
+    assert_eq!(location(&r), "/signin");
     assert_eq!(s.me(at1).await, 401);
     assert_eq!(s.me(two["access_token"].as_str().unwrap()).await, 401);
     assert_eq!(s.refresh("dino", two["refresh_token"].as_str().unwrap()).await.status(), 400);
@@ -254,27 +260,30 @@ async fn sign_out_everywhere_idempotency_delete_and_erase() {
     let r = b.get(s.url("/account")).send().await.unwrap();
     assert_eq!(location(&r), "/signin");
 
-    // Idempotency: the same key with a fresh token replays the first answer.
+    // One device signed out from the page; the others stay.
     s.email_signin(&b, "leaving@example.com").await;
     let three = s.native_login(&b, "dino", "Mac three").await;
-    let at3 = three["access_token"].as_str().unwrap();
-    let first: Value = app().delete(s.url(&format!("/v1/devices/{}", three["device_id"].as_str().unwrap()))).bearer_auth(at3).header("idempotency-key", "k1").send().await.unwrap().json().await.unwrap();
-    assert_eq!(first["revoked"], three["device_id"]);
     let four = s.native_login(&b, "dino", "Mac four").await;
-    let at4 = four["access_token"].as_str().unwrap();
-    // Same key, same route, same account: replayed, not run again.
-    let replay = app().delete(s.url(&format!("/v1/devices/{}", four["device_id"].as_str().unwrap()))).bearer_auth(at4).header("idempotency-key", "k1").send().await.unwrap();
-    assert_eq!(replay.headers().get("idempotent-replayed").unwrap(), "true");
-    assert_eq!(s.me(at4).await, 200, "the replay didn't revoke the second device");
+    let (at3, at4) = (three["access_token"].as_str().unwrap(), four["access_token"].as_str().unwrap());
+    let page = b.get(s.url("/account")).send().await.unwrap().text().await.unwrap();
+    let r = b.post(s.url(&format!("/account/devices/{}/revoke", three["device_id"].as_str().unwrap()))).form(&[("csrf", csrf(&page).as_str())]).send().await.unwrap();
+    assert_eq!(location(&r), "/account");
+    assert_eq!(s.me(at3).await, 401);
+    assert_eq!(s.me(at4).await, 200, "the other device is still signed in");
 
     // Export has the account and every device.
-    let ex: Value = app().get(s.url("/v1/export")).bearer_auth(at4).send().await.unwrap().json().await.unwrap();
+    let ex: Value = b.get(s.url("/account/export")).send().await.unwrap().json().await.unwrap();
     assert_eq!(ex["email"], "leaving@example.com");
     assert_eq!(ex["devices"].as_array().unwrap().len(), 4);
 
-    // Delete: everything revoked now, sign-in refused, rows erased 30 days later.
-    let r: Value = app().delete(s.url("/v1/account")).bearer_auth(at4).send().await.unwrap().json().await.unwrap();
-    assert_eq!(r["deleted"], true);
+    // Delete: only with the address typed, then everything revoked now, sign-in refused, rows
+    // erased 30 days later.
+    let page = b.get(s.url("/account")).send().await.unwrap().text().await.unwrap();
+    let r = b.post(s.url("/account/delete")).form(&[("csrf", csrf(&page).as_str()), ("confirm", "someone@example.com")]).send().await.unwrap();
+    assert!(r.text().await.unwrap().contains("Not deleted"));
+    assert_eq!(s.me(at4).await, 200);
+    let r = b.post(s.url("/account/delete")).form(&[("csrf", csrf(&page).as_str()), ("confirm", "Leaving@Example.com")]).send().await.unwrap();
+    assert!(r.text().await.unwrap().contains("Account deleted"));
     assert_eq!(s.me(at4).await, 401);
     let b2 = browser();
     let page = b2.get(s.url("/signin")).send().await.unwrap().text().await.unwrap();

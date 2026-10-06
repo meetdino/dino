@@ -14,7 +14,7 @@ The account page shows everything it holds, settings included, and the export re
 |---|---|
 | OAuth 2 server | `GET /oauth/authorize` (code + PKCE S256, loopback redirects for native apps), `POST /oauth/token` (`authorization_code`, `refresh_token`, `urn:ietf:params:oauth:grant-type:device_code`), `POST /oauth/device_authorization` (with `email`: a sign-in link by mail, opened at `/login/{token}`), `POST /oauth/revoke`, `/.well-known/oauth-authorization-server` |
 | Sign-in pages | `/signin` (GitHub, Google, emailed code), `/device` (approve a device-flow code), `/account` (devices, synced data, export, sign out everywhere, delete) |
-| Account API (`/v1`, bearer) | `GET /me`, `GET /devices`, `DELETE /devices/{id}`, `POST /signout-everywhere`, `DELETE /account`, `GET /export` |
+| Account (`/v1`, bearer) | `GET /me`. Devices, sign-out everywhere, export and deletion are on `/account`, behind a browser sign-in |
 | Sync (`/v1/sync`, bearer) | `GET ?since=&limit=`, `POST` (a `dino_sync::PushRequest`), `GET /ws` (nudges) |
 | Operations | `/healthz`, `/readyz`, Prometheus `/metrics` on `DINO_METRICS_BIND` |
 
@@ -52,9 +52,8 @@ the `/v1` API.
   node.
 - **The database out of reach** (a serverless Postgres waking up, Postgres restarting): requests answer 503 with
   `Retry-After` instead of failing, and the server waits for it at start rather than exiting.
-- **Hardening**: per-address and per-account rate limits (GCRA), `Idempotency-Key` on `/v1`
-  mutations, CSRF tokens and Origin checks on forms, a strict CSP, `__Host-` cookies on https, no
-  query strings, bodies or tokens in logs.
+- **Hardening**: per-address and per-account rate limits (GCRA), CSRF tokens and Origin checks on
+  forms, a strict CSP, `__Host-` cookies on https, no query strings, bodies or tokens in logs.
 
 ## Run it locally
 
@@ -100,9 +99,9 @@ cargo test          # needs Postgres; DINO_TEST_DATABASE_URL, default postgres:/
 Each test gets its own database and a real server on a random port, with GitHub, Google and mail
 faked. They cover the full PKCE sign-in, code replay, bad clients and redirects, refresh rotation
 with the grace window, concurrent refreshes and reuse detection, the device flow with consent and
-fresh sign-in, GitHub and Google linking to one account, sign-out everywhere, idempotency,
-deletion and erasure, CSRF and Origin checks, rate limits, two devices converging
-through sync, paging, nudges across two nodes, older clients told to upgrade, gapless sequences
+fresh sign-in, GitHub and Google linking to one account, the account page's sign-out everywhere,
+device sign-out, export, deletion and erasure, CSRF and Origin checks, rate limits, two devices
+converging through sync, paging, nudges across two nodes, older clients told to upgrade, gapless sequences
 under concurrent pushes, sign-in links (single use, expiry, per-address limits, no enumeration),
 one-click GitHub joining an email account, a 503 when the database is out of reach, and that the
 logs contain no token.
