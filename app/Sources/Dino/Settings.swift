@@ -39,6 +39,10 @@ struct DinoSettings: Codable, Equatable {
         var claude_token: ClaudeTokenUse?
         /// Look for updates once a day; nil from an older dinod (on there).
         var check_updates: Bool?
+        /// Ghostty's `shell-integration` and its features (GHOSTTY_SHELL_FEATURES), as the app last
+        /// read them from the user's Ghostty config, for the shells dinod starts; nil from an older dinod.
+        var shell_integration_mode: String?
+        var shell_features: String?
         /// One compiler cache for every session's builds; nil from an older dinod.
         var build_cache: BuildCache?
     }
@@ -745,7 +749,7 @@ private struct TerminalSettingsPane: View {
             } header: {
                 Text("Shell")
             } footer: {
-                Footnote("Lets dino see your prompts and current folder in zsh and bash, as Ghostty does, so new tabs open in the same folder and you can jump between prompts. Your shell startup files aren't changed. Applies to new shells.")
+                Footnote("Lets dino see your prompts and current folder in zsh, bash, fish, elvish and nushell, as Ghostty does, so new tabs open in the same folder and you can jump between prompts. Follows shell-integration and shell-integration-features in your Ghostty config. Your shell startup files aren't changed. Applies to new shells.")
             }
             ShellAISection()
             Section {

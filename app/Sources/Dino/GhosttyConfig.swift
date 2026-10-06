@@ -57,6 +57,21 @@ enum GhosttyConfig {
         }
     }
 
+    /// Ghostty's `shell-integration` (`detect`, `none` or a shell) and its features as Ghostty hands
+    /// them to a shell (GHOSTTY_SHELL_FEATURES), as the config says: dinod starts shells with them.
+    private(set) static var shellSetup = (mode: "detect", features: "cursor,title")
+
+    /// `shell-integration-features` in Ghostty's order, then written as Ghostty writes them: sorted,
+    /// `cursor` saying whether the cursor blinks (`cursor-style-blink`, on unless set).
+    private static func readShellSetup(_ c: TerminalController) {
+        let names = ["cursor", "sudo", "title", "ssh-env", "ssh-terminfo", "path"]
+        let bits = c.configBits("shell-integration-features") ?? 0b10_0101
+        let blink = c.configFlag("cursor-style-blink") ?? true
+        let features = names.enumerated().filter { bits & (1 << $0.offset) != 0 }.map(\.element).sorted()
+            .map { $0 == "cursor" ? "cursor:\(blink ? "blink" : "steady")" : $0 }
+        shellSetup = (c.configText("shell-integration") ?? "detect", features.joined(separator: ","))
+    }
+
     /// The config files read last time (includes too), and lines Ghostty refused.
     private(set) static var loaded: [String] = []
     private(set) static var skipped: [String] = []
@@ -78,6 +93,7 @@ enum GhosttyConfig {
         defer {
             PaneSignals.readConfig(controller)
             QuickTerminal.shared.readConfig(controller)
+            readShellSetup(controller)
             SecureInput.shared.update()
         }
         var read: [String] = []
