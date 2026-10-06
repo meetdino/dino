@@ -131,8 +131,9 @@ struct DinoApp: App {
                 Button("Previous Session") { model.cycle(by: -1) }
                     .keyboardShortcut(.tab, modifiers: [.control, .shift])
                     .disabled(model.sidebarSessions.count < 2)
+                // Beside Preview's ⌥⌘P and Tasks' ⌥⌘T; ⇧⌘D is Split Down, as in Ghostty.
                 Button(model.showReview ? "Hide Changes" : "Review Changes") { model.showReview.toggle() }
-                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                    .keyboardShortcut("c", modifiers: [.command, .option])
                     .disabled(!model.showReview && model.selectedSession?.host != nil)
                 Button(model.sidePane == .preview ? "Hide Preview" : "Show Preview") { model.togglePreview() }
                     .keyboardShortcut("p", modifiers: [.command, .option])
@@ -669,7 +670,7 @@ struct SidePanePicker: View {
                 Toggle(isOn: Binding(get: { model.showReview }, set: { model.showReview = $0 })) {
                     Label("Changes", systemImage: "plus.forwardslash.minus")
                 }
-                .help(remote ?? "Changes (⇧⌘D): review what this session changed and leave comments for the agent")
+                .help(remote ?? "Changes (⌥⌘C): review what this session changed and leave comments for the agent")
                 .disabled(session == nil || (remote != nil && !model.showReview))
                 Toggle(isOn: Binding(get: { preview }, set: { _ in model.togglePreview() })) {
                     Label("Preview", systemImage: "globe")

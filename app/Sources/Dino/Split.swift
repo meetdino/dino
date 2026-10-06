@@ -516,9 +516,10 @@ struct SessionMenu: View {
 }
 
 /// The Split menu: in the Session menu, and in the toolbar without shortcuts (a toolbar menu
-/// answers its shortcuts too, and ⌘D would start two shells). The keys after ⌘D's are Ghostty's
-/// own defaults: in a pane, Ghostty's keybinds (the user's, if rebound) take them first and come
-/// back to dino as the same actions.
+/// answers its shortcuts too, and ⌘D would start two shells). Its keys are Ghostty's own macOS
+/// defaults: ⌘D and ⇧⌘D split right and down (handed to these items, see `menuKeys`); for the
+/// rest, Ghostty's keybinds (the user's, if rebound) take them first in a pane and come back to
+/// dino as the same actions.
 struct SplitMenuItems: View {
     @EnvironmentObject var model: DinoModel
     var shortcuts = true
@@ -530,7 +531,7 @@ struct SplitMenuItems: View {
             .keyboardShortcut(shortcuts ? KeyboardShortcut("d") : nil)
             .disabled(session == nil)
         Button("Split Down with Shell") { model.splitWithShell(.down) }
-            .keyboardShortcut(shortcuts ? KeyboardShortcut("d", modifiers: [.command, .option]) : nil)
+            .keyboardShortcut(shortcuts ? KeyboardShortcut("d", modifiers: [.command, .shift]) : nil)
             .disabled(session == nil)
         Button("Split Left with Shell") { model.splitWithShell(.left) }
             .disabled(session == nil)
