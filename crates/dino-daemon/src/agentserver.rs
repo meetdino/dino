@@ -23,10 +23,18 @@ pub(crate) struct Address {
     pub(crate) password: String,
 }
 
-/// A free port and a fresh password for a session's agent to serve on.
+/// A free port and a fresh password for a session's agent to serve on. Without random bytes for
+/// the password, none: the agent runs without its server rather than behind a guessable one.
 pub(crate) fn address() -> Option<Address> {
+    let password = match dino_core::try_new_uuid() {
+        Ok(p) => p.replace('-', ""),
+        Err(e) => {
+            eprintln!("dinod: no random password for an agent's server ({e}): it runs without one");
+            return None;
+        }
+    };
     let port = std::net::TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok()?.port();
-    Some(Address { port, password: dino_core::new_uuid().replace('-', "") })
+    Some(Address { port, password })
 }
 
 /// How long to wait between tries while its server starts, or after the stream drops.

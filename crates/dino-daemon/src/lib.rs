@@ -2204,7 +2204,9 @@ fn remote_spec(
         "claude" => {
             let port = ssh::pick_port();
             tunnel = Some((port, d.proxy.remote_port));
-            wired.extend(["--settings".into(), dino_core::claude_hook_settings(&d.proxy.remote_hook_url(id, &new_uuid(), port), None)]);
+            // The token is all that lets its hooks in: none rather than a guessable one.
+            let token = dino_core::try_new_uuid().map_err(|e| anyhow::anyhow!("no random token for its hooks: {e}"))?;
+            wired.extend(["--settings".into(), dino_core::claude_hook_settings(&d.proxy.remote_hook_url(id, &token, port), None)]);
             d.proxy.stats.reports_turns(id);
             ssh::Program::Claude { session: agent_session.get_or_insert_with(new_uuid), resume: restoring }
         }
