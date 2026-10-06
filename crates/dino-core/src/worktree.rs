@@ -469,6 +469,9 @@ pub fn list(dir: &Path) -> anyhow::Result<Vec<Worktree>> {
 /// A commit of the checkout as it is now, uncommitted edits included, without touching it:
 /// agents start from what the user sees, not from the last commit.
 pub fn snapshot(repo: &Path) -> anyhow::Result<String> {
+    // A file rewritten as it was (`npm install` rewrites package-lock.json) looks changed to the
+    // index until it's looked at again, and `stash create` then fails without a word.
+    let _ = git(repo, &["update-index", "-q", "--refresh"]);
     let stash = git(repo, &["stash", "create", "dino fan-out base"])?;
     let commit = if stash.trim().is_empty() { git(repo, &["rev-parse", "HEAD"])? } else { stash };
     Ok(commit.trim().to_string())
@@ -1296,6 +1299,25 @@ mod tests {
         assert_eq!(made_by_path("/Users/a/src/app/.claude/worktrees/fix-x"), Some("claude"));
         assert_eq!(made_by_path("/Users/a/.codex/worktrees/1a2b/app"), Some("codex"));
         assert_eq!(made_by_path("/Users/a/src/app-fix"), None);
+    }
+
+    #[test]
+    fn a_file_rewritten_as_it_was_is_no_change() {
+        let tmp = std::env::temp_dir().join(format!("dino-wt-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let repo = tmp.as_path();
+        git(repo, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(repo.join("package-lock.json"), "{}\n").unwrap();
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).unwrap();
+        let head = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        // What `npm install` does to a lockfile it leaves as it was: written again, a moment later.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::write(repo.join("package-lock.json"), "{}\n").unwrap();
+        std::fs::File::options().write(true).open(repo.join("package-lock.json")).unwrap().set_modified(later).unwrap();
+        assert_eq!(snapshot(repo).unwrap(), head);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
