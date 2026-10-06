@@ -321,6 +321,8 @@ struct Feed {
     in_link: bool,
     /// The last prompt's start mark (`A;…`), for a prompt the shell draws again.
     prompt: Option<String>,
+    /// A command started (OSC 133 C) and hasn't been marked ended yet.
+    ran: bool,
 }
 
 /// The alternate screen as it was when the program last left it.
@@ -370,7 +372,7 @@ impl Pane {
             history: AtomicUsize::new(HISTORY.load(Ordering::Relaxed)),
         });
         let term = new_term(&shared, cols, rows);
-        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, osc: Vec::new(), output_from: None, mark: None, in_link: false, prompt: None };
+        let feed = Feed { processor: Processor::new(), carry: Vec::new(), left_alt: None, osc: Vec::new(), output_from: None, mark: None, in_link: false, prompt: None, ran: false };
         Self { term: Arc::new(FairMutex::new(term)), feed: Mutex::new(feed), shared, killer: Mutex::new(None), pid: OnceLock::new() }
     }
 
@@ -525,13 +527,19 @@ impl Pane {
                         }
                         ["C", ..] => {
                             feed.mark = None;
+                            feed.ran = true;
                             let grid = term.grid();
                             let alt = term.mode().contains(TermMode::ALT_SCREEN);
                             feed.output_from = (!alt).then(|| (grid.history_size() + grid.cursor.point.line.0.max(0) as usize, grid.history_size()));
                         }
                         ["D", ref rest @ ..] => {
                             feed.mark = None;
-                            *s.last_exit.lock().unwrap() = rest.first().and_then(|c| c.parse().ok());
+                            // A second end without a code (Ghostty's fish and elvish scripts mark
+                            // the end again at the next prompt) leaves the one before alone.
+                            let code = rest.first().and_then(|c| c.parse().ok());
+                            if std::mem::take(&mut feed.ran) || code.is_some() {
+                                *s.last_exit.lock().unwrap() = code;
+                            }
                             if let Some(from) = feed.output_from.take() {
                                 *s.last_output.lock().unwrap() = output_since(term, from);
                             }
@@ -909,8 +917,12 @@ fn oscs(pending: &mut Vec<u8>, bytes: &[u8]) -> Vec<(&'static str, String, usize
     out
 }
 
-/// The path in an OSC 7 `file://host/path` URL, percent-decoded.
+/// The path in an OSC 7 `file://host/path` URL, percent-decoded, or in a `kitty-shell-cwd://host/path`
+/// one (elvish's), as it is.
 fn file_url_path(url: &str) -> Option<String> {
+    if let Some(rest) = url.strip_prefix("kitty-shell-cwd://") {
+        return Some(rest[rest.find('/')?..].to_string());
+    }
     let rest = url.strip_prefix("file://")?;
     let path = rest[rest.find('/')?..].as_bytes();
     let mut out = Vec::with_capacity(path.len());
@@ -1340,6 +1352,17 @@ mod tests {
     }
 
     #[test]
+    fn an_end_marked_again_without_a_code_keeps_the_code() {
+        let p = pane();
+        // fish with Ghostty's script: the end is marked again, without a code, at the next prompt.
+        p.feed(b"\x1b]133;A\x07$ false\r\n\x1b]133;C\x07\x1b]133;D;1\x07\x1b]133;D\x07\x1b]133;A\x07$ ");
+        assert_eq!(*p.shared.last_exit.lock().unwrap(), Some(1));
+        // A command that ends without saying how.
+        p.feed(b"x\r\n\x1b]133;C\x07\x1b]133;D\x07\x1b]133;A\x07$ ");
+        assert_eq!(*p.shared.last_exit.lock().unwrap(), None);
+    }
+
+    #[test]
     fn a_shell_reports_its_folder_and_its_last_exit_code() {
         let p = pane();
         let moves = Arc::new(AtomicU64::new(0));
@@ -1357,6 +1380,8 @@ mod tests {
         p.feed(b"true\r\n\x1b]133;C\x07\x1b]133;D;0\x1b\\\x1b]133;A\x07\x1b]7;file:///Users/me\x07$ ");
         assert_eq!(*p.shared.last_exit.lock().unwrap(), Some(0));
         assert_eq!(p.shared.cwd.lock().unwrap().as_deref(), Some("/Users/me"));
+        // Elvish's own scheme: the path as it is.
+        assert_eq!(file_url_path("kitty-shell-cwd://Mac/tmp/a b"), Some("/tmp/a b".into()));
         assert_eq!(p.shared.prompts.load(Ordering::Relaxed), 2);
         // Told once per move, not once per prompt.
         p.feed(b"\x1b]7;file:///Users/me\x07");
