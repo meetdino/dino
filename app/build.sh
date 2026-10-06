@@ -1,12 +1,14 @@
 #!/bin/bash
 # Build dino.app: the Swift shell (sidebar + Ghostty surfaces) around the Rust dino CLI/daemon.
 #
+#   app/build.sh --install   the dino you use every day, from this checkout: built as a release is
+#                            (but for thin LTO: Cargo.toml's devapp profile), with the dino CLI and
+#                            dinod inside it and dinod as its launch agent, and put in
+#                            ~/Applications/Dino.app ($DINO_APP: elsewhere) once it's whole, or
+#                            beside it for Restart to Update while dino runs from there.
+#                            scripts/dev-rebuild.sh runs this when main moves.
 #   app/build.sh             app/build/Dino.app, a build to try things in: "dino dev"
 #                            (dev.dino.app.dev), which runs the dino on your PATH (or DINO_BIN)
-#   app/build.sh --install   the dino you use every day, from this checkout: built as a release is,
-#                            with the dino CLI and dinod inside it and dinod as its launch agent,
-#                            and put in ~/Applications/Dino.app ($DINO_APP: elsewhere) once it's
-#                            whole. scripts/dev-rebuild.sh runs this when main moves.
 #
 # Both are signed with $DEVELOPER_ID_APP, else the keychain's Developer ID Application identity,
 # else ad hoc ("-" asks for ad hoc). macOS keeps a privacy grant (Screen Recording, Accessibility…)
@@ -29,7 +31,11 @@ case "${1:-}" in
 esac
 
 BUILD_ID="$(dino_build_id "$ROOT")"
-(cd .. && DINO_BUILD="$BUILD_ID" cargo build --release -q)
+# Installed: the devapp profile (Cargo.toml), a quicker release. Alone: target/release/dino, the
+# dino on your PATH that "dino dev" runs.
+PROFILE=release
+if $INSTALL; then PROFILE=devapp; fi
+(cd .. && DINO_BUILD="$BUILD_ID" cargo build --profile "$PROFILE" -q)
 swift build -c release
 BIN=$(swift build -c release --show-bin-path)
 
@@ -63,7 +69,7 @@ if $INSTALL; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$PLIST"
     # The dino it was built with, run by the app and as dinod (scripts/bundle.sh: its launch agent).
     mkdir -p "$APP/Contents/Helpers"
-    cp ../target/release/dino "$APP/Contents/Helpers/dino"
+    cp "../target/$PROFILE/dino" "$APP/Contents/Helpers/dino"
     dino_agent "$APP" "$BUNDLE_ID" "${DINO_AGENT_HOME:-}"
 else
     # Its own identity: macOS keeps a privacy grant for the bundle id that got it, and the
@@ -84,14 +90,39 @@ if ! dino_sign "$APP" "$IDENTITY" --timestamp=none AdHoc.entitlements 2>build/si
     dino_sign "$APP" - --timestamp=none AdHoc.entitlements
 fi
 
+# Whether anything runs from the app at $1: the app, dinod, or the dino CLI inside it.
+running_from() {
+    local f
+    for f in "$1/Contents/MacOS/Dino" "$1/Contents/Helpers/dino"; do
+        if [ -e "$f" ] && lsof -t -- "$f" >/dev/null 2>&1; then return 0; fi
+    done
+    return 1
+}
+
 if $INSTALL; then
+    # In place only while nothing runs from DEST. macOS knows a running dino (the app, dinod and
+    # every program in its terminals) by the bundle at the path it started from: moved aside, it's a
+    # bare executable without dino's permissions (Screen Recording…), and deleted, it's no one, until
+    # it restarts. So while dino runs, the new build waits beside it, in a hidden folder, and Restart
+    # to Update puts it in place once dino and dinod have stopped (app/Sources/Dino/Updates.swift).
     mkdir -p "$(dirname "$DEST")"
-    OLD="$(dirname "$DEST")/.$(basename "$DEST").old.$$"
-    if [ -e "$DEST" ]; then mv "$DEST" "$OLD"; fi
-    mv "$APP" "$DEST"
-    rm -rf "$OLD"
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$DEST" 2>/dev/null || true
-    echo "$DEST"
+    NEXT="$(dirname "$DEST")/.$(basename "$DEST").next"
+    rm -rf "$NEXT"
+    if running_from "$DEST"; then
+        # There whole or not at all: the running dino looks when its folder changes.
+        rm -rf "$NEXT.part"
+        mkdir "$NEXT.part"
+        mv "$APP" "$NEXT.part/$(basename "$DEST")"
+        mv "$NEXT.part" "$NEXT"
+        echo "$NEXT/$(basename "$DEST"): dino runs from $DEST, so Restart to Update installs it"
+    else
+        OLD="$(dirname "$DEST")/.$(basename "$DEST").old.$$"
+        if [ -e "$DEST" ]; then mv "$DEST" "$OLD"; fi
+        mv "$APP" "$DEST"
+        rm -rf "$OLD"
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$DEST" 2>/dev/null || true
+        echo "$DEST"
+    fi
 else
     echo "$PWD/$APP"
 fi

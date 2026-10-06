@@ -15,8 +15,9 @@ import SwiftUI
 /// if anything would be cut off, dino says what (`RestartImpact`) and lets you choose: now, once
 /// nothing is working, or when you next quit dino.
 ///
-/// Nothing restarts by itself. A dino rebuilt in place (app/build.sh --install, while it runs)
-/// offers Restart to Update the same way, relaunching into the new build and its dinod; so does a
+/// Nothing restarts by itself. A dino rebuilt while it runs (app/build.sh --install) offers Restart
+/// to Update the same way: the new build waits beside this one (`staged`) and goes in its place
+/// once this app and dinod have stopped, and dino opens again from it; so does a
 /// dinod from another build than this app's (an older dino quit without stopping it), restarting
 /// dinod alone.
 @MainActor
@@ -127,11 +128,12 @@ final class Updates: ObservableObject {
 
     // MARK: Builds already on this Mac
 
-    /// The app on disk is a newer build than the one running (the rebuild hook replaced it):
-    /// Restart to Update. Looked at when dino comes forward and when its folder changes.
+    /// A newer build of this app is waiting beside it (the rebuild hook staged it), or is in its
+    /// place already: Restart to Update. Looked at when dino comes forward and when its folder changes.
     func checkRebuilt() {
+        let info = NSDictionary(contentsOf: Updates.staged.appendingPathComponent("Contents/Info.plist")) ?? Updates.diskInfo
         guard pending?.local != .rebuilt, let running = Updates.bundledBuild,
-              let onDisk = Updates.diskInfo["DinoBuild"] as? String, onDisk != running else { return }
+              let onDisk = info["DinoBuild"] as? String, onDisk != running else { return }
         pending = Pending(version: onDisk, whenIdle: false, install: nil, local: .rebuilt)
     }
 
@@ -168,18 +170,37 @@ final class Updates: ObservableObject {
         }
     }
 
-    /// The app opens again from where it is once this one has quit: opened while this one runs,
-    /// LaunchServices would bring this one forward instead. In front only if this one was: a
-    /// restart once agents are idle doesn't take over what you're doing elsewhere.
+    /// The app opens again from where it is once this one has quit, the build waiting beside it in
+    /// its place: opened while this one runs, LaunchServices would bring this one forward instead.
+    /// In front only if this one was: a restart once agents are idle doesn't take over what you're
+    /// doing elsewhere.
     private static func reopenAfterQuit() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "while /bin/kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec /usr/bin/open $3 \"$2\"", "dino-reopen",
+        p.arguments = ["-c", "while /bin/kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; \(installStaged); exec /usr/bin/open $3 \"$2\"", "dino-reopen",
                        String(getpid()), Bundle.main.bundlePath, NSApp.isActive ? "" : "-g"]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         try? p.run()
     }
+
+    /// Where app/build.sh --install leaves a new build while this one runs: in a hidden folder
+    /// beside it, under the same name. macOS knows dino, dinod and the programs in its terminals
+    /// by this app at its path, so it stays there until they've stopped.
+    nonisolated static var staged: URL {
+        let app = Bundle.main.bundleURL
+        return app.deletingLastPathComponent().appendingPathComponent(".\(app.lastPathComponent).next")
+            .appendingPathComponent(app.lastPathComponent)
+    }
+
+    /// Shell: the build waiting at `staged` put in place of the app at "$2" (this one, quit).
+    private static let installStaged = """
+        next="$(dirname "$2")/.$(basename "$2").next"; old="$(dirname "$2")/.$(basename "$2").old.$$"
+        if [ -d "$next/$(basename "$2")" ] && mv "$2" "$old"; then
+            if mv "$next/$(basename "$2")" "$2"; then rm -rf "$old" "$next"; else mv "$old" "$2"; fi
+            /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$2" 2>/dev/null
+        fi
+        """
 
     /// The folder the app is in, watched for the rebuild putting a new one in its place.
     private var folderWatch: DispatchSourceFileSystemObject?
@@ -322,10 +343,12 @@ final class Updates: ObservableObject {
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return false }
         }
-        guard !model.daemonDown else { return true }
-        Self.stopDaemon(model)
-        // Rebuilt in place, the new app is already there: no waiting for it.
-        Self.startDaemonAfterInstall(waiting: pending.local == nil)
+        let running = !model.daemonDown
+        if running { Self.stopDaemon(model) }
+        // Rebuilt, the new app is beside this one: put in place, no waiting for it.
+        if running || pending.local == .rebuilt {
+            Self.startDaemonAfterInstall(waiting: pending.local == nil, start: running)
+        }
         return true
     }
 
@@ -338,14 +361,17 @@ final class Updates: ObservableObject {
         }
     }
 
-    /// Once this app has quit and Sparkle has put the new one in its place, start dinod from it,
-    /// which resumes the sessions: they don't wait for dino to be opened again. Gives up waiting
-    /// for the new app after two minutes (the update failed) and starts the one that's there.
-    private static func startDaemonAfterInstall(waiting: Bool) {
+    /// Once this app has quit and Sparkle (or this, for a rebuild) has put the new one in its
+    /// place, start dinod from it, which resumes the sessions: they don't wait for dino to be
+    /// opened again. Gives up waiting for the new app after two minutes (the update failed) and
+    /// starts the one that's there. `start` false: dinod wasn't running, and stays stopped.
+    private static func startDaemonAfterInstall(waiting: Bool, start: Bool) {
         let bundle = Bundle.main.bundlePath
         let build = waiting ? Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "" : ""
         let script = """
         while /bin/kill -0 "$1" 2>/dev/null; do sleep 0.2; done
+        \(installStaged)
+        [ -n "$4" ] || exit 0
         i=0
         while [ -n "$3" ] && [ $i -lt 600 ]; do
             v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$2/Contents/Info.plist" 2>/dev/null)
@@ -356,7 +382,7 @@ final class Updates: ObservableObject {
         """
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", script, "dino-update", String(getpid()), bundle, build]
+        p.arguments = ["-c", script, "dino-update", String(getpid()), bundle, build, start ? "start" : ""]
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = DinoEnvironment.loginPath
         env["DINO_HOME"] = DinoEnvironment.home
