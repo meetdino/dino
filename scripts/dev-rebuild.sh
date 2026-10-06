@@ -1,7 +1,8 @@
 #!/bin/bash
 # Keep the dino you use built from main: when main moves in the main checkout, app/build.sh
-# --install replaces ~/Applications/Dino.app in the background once the new one is whole, and the
-# running dino offers Restart to Update. Opt in with scripts/install-hooks.sh.
+# --install builds ~/Applications/Dino.app in the background, and once the new one is whole puts it
+# in place, or, while dino runs from there, beside it for Restart to Update to put in place (moved
+# or deleted under them, dino's sessions lose its permissions). Opt in with scripts/install-hooks.sh.
 #
 #   scripts/dev-rebuild.sh              (post-commit, post-merge) rebuild, if this is the main
 #                                       checkout and it's on main; anywhere else, nothing
@@ -65,7 +66,9 @@ build() {
     unset pw
     local id; id=$(git -C "$root" config dino.signingIdentity)
     if [ -n "$id" ]; then export DEVELOPER_ID_APP="$id"; fi
-    if "$root/app/build.sh" --install >"$log" 2>&1; then
+    # Through the build slots every build on this Mac shares, where there are any.
+    local slot=; if [ -x /tmp/dino-slot ]; then slot=/tmp/dino-slot; fi
+    if $slot "$root/app/build.sh" --install >"$log" 2>&1; then
         echo "$built" >"$root/app/build/.rebuilt"
         osascript -e "display notification \"Restart to Update in dino to use $(git -C "$root" log -1 --format=%h).\" with title \"dino rebuilt\"" 2>/dev/null
     else

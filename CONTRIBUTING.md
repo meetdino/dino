@@ -29,9 +29,11 @@ scripts/install-hooks.sh   # main moves in the main checkout: ./app/build.sh --i
 ```
 
 Then every commit or merge to main in the main checkout rebuilds it (log: `app/build/build.log`)
-and the running dino offers Restart to Update; `scripts/land.sh` from any worktree fast-forwards
-the main checkout's main too once its change lands, unless the main checkout has changes of its
-own. To sign with your
+and the running dino offers Restart to Update. While dino runs, the new build waits beside it
+(`~/Applications/.Dino.app.next`) and goes in place when you restart: macOS knows the running dino
+and the programs in its terminals by the app at its path, and moved or deleted under them, they
+lose its permissions. `scripts/land.sh` from any worktree fast-forwards the main checkout's main
+too once its change lands, unless the main checkout has changes of its own. To sign with your
 Developer ID, `git config dino.signingIdentity "Developer ID Application: Name (TEAMID)"`.
 
 ## Where things are
