@@ -117,9 +117,10 @@ struct FallbackInfo: Codable, Equatable {
     var provider: String
     var name: String
     var model: String
-    /// The route it uses otherwise: "Claude".
+    /// The route it uses otherwise: "Claude"; for "unavailable", the model asked for.
     var from: String
-    /// "limit", "balance" or "outage".
+    /// "limit", "balance", "outage", or "unavailable": ChatGPT rejects the Codex model asked for
+    /// (`from`), and another the account lists answers (`model`).
     var reason: String
     var said: String
     var resets_at: UInt64?
@@ -129,9 +130,14 @@ struct FallbackInfo: Codable, Equatable {
     /// Answered by another of the user's Claude accounts ("Claude account 2"), not a fallback route.
     var isAccount: Bool { provider == "anthropic" }
 
-    /// What the session shows: "On fallback: GLM Coding Plan · Claude limit resets 14:00", or for
-    /// another Claude account "Claude account 2 · resets 14:00".
+    /// Answered by another model of the same account, the one asked for being rejected.
+    var isModel: Bool { reason == "unavailable" }
+
+    /// What the session shows: "On fallback: GLM Coding Plan · Claude limit resets 14:00", for
+    /// another Claude account "Claude account 2 · resets 14:00", for another model
+    /// "gpt-5.5 unavailable · using gpt-5.4".
     var label: String {
+        if isModel { return "\(why) · using \(model)" }
         guard isAccount else { return "On fallback: \(name) · \(why)" }
         if let t = resets_at { return "\(name) · resets \(Clock.short(t))" }
         return "\(name) · \(from) at its limit"
@@ -142,6 +148,7 @@ struct FallbackInfo: Codable, Equatable {
         switch reason {
         case "balance": return "\(from) out of balance"
         case "outage": return "\(from) down"
+        case "unavailable": return "\(from) unavailable"
         default:
             if let t = resets_at { return "\(from) limit resets \(Clock.short(t))" }
             return "\(from) at its limit"
