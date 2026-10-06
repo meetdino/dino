@@ -15,7 +15,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dino_core::ipc::SyncStatus;
@@ -90,6 +90,18 @@ fn write_private(path: &PathBuf, bytes: &[u8]) -> anyhow::Result<()> {
     drop(f);
     std::fs::rename(tmp, path)?;
     Ok(())
+}
+
+/// Told when the phase becomes "ready" or "conflict": signed out, the loops wait on it.
+static PHASE: Condvar = Condvar::new();
+
+/// Wait until the phase is one of `phases`; its server then.
+fn until_phase(phases: &[&str]) -> String {
+    let mut s = state().lock().unwrap();
+    while !phases.contains(&s.phase.as_str()) {
+        s = PHASE.wait(s).unwrap();
+    }
+    s.server.clone()
 }
 
 fn state() -> &'static Mutex<State> {
@@ -247,6 +259,7 @@ fn run() {
     let network = NetworkChanges::new();
     PULL.store(true, Ordering::Relaxed);
     loop {
+        until_phase(&["ready"]);
         std::thread::sleep(Duration::from_millis(250));
         let wall = now_ms();
         // Woke from sleep, or the network changed: the other Macs may have moved on.
@@ -501,16 +514,11 @@ fn nudges() {
     let mut wait = Duration::from_secs(1);
     let mut asked: Option<(String, Instant)> = None;
     loop {
-        let server = {
-            let s = state().lock().unwrap();
-            matches!(s.phase.as_str(), "ready" | "conflict").then(|| s.server.clone())
-        };
-        let Some(server) = server else {
+        if !matches!(state().lock().unwrap().phase.as_str(), "ready" | "conflict") {
             PUSH.store(0, Ordering::Relaxed);
             asked = None;
-            std::thread::sleep(Duration::from_secs(1));
-            continue;
-        };
+        }
+        let server = until_phase(&["ready", "conflict"]);
         // Whether this server pushes at all: asked once, and again now and then (it may change).
         let stale = asked.as_ref().is_none_or(|(s, at)| *s != server || at.elapsed() >= Duration::from_secs(10 * 60));
         if stale {
@@ -786,6 +794,7 @@ fn set_up_account(server: &str) -> anyhow::Result<()> {
         s.conflict_local = local.into_iter().collect();
         s.phase = "conflict".into();
     }
+    PHASE.notify_all();
     save_state(&s);
     drop(s);
     kick();
@@ -819,6 +828,7 @@ pub fn resolve(choice: &str) -> anyhow::Result<()> {
     }
     s.conflict_local.clear();
     s.phase = "ready".into();
+    PHASE.notify_all();
     save_state(&s);
     drop(s);
     kick();

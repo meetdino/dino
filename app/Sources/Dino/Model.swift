@@ -703,8 +703,20 @@ final class DinoModel: ObservableObject {
         GhosttyActions.model = self
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
             MainActor.assumeIsolated {
-                if GhosttyConfig.changed { GhosttyConfig.apply(to: Self.terminals, overrides: Self.menuKeys) }
+                if Self.isShown, GhosttyConfig.changed { GhosttyConfig.apply(to: Self.terminals, overrides: Self.menuKeys) }
             }
+        }
+    }
+
+    /// Some of the app's windows are on screen. The slower pollers fetch what only a window shows,
+    /// so they rest while none does (hidden, minimized, covered or closed); what notifies goes on.
+    static var isShown: Bool { NSApp.occlusionState.contains(.visible) }
+
+    /// Wait until a window of the app shows: at once when one does.
+    nonisolated static func untilShown() async {
+        var changes = NotificationCenter.default.notifications(named: NSApplication.didChangeOcclusionStateNotification).makeAsyncIterator()
+        while !(await MainActor.run { isShown }) {
+            _ = await changes.next()
         }
     }
 
@@ -750,7 +762,9 @@ final class DinoModel: ObservableObject {
             }
         }
         check()
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in check() }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+            if MainActor.assumeIsolated({ Self.isShown }) { check() }
+        }
     }
 
     /// What a pane's `dino attach` runs with: the scrollback the pane keeps (Ghostty's
@@ -1042,14 +1056,16 @@ final class DinoModel: ObservableObject {
     }
 
     /// Automations, archived sessions and launchers (keys and policies change which agents can
-    /// start) refresh slower than session state.
+    /// start) refresh slower than session state. Automations are looked at even with no window
+    /// showing (their runs notify); the rest only while one shows.
     private func watchSlower() {
         Task.detached {
             while true {
                 if let conn = try? DinoConnection(path: DinoEnvironment.socketPath) {
-                    let launchers = try? conn.request(["type": "launchers"]).launchers
                     let tasks = try? conn.scheduleList()
-                    let archived = try? conn.archived()
+                    let shown = await MainActor.run { Self.isShown }
+                    let launchers = shown ? try? conn.request(["type": "launchers"]).launchers : nil
+                    let archived = shown ? try? conn.archived() : nil
                     await MainActor.run {
                         if let tasks { self.applySchedule(tasks) }
                         self.notePolled(schedule: true)
@@ -1068,6 +1084,7 @@ final class DinoModel: ObservableObject {
     private func watchTree() {
         Task.detached {
             while true {
+                await Self.untilShown()
                 await MainActor.run { self.refreshTree() }
                 try? await Task.sleep(for: .seconds(3))
             }
