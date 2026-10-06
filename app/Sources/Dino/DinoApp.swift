@@ -224,9 +224,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_: Notification) {
-        // Run as a regular app with a Dock icon and menu bar even when launched from a binary.
+        // Run as a regular app with a Dock icon and menu bar even when launched from a binary, and
+        // come forward then, as nothing else brings it. Opened by Launch Services (Finder, the Dock,
+        // `open`; launchd is its parent), coming forward is Launch Services' call: `open -g`, and
+        // dino reopening after an update while you're elsewhere (`Updates.reopenAfterQuit`), stay
+        // behind your windows.
         NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        if getppid() != 1 { NSApp.activate(ignoringOtherApps: true) }
         NSApp.servicesProvider = services
         // Sparkle schedules its daily check from here (a release build only).
         _ = Updates.shared
