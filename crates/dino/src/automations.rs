@@ -21,6 +21,7 @@ pub const HELP: &str = "Automations: run an agent or a command on a schedule, or
 When (one; without any, it runs only when you run it):
   --daily HH:MM | --weekdays HH:MM | --weekly <day> HH:MM | --hourly <minute> | --manual
   --on-pr                       a pull request opens         ┐ in --repo owner/name, or the
+  --on-merge                    a pull request merges        │
   --on-review                   your review is requested     │ GitHub repo the folder is a
   --on-ci-fail [--branch <b>]   a check fails (on a branch,  │ clone of (--on-review without
                 [--mine]        or on open PRs: yours only)  │ --repo: any repo). Through your
@@ -29,7 +30,7 @@ When (one; without any, it runs only when you run it):
   --on-commits [--branch <b>]   new commits on the default branch (or <b>) after a fetch
   --on-behind [--branch <b>]    the branch falls behind its upstream
                                 git looks every 10 minutes (--interval <minutes>)
-  --on-files [<patterns>]       files change in the folder (--path <sub-folder>): `*.rs, docs/**`
+  --on-files [<patterns>]       files git doesn't ignore change in the folder (--path <sub>): `*.rs, docs/**`
   --after <name> [--outcome success|failure]
                                 another automation's run (or a session's turn) finishes
 
@@ -55,7 +56,7 @@ Only when (each run that doesn't is kept as skipped):
   --max-runs <n>                pause after n runs
 
 Afterwards:
-  --comment                     post the summary as a comment on the PR
+  --comment                     post the summary as a comment on the PR (or issue)
   --no-notify                   no notification when a run finishes
 
 The prompt can use what happened: {pr.url} {pr.title} {pr.number} {pr.branch} {ci.check}
@@ -441,6 +442,7 @@ fn apply(t: &mut ScheduledTask, args: &[String]) -> anyhow::Result<Option<String
                 t.frequency = Frequency::Hourly { minute: minute as u8 };
             }
             "--on-pr" => trigger(t, TriggerKind::PrOpened),
+            "--on-merge" => trigger(t, TriggerKind::PrMerged),
             "--on-review" => trigger(t, TriggerKind::ReviewRequested),
             "--on-ci-fail" => trigger(t, TriggerKind::CiFailed),
             "--on-label" => {

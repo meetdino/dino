@@ -1089,11 +1089,22 @@ fn finish(d: &Daemon, t: &ScheduledTask, run_id: &str, ok: bool, reason: Option<
             ("after.summary".into(), full.unwrap_or_default()),
             ("after.session".into(), run.session.clone().unwrap_or_default()),
         ]
-        .into(),
+        .into_iter()
+        .chain(run.session.as_deref().map(|s| place(d, s)).unwrap_or_default())
+        .collect(),
     };
     chain(d, &t.id, ok, &event);
     drop(live);
     d.schedule.poke();
+}
+
+/// Where session `id` worked and what its changes are measured from, for what comes after it to
+/// look at: `git -C {after.dir} diff {after.base}`.
+fn place(d: &Daemon, id: &str) -> Vec<(String, String)> {
+    match crate::changes_base(d, id) {
+        Ok(Ok((dir, base, _))) => vec![("after.dir".into(), dir.display().to_string()), ("after.base".into(), base)],
+        _ => vec![],
+    }
 }
 
 /// Fire the automations that come after `id` (an automation, or a session) on this outcome.
@@ -1184,7 +1195,9 @@ fn follow_sessions(d: &Daemon) {
                 ("after.summary".into(), last_message(&s).unwrap_or_default()),
                 ("after.session".into(), s.id.clone()),
             ]
-            .into(),
+            .into_iter()
+            .chain(place(d, &s.id))
+            .collect(),
         };
         chain(d, &s.id, ok, &event);
     }

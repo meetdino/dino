@@ -147,6 +147,7 @@ fn look(d: &Daemon, t: &ScheduledTask) -> anyhow::Result<Found> {
     let mut found = Found::default();
     match t.trigger.on {
         TriggerKind::PrOpened => found.events = parse::prs_opened(&pulls()?, repo, since),
+        TriggerKind::PrMerged => found.events = parse::prs_merged(&gh.get(&format!("/repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=30"))?, repo, since),
         TriggerKind::ReviewRequested => {
             found.events = if repo.is_empty() {
                 parse::reviews_requested_anywhere(&gh.get("/search/issues?q=is%3Apr+is%3Aopen+review-requested%3A%40me&per_page=50")?)
@@ -342,7 +343,7 @@ pub(crate) fn files(d: &Daemon) {
         if !t.conditions.parallel && d.schedule.busy(&id) {
             continue;
         }
-        let files = changed_files(&root, &changes.paths, &t.trigger.glob, &dino_worktrees);
+        let files = not_ignored(&root, changed_files(&root, &changes.paths, &t.trigger.glob, &dino_worktrees));
         if files.is_empty() {
             continue;
         }
@@ -383,6 +384,38 @@ fn changed_files(root: &Path, paths: &[PathBuf], glob: &str, skip: &[PathBuf]) -
     out
 }
 
+/// `files` (relative to `root`) without the ones git ignores: build output, caches, what a test
+/// run writes. Without them a run that builds would start the next. Outside a repo, all of them.
+fn not_ignored(root: &Path, files: Vec<String>) -> Vec<String> {
+    use std::io::Write;
+    if files.is_empty() {
+        return files;
+    }
+    let child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "--stdin", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return files };
+    let input: Vec<u8> = files.iter().flat_map(|f| f.bytes().chain([0])).collect();
+    // Written from a thread: a long list could fill both pipes at once.
+    let mut stdin = child.stdin.take();
+    let writer = std::thread::spawn(move || stdin.as_mut().map(|i| i.write_all(&input)));
+    let out = child.wait_with_output();
+    let _ = writer.join();
+    // 0: some are ignored; 1: none are; anything else: not a repo, or git failed.
+    match out {
+        Ok(o) if o.status.code() == Some(0) => {
+            let ignored: Vec<&[u8]> = o.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+            files.into_iter().filter(|f| !ignored.contains(&f.as_bytes())).collect()
+        }
+        _ => files,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,5 +426,22 @@ mod tests {
         let paths: Vec<PathBuf> = ["/r/src/a.rs", "/r/.git/index", "/r/wt/x.rs", "/r/docs/b.md", "/elsewhere/c.rs", "/r/src/a.rs"].iter().map(PathBuf::from).collect();
         assert_eq!(changed_files(root, &paths, "", &[PathBuf::from("/r/wt")]), ["docs/b.md", "src/a.rs"]);
         assert_eq!(changed_files(root, &paths, "*.rs", &[]), ["src/a.rs", "wt/x.rs"]);
+    }
+
+    #[test]
+    fn ignored_files_dont_count() {
+        let dir = std::env::temp_dir().join(format!("dino-ignored-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        let ok = Command::new("git").arg("-C").arg(&dir).args(["init", "-q"]).status().unwrap().success();
+        assert!(ok);
+        std::fs::write(dir.join(".gitignore"), "target/\n*.log\n").unwrap();
+        let files: Vec<String> = ["src/a.rs", "target/debug/x", "run.log", "notes.md"].map(String::from).into();
+        assert_eq!(not_ignored(&dir, files.clone()), ["src/a.rs", "notes.md"]);
+        // Outside a repo nothing is left out.
+        let plain = std::env::temp_dir().join(format!("dino-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(not_ignored(&plain, files.clone()).len(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&plain);
     }
 }
