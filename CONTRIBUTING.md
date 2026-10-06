@@ -16,10 +16,11 @@ cargo build --release      # target/release/dino: the CLI, and dinod (`dino daem
 ./app/build.sh --install   # the dino you use, built from here: ~/Applications/Dino.app
 ```
 
-"dino dev" has its own bundle id, so it shares no settings or permissions with the dino you use,
-and runs the `dino` it finds on your `PATH` or in `~/.local/bin` (or `DINO_BIN`, when set): link
-the one you built, `ln -sf "$PWD/target/release/dino" ~/.local/bin/dino`. Then run it with
-`open app/build/Dino.app`. An installed build carries its `dino` and runs dinod from it, as a
+"dino dev" has its own bundle id, so it shares no app preferences or macOS permissions with the
+dino you use, and runs the `dino` it finds on your `PATH` or in `~/.local/bin` (or `DINO_BIN`, when
+set): link the one you built, `ln -sf "$PWD/target/release/dino" ~/.local/bin/dino`. Then run it
+with `open app/build/Dino.app`. It talks to the same dinod, sessions and `settings.toml` as the dino
+you use, unless you give it a `DINO_HOME` of its own (below). An installed build carries its `dino` and runs dinod from it, as a
 release does.
 
 To keep the dino you use built from main, install the git hooks once:
