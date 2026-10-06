@@ -2402,6 +2402,37 @@ fn ended_note(d: &Daemon, s: &Arc<Session>) -> Vec<u8> {
     format!("{what} · {action}").into_bytes()
 }
 
+/// A client attached to session `s` as `id`, until this is dropped: its size and focus count
+/// toward the session's (see `clients`), and its terminal answers the program's queries in place
+/// of dinod's emulator. However the client goes, dropping this leaves the session as it was.
+struct Attached<'a> {
+    s: &'a Session,
+    id: u64,
+}
+
+impl<'a> Attached<'a> {
+    fn new(s: &'a Session, id: u64, size: (u16, u16)) -> Self {
+        // Its size, unless another client is the one being looked at (see `clients`).
+        s.clients.lock().unwrap().join(id, size);
+        s.fit();
+        // The client's terminal answers queries now; the daemon's emulator must stay quiet.
+        s.attached.fetch_add(1, Ordering::Relaxed);
+        s.pane.shared.answer_queries.store(false, Ordering::Relaxed);
+        Self { s, id }
+    }
+}
+
+impl Drop for Attached<'_> {
+    fn drop(&mut self) {
+        let (s, id) = (self.s, self.id);
+        s.focus_changed(|c| c.leave(id), false);
+        s.subscribers.lock().unwrap().retain(|(sub, _)| *sub != id);
+        if s.attached.fetch_sub(1, Ordering::Relaxed) == 1 {
+            s.pane.shared.answer_queries.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Stream a session to a client until it detaches or the session ends.
 fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, rows: u16, scrollback: Option<u64>) -> io::Result<()> {
     // As much scrollback as the client keeps (Ghostty's `scrollback-limit`), kept from now on by
@@ -2412,26 +2443,32 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
         s.pane.keep_history(history);
         REPLAY.store(history, Ordering::Relaxed);
     }
+    let mut out = stream.try_clone()?;
     ipc::write_json(&mut stream, &Response::Ok)?;
     s.poke();
     let sub_id = d.next_sub.fetch_add(1, Ordering::Relaxed);
-    // Its size, unless another client is the one being looked at (see `clients`).
-    s.clients.lock().unwrap().join(sub_id, (cols, rows));
-    s.fit();
-    // The client's terminal answers queries now; the daemon's emulator must stay quiet.
-    s.attached.fetch_add(1, Ordering::Relaxed);
-    s.pane.shared.answer_queries.store(false, Ordering::Relaxed);
+    let attached = Attached::new(s, sub_id, (cols, rows));
 
     let (tx, rx) = channel::<Vec<u8>>();
+    // Subscribed as its screen is taken, so what it's sent after that is exactly what came next.
+    // Not to a program a restart is replacing, which `restart` marks before it drops the
+    // subscribers: the client would wait on it for good, its keys going to a program that's
+    // gone. Let go instead, it reattaches, to the new one.
     let replay = s.pane.replay_then(history, |bytes| {
-        s.subscribers.lock().unwrap().push((sub_id, tx));
-        bytes
+        let mut subscribers = s.subscribers.lock().unwrap();
+        (!s.replaced.load(Ordering::Relaxed)).then(|| subscribers.push((sub_id, tx))).map(|()| bytes)
     });
-    let mut out = stream.try_clone()?;
-    ipc::write_frame(&mut out, ipc::DATA, &replay)?;
+    let Some(replay) = replay else { return Ok(()) };
     let exited_already = s.pane.is_exited();
     let (d2, s2) = (d.clone(), s.clone());
     let writer = std::thread::spawn(move || {
+        // Its screen goes out here, while its keys are read: sent first, a client slow to read it
+        // (a long scrollback) or that never does held them back until it had, and one that left
+        // first lost them.
+        if ipc::write_frame(&mut out, ipc::DATA, &replay).is_err() {
+            let _ = out.shutdown(std::net::Shutdown::Both);
+            return;
+        }
         if exited_already {
             let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
             return;
@@ -2488,11 +2525,8 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
             _ => {}
         }
     }
-    s.focus_changed(|c| c.leave(sub_id), false);
-    s.subscribers.lock().unwrap().retain(|(id, _)| *id != sub_id);
-    if s.attached.fetch_sub(1, Ordering::Relaxed) == 1 {
-        s.pane.shared.answer_queries.store(true, Ordering::Relaxed);
-    }
+    // Its subscription gone, the writer stops waiting for output.
+    drop(attached);
     let _ = writer.join();
     Ok(())
 }
@@ -5398,6 +5432,76 @@ while (sysread(STDIN, my $c, 1)) {
             assert_ne!(kind, ipc::EXIT, "the client was told the session ended");
             seen.extend(payload);
         }
+        kill(&d, &id);
+    }
+
+    /// A client attaching in the moment a restart starts, after `attachable` gave it the old
+    /// program and before `restart` let that program's subscribers go, is let go too: it
+    /// reattaches to the new one, rather than wait on the old one for good while its keys went to a
+    /// program that's gone.
+    #[test]
+    fn a_client_attaching_as_a_restart_starts_is_let_go_to_reattach() {
+        let home = test_home().to_path_buf();
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
+        let old = session(&d, &id);
+        // `restart`, as far as letting the old program's clients go.
+        old.replaced.store(true, Ordering::Relaxed);
+        old.subscribers.lock().unwrap().clear();
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (d2, old2) = (d.clone(), old.clone());
+        let attaching = std::thread::spawn(move || attach(&d2, &old2, server, 80, 24, None));
+        client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let (kind, _) = ipc::read_frame(&mut client).unwrap();
+        assert_eq!(kind, ipc::JSON);
+        let next = ipc::read_frame(&mut client);
+        assert!(next.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::UnexpectedEof), "still attached to the old program: {next:?}");
+        attaching.join().unwrap().unwrap();
+        assert!(old.subscribers.lock().unwrap().is_empty());
+        assert_eq!(old.attached.load(Ordering::Relaxed), 0);
+        assert_eq!(old.clients.lock().unwrap().size(), None);
+        kill(&d, &id);
+    }
+
+    /// A client's keys are read from the moment it attaches, not once its screen (the scrollback
+    /// with it) has gone out to it: a client slow to read that, or one that never does and leaves
+    /// (a script's one-off attach), had them held back or lost. However it leaves, it no longer
+    /// decides the session's size, nor keeps dinod's emulator from answering the program.
+    #[test]
+    fn a_client_types_before_reading_its_screen_and_leaves_nothing_behind() {
+        let home = test_home().to_path_buf();
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        // A scrollback longer than a socket holds (8 KB each way on macOS).
+        s.pane.write(b"seq 1 3000\r".to_vec());
+        wait_for("the scrollback", || s.pane.text(0).contains("\n3000"));
+
+        // The app's pane, in the background: it reads all it's sent.
+        let (mut pane, server) = UnixStream::pair().unwrap();
+        let d2 = d.clone();
+        std::thread::spawn(move || serve(&d2, server));
+        ipc::write_json(&mut pane, &Request::Attach { id: id.clone(), cols: 100, rows: 30, wait: false, scrollback: None }).unwrap();
+        ipc::write_frame(&mut pane, ipc::FOCUS, &[0]).unwrap();
+        std::thread::spawn(move || while ipc::read_frame(&mut pane).is_ok() {});
+        wait_for("the pane's size", || s.pane.size() == (100, 30));
+
+        // A client that types and goes without reading what it's sent.
+        let (mut once, server) = UnixStream::pair().unwrap();
+        let d2 = d.clone();
+        let served = std::thread::spawn(move || serve(&d2, server));
+        ipc::write_json(&mut once, &Request::Attach { id: id.clone(), cols: 120, rows: 40, wait: false, scrollback: None }).unwrap();
+        let (kind, _) = ipc::read_frame(&mut once).unwrap();
+        assert_eq!(kind, ipc::JSON);
+        ipc::write_frame(&mut once, ipc::DATA, b"echo typed-$((6*7))\r").unwrap();
+        wait_for("what it typed", || s.pane.text(0).contains("\ntyped-42"));
+        assert_eq!(s.pane.size(), (120, 40), "attached, it decides the size");
+        drop(once);
+        let _ = served.join();
+        wait_for("the pane's size back", || s.pane.size() == (100, 30));
+        assert_eq!(s.attached.load(Ordering::Relaxed), 1, "only the pane");
+        assert!(!s.pane.shared.answer_queries.load(Ordering::Relaxed));
         kill(&d, &id);
     }
 
