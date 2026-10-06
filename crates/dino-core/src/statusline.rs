@@ -18,13 +18,12 @@ struct Layers {
 
 impl Layers {
     /// Claude Code's own order: managed settings win, then the project's local and shared
-    /// settings, then the user's.
-    fn for_project(project: &Path) -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        Self::new(project, &home, Path::new("/Library/Application Support/ClaudeCode"))
+    /// settings, then the user's, in Claude's config folder `config` (see `claude_config`).
+    fn for_project(project: &Path, config: &Path) -> Self {
+        Self::new(project, config, Path::new("/Library/Application Support/ClaudeCode"))
     }
 
-    fn new(project: &Path, home: &Path, managed_dir: &Path) -> Self {
+    fn new(project: &Path, config: &Path, managed_dir: &Path) -> Self {
         // `managed-settings.d/*.json` go on top of `managed-settings.json`, later names winning.
         let mut drop_ins: Vec<PathBuf> = std::fs::read_dir(managed_dir.join("managed-settings.d"))
             .into_iter()
@@ -39,7 +38,7 @@ impl Layers {
         let rest = vec![
             project.join(".claude/settings.local.json"),
             project.join(".claude/settings.json"),
-            home.join(".claude/settings.json"),
+            config.join("settings.json"),
         ];
         Self { managed: drop_ins, rest }
     }
@@ -65,9 +64,10 @@ impl Layers {
     }
 }
 
-/// The user's own statusline command for `project`, for `dino statusline` to run.
+/// The user's own statusline command for `project`, for `dino statusline` to run: in the session
+/// it reports for, whose config folder its environment says.
 pub fn user_command(project: &Path) -> Option<String> {
-    Layers::for_project(project).effective()?.0["command"].as_str().map(String::from)
+    Layers::for_project(project, &crate::claude_config::home()).effective()?.0["command"].as_str().map(String::from)
 }
 
 /// The environment variable that tells `dino statusline` where to report: the hook URL holds the
@@ -76,9 +76,11 @@ pub const HOOK_ENV: &str = "DINO_HOOK_URL";
 
 /// The `statusLine` setting for a Claude session in `project`: the user's own, run through
 /// `dino statusline` (which reports to `HOOK_ENV`), with their padding and refresh interval.
-/// `None` when they have none, or when it is managed (a managed setting can't be overridden anyway).
-pub fn wrapper(project: &Path, dino: &Path) -> Option<String> {
-    wrap(Layers::for_project(project).effective(), dino)
+/// `config` is the session's own config folder, if it has one (see `claude_config`). `None` when
+/// they have none, or when it is managed (a managed setting can't be overridden anyway).
+pub fn wrapper(project: &Path, config: Option<&Path>, dino: &Path) -> Option<String> {
+    let config = config.map_or_else(crate::claude_config::home, Path::to_path_buf);
+    wrap(Layers::for_project(project, &config).effective(), dino)
 }
 
 fn wrap(effective: Option<(Value, bool)>, dino: &Path) -> Option<String> {
@@ -160,7 +162,7 @@ mod tests {
     }
 
     fn effective(d: &Path) -> Option<(Value, bool)> {
-        Layers::new(&d.join("project"), &d.join("home"), &d.join("managed")).effective()
+        Layers::new(&d.join("project"), &d.join("home/.claude"), &d.join("managed")).effective()
     }
 
     fn command(d: &Path) -> Option<String> {
@@ -236,6 +238,19 @@ mod tests {
         assert_eq!((wrapped["padding"].as_u64(), wrapped["refreshInterval"].as_u64(), wrapped["type"].as_str()), (Some(0), Some(10), Some("command")));
         write(&d, "managed/managed-settings.json", r#"{"statusLine":{"type":"command","command":"org.sh"}}"#);
         assert_eq!(wrap(effective(&d), dino), None, "a managed statusline can't be replaced");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A session with a config folder of its own (`CLAUDE_CONFIG_DIR`) has its user settings there.
+    #[test]
+    fn the_users_own_is_in_the_sessions_config_folder() {
+        let d = dir("config");
+        let dino = Path::new("/usr/local/bin/dino");
+        let own = d.join("work-account");
+        std::fs::create_dir_all(&own).unwrap();
+        write(&d, "work-account/settings.json", r#"{"statusLine":{"type":"command","command":"work.sh","padding":1}}"#);
+        assert!(wrapper(&d.join("project"), Some(&own), dino).is_some_and(|w| w.contains("statusline") && w.contains(r#""padding":1"#)));
+        assert_eq!(wrapper(&d.join("project"), Some(&d.join("home/.claude")), dino), None, "not the other folder's");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

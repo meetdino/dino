@@ -109,13 +109,11 @@ pub(crate) fn typed(text: &str) -> Option<&str> {
 
 // ---- Claude ----
 
-/// `~/.claude/projects/<dir>/<uuid>.jsonl`, not subagents' (`<uuid>/subagents/…`).
+/// `~/.claude/projects/<dir>/<uuid>.jsonl`, not subagents' (`<uuid>/subagents/…`), in each of
+/// Claude's config folders.
 pub(crate) fn claude_transcripts() -> Vec<PathBuf> {
-    std::fs::read_dir(home().join(".claude/projects"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .flat_map(|d| std::fs::read_dir(d.path()).into_iter().flatten().flatten())
+    crate::transcript::claude_projects()
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
         .collect()
@@ -206,8 +204,8 @@ pub(crate) fn lines_at(text: &str, from: u64) -> impl Iterator<Item = (u64, &str
 /// `sessionId` is the conversation that started them.
 pub(crate) fn claude_usage_files() -> Vec<PathBuf> {
     let mut out = vec![];
-    for project in std::fs::read_dir(home().join(".claude/projects")).into_iter().flatten().flatten() {
-        for e in std::fs::read_dir(project.path()).into_iter().flatten().flatten() {
+    for project in crate::transcript::claude_projects() {
+        for e in std::fs::read_dir(project).into_iter().flatten().flatten() {
             let p = e.path();
             if p.extension().is_some_and(|x| x == "jsonl") {
                 out.push(p);

@@ -8,10 +8,15 @@ use serde_json::Value;
 /// How much of the end of a transcript file is read; enough for the last several turns.
 const READ_TAIL: u64 = 2 << 20;
 
-/// Claude's transcript for conversation `uuid`: `~/.claude/projects/<dir>/<uuid>.jsonl`.
+/// Claude's transcript for conversation `uuid`: `~/.claude/projects/<dir>/<uuid>.jsonl`, in
+/// whichever of Claude's config folders it is (see `claude_config`).
 pub fn claude_path(uuid: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    std::fs::read_dir(home.join(".claude/projects")).ok()?.flatten().map(|d| d.path().join(format!("{uuid}.jsonl"))).find(|p| p.exists())
+    claude_projects().map(|d| d.join(format!("{uuid}.jsonl"))).find(|p| p.exists())
+}
+
+/// Every project folder of Claude's (`~/.claude/projects/<dir>`), in each of its config folders.
+pub(crate) fn claude_projects() -> impl Iterator<Item = PathBuf> {
+    crate::claude_config::homes().into_iter().flat_map(|home| std::fs::read_dir(home.join("projects")).into_iter().flatten().flatten().map(|d| d.path()))
 }
 
 /// The last turns of Claude conversation `uuid`, at most `budget` characters.
@@ -73,10 +78,8 @@ fn codex_context_in(jsonl: &str) -> Option<(u64, u64)> {
 /// The transcript of Claude subagent `id`: `~/.claude/projects/<dir>/<parent>/subagents/agent-<id>.jsonl`,
 /// looked for under every conversation when the parent's `uuid` isn't known.
 pub fn claude_subagent_path(parent: Option<&str>, id: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let file = format!("agent-{id}.jsonl");
-    let projects = std::fs::read_dir(home.join(".claude/projects")).ok()?.flatten().map(|d| d.path());
-    projects
+    claude_projects()
         .flat_map(|project| match parent {
             Some(uuid) => vec![project.join(uuid)],
             None => std::fs::read_dir(&project).into_iter().flatten().flatten().map(|d| d.path()).collect(),

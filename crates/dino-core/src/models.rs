@@ -63,10 +63,6 @@ fn codex_home() -> PathBuf {
     std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".codex"))
 }
 
-pub(crate) fn claude_home() -> PathBuf {
-    std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".claude"))
-}
-
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
@@ -79,7 +75,7 @@ pub fn codex_sources() -> Vec<PathBuf> {
 /// The files Claude's catalog is read from, to tell when to read it again.
 pub fn claude_sources() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = claude_catalog_file().into_iter().collect();
-    v.push(claude_home().join("settings.json"));
+    v.push(crate::claude_config::home().join("settings.json"));
     v.push(PathBuf::from(CLAUDE_MANAGED));
     v
 }
@@ -143,7 +139,7 @@ pub fn codex_from_program(program: &str) -> Option<Catalog> {
 
 /// The newest `*-cc.json` in Claude Code's model catalog cache: what `/model` offers this account.
 fn claude_catalog_file() -> Option<PathBuf> {
-    std::fs::read_dir(claude_home().join("cache/model-catalog"))
+    std::fs::read_dir(crate::claude_config::home().join("cache/model-catalog"))
         .ok()?
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().ends_with("-cc.json"))
@@ -205,7 +201,7 @@ fn claude_allowed() -> Option<Vec<String>> {
         let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
         v.get("availableModels")?.as_array().map(|a| a.iter().filter_map(|m| m.as_str().map(String::from)).collect())
     };
-    read(Path::new(CLAUDE_MANAGED)).or_else(|| read(&claude_home().join("settings.json")))
+    read(Path::new(CLAUDE_MANAGED)).or_else(|| read(&crate::claude_config::home().join("settings.json")))
 }
 
 /// Claude's catalog; `version` is what `claude --version` says.

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{Agent, ControlKind, StatusSource, Wiring, strings};
+use crate::claude_config;
 use crate::found::{self, FoundSession, Source};
 use crate::history::{self, Turn};
 use crate::models::{self, Catalog};
@@ -14,15 +15,25 @@ pub(crate) struct Claude {
     pub(crate) free: bool,
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+/// The `~/.claude/sessions/<pid>.json` Claude process `pid` keeps while it runs, in Claude's
+/// config folder `config`.
+fn session_file_in(config: &Path, pid: u32) -> Option<Value> {
+    serde_json::from_str(&std::fs::read_to_string(config.join(format!("sessions/{pid}.json"))).ok()?).ok()
 }
 
-/// The live `~/.claude/sessions/<pid>.json` of an interactive Claude, if `pid` is one.
-fn live(pid: u32) -> Option<Value> {
-    let text = std::fs::read_to_string(home().join(format!(".claude/sessions/{pid}.json"))).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
+/// That file, in whichever of the config folders dino knows of it is (see `claude_config`).
+fn session_file(pid: u32) -> Option<Value> {
+    claude_config::homes().iter().find_map(|c| session_file_in(c, pid))
+}
+
+/// `v`, if it's the session file of `pid` as an interactive Claude.
+fn interactive(v: Value, pid: u32) -> Option<Value> {
     (v["pid"].as_u64() == Some(pid as u64) && v["kind"].as_str().is_none_or(|k| k == "interactive")).then_some(v)
+}
+
+/// The live session file of an interactive Claude, if `pid` is one.
+fn live(pid: u32) -> Option<Value> {
+    interactive(session_file(pid)?, pid)
 }
 
 /// Whether Claude Code would take bypass in its cycle without asking first, for a session in
@@ -211,7 +222,7 @@ impl Agent for Claude {
     // Claude's warning about bypass is out of the way: until the user accepts it, the flag puts
     // that warning up as every session starts, and declining it quits (seen with 2.1.291).
     fn reach_args(&self, mode: &str, cwd: &Path, config: Option<&Path>) -> Vec<String> {
-        let config = config.map_or_else(models::claude_home, Path::to_path_buf);
+        let config = config.map_or_else(claude_config::home, Path::to_path_buf);
         if mode == "bypass" && bypass_ready(&config, Path::new(models::CLAUDE_MANAGED), cwd) {
             strings(&["--allow-dangerously-skip-permissions"])
         } else {
@@ -341,9 +352,7 @@ impl Agent for Claude {
 
     /// Claude reports `busy`/`idle` in `~/.claude/sessions/<pid>.json`.
     fn busy(&self, pid: u32) -> Option<bool> {
-        let text = std::fs::read_to_string(home().join(format!(".claude/sessions/{pid}.json"))).ok()?;
-        let v: Value = serde_json::from_str(&text).ok()?;
-        Some(v["status"].as_str()? == "busy")
+        Some(session_file(pid)?["status"].as_str()? == "busy")
     }
 
     fn portable_flags(&self, args: &[String]) -> Vec<String> {
@@ -354,10 +363,12 @@ impl Agent for Claude {
         )
     }
 
-    /// Claude Code writes `~/.claude/sessions/<pid>.json` for every live process.
+    /// Claude Code writes `~/.claude/sessions/<pid>.json` for every live process, in the config
+    /// folder it runs with: those dino knows of.
     fn running(&self, procs: &crate::procinfo::Procs) -> Vec<FoundSession> {
         let mut out = vec![];
-        for e in std::fs::read_dir(home().join(".claude/sessions")).into_iter().flatten().flatten() {
+        let files = claude_config::homes().into_iter().flat_map(|c| std::fs::read_dir(c.join("sessions")).into_iter().flatten().flatten());
+        for e in files {
             let p = e.path();
             if p.extension().is_none_or(|x| x != "json") {
                 continue;
@@ -406,9 +417,16 @@ impl Agent for Claude {
         !self.free && (comm.contains("/claude/versions/") || comm.rsplit('/').next() == Some("claude"))
     }
 
-    // Found by its session file: its native binary is named after its version.
-    fn inside(&self, pid: u32, _comm: &str, _args: &dyn Fn() -> Vec<String>) -> Option<FoundSession> {
-        let v = live(pid)?;
+    // Found by its session file: its native binary is named after its version. One started with
+    // a config folder dino doesn't know of has its file there: its environment says which, known
+    // from then on.
+    fn inside(&self, pid: u32, comm: &str, _args: &dyn Fn() -> Vec<String>) -> Option<FoundSession> {
+        let v = live(pid).or_else(|| {
+            let own = self.may_be(comm).then(|| claude_config::of_process(pid)).flatten()?;
+            let v = interactive(session_file_in(&own, pid)?, pid)?;
+            claude_config::note(&own);
+            Some(v)
+        })?;
         let mut s = found::by_hand("claude", pid);
         s.session_id = v["sessionId"].as_str().unwrap_or_default().into();
         s.title = crate::transcript::claude_path(&s.session_id)
@@ -512,6 +530,79 @@ impl Agent for Claude {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A conversation kept in a config folder of its own (`CLAUDE_CONFIG_DIR`): once dino knows of
+    /// the folder, it's resumed rather than started again with the same id (which Claude refuses,
+    /// "Session ID … is already in use"), and its transcript, its subagents', and the file its
+    /// process keeps are all read there.
+    #[test]
+    fn a_conversation_in_a_config_folder_of_its_own_is_found_there() {
+        let config = std::env::temp_dir().join(format!("dino-claude-own-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        let (uuid, sub) = (crate::new_uuid(), "a1b2c3");
+        let transcript = config.join(format!("projects/-r/{uuid}.jsonl"));
+        let subagent = config.join(format!("projects/-r/{uuid}/subagents/agent-{sub}.jsonl"));
+        std::fs::create_dir_all(subagent.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        std::fs::write(&transcript, "{}\n").unwrap();
+        std::fs::write(&subagent, "{}\n").unwrap();
+        // No process has this pid: macOS's go up to 99999.
+        let pid = 5_000_000 + std::process::id();
+        std::fs::write(config.join(format!("sessions/{pid}.json")), format!(r#"{{"pid":{pid},"sessionId":"{uuid}","status":"busy","kind":"interactive"}}"#)).unwrap();
+        let claude = Claude { free: false };
+        let resume = |c: &Claude| c.session_args(&mut Some(uuid.clone()), true).1;
+
+        assert_eq!(resume(&claude), ["--session-id", uuid.as_str()], "a folder dino doesn't know of");
+        assert_eq!(claude.conversation_of(pid), None);
+        claude_config::note(&config);
+        assert_eq!(resume(&claude), ["--resume", uuid.as_str()]);
+        assert_eq!(claude.transcript(&uuid), Some(transcript.clone()));
+        assert_eq!(crate::transcript::claude_subagent_path(Some(&uuid), sub), Some(subagent.clone()));
+        assert_eq!(claude.transcript(sub), Some(subagent.clone()), "a subagent's id reads its own");
+        assert!(history::claude_transcripts().contains(&transcript));
+        let usage = history::claude_usage_files();
+        assert!(usage.contains(&transcript) && usage.contains(&subagent));
+        assert_eq!(claude.conversation_of(pid).as_deref(), Some(uuid.as_str()));
+        assert_eq!(claude.busy(pid), Some(true));
+        std::fs::remove_dir_all(&config).unwrap();
+    }
+
+    /// A Claude typed by hand into a dino shell with a config folder dino doesn't know of: its
+    /// environment says which, and its session file is read there.
+    #[test]
+    fn a_claude_by_hand_is_found_by_its_own_config_folder() {
+        const STAND_IN: &str = "DINO_TEST_CLAUDE_STAND_IN";
+        if std::env::var_os(STAND_IN).is_some() {
+            // The Claude: a process of ours (macOS hides its own programs' environments), around
+            // for a while.
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            return;
+        }
+        let config = std::env::temp_dir().join(format!("dino-claude-by-hand-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "agent::claude::tests::a_claude_by_hand_is_found_by_its_own_config_folder", "--test-threads=1"])
+            .env(STAND_IN, "1")
+            .env(claude_config::ENV, &config)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert_eq!(claude_config::of_process(pid), Some(config.clone()));
+        let uuid = crate::new_uuid();
+        std::fs::write(config.join(format!("sessions/{pid}.json")), format!(r#"{{"pid":{pid},"sessionId":"{uuid}","cwd":"/r","kind":"interactive"}}"#)).unwrap();
+        let claude = Claude { free: false };
+
+        assert!(claude.inside(pid, "/usr/bin/vim", &Vec::new).is_none(), "only a process that may be Claude is asked");
+        assert!(!claude_config::homes().contains(&config));
+        let found = claude.inside(pid, "/Users/x/.local/share/claude/versions/2.1.292", &Vec::new).unwrap();
+        assert_eq!(found.session_id, uuid);
+        assert!(claude_config::homes().contains(&config), "known from then on");
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(&config).unwrap();
+    }
 
     #[test]
     fn bypass_joins_the_cycle_only_once_its_warning_was_accepted_and_nothing_turns_it_off() {
