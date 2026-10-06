@@ -25,6 +25,20 @@ fn live(pid: u32) -> Option<Value> {
     (v["pid"].as_u64() == Some(pid as u64) && v["kind"].as_str().is_none_or(|k| k == "interactive")).then_some(v)
 }
 
+/// Whether Claude Code would take bypass in its cycle without asking first, for a session in
+/// `cwd` with config folder `config`: the user accepted its warning about bypass once (it then
+/// writes `skipDangerousModePermissionPrompt` to their settings), or the organization's settings
+/// (`managed`) skip it; and no settings turn bypass off. A repository's own settings can't skip
+/// the warning, so only these two are read for that.
+fn bypass_ready(config: &Path, managed: &Path, cwd: &Path) -> bool {
+    let read = |p: &Path| std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let (user, managed) = (read(&config.join("settings.json")), read(managed));
+    let project = [read(&cwd.join(".claude/settings.json")), read(&cwd.join(".claude/settings.local.json"))];
+    let off = |v: &Option<Value>| v.as_ref().and_then(|v| v.pointer("/permissions/disableBypassPermissionsMode")?.as_str()) == Some("disable");
+    let skips = |v: &Option<Value>| v.as_ref().and_then(|v| v.get("skipDangerousModePermissionPrompt")?.as_bool()) == Some(true);
+    !(off(&user) || off(&managed) || project.iter().any(off)) && (skips(&user) || skips(&managed))
+}
+
 /// Claude Code's command line (`claude --help`, 2.1), for finding a prompt in it.
 const CLI: super::Cli = super::Cli {
     value: &[
@@ -191,6 +205,18 @@ impl Agent for Claude {
         }
         order.push("auto");
         Some(("\x1b[Z", order))
+    }
+
+    // Bypass in Shift+Tab's cycle from the start, so switching into it is a keypress. Only once
+    // Claude's warning about bypass is out of the way: until the user accepts it, the flag puts
+    // that warning up as every session starts, and declining it quits (seen with 2.1.291).
+    fn reach_args(&self, mode: &str, cwd: &Path, config: Option<&Path>) -> Vec<String> {
+        let config = config.map_or_else(models::claude_home, Path::to_path_buf);
+        if mode == "bypass" && bypass_ready(&config, Path::new(models::CLAUDE_MANAGED), cwd) {
+            strings(&["--allow-dangerously-skip-permissions"])
+        } else {
+            vec![]
+        }
     }
 
     fn catalog_key(&self) -> &'static str {
@@ -480,5 +506,40 @@ impl Agent for Claude {
             "AWS_SESSION_TOKEN",
             "AWS_BEARER_TOKEN_BEDROCK",
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bypass_joins_the_cycle_only_once_its_warning_was_accepted_and_nothing_turns_it_off() {
+        let root = std::env::temp_dir().join(format!("dino-bypass-ready-{}", std::process::id()));
+        let (config, repo, managed) = (root.join("config"), root.join("repo"), root.join("managed-settings.json"));
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        let write = |p: &Path, json: &str| std::fs::write(p, json).unwrap();
+        let ready = || bypass_ready(&config, &managed, &repo);
+        let reach = |config: &Path| Claude { free: false }.reach_args("bypass", &repo, Some(config));
+
+        assert!(!ready(), "never accepted: the flag would put the warning up at every start");
+        write(&repo.join(".claude/settings.local.json"), r#"{"skipDangerousModePermissionPrompt": true}"#);
+        assert!(!ready(), "a repository's own settings don't skip it");
+        write(&config.join("settings.json"), r#"{"model": "opus", "skipDangerousModePermissionPrompt": true}"#);
+        assert!(ready(), "accepted once, written to the user's settings");
+        assert_eq!(reach(&config), ["--allow-dangerously-skip-permissions"]);
+        assert!(Claude { free: false }.reach_args("plan", &repo, Some(&config)).is_empty(), "only bypass needs it");
+        assert!(reach(&root.join("another-account")).is_empty(), "another config folder, not accepted there");
+
+        write(&repo.join(".claude/settings.json"), r#"{"permissions": {"disableBypassPermissionsMode": "disable"}}"#);
+        assert!(!ready(), "turned off in the repository");
+        std::fs::remove_file(repo.join(".claude/settings.json")).unwrap();
+        write(&managed, r#"{"permissions": {"disableBypassPermissionsMode": "disable"}}"#);
+        assert!(!ready(), "turned off by the organization");
+        write(&config.join("settings.json"), "{}");
+        write(&managed, r#"{"skipDangerousModePermissionPrompt": true}"#);
+        assert!(ready(), "the organization skips it");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
