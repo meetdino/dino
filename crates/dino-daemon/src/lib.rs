@@ -265,8 +265,9 @@ struct Daemon {
     worktrees: Mutex<Vec<SessionWorktree>>,
     /// Session id → the PR from its branch, as of the last poll.
     prs: Mutex<HashMap<String, ipc::PrInfo>>,
-    /// One PR poll at a time, so an automatic step is never taken twice.
-    pr_poll: Mutex<()>,
+    /// One PR poll at a time, so an automatic step is never taken twice. Held with it: the branches
+    /// it last found no PR for, where they were pushed to then and when (see `refresh_prs`).
+    pr_poll: Mutex<HashMap<(PathBuf, String), (String, Instant)>>,
     /// Sessions whose PR merged or closed, to archive once their turn is over; since when.
     closing: Mutex<HashMap<String, Instant>>,
     /// Sessions closed with time to undo it (see `Request::Close`): gone from every list, their
@@ -682,8 +683,7 @@ fn peer(stream: &UnixStream) -> String {
     if !ok || pid <= 0 {
         return "an unknown process".into();
     }
-    let name = std::process::Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().rsplit('/').next().unwrap_or("").to_string()).unwrap_or_default();
+    let name = dino_core::procinfo::name(pid as u32).unwrap_or_default();
     format!("pid {pid} ({name})")
 }
 
@@ -1085,10 +1085,23 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 | Request::RemoveStored { .. }
                 | Request::FreeUpSpace
         );
-        // A hover card asks for its session's cost every couple of seconds: nothing changes.
-        // Nothing a client shows changes with these: no client looks again because of them (the build
-        // cache's stats are asked for every few seconds while Settings shows them).
-        let reads_state = matches!(req, Request::State | Request::StateChange { .. } | Request::SessionCost { .. } | Request::BuildCache | Request::BuildCacheEnsure);
+        // Nothing a client shows changes with these: no client looks again because of them. The app
+        // asks most of them every few seconds (the sidebar's tree, automations, agents in other
+        // terminals, settings, a hover card's cost, the build cache's stats while Settings shows them).
+        let reads_state = matches!(
+            req,
+            Request::State
+                | Request::StateChange { .. }
+                | Request::SessionCost { .. }
+                | Request::BuildCache
+                | Request::BuildCacheEnsure
+                | Request::Tree { .. }
+                | Request::Found { .. }
+                | Request::Launchers
+                | Request::ScheduleList
+                | Request::Archived
+                | Request::Settings
+        );
         let resp = match req {
             Request::State => state(d),
             Request::StateChange { seen } => state_change(d, seen),
@@ -3034,7 +3047,13 @@ fn save(d: &Daemon) {
             let _ = std::fs::remove_file(f.path());
         }
     }
-    let _ = write_private(&saved_path(&d.home), &serde_json::to_vec_pretty(&saved).unwrap_or_default());
+    // Written only when it changed: it's saved every few seconds, and mostly it hasn't.
+    static WRITTEN: Mutex<Option<(PathBuf, Vec<u8>)>> = Mutex::new(None);
+    let (path, bytes) = (saved_path(&d.home), serde_json::to_vec_pretty(&saved).unwrap_or_default());
+    let mut written = WRITTEN.lock().unwrap();
+    if written.as_ref().is_none_or(|(p, b)| *p != path || *b != bytes) && write_private(&path, &bytes).is_ok() {
+        *written = Some((path, bytes));
+    }
 }
 
 /// What it takes to bring `s` back.
@@ -3676,14 +3695,15 @@ fn tty_of(pid: u32) -> Option<String> {
 
 /// SIGTERM, then SIGKILL if it hasn't exited after a few seconds.
 fn stop(pid: u32) -> anyhow::Result<()> {
-    let alive = || std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| s.success());
-    let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    let signal = |sig| unsafe { libc::kill(pid as libc::pid_t, sig) } == 0;
+    let alive = || signal(0);
+    signal(libc::SIGTERM);
     let deadline = Instant::now() + std::time::Duration::from_secs(5);
     while alive() && Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     if alive() {
-        let _ = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+        signal(libc::SIGKILL);
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     if alive() {
@@ -4334,6 +4354,9 @@ struct AutoState {
 /// so): long enough to see it happen.
 const CLOSE_AFTER_MERGE: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// How often a pushed branch without a PR is asked about while nothing new is pushed to it.
+const PR_MISS_AGAIN: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 /// How long after the user last typed in a session an automatic fix waits.
 const LEAVE_THE_USER: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -4341,7 +4364,7 @@ const LEAVE_THE_USER: std::time::Duration = std::time::Duration::from_secs(10);
 /// Sessions on the same branch share one lookup; on the default branch, detached, or without gh
 /// there's none. Failures just mean no PR.
 fn refresh_prs(d: &Daemon) {
-    let _one = d.pr_poll.lock().unwrap();
+    let mut misses = d.pr_poll.lock().unwrap();
     if dino_core::which("gh").is_none() {
         d.prs.lock().unwrap().clear();
         return;
@@ -4350,18 +4373,51 @@ fn refresh_prs(d: &Daemon) {
     let mut looked_up: HashMap<(PathBuf, String), Option<ipc::PrInfo>> = HashMap::new();
     let mut found = HashMap::new();
     let mut with_pr = vec![];
-    for s in live {
-        let Ok(root) = worktree::repo_root(&s.cwd) else { continue };
-        let Some(branch) = pr::branch(&root) else { continue };
-        let pr = looked_up
-            .entry((root.clone(), branch.clone()))
-            .or_insert_with(|| (branch != pr::default_branch(&root)).then(|| pr::view(&root, &branch).ok()).flatten());
+    let old = d.prs.lock().unwrap().clone();
+    let on: Vec<(Arc<Session>, PathBuf, String)> = live
+        .into_iter()
+        .filter_map(|s| {
+            let root = worktree::repo_root(&s.cwd).ok()?;
+            let branch = pr::branch(&root)?;
+            Some((s, root, branch))
+        })
+        .collect();
+    // A branch that had no PR is asked about again once it's pushed somewhere new, or after a few
+    // minutes (a PR opened on the web); one never pushed has none. One with a PR, or with automatic
+    // steps on, is asked every time.
+    let watched: HashSet<(PathBuf, String)> = on
+        .iter()
+        .filter(|(s, ..)| old.contains_key(&s.id) || {
+            let a = s.auto.lock().unwrap();
+            a.pr.fix || a.pr.merge
+        })
+        .map(|(_, root, branch)| (root.clone(), branch.clone()))
+        .collect();
+    for (s, root, branch) in on {
+        let key = (root.clone(), branch.clone());
+        let pr = looked_up.entry(key.clone()).or_insert_with(|| {
+            if branch == pr::default_branch(&root) {
+                return None;
+            }
+            let watched = watched.contains(&key);
+            let pushed = if watched { String::new() } else { pr::pushed(&root, &branch)? };
+            if !watched && misses.get(&key).is_some_and(|(at, when)| *at == pushed && when.elapsed() < PR_MISS_AGAIN) {
+                return None;
+            }
+            let pr = pr::view(&root, &branch).ok();
+            match pr {
+                None => misses.insert(key, (pushed, Instant::now())),
+                Some(_) => misses.remove(&key),
+            };
+            pr
+        });
         if let Some(pr) = pr {
             found.insert(s.id.clone(), pr.clone());
             with_pr.push((s, root, branch, pr.clone()));
         }
     }
-    let old = std::mem::replace(&mut *d.prs.lock().unwrap(), found);
+    *d.prs.lock().unwrap() = found;
+    misses.retain(|k, _| looked_up.contains_key(k));
     // One automatic step per PR, however many sessions share its branch.
     let mut acted = HashSet::new();
     for (s, root, branch, pr) in with_pr {

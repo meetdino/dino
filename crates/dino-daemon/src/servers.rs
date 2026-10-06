@@ -5,6 +5,7 @@
 //! only a process still under that agent, running that command, is ever signalled.
 
 use crate::{Daemon, Session};
+use dino_core::procinfo;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,14 +21,12 @@ pub(crate) struct Server {
 /// Look again at every local session with background commands still running.
 pub(crate) fn watch(d: &Daemon) {
     let sessions: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| s.host.is_none() && !s.pane.is_exited()).cloned().collect();
-    let mut tree = None;
     for s in sessions {
         let running = running_commands(d, &s);
         let found = if running.is_empty() {
             vec![]
         } else {
-            let tree = tree.get_or_insert_with(processes);
-            s.pane.pid().map(|agent| serving(tree, agent, &running)).unwrap_or_default()
+            s.pane.pid().map(|agent| serving(&processes(agent), agent, &running)).unwrap_or_default()
         };
         let mut servers = s.servers.lock().unwrap();
         if *servers != found {
@@ -48,20 +47,9 @@ fn running_commands(d: &Daemon, s: &Session) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Every process: its parent and its command line.
-fn processes() -> HashMap<u32, (u32, String)> {
-    let out = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,args="]).output();
-    let Ok(out) = out else { return HashMap::new() };
-    String::from_utf8_lossy(&out.stdout).lines().filter_map(ps_line).collect()
-}
-
-/// `  812    1 /bin/bash -c …`: ps pads each column to its widest value, so split on runs of spaces.
-fn ps_line(l: &str) -> Option<(u32, (u32, String))> {
-    let l = l.trim_start();
-    let (pid, rest) = l.split_once(char::is_whitespace)?;
-    let rest = rest.trim_start();
-    let (ppid, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    Some((pid.parse().ok()?, (ppid.parse().ok()?, args.trim().to_string())))
+/// The agent and every process under it: its parent and its command line.
+fn processes(agent: u32) -> HashMap<u32, (u32, String)> {
+    procinfo::tree(agent).into_iter().map(|(pid, parent)| (pid, (parent, procinfo::args_and_env(pid).map(|(a, _)| a.join(" ")).unwrap_or_default()))).collect()
 }
 
 /// The agent's shell running `command`: a direct child of the agent whose command line carries it,
@@ -114,7 +102,7 @@ pub(crate) fn stop(d: &Daemon, s: &Session, task: &str) -> anyhow::Result<()> {
     let command = running_commands(d, s).into_iter().find(|(id, _)| id == task).map(|(_, c)| c);
     let command = command.ok_or_else(|| anyhow::anyhow!("that command isn't running any more"))?;
     let agent = s.pane.pid().ok_or_else(|| anyhow::anyhow!("its agent isn't running"))?;
-    let tree = processes();
+    let tree = processes(agent);
     let shell = shell_for(&tree, agent, &command).ok_or_else(|| anyhow::anyhow!("couldn't find that command's process"))?;
     let pids = subtree(&tree, shell);
     // As ⌃C in its terminal would: a server takes that as asked to stop and exits cleanly, so the
@@ -125,8 +113,7 @@ pub(crate) fn stop(d: &Daemon, s: &Session, task: &str) -> anyhow::Result<()> {
         for sig in [libc::SIGTERM, libc::SIGKILL] {
             std::thread::sleep(Duration::from_secs(3));
             // Only ones that are still what they were: the same pid under the same parent.
-            let now = processes();
-            let left: Vec<u32> = pids.iter().copied().filter(|p| now.get(p).is_some_and(|(pp, _)| tree.get(p).is_some_and(|(was, _)| was == pp))).collect();
+            let left: Vec<u32> = pids.iter().copied().filter(|p| procinfo::parent_of(*p).is_some_and(|pp| tree.get(p).is_some_and(|(was, _)| *was == pp))).collect();
             if left.is_empty() {
                 break;
             }
@@ -168,10 +155,22 @@ mod tests {
     }
 
     #[test]
-    fn reads_ps_whatever_the_padding() {
-        assert_eq!(ps_line("  812     1 /bin/bash -c eval 'x'"), Some((812, (1, "/bin/bash -c eval 'x'".into()))));
-        assert_eq!(ps_line("21698  9257 python3 -m http.server"), Some((21698, (9257, "python3 -m http.server".into()))));
-        assert_eq!(ps_line("  7  1"), Some((7, (1, String::new()))));
-        assert_eq!(ps_line("garbage"), None);
+    fn reads_an_agents_processes() {
+        let mut shell = std::process::Command::new("/bin/sh").args(["-c", "eval 'sleep 30'; true"]).spawn().unwrap();
+        let me = std::process::id();
+        let mut tree = processes(me);
+        for _ in 0..50 {
+            if subtree(&tree, shell.id()).len() > 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            tree = processes(me);
+        }
+        let found = shell_for(&tree, me, "sleep 30");
+        let under = subtree(&tree, shell.id());
+        let _ = shell.kill();
+        let _ = shell.wait();
+        assert_eq!(found, Some(shell.id()));
+        assert_eq!(under.len(), 2, "the shell and its sleep: {tree:?}");
     }
 }

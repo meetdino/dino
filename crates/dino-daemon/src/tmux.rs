@@ -14,6 +14,8 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use dino_core::procinfo;
+
 /// How long a server has to answer one command. tmux answers in milliseconds; one that hasn't by
 /// then is stopped, busy in its config (a `run-shell`), or on a socket nothing serves.
 pub const ANSWER: Duration = Duration::from_millis(1500);
@@ -101,8 +103,7 @@ pub struct View {
 
 /// Whether process `pid` is a tmux (in a shell's foreground: a client, attached or on its way).
 pub fn is_tmux_process(pid: u32) -> bool {
-    let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output();
-    out.is_ok_and(|o| is_tmux(String::from_utf8_lossy(&o.stdout).trim()))
+    procinfo::name(pid).is_some_and(|n| is_tmux(&n))
 }
 
 /// The tmux and the server socket of `fg`, when it's a tmux client. Its arguments don't change, so
@@ -202,7 +203,7 @@ const FRESH: std::time::Duration = std::time::Duration::from_millis(2500);
 /// Servers by their pid. Only ever read from: nothing here changes a server.
 static SERVERS: std::sync::Mutex<Option<std::collections::HashMap<u32, Server>>> = std::sync::Mutex::new(None);
 
-/// Fill in where each running agent that lives under a tmux server is: its pane. One `ps` for the
+/// Fill in where each running agent that lives under a tmux server is: its pane. One look at the
 /// process table and one `list-panes -a` per server (reused for [`FRESH`]); nothing at all when no
 /// agent runs in tmux.
 pub fn place(found: &mut [dino_core::found::FoundSession]) {
@@ -210,8 +211,8 @@ pub fn place(found: &mut [dino_core::found::FoundSession]) {
     if tmuxed.is_empty() {
         return;
     }
-    let table = processes();
-    let parent = |p: u32| table.get(&p).map(|(pp, _)| *pp);
+    let table = procinfo::processes();
+    let parent = |p: u32| table.get(&p).map(|pr| pr.parent);
     // Each agent's ancestors, and the nearest that is a tmux: the server its pane belongs to.
     let mut placed = vec![];
     for i in tmuxed {
@@ -219,7 +220,7 @@ pub fn place(found: &mut [dino_core::found::FoundSession]) {
         while let Some(pp) = parent(*chain.last().unwrap()).filter(|&pp| pp > 1 && chain.len() < 32) {
             chain.push(pp);
         }
-        if let Some(&server) = chain.iter().find(|p| table.get(p).is_some_and(|(_, c)| is_tmux(c))) {
+        if let Some(&server) = chain.iter().find(|p| table.get(p).is_some_and(|pr| is_tmux(&pr.name))) {
             placed.push((i, chain, server));
         }
     }
@@ -340,32 +341,11 @@ fn is_tmux(comm: &str) -> bool {
     comm.rsplit('/').next().is_some_and(|c| c == "tmux" || c.starts_with("tmux:"))
 }
 
-/// Every process: pid → (parent, command).
-fn processes() -> std::collections::HashMap<u32, (u32, String)> {
-    let out = Command::new("ps").args(["-A", "-o", "pid=,ppid=,comm="]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-    out.lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let pid = it.next()?.parse().ok()?;
-            let ppid = it.next()?.parse().ok()?;
-            Some((pid, (ppid, it.collect::<Vec<_>>().join(" "))))
-        })
-        .collect()
-}
-
 /// The executable and arguments of `pid`.
 fn command_of(pid: u32) -> Option<(PathBuf, Vec<String>)> {
-    let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()?;
-    let bin = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    let out = Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().ok()?;
-    let args = String::from_utf8_lossy(&out.stdout).split_whitespace().skip(1).map(String::from).collect();
-    // A bare `tmux` found on PATH: ask the same one.
-    let bin = if bin.is_absolute() { bin } else { which(&bin)? };
+    let bin = PathBuf::from(procinfo::exe_of(pid)?);
+    let args = procinfo::args_and_env(pid)?.0.into_iter().skip(1).collect();
     Some((bin, args))
-}
-
-fn which(name: &Path) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(name)).find(|p| p.is_file()))
 }
 
 /// The server's socket from the client's `-S path` or `-L name`, else tmux's default
@@ -444,6 +424,16 @@ mod tests {
         assert_eq!(s(&["-f", "/dev/null", "-S", "/y", "new"]), Some(PathBuf::from("/y")));
         // A `-S` after the command is the command's, not tmux's.
         assert_eq!(s(&["new", "-S", "/z"]).filter(|p| p == Path::new("/z")), None);
+    }
+
+    #[test]
+    fn reads_a_process_command_line() {
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let got = command_of(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(got, Some((PathBuf::from("/bin/sleep"), vec!["30".to_string()])));
+        assert!(!is_tmux_process(std::process::id()));
     }
 
     #[test]

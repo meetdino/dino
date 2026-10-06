@@ -189,7 +189,7 @@ pub fn cancel(key: &str) -> bool {
 }
 
 fn kill_group(pgid: u32) {
-    let _ = Command::new("kill").args(["-TERM", &format!("-{pgid}")]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    unsafe { libc::kill(-(pgid as libc::pid_t), libc::SIGTERM) };
 }
 
 fn last_line(s: &str) -> &str {

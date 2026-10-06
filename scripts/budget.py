@@ -12,6 +12,7 @@ test copy of the app (its own bundle id, registered for nothing), with a realist
 shells and two Claude Code sessions (haiku). Then it measures, and fails (exit 1) past the budget:
 
     idle app CPU                    <= 1 %
+    idle dinod CPU, app attached    <= 1 % with no sessions, <= 2 % with 20 shells
     WindowServer, app idle vs none  <= +5 points (measured twice: WindowServer is shared)
     one shell streaming (in view)   <= 10 %
     one Claude turn streaming       <= 10 %
@@ -48,7 +49,7 @@ SAFE = ["--model", "haiku", "--disallowedTools", "Artifact,Write,Edit,WebFetch,W
 
 BUDGET = {"idle": 1.0, "cat_s": 2.0, "cat_cpu": 2.5, "ws_delta": 5.0, "shell": 10.0, "claude": 10.0, "settings": 2.0, "lat_median": 1.0, "lat_p95": 2.0,
           "proxy_ttfb_median": 1.0, "proxy_ttfb_p95": 3.0, "proxy_total": 3.0, "proxy_cpu": 0.6,
-          "found_ms": 20.0, "found_idle": 0.2, "wt_first": 2.0, "wt_all": 15.0, "wt_idle": 0.5}
+          "found_ms": 20.0, "found_idle": 0.2, "wt_first": 2.0, "wt_all": 15.0, "wt_idle": 0.5, "dinod_idle": 1.0, "dinod_idle_20": 2.0}
 results, failures, warnings = [], [], []
 
 
@@ -80,9 +81,9 @@ def send(s, k, d):
     s.sendall(bytes([k]) + struct.pack(">I", len(d)) + d)
 
 
-def req(body):
+def req(body, home=HOME):
     s = socket.socket(socket.AF_UNIX)
-    s.connect(HOME + "/dinod.sock")
+    s.connect(home + "/dinod.sock")
     send(s, 0, json.dumps(body).encode())
     h = rd(s, 5)
     r = json.loads(rd(s, struct.unpack(">I", h[1:])[0]))
@@ -215,6 +216,41 @@ def latency():
     log(f"     echo: plain pty median {plain[0]:.2f} ms p95 {plain[1]:.2f} ms · through dinod median {via[0]:.2f} ms p95 {via[1]:.2f} ms")
     check("keystroke echo median, added by dinod", via[0] - plain[0], BUDGET["lat_median"], " ms")
     check("keystroke echo p95, added by dinod", via[1] - plain[1], BUDGET["lat_p95"], " ms")
+
+
+def dinod_idle():
+    """dinod's own CPU while nothing happens, with the app attached: none, then 20 idle shells.
+    Its own HOME, so no agent transcripts on this Mac are read in (a new dinod's usage backfill)."""
+    root = "/tmp/dino-budget-idle"
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root + "/home")
+    os.makedirs(root + "/dino")
+    open(root + "/home/.zshrc", "w").write("PROMPT='%# '\n")
+    open(root + "/dino/settings.toml", "w").write("[machine]\nonboarded = true\n")
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ZDOTDIR"))}
+    env = dict(base, HOME=root + "/home", SHELL="/bin/zsh", DINO_HOME=root + "/dino", TERM="xterm-256color")
+    d = subprocess.Popen([BIN, "daemon"], env=env, stdout=open(root + "/dinod.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    app = None
+    try:
+        end = time.time() + 10
+        while not os.path.exists(root + "/dino/dinod.sock") and time.time() < end:
+            time.sleep(0.1)
+        app = launch(env, "")
+        time.sleep(5)
+        check("idle dinod, app attached, no sessions", usage(d.pid, 20), BUDGET["dinod_idle"])
+        for _ in range(20):
+            req({"type": "new", "launcher": "shell", "args": [], "cwd": root + "/home", "cols": 100, "rows": 40}, root + "/dino")
+        time.sleep(10)
+        check("idle dinod, app attached, 20 shells", usage(d.pid, 20), BUDGET["dinod_idle_20"])
+    finally:
+        stop(app)
+        try:
+            for x in req({"type": "state"}, root + "/dino")["sessions"]:
+                req({"type": "kill", "id": x["id"]}, root + "/dino")
+        except Exception:
+            pass
+        d.kill(); d.wait()
+        shutil.rmtree(root, ignore_errors=True)
 
 
 # ---- the app -----------------------------------------------------------------------------------
@@ -706,6 +742,7 @@ def main():
         for c in glob.glob(os.path.expanduser("~/.claude/projects/-private-tmp-dino-budget*")) + glob.glob(os.path.expanduser("~/.claude/projects/-tmp-dino-budget*")):
             shutil.rmtree(c, ignore_errors=True)
 
+    dinod_idle()
     latency()
     throughput()
     proxy()
