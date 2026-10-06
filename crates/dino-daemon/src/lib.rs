@@ -2877,28 +2877,16 @@ fn restart_into(d: &Daemon, exe: &Path) -> ! {
 const STATE_LOOK: std::time::Duration = std::time::Duration::from_millis(250);
 const STATE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The state once it differs from `seen` (see `Request::StateChange`). How long ago a session last
-/// printed only counts by which side of 1.5 s and 5 s it is, as the app shows it: exact, it would
-/// differ on every look.
+/// The state once it differs from `seen` (see `Request::StateChange`).
 fn state_change(d: &Daemon, seen: Option<u64>) -> Response {
     let until = Instant::now() + STATE_WAIT;
     loop {
         let asked = *d.asked.0.lock().unwrap();
         let mut resp = state(d);
-        let Response::State { sessions, .. } = &mut resp else { return resp };
-        let exact: Vec<Option<u64>> = sessions.iter().map(|s| s.output_ms_ago).collect();
-        for s in sessions.iter_mut() {
-            s.output_ms_ago = s.output_ms_ago.map(|ms| if ms < 1500 { 0 } else if ms < 5000 { 1500 } else { 5000 });
+        let tag = shown(&mut resp);
+        if let Response::State { version, .. } = &mut resp {
+            *version = Some(tag);
         }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hasher::write(&mut h, &serde_json::to_vec(&resp).unwrap_or_default());
-        // Within the integers a JSON number holds exactly everywhere.
-        let tag = std::hash::Hasher::finish(&h) & ((1 << 53) - 1);
-        let Response::State { sessions, version, .. } = &mut resp else { return resp };
-        for (s, ms) in sessions.iter_mut().zip(exact) {
-            s.output_ms_ago = ms;
-        }
-        *version = Some(tag);
         if seen != Some(tag) || Instant::now() >= until {
             return resp;
         }
@@ -2907,6 +2895,32 @@ fn state_change(d: &Daemon, seen: Option<u64>) -> Response {
             let _ = d.asked.1.wait_timeout(guard, STATE_LOOK.min(until.saturating_duration_since(Instant::now())));
         }
     }
+}
+
+/// A tag for what clients show of state `resp`: it differs when that does. How long ago a session
+/// last printed only counts by which side of 1.5 s and 5 s it is, as the app shows it: exact, it
+/// would differ on every look. A shell's foreground counts by its name: a loop forking `sleep`
+/// has another pid at each look, and nothing shows it.
+fn shown(resp: &mut Response) -> u64 {
+    let Response::State { sessions, .. } = resp else { return 0 };
+    let exact: Vec<(Option<u64>, Option<u32>)> = sessions.iter().map(|s| (s.output_ms_ago, s.foreground.as_ref().map(|f| f.pid))).collect();
+    for s in sessions.iter_mut() {
+        s.output_ms_ago = s.output_ms_ago.map(|ms| if ms < 1500 { 0 } else if ms < 5000 { 1500 } else { 5000 });
+        if let Some(f) = &mut s.foreground {
+            f.pid = 0;
+        }
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hasher::write(&mut h, &serde_json::to_vec(&*resp).unwrap_or_default());
+    let Response::State { sessions, .. } = resp else { return 0 };
+    for (s, (ms, pid)) in sessions.iter_mut().zip(exact) {
+        s.output_ms_ago = ms;
+        if let (Some(f), Some(pid)) = (&mut s.foreground, pid) {
+            f.pid = pid;
+        }
+    }
+    // Within the integers a JSON number holds exactly everywhere.
+    std::hash::Hasher::finish(&h) & ((1 << 53) - 1)
 }
 
 // ---- Persistence: sessions survive dinod restarts (and reboots) by resuming each agent. ----
@@ -3528,10 +3542,14 @@ fn watch_shells(d: &Daemon) {
                 if i.found.is_some() || i.tmux.is_some() {
                     *s.pane.shared.title.lock().unwrap() = i.before.clone().flatten();
                 }
-                // Back at the prompt: what an agent's hooks said of it went with it.
+                // Back at the prompt: what an agent's hooks said of it went with it, and its own
+                // records are read while they're fresh. Only after an agent: a read looks at every
+                // agent's records on this Mac, and a loop forking `sleep` comes back here each time.
                 if i.fg.is_some() {
-                    d.proxy.stats.agent_left(&s.id);
-                    stats::session_ended();
+                    let hooked = d.proxy.stats.agent_left(&s.id);
+                    if hooked || i.found.is_some() {
+                        stats::session_ended();
+                    }
                 }
                 // Taken at the prompt: an agent can retitle before a poll sees it start.
                 *i = Inside { before: Some(s.pane.title()), ..Inside::default() };
@@ -4746,6 +4764,38 @@ mod tests {
         assert_eq!(undecorated("✳"), None);
         assert_eq!(undecorated("~/src/dino").as_deref(), Some("~/src/dino"));
         assert_eq!(undecorated("2 tasks").as_deref(), Some("2 tasks"));
+    }
+
+    /// A shell looping over a short command has another foreground process at each look: no
+    /// client is woken for it while it's the same command, nor for output a moment later.
+    #[test]
+    fn a_new_pid_of_the_same_command_is_no_change() {
+        let state = |fg: Option<(u32, &str)>, ms: u64| Response::State {
+            sessions: vec![SessionInfo {
+                id: "1".into(),
+                agent_id: "shell".into(),
+                running: fg.is_some(),
+                foreground: fg.map(|(pid, name)| ipc::ForegroundProcess { pid, name: name.into() }),
+                output_ms_ago: Some(ms),
+                ..SessionInfo::default()
+            }],
+            quotas: vec![],
+            power: None,
+            limits: vec![],
+            leftovers: vec![],
+            claude_accounts: None,
+            version: None,
+        };
+        let tag = |fg, ms| shown(&mut state(fg, ms));
+        let sleeping = tag(Some((101, "sleep")), 20);
+        assert_eq!(tag(Some((102, "sleep")), 300), sleeping);
+        assert_ne!(tag(Some((103, "vim")), 20), sleeping);
+        assert_ne!(tag(None, 20), sleeping, "back at the prompt");
+        assert_ne!(tag(Some((102, "sleep")), 2000), sleeping);
+        let mut s = state(Some((104, "sleep")), 300);
+        shown(&mut s);
+        let Response::State { sessions, .. } = s else { unreachable!() };
+        assert_eq!((sessions[0].foreground.as_ref().map(|f| f.pid), sessions[0].output_ms_ago), (Some(104), Some(300)), "what's sent is exact");
     }
 
     fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
