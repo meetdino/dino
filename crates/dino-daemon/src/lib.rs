@@ -5625,9 +5625,17 @@ while (sysread(STDIN, my $c, 1)) {
             }
         };
         let counts = || (d.git.reads.load(Ordering::Relaxed), d.git.listings.load(Ordering::Relaxed));
+        // Each step starts once everything seen before it has been read: what the last one set
+        // off (late, or in two goes) is never taken for this one's, and a watch macOS was slow to
+        // give is up.
+        let settle = || wait_for("everything seen to be read", Box::new(|| {
+            ask();
+            gitstate::settled(&d, &real(&repo))
+        }));
         let first = ask();
         assert_eq!(counts().0, 30, "each worktree read once");
         assert!(wts.iter().all(|w| find(&first, w).git.is_some_and(|g| g.state == "empty")));
+        settle();
         wait_for("a read with nothing changed to run no git", Box::new(|| {
             let before = counts();
             ask();
@@ -5641,12 +5649,14 @@ while (sysread(STDIN, my $c, 1)) {
             read.sort();
             read
         };
+        settle();
         let then = Instant::now();
         std::fs::write(wts[7].join("draft.txt"), "draft\n").unwrap();
         wait_for("the new file to show", Box::new(|| find(&ask(), &wts[7]).git.is_some_and(|g| g.uncommitted == 1)));
         assert_eq!(read_since(then), [real(&wts[7])], "only the worktree that changed is read again");
 
         // Its files, then its HEAD (the watch may say so one after the other): it alone.
+        settle();
         let then = Instant::now();
         git(&wts[3], &["commit", "-q", "--allow-empty", "-m", "Fix the parser"]);
         wait_for("the commit to show", Box::new(|| find(&ask(), &wts[3]).git.is_some_and(|g| g.ahead == 1 && g.label == "Fix the parser")));
