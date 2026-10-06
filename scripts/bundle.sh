@@ -19,8 +19,8 @@ dino_build_id() {
 # runs `Contents/Helpers/dino daemon` and waits for it (`DinodHost`): run as the helper itself,
 # dinod's terminals asked for Accessibility as a "dino" executable of their own. Named apart from
 # that agent (`<bundle>.dinod`): launchd keeps the launch constraint an agent got when it was first
-# registered (signed as `dino`), and the app's executable wouldn't meet it. Restarted by launchd if it crashes, not
-# otherwise (`dino stop` stays stopped), and not started at login: dino starts it when used, as before.
+# registered (signed as `dino`), and the app's executable wouldn't meet it. Restarted by launchd if
+# it crashes, not otherwise (`dino stop` stays stopped), and not started at login: dino starts it when used, as before.
 # Started again 2 s after it last started at the soonest, not launchd's 10: `dino stop` then a start.
 #   dino_agent APP BUNDLE_ID [AGENT_HOME]
 # AGENT_HOME: the $DINO_HOME of a second, isolated dino, which the app then runs with too, however
@@ -54,6 +54,30 @@ dino_agent() {
 </plist>
 PLIST
     plutil -lint -s "$app/Contents/Library/LaunchAgents/$label.plist"
+    # The agent before it, as it was: never started, only there so that the app can unregister it
+    # where an earlier dino registered it (SMAppService unregisters only an agent its bundle carries).
+    local old="${label/.dinod-host/.dinod}"
+    cat > "$app/Contents/Library/LaunchAgents/$old.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$old</string>
+    <key>BundleProgram</key><string>Contents/Helpers/dino</string>
+    <key>ProgramArguments</key><array><string>dino</string><string>daemon</string></array>
+    <key>AssociatedBundleIdentifiers</key><array><string>$bundle_id</string></array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DINO_LAUNCHD</key><string>$old</string>$env
+    </dict>
+    <key>KeepAlive</key><dict><key>Crashed</key><true/></dict>
+    <key>ThrottleInterval</key><integer>2</integer>
+    <key>ProcessType</key><string>Interactive</string>
+    <key>AbandonProcessGroup</key><true/>
+</dict>
+</plist>
+PLIST
+    plutil -lint -s "$app/Contents/Library/LaunchAgents/$old.plist"
 }
 
 # Signing: inside out, never --deep (Apple's guidance), always with the hardened runtime (no
