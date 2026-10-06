@@ -13,8 +13,11 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var bells: UInt64
     var requests: UInt64
     var in_flight: UInt32
+    /// Everything its calls read (cache reads included) and wrote.
     var input_tokens: UInt64
     var output_tokens: UInt64
+    /// Of `input_tokens`, what was read again from the prompt cache; nil from an older dinod.
+    var cache_read_tokens: UInt64?
     var last_model: String?
     var tier: String?
     var activity: String?
@@ -128,20 +131,24 @@ struct FallbackInfo: Codable, Equatable {
     var since: UInt64
 
     /// Answered by another of the user's Claude accounts ("Claude account 2"), not a fallback route.
-    var isAccount: Bool { provider == "anthropic" }
+    var isAccount: Bool { provider == "anthropic" && !isModel }
 
     /// Answered by another model of the same account, the one asked for being rejected.
     var isModel: Bool { reason == "unavailable" }
 
     /// What the session shows: "On fallback: GLM Coding Plan · Claude limit resets 14:00", for
-    /// another Claude account "Claude account 2 · resets 14:00", for another model
-    /// "gpt-5.5 unavailable · using gpt-5.4".
+    /// another Claude account "On Claude account 2 · account 1 back at 14:00" (the reset is the
+    /// spent account's, Claude Code's own sign-in), for another model "gpt-5.5 unavailable ·
+    /// using gpt-5.4".
     var label: String {
         if isModel { return "\(why) · using \(model)" }
         guard isAccount else { return "On fallback: \(name) · \(why)" }
-        if let t = resets_at { return "\(name) · resets \(Clock.short(t))" }
-        return "\(name) · \(from) at its limit"
+        if let t = resets_at { return "On \(name) · account 1 back at \(Clock.short(t))" }
+        return "On \(name) · account 1 at its limit"
     }
+
+    /// The sidebar row's, short: "On Claude account 3"; the footer says when account 1 is back.
+    var rowLabel: String { isAccount ? "On \(name)" : label }
 
     /// "Claude limit resets 14:00", "GLM out of balance", "Claude down".
     var why: String {
@@ -337,6 +344,11 @@ struct WindowInfo: Codable, Equatable {
     var name: String
     var utilization: Float
     var resets_at: UInt64?
+
+    /// A plan's window ("5h", "7d"), not another figure of the provider's.
+    var isWindow: Bool { name.hasSuffix("h") || name.hasSuffix("d") }
+    /// Ended since it was reported: its use now isn't known until a call reports it again.
+    var isPast: Bool { resets_at.map { TimeInterval($0) <= Date().timeIntervalSince1970 } ?? false }
 }
 
 struct QuotaInfo: Codable, Equatable {
@@ -676,7 +688,7 @@ struct Response: Decodable {
     var type: String
     var sessions: [SessionInfo]?
 
-    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, limits, leftovers, launchers, id, message, version, dino, installed, launchd, build, exe }
+    enum CodingKeys: String, CodingKey { case type, sessions, quotas, power, limits, leftovers, claude_accounts, launchers, id, message, version, dino, installed, launchd, build, exe }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -687,6 +699,7 @@ struct Response: Decodable {
         power = try c.decodeIfPresent(PowerInfo.self, forKey: .power)
         limits = try c.decodeIfPresent([AgentLimit].self, forKey: .limits)
         leftovers = try c.decodeIfPresent([Leftover].self, forKey: .leftovers)
+        claude_accounts = try c.decodeIfPresent([ClaudeAccountInfo].self, forKey: .claude_accounts)
         launchers = try c.decodeIfPresent([LauncherInfo].self, forKey: .launchers)
         id = try c.decodeIfPresent(String.self, forKey: .id)
         message = try c.decodeIfPresent(String.self, forKey: .message)
@@ -703,6 +716,9 @@ struct Response: Decodable {
     var limits: [AgentLimit]?
     /// Builds running for no session, found as dinod started; nil when none are (and from an older dinod).
     var leftovers: [Leftover]?
+    /// Your Claude accounts with their windows, once there's more than one; nil with one, and from
+    /// an older dinod.
+    var claude_accounts: [ClaudeAccountInfo]?
     var launchers: [LauncherInfo]?
     var id: String?
     var message: String?

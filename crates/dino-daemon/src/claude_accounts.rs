@@ -6,8 +6,10 @@
 use std::sync::{Arc, Mutex};
 
 use dino_core::claude_token::{self as token, account_key};
-use dino_core::ipc::{ClaudeAccountInfo, ClaudeAccountsInfo};
+use dino_core::ipc::{ClaudeAccountInfo, ClaudeAccountsInfo, WindowInfo};
 use dino_core::settings;
+use dino_proxy::Quota;
+use dino_proxy::fallback::Limited;
 
 use crate::Daemon;
 use crate::subtoken::{self, State};
@@ -74,11 +76,22 @@ pub(crate) fn info(d: &Daemon) -> ClaudeAccountsInfo {
     let tokens: Vec<&str> = have.iter().map(|(_, t)| t.as_str()).collect();
     let (own, others) = d.proxy.claude_accounts(&tokens);
     let numbers = std::iter::once(1).chain(have.iter().map(|(n, _)| *n));
+    let accounts = rows(numbers.zip(std::iter::once(own).chain(others)).map(|(n, l)| (n, l, None)));
+    let st = STATE.lock().unwrap();
+    ClaudeAccountsInfo { accounts, added: None, creating: st.creating.clone(), error: st.error.clone() }
+}
+
+/// For the state: every account with its windows, once there's more than one (see
+/// `Proxy::claude_accounts_now`).
+pub(crate) fn now(d: &Daemon) -> Option<Vec<ClaudeAccountInfo>> {
+    Some(rows(d.proxy.claude_accounts_now()?.into_iter()))
+}
+
+/// Each account as it stands, in the order they're tried: the first that isn't spent answers.
+fn rows(accounts: impl Iterator<Item = (u32, Option<Limited>, Option<Quota>)>) -> Vec<ClaudeAccountInfo> {
     let mut answering = false;
-    let accounts = numbers
-        .zip(std::iter::once(own).chain(others))
-        .map(|(number, spent)| {
-            // The first that isn't spent answers.
+    accounts
+        .map(|(number, spent, quota)| {
             let first = spent.is_none() && !answering;
             answering |= first;
             ClaudeAccountInfo {
@@ -87,9 +100,10 @@ pub(crate) fn info(d: &Daemon) -> ClaudeAccountsInfo {
                 spent: spent.is_some(),
                 resets_at: spent.as_ref().and_then(|l| l.resets_at),
                 retry_at: spent.as_ref().map(|l| l.retry_at),
+                windows: quota
+                    .map(|q| q.windows.into_iter().map(|(name, w)| WindowInfo { name, utilization: w.utilization, resets_at: w.resets_at }).collect())
+                    .unwrap_or_default(),
             }
         })
-        .collect();
-    let st = STATE.lock().unwrap();
-    ClaudeAccountsInfo { accounts, added: None, creating: st.creating.clone(), error: st.error.clone() }
+        .collect()
 }
