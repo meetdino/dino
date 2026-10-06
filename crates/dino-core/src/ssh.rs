@@ -160,7 +160,8 @@ pub fn remote_command(host: &str, folder: &str, program: &Program, args: &[Strin
             script += &format!("if [ -n \"${{{TOKEN_ENV}:-}}\" ]; then CLAUDE_CODE_OAUTH_TOKEN=\"${TOKEN_ENV}\"; export CLAUDE_CODE_OAUTH_TOKEN; fi\nunset {TOKEN_ENV}\n");
             let s = quote(session);
             if *resume {
-                script += &format!("if ls \"$HOME\"/.claude/projects/*/{s}.jsonl >/dev/null 2>&1; then set -- --resume {s}; else set -- --session-id {s}; fi\n");
+                // In its config folder there, which `CLAUDE_CONFIG_DIR` moves.
+                script += &format!("if ls \"${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}\"/projects/*/{s}.jsonl >/dev/null 2>&1; then set -- --resume {s}; else set -- --session-id {s}; fi\n");
             } else {
                 script += &format!("set -- --session-id {s}\n");
             }
@@ -275,7 +276,17 @@ mod tests {
 
     /// Runs the command as sshd would: through the user's shell, here with a made-up home.
     fn run(cmd: &str, home: &Path) -> (i32, String) {
-        let out = Command::new("/bin/sh").arg("-c").arg(cmd).env("HOME", home).env("SHELL", "/bin/sh").env("PATH", "/usr/bin:/bin").output().unwrap();
+        run_with(cmd, home, &[])
+    }
+
+    /// As `run`, with `env` set there too; the host's, so none of this process's.
+    fn run_with(cmd: &str, home: &Path, env: &[(&str, &Path)]) -> (i32, String) {
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg(cmd).env_remove("CLAUDE_CONFIG_DIR").env("HOME", home).env("SHELL", "/bin/sh").env("PATH", "/usr/bin:/bin");
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        let out = c.output().unwrap();
         (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
@@ -300,6 +311,14 @@ mod tests {
         std::fs::create_dir_all(home.join(".claude/projects/x")).unwrap();
         std::fs::write(home.join(".claude/projects/x/abc.jsonl"), "").unwrap();
         let (_, out) = run(&remote_command("devbox", "~/my proj", &claude, &[]), &home);
+        assert!(out.contains("args=--resume abc"), "{out}");
+        // A host whose Claude keeps its records elsewhere: there, and only there.
+        let config = home.join("claude-work");
+        let (_, out) = run_with(&remote_command("devbox", "~/my proj", &claude, &[]), &home, &[("CLAUDE_CONFIG_DIR", &config)]);
+        assert!(out.contains("args=--session-id abc"), "{out}");
+        std::fs::create_dir_all(config.join("projects/x")).unwrap();
+        std::fs::write(config.join("projects/x/abc.jsonl"), "").unwrap();
+        let (_, out) = run_with(&remote_command("devbox", "~/my proj", &claude, &[]), &home, &[("CLAUDE_CONFIG_DIR", &config)]);
         assert!(out.contains("args=--resume abc"), "{out}");
 
         let (code, out) = run(&remote_command("devbox", "/no/such", &claude, &[]), &home);

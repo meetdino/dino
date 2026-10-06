@@ -20,7 +20,7 @@ use dino_core::models::Catalog;
 use dino_core::providers::{Format, ProviderRoute, pick_format, route_path};
 use dino_core::settings::{self, Settings};
 use dino_core::agent::{StatusSource, agent};
-use dino_core::{claude_token, detect_agents, load_keys, new_uuid, pr, proxy_wiring, ssh, trust, user_shell, worktree};
+use dino_core::{claude_config, claude_token, detect_agents, load_keys, new_uuid, pr, proxy_wiring, ssh, trust, user_shell, worktree};
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
 
@@ -1799,6 +1799,10 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     {
         anyhow::bail!("its conversation is running in {} already", other.name);
     }
+    // An ended one isn't started again yet, but its conversation is still read: where its Claude keeps it.
+    if let Some(r) = ended.filter(|_| host.is_none()) {
+        session_claude_config(&repo_env(&settings, Path::new(&r.cwd)), &r.account);
+    }
     let (spec, cwd, server, reach) = match &host {
         _ if ended.is_some() => (None, PathBuf::from(ended.map(|r| r.cwd.clone()).unwrap_or_default()), None, vec![]),
         Some(host) => {
@@ -2015,12 +2019,17 @@ fn local_spec(
     route: Option<&ProviderRoute>,
 ) -> (SpawnSpec, PathBuf, Option<agentserver::Address>, Vec<String>) {
     let cwd = cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    // What it runs with besides dino's own wiring: the repo's environment, and the account an
+    // agent started by hand keeps (see below).
+    let repo = repo_env(settings, &cwd);
+    let account = restore.map(|r| r.account.clone()).unwrap_or_default();
+    let claude_config = session_claude_config(&repo, &account);
     // Claude reports its context window to its statusline; wrap the user's, if they have one.
     let adapter = agent(&l.agent_id);
     let status_line = std::env::current_exe()
         .ok()
         .filter(|_| adapter.is_some_and(|a| a.statusline()))
-        .and_then(|dino| dino_core::statusline::wrapper(&cwd, &dino));
+        .and_then(|dino| dino_core::statusline::wrapper(&cwd, claude_config.as_deref(), &dino));
     // On a provider's model the agent's own API isn't routed (it isn't used): only its status
     // wiring, then the provider's, which wins. The proxy's URLs carry its secret, so they go in
     // the agent's environment or a private file; one that must have them on its command line gets
@@ -2040,7 +2049,7 @@ fn local_spec(
     let model = route.map(|r| controls.model.clone().unwrap_or_else(|| r.model.clone()));
     let provider = route.zip(adapter).zip(model.as_deref()).and_then(|((r, a), m)| a.provider_wiring_for(&base(&route_path(&r.provider)), r.format?, m, providers::model(&r.provider, m).as_ref()));
     // The repo's environment first: dino's own wiring must win, or metering and hooks break.
-    let mut env: HashMap<String, String> = repo_env(settings, &cwd).into_iter().collect();
+    let mut env: HashMap<String, String> = repo.into_iter().collect();
     env.extend(wiring_env);
     if let Some((penv, pargs)) = provider.clone() {
         env.extend(penv);
@@ -2083,7 +2092,7 @@ fn local_spec(
     // An agent started by hand keeps the account it had there (another account's token, its
     // own gateway) over dino's defaults, the key store's token and the user's own login.
     let restoring = restore.is_some();
-    env.extend(restore.map(|r| r.account.clone()).unwrap_or_default());
+    env.extend(account);
     if adapter.is_some_and(|a| a.session_tools()) && settings.policies.session_tools {
         peers::wire_claude(id, &mut wired_args);
     }
@@ -2122,7 +2131,7 @@ fn local_spec(
     // Shift+Tab): switching into it later is a keypress, not a restart once its turn is over.
     let reach = match adapter {
         Some(a) if settings.policies.allow_bypass && controls.mode.as_deref() != Some("bypass") => {
-            a.reach_args("bypass", &cwd, env.get("CLAUDE_CONFIG_DIR").map(Path::new))
+            a.reach_args("bypass", &cwd, claude_config.as_deref())
         }
         _ => vec![],
     };
@@ -2141,6 +2150,15 @@ fn local_spec(
         }
     }
     (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd, server, reach)
+}
+
+/// The Claude config folder a session's environment sets, from its repo's environment (`repo`)
+/// and the account it keeps (`account`, which wins), rather than dinod's own: noted, so dino looks
+/// for its Claude's records there (see `dino_core::claude_config`).
+fn session_claude_config(repo: &[(String, String)], account: &[(String, String)]) -> Option<PathBuf> {
+    let dir = claude_config::set_in(repo.iter().chain(account).map(|(k, v)| (k.as_str(), v.as_str())))?;
+    claude_config::note(&dir);
+    Some(dir)
 }
 
 /// Where a session's private files go: inside dino's own folder, which only its user can open.
@@ -5299,6 +5317,45 @@ while (sysread(STDIN, my $c, 1)) {
         });
         assert_eq!(said(&d, &id).as_deref(), Some("gpt-5.6-luna"));
         s.pane.kill();
+    }
+
+    /// A Claude whose session has a config folder of its own (`CLAUDE_CONFIG_DIR` in the account
+    /// it keeps, as one continued from outside dino does) is started again on its conversation,
+    /// found there: started with the same id instead, Claude refused it ("Session ID … is already
+    /// in use") and every restart ended the session. An ended one's folder is known too, for its
+    /// conversation to be read.
+    #[test]
+    fn a_claude_with_its_own_config_folder_resumes_its_conversation_there() {
+        let dir = test_home().join("own-claude-config");
+        let config = dir.join("config");
+        let conversation = new_uuid();
+        std::fs::create_dir_all(config.join("projects/-w")).unwrap();
+        let claude = LauncherInfo { short: "claude".into(), agent_id: "claude".into(), label: "Claude Code".into(), program: "/usr/bin/true".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let d = test_daemon(vec![claude.clone()]);
+        let saved = SavedSession {
+            id: "9401".into(),
+            launcher: "claude".into(),
+            cwd: dir.display().to_string(),
+            agent_session: Some(conversation.clone()),
+            account: vec![("CLAUDE_CONFIG_DIR".into(), config.display().to_string())],
+            ..SavedSession::default()
+        };
+        let start = || {
+            let mut agent_session = saved.agent_session.clone();
+            local_spec(&d, &Settings::default(), &claude, Some(saved.cwd.clone()), &saved.id, &mut agent_session, Some(&saved), &Controls::default(), &[], None, None).0
+        };
+        let flag = |spec: &SpawnSpec| spec.args.windows(2).find(|w| w[1] == conversation).map(|w| w[0].clone());
+        assert_eq!(flag(&start()).as_deref(), Some("--session-id"), "nothing said yet: a new conversation with its id");
+        std::fs::write(config.join(format!("projects/-w/{conversation}.jsonl")), "{}\n").unwrap();
+        let spec = start();
+        assert_eq!(flag(&spec).as_deref(), Some("--resume"));
+        assert_eq!(spec.env.get("CLAUDE_CONFIG_DIR"), Some(&config.display().to_string()), "and it runs with its folder");
+
+        let other = dir.join("ended-config");
+        let ended = SavedSession { id: "9402".into(), ended: true, account: vec![("CLAUDE_CONFIG_DIR".into(), other.display().to_string())], ..saved.clone() };
+        spawn(&d, Launch { restore: Some(ended.clone()), ..Launch::new("claude", vec![], Some(ended.cwd.clone())) }).unwrap();
+        assert!(session(&d, "9402").pane.is_exited());
+        assert!(claude_config::homes().contains(&other));
     }
 
     /// With bypass allowed and Claude's warning about it accepted in its config folder, Claude
