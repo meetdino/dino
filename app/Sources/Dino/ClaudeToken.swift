@@ -54,7 +54,7 @@ struct ClaudeTokenSection: View {
                 }
                 Spacer()
                 if info?.creating != nil {
-                    ProgressView().controlSize(.small).help("Waiting for claude setup-token in a shell in the main window")
+                    ProgressView().controlSize(.small).help("Waiting for claude setup-token to finish in the main window")
                 }
                 if info?.set == true {
                     Button("Remove…", role: .destructive) { confirmRemove() }
@@ -62,12 +62,12 @@ struct ClaudeTokenSection: View {
                     Button("Paste…") { pasting = true }
                     Button("Create…") { create() }
                         .disabled(info?.creating != nil)
-                        .help("Runs claude setup-token in a new shell: sign in in your browser, and dino keeps the token it prints")
+                        .help("Runs claude setup-token in a new shell. Sign in with your browser, and dino saves the token.")
                 }
             }
             if info?.set == true {
-                Toggle("Use on SSH environments", isOn: use.ssh)
-                Toggle("Use for Claude Code on this Mac too", isOn: use.local)
+                Toggle("Use on SSH hosts", isOn: use.ssh)
+                Toggle("Use on this Mac, even when Claude Code is signed in", isOn: use.local)
             }
             if let e = error ?? info?.error {
                 Text(e).font(.callout).foregroundStyle(.red)
@@ -75,7 +75,7 @@ struct ClaudeTokenSection: View {
         } header: {
             Text("Claude Code Subscription Token")
         } footer: {
-            Footnote("A one-year token for your Claude plan, from claude setup-token, for Claude Code where it can't sign in in a browser. Only the Claude Code dino starts gets it: on SSH environments, and on this Mac while Claude Code here isn't signed in (always, with the second switch, over your own sign-in). Never other agents. Like every key, it stays on this Mac and never syncs.")
+            Footnote("Lets Claude Code use your Claude plan where it can't sign in through a browser, such as on SSH hosts. The token comes from claude setup-token and lasts a year. Only Claude Code sessions that dino starts use it, never other agents. On this Mac, it's used only while Claude Code isn't signed in, unless you turn on “Use on this Mac, even when Claude Code is signed in”. The token stays on this Mac and never syncs.")
         }
         .task { refresh() }
         // While setup-token runs, look until the token is in.
@@ -90,15 +90,15 @@ struct ClaudeTokenSection: View {
 
     private var detail: String {
         guard let info, info.set else {
-            if info?.creating != nil { return "Waiting for claude setup-token: sign in in your browser" }
-            return "Not set: Claude Code on SSH environments signs in on its own there"
+            if info?.creating != nil { return "Waiting for you to sign in with your browser…" }
+            return "Not set. Claude Code on SSH hosts uses its own sign-in."
         }
         var parts = [info.masked ?? "Set"]
         if let expires = info.expires {
-            parts.append("runs out \(Date(timeIntervalSince1970: TimeInterval(expires)).formatted(date: .abbreviated, time: .omitted))")
+            parts.append("expires \(Date(timeIntervalSince1970: TimeInterval(expires)).formatted(date: .abbreviated, time: .omitted))")
         }
         if info.signed_in == false {
-            parts.append("Claude Code here isn't signed in, so it's used here too")
+            parts.append("also used on this Mac, where Claude Code isn't signed in")
         }
         return parts.joined(separator: " · ")
     }
@@ -106,12 +106,12 @@ struct ClaudeTokenSection: View {
     private var pasteSheet: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Paste a Claude Code subscription token").font(.headline)
-            Text("The one claude setup-token printed, starting with sk-ant-oat.").font(.callout).foregroundStyle(.secondary)
+            Text("Paste the token that claude setup-token printed. It starts with sk-ant-oat.").font(.callout).foregroundStyle(.secondary)
             SecureField("sk-ant-oat01-…", text: $pasted).frame(width: 380)
             HStack {
                 Spacer()
                 Button("Cancel") { pasted = ""; pasting = false }.keyboardShortcut(.cancelAction)
-                Button("Keep It") { keep() }.keyboardShortcut(.defaultAction).disabled(pasted.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("Save") { keep() }.keyboardShortcut(.defaultAction).disabled(pasted.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
         .padding(20)
@@ -152,7 +152,7 @@ struct ClaudeTokenSection: View {
     private func confirmRemove() {
         let alert = NSAlert()
         alert.messageText = "Remove the Claude subscription token?"
-        alert.informativeText = "dino forgets it, so Claude Code on SSH environments needs its own sign-in there. The token itself stays valid until it runs out or you revoke it."
+        alert.informativeText = "Claude Code on SSH hosts will need to sign in on its own. The token stays valid until it expires or you revoke it."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {

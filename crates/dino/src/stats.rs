@@ -21,7 +21,7 @@ speed, all.
   --clear             forget every statistic; agents' records are read again next time, what
                       only the proxy saw is gone. Asks first on a terminal; --yes doesn't.
 
-Piped, it prints no header and no colour: one tab-separated line per row, its section first
+When piped, it prints no header and no colour: one tab-separated line per row, its section first
 (`totals`, `streaks`, `period`, `day`, `hour`, `model`, `agent`, `project`, `route`, `speed`),
 then the row's raw values in the order the terminal shows them. Token counts are whole numbers,
 times ISO dates or ms.
@@ -74,17 +74,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 range = Range::parse(v).ok_or_else(|| anyhow::anyhow!("--range takes 7d, 30d or all, not `{}`", printable(v)))?;
             }
             a if section.is_none() && SECTIONS.contains(&a) => section = Some(a.to_string()),
-            a => anyhow::bail!("dino stats doesn't take `{}`\n`dino stats --help` says what it does.", printable(a)),
+            a => anyhow::bail!("dino stats doesn't take `{}`\n`dino stats --help` lists its options.", printable(a)),
         }
     }
     if clear {
         if !yes {
-            anyhow::ensure!(out::tty() && std::io::IsTerminal::is_terminal(&std::io::stdin()), "dino stats --clear forgets every statistic: add --yes to go ahead");
-            eprint!("Forget every usage statistic? What only dino's proxy saw can't come back. [y/N] ");
+            anyhow::ensure!(out::tty() && std::io::IsTerminal::is_terminal(&std::io::stdin()), "dino stats --clear deletes all statistics: add --yes to confirm");
+            eprint!("Delete all usage statistics? Usage that only dino recorded can't be recovered. [y/N] ");
             let mut answer = String::new();
             std::io::stdin().read_line(&mut answer)?;
             if !matches!(answer.trim(), "y" | "Y" | "yes") {
-                eprintln!("Kept.");
+                eprintln!("Nothing deleted.");
                 return Ok(());
             }
         }
@@ -203,7 +203,7 @@ fn overview(p: &mut Printer, r: &Report) {
     p.heading(&format!("Usage, {}", range_words(r.range)));
     if t.requests == 0 {
         if out::tty() {
-            println!("{}", out::paint("Nothing yet. Agents' use shows here as they work, through dino or on their own.", Paint::Dim));
+            println!("{}", out::paint("No usage yet. It shows here as your agents work, in dino or on their own.", Paint::Dim));
         }
         return;
     }

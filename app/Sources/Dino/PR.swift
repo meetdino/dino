@@ -123,7 +123,7 @@ struct PRPopover: View {
                 if busy { ProgressView().controlSize(.small) }
                 if pr.isOpen, pr.checks.failed > 0, session.agent_id != "shell" {  // a shell has no one to read it
                     Button("Ask \(session.display) to Fix") { run { try await model.fixPR(session.id) } }
-                        .help("Paste the failing checks' logs into \(session.display) and ask it to fix them")
+                        .help("Send the failing checks' logs to \(session.display) and ask it to fix them")
                 }
                 if pr.canMerge {
                     Button("Merge") { confirmMerge = true }
@@ -146,7 +146,7 @@ struct PRPopover: View {
             Button("Squash and Merge") { run { try await model.mergePR(session.id) } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Its commits land on the base branch on GitHub as one.")
+            Text("Its commits are combined into one commit on the base branch on GitHub.")
         }
     }
 
@@ -167,14 +167,14 @@ struct PRPopover: View {
                 autoRow(
                     "Auto-fix failing checks",
                     detail: auto.flatMap { $0.fix && $0.fixes > 0 ? "\($0.fixes) of 3 asked" : nil },
-                    help: "When checks fail, paste their logs into \(session.display) and ask it to fix them: once per push, up to three times",
+                    help: "When checks fail, send their logs to \(session.display) and ask it to fix them. This happens once per push, up to three times.",
                     isOn: Binding(get: { auto?.fix ?? false }, set: { on in run { try await model.setAutoPR(session.id, fix: on) } })
                 )
             }
             autoRow(
                 "Auto-merge when checks pass",
                 detail: nil,
-                help: "Squash-merge once every check passes, unless a reviewer asked for changes",
+                help: "Squash and merge once every check passes, unless a reviewer requested changes",
                 isOn: Binding(get: { auto?.merge ?? false }, set: { on in run { try await model.setAutoPR(session.id, merge: on) } })
             )
             if let note = auto?.note {

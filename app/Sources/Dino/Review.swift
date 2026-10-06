@@ -120,7 +120,7 @@ struct ReviewPanel: View {
         .help(changes.map { "\($0.root)\nSince \($0.base)" } ?? "")
     }
 
-    private static let reviewHelp = "Claude reads these changes and comments only on likely bugs: code that won't compile, logic errors, security problems. The reviewer is always Claude, whichever agent made the changes."
+    private static let reviewHelp = "Claude reviews these changes and flags only likely bugs, such as code that won't compile, logic errors and security problems. Claude is the reviewer no matter which agent made the changes."
 
     @ViewBuilder
     private var reviewButton: some View {
@@ -411,7 +411,7 @@ private struct DiffRow: View {
                 Button("Comment on This Line", action: onComment)
                 if let open, let n = line.new { Button("Open File at Line \(n)") { open(Int(n)) } }
             }
-            .help("Click to comment on this line; right-click to open the file there")
+            .help("Click to comment on this line. Right-click to open the file at this line.")
         }
     }
 
@@ -485,7 +485,7 @@ private struct CommentCard: View {
             if comment.severity != nil {
                 Button("Dismiss", action: onDelete)
                     .controlSize(.small)
-                    .help("Drop this finding: it won't be sent")
+                    .help("Dismiss this finding so it isn't sent")
             } else {
                 Button(action: onDelete) { Image(systemName: "trash") }
                     .buttonStyle(.borderless).foregroundStyle(.secondary)
@@ -524,7 +524,7 @@ private struct CommentComposer: View {
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Brand.green.opacity(0.6)))
             HStack {
-                Text("↵ add · ⌥↵ new line").font(.caption).foregroundStyle(.tertiary)
+                Text("↩ to add · ⌥↩ for a new line").font(.caption).foregroundStyle(.tertiary)
                 Spacer()
                 Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
                 Button("Comment", action: onAdd)

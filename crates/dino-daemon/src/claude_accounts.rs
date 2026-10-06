@@ -37,7 +37,7 @@ pub(crate) fn serve(d: &Arc<Daemon>, action: &str, value: Option<String>, accoun
             let mut numbers: Vec<u32> = have.iter().map(|(n, _)| *n).collect();
             let mut asked = order.clone();
             asked.sort();
-            anyhow::ensure!(asked == numbers, "the accounts changed meanwhile: look again");
+            anyhow::ensure!(asked == numbers, "your accounts changed in the meantime; try again");
             // The same numbers, the tokens moved: account 2 is always the first tried.
             numbers.sort();
             let tokens: Vec<&str> = order.iter().filter_map(|n| have.iter().find(|(h, _)| h == n).map(|(_, t)| t.as_str())).collect();

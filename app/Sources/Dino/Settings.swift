@@ -675,12 +675,12 @@ private struct GeneralPane: View {
                     Text("Stop them").tag(QuitChoice.stop.rawValue)
                 }
             } footer: {
-                Footnote("With no session to come back to, dino opens a shell; ⌘T opens another where you are. Agents run in dinod, not in this window. Stopped agents resume the next time dino starts.")
+                Footnote("If there's no last session to open, dino opens a new shell. Quitting dino doesn't stop your agents unless you choose “Stop them”. Stopped agents resume their conversations the next time you open dino.")
             }
             UpdatesSection()
             DinodAgentSection()
             Section {
-                LabeledContent("Settings and keys") {
+                LabeledContent("Settings and keys folder") {
                     HStack {
                         Text(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)
                             .foregroundStyle(.secondary)
@@ -714,13 +714,13 @@ private struct TerminalSettingsPane: View {
                 }
                 LabeledContent("Ghostty config") {
                     let files = GhosttyConfig.loaded.map { NSString(string: $0).abbreviatingWithTildeInPath }
-                    Text(files.isEmpty ? "None: Ghostty's defaults" : files.joined(separator: "\n"))
+                    Text(files.isEmpty ? "None (Ghostty's defaults)" : files.joined(separator: "\n"))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.trailing)
                         .textSelection(.enabled)
                 }
                 if !GhosttyConfig.skipped.isEmpty {
-                    LabeledContent("Left out") {
+                    LabeledContent("Lines not applied") {
                         Text(GhosttyConfig.skipped.joined(separator: "\n"))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.trailing)
@@ -730,7 +730,7 @@ private struct TerminalSettingsPane: View {
             } header: {
                 Text("Appearance")
             } footer: {
-                Footnote("Panes take your Ghostty font, colors, cursor and keybinds, and edits as you save them; dino keeps its own shortcuts and starts each pane itself, so command and working-directory don't apply.")
+                Footnote("Terminals use the font, colors, cursor and key bindings from your Ghostty config, and update when you save it. dino's own shortcuts keep working. Ghostty's command and working-directory options don't apply in dino.")
             }
             Section {
                 Toggle("Shell integration", isOn: Binding(
@@ -742,7 +742,7 @@ private struct TerminalSettingsPane: View {
             } header: {
                 Text("Shell")
             } footer: {
-                Footnote("Shell integration has zsh and bash mark each prompt and say which folder they're in, as in Ghostty, without touching your startup files (new shells).")
+                Footnote("Lets dino see your prompts and current folder in zsh and bash, as Ghostty does, so new tabs open in the same folder and you can jump between prompts. Your shell startup files aren't changed. Applies to new shells.")
             }
             ShellAISection()
             Section {
@@ -757,17 +757,17 @@ private struct TerminalSettingsPane: View {
                     ForEach(QuickTerminal.Key.allCases) { Text($0.label).tag($0.rawValue) }
                 }
                 if quickTaken {
-                    Text("Another app has this shortcut. Choose another.")
+                    Text("Another app uses this shortcut. Choose a different one.")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
                 Toggle("Hide it when you click elsewhere", isOn: $quickAutohide)
                     .disabled(QuickTerminal.shared.place.autohide != nil)
-                    .help(QuickTerminal.shared.place.autohide != nil ? "Your Ghostty config's quick-terminal-autohide decides" : "")
+                    .help(QuickTerminal.shared.place.autohide != nil ? "Set by quick-terminal-autohide in your Ghostty config" : "")
             } header: {
-                Text("Quick terminal")
+                Text("Quick Terminal")
             } footer: {
-                Footnote("The quick terminal drops down from the top of the screen from any app, and keeps its shell while it's hidden. Your Ghostty config's quick-terminal-* settings say where it shows and how big it is, and a global: keybind for toggle_quick_terminal opens it too.")
+                Footnote("Press the shortcut in any app to drop down a terminal from the top of the screen. Its shell keeps running while it's hidden. To change where it appears and its size, use the quick-terminal settings in your Ghostty config. A global toggle_quick_terminal key binding there also opens it.")
             }
             Section {
                 LabeledContent("Default terminal") {
@@ -794,7 +794,7 @@ private struct TerminalSettingsPane: View {
                     }
                 }
             } footer: {
-                Footnote("As the default terminal, dino opens scripts (.command, .tool), programs and man pages you open from the Finder or other apps; a folder opened with dino, or \"New dino Shell at Folder\" in the Finder's Services menu, opens a shell there.")
+                Footnote("When dino is your default terminal, scripts (.command and .tool files), programs and man pages you open from the Finder or other apps open in dino. To open a shell in a folder, open the folder with dino, or choose “New dino Shell at Folder” from the Finder's Services menu.")
             }
         }
         .formStyle(.grouped)
@@ -881,7 +881,7 @@ private struct ShellAISection: View {
             if !terminal.ask_agent.isEmpty, let a = asker, a.knobs?.model == true {
                 model(a)
             }
-            Picker("⌘⏎ hands off to", selection: Binding(
+            Picker("⌘⏎ sends to", selection: Binding(
                 get: { terminal.handoff_agent },
                 set: { id in if id != terminal.handoff_agent { set { $0.handoff_agent = id } } }
             )) {
@@ -895,7 +895,7 @@ private struct ShellAISection: View {
         } header: {
             Text("AI in the Shell")
         } footer: {
-            Footnote("In a shell, type what you want in plain English. ⌘I asks for a command and puts it on the line for you to read and run; ⌘⏎ hands the line to an agent as a new session. Elsewhere, with dino's shell integration, they're Alt+I and Alt+Enter. ⌘I asks with no tools, so it can't change anything, and only agents that can answer that way are listed; a small, fast model answers sooner.")
+            Footnote("Type what you want in plain English at a shell prompt. ⌘I turns it into a command and puts it on the line for you to check and run. ⌘⏎ sends the line to an agent as a new session. In other terminals with dino's shell integration, use Alt+I and Alt+Enter.\n\nThe agent ⌘I asks can't use tools, so it can't change anything. Only agents that support this are listed. A small, fast model answers sooner.")
         }
         .disabled(store.settings == nil)
     }
@@ -908,7 +908,7 @@ private struct PowerPane: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Keep the Mac awake while agents work", isOn: Binding(
+                Toggle("Keep your Mac awake while agents work", isOn: Binding(
                     get: { store.settings?.machine.awake_while_working ?? true },
                     set: { on in store.update { $0.machine.awake_while_working = on } }
                 ))
@@ -916,9 +916,9 @@ private struct PowerPane: View {
                 .orgLocked("machine.awake_while_working")
                 AwakeNow()
             } header: {
-                Text("Staying awake")
+                Text("Staying Awake")
             } footer: {
-                Footnote("While any agent is working, whichever agent it is, dino keeps the Mac from sleeping when idle, and lets it sleep again once none is. Claude Code does this for itself with caffeinate; most other agents don't. The display still sleeps, and closing the lid still sleeps the Mac unless Lid closed below keeps it awake.")
+                Footnote("Your Mac won't go to sleep on its own while any agent is working. The display can still turn off. Closing the lid still puts your Mac to sleep, unless you turn on “Keep agents running with the lid closed” below.")
             }
             Section {
                 Toggle("Keep your Mac awake while automations are scheduled", isOn: Binding(
@@ -928,7 +928,7 @@ private struct PowerPane: View {
                 .disabled(store.settings == nil)
                 .orgLocked("machine.keep_awake")
             } footer: {
-                Footnote("So scheduled automations run on time. Closing the lid still sleeps it, unless Lid closed below keeps it awake; a missed time runs once when it wakes.")
+                Footnote("Your Mac won't go to sleep on its own while you have scheduled automations, so they run on time. Closing the lid still puts your Mac to sleep. An automation that was due while your Mac slept runs once when it wakes.")
             }
             LidSection()
         }
@@ -956,14 +956,14 @@ private struct TmuxSection: View {
 
     var body: some View {
         Section {
-            Toggle("Show my agents in tmux", isOn: Binding(get: { tmux.show_agents }, set: { on in change { $0.show_agents = on } }))
+            Toggle("Show agents in tmux", isOn: Binding(get: { tmux.show_agents }, set: { on in change { $0.show_agents = on } }))
             if tmux.show_agents {
-                Picker("Put them in", selection: Binding(
+                Picker("Put agents in", selection: Binding(
                     get: { tmux.session.isEmpty ? "attached" : "named" },
                     set: { v in change { $0.session = v == "attached" ? "" : (DinoSettings.Tmux.valid(session) ? session : "dino") } }
                 )) {
-                    Text("A session of their own").tag("named")
-                    Text("The session you're in").tag("attached")
+                    Text("Their own tmux session").tag("named")
+                    Text("The tmux session you're attached to").tag("attached")
                 }
                 if !tmux.session.isEmpty {
                     name("Session", text: $session, field: .session)
@@ -977,7 +977,7 @@ private struct TmuxSection: View {
                 name("Session", text: $tabs, field: .tabs)
             }
         } footer: {
-            Footnote("Your agents show up as tmux windows (running `dino attach`), so `tmux attach` from anywhere reaches them. They still run in dino: closing a window, or quitting tmux, leaves the agent running and its window comes back. dino never starts tmux for this, never changes your tmux config or your own windows. New tabs run `tmux new -A -s` with the name you give. For your status bar: set -g status-right '#(dino status --tmux)'.")
+            Footnote("Each agent appears as a tmux window, so you can reach it with `tmux attach` from anywhere. Closing the window or quitting tmux doesn't stop the agent, and its window comes back. dino doesn't start tmux and never changes your tmux config or your own windows. New tabs attach to the tmux session you name, and create it if needed.\n\nTo show your agents in the tmux status bar, add: set -g status-right '#(dino status --tmux)'")
         }
         .disabled(store.settings == nil)
         .onAppear {
@@ -997,7 +997,7 @@ private struct TmuxSection: View {
                 .focused($editing, equals: field)
                 .onSubmit { commit(field) }
             if !DinoSettings.Tmux.valid(text.wrappedValue) {
-                Text("Letters, digits, - _ and . only").font(.caption).foregroundStyle(.orange)
+                Text("Use only letters, digits, -, _ and .").font(.caption).foregroundStyle(.orange)
             }
         }
     }
@@ -1058,7 +1058,7 @@ private struct AgentChoiceSection: View {
         } header: {
             Text("Agents You Use")
         } footer: {
-            Footnote("Agents you turn off leave the menus and fan-out, and dino won't start them. Ones already running keep going. The shell is always there.")
+            Footnote("Agents you turn off are hidden from menus and can't be started. Sessions already running keep going. Shells are always available.")
         }
     }
 }
@@ -1089,7 +1089,7 @@ private struct BypassSection: View {
         } header: {
             Text("Permissions")
         } footer: {
-            Footnote("Bypass lets an agent edit files and run any command without asking. Turn it off and dino hides it and won't start or switch a session into it. Sessions already in it keep running.")
+            Footnote("In bypass permissions mode, an agent edits files and runs any command without asking you. When this is off, the mode isn't offered, and no session can start in it or switch to it. Sessions already in it keep running.")
         }
     }
 }
@@ -1114,7 +1114,7 @@ private struct LimitsSection: View {
         } header: {
             Text("Limits")
         } footer: {
-            Footnote("Counts input, cached and output tokens, like the sidebar. A session over its budget gets an error on its next model call. Only sessions routed through dino (see Models & Providers → Providers); applies to running ones too.")
+            Footnote("Counts input, cached and output tokens, as the sidebar does. Once a session goes over the limit, its next request to the model fails with an error. Applies to sessions whose traffic goes through dino (Models & Providers → Providers), including ones already running.")
         }
     }
 
@@ -1147,7 +1147,7 @@ struct RoutingSections: View {
         } header: {
             Text("Routing")
         } footer: {
-            Footnote("dino's local proxy counts tokens per session, serves the free models pool (see Experimental) and connects agents to the providers below. Off, agents talk to their providers directly. Applies to sessions you start from now on.")
+            Footnote("Lets dino count each session's tokens, apply token limits and fallbacks, and connect agents to the providers below and to the free models pool (Experimental). When this is off, agents connect to their providers directly. Applies to new sessions.")
         }
     }
 }
@@ -1164,22 +1164,22 @@ private struct ExperimentalFeature: Identifiable {
         ExperimentalFeature(
             id: "free_models",
             title: "Free models pool",
-            summary: "Agents on free NVIDIA models, with dino picking one for each turn. With a TypeSafe key, each turn's prompt (up to 8,000 characters) is sent to api.typesafe.ai to pick the model. Off, nothing is sent there."
+            summary: "Run agents on free NVIDIA models, with dino choosing a model for each turn. If you add a TypeSafe key, the first 8,000 characters of each turn's prompt are sent to api.typesafe.ai to choose the model. Nothing is sent while this is off."
         ),
         ExperimentalFeature(
             id: "computer_use",
             title: "Computer use for more agents",
-            summary: "For agents with no computer use of their own: they can see your screen and click and type in your apps, through open-computer-use (open source). Anything on screen can steer an agent: a web page or a message could tell it to do something you didn't ask. dino installs it in its own folder and adds it only to the agents you pick. Off, dino removes what it added."
+            summary: "Lets agents without built-in computer use see your screen and click and type in your apps, using the open-source open-computer-use. Only the agents you choose get it. Be careful: anything on screen, such as a web page or a message, could tell an agent to do something you didn't ask for. Turning this off removes everything dino added."
         ),
         ExperimentalFeature(
             id: "fan_out",
             title: "Fan out",
-            summary: "One prompt to several agents at once, each in its own worktree, then keep the best: Session → Fan Out… (⇧⌘N). Off, it's not offered; fan-outs already running stay in the sidebar."
+            summary: "Send one prompt to several agents at once, each in its own worktree, and keep the best result: Session → Fan Out… (⇧⌘N). Turning this off hides the command. Fan-outs already running stay in the sidebar."
         ),
         ExperimentalFeature(
             id: "session_tools",
             title: "Cross-session communication",
-            summary: "Gives Claude sessions dino's tools to list and read every session in dino, whatever the agent, and, when you allow it, to message an idle one or start a new one. Applies to new sessions. For other agents, add “dino mcp” as an MCP server in their own settings."
+            summary: "Lets Claude sessions list and read your other dino sessions, whatever agent they run. With your permission, they can also message an idle session or start a new one. Applies to new sessions. To give other agents the same ability, add “dino mcp” as an MCP server in their settings."
         ),
     ]
 
@@ -1227,16 +1227,16 @@ private struct ExperimentalPane: View {
                     }
                     if f.id == "free_models", on(f).wrappedValue {
                         LabeledContent("Models") {
-                            Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (see Models & Providers → API Keys)")
+                            Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (Models & Providers → API Keys)")
                                 .foregroundStyle(has("NVIDIA_API_KEY") ? .primary : .secondary)
                         }
-                        LabeledContent("Picks the model per turn with") {
+                        LabeledContent("Chooses each turn's model with") {
                             Text(has("TYPESAFE_API_KEY") ? "TypeSafe Jev, then built-in rules" : "Built-in rules")
                         }
                     }
                 }
             } footer: {
-                Footnote("Features still being tried out. Each is off until you turn it on, and only on this Mac, except Cross-session communication, which syncs with your other agent settings.")
+                Footnote("These features are still being tested. Each is off until you turn it on, and applies only to this Mac, except Cross-session communication, which syncs to your other Macs.")
             }
         }
         .formStyle(.grouped)
@@ -1270,7 +1270,7 @@ private struct ManagedPane: View {
                 }
                 ForEach(items) { row($0) }
             } footer: {
-                Footnote("Your organization sets these, and they win over your own choices; dino shows them locked wherever they are. Your own values stay in settings.toml, and come back if your organization stops setting them.")
+                Footnote("Your organization sets these, and they override your own choices. They appear locked throughout Settings. Your own choices are kept, and come back if your organization stops setting them.")
             }
         }
         .formStyle(.grouped)
@@ -1334,9 +1334,9 @@ private struct ManagedPane: View {
         case ("policies", "close_merged"): return make("Archive sessions after their PR merges or closes", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("routing", "proxy"): return make("Route agent traffic through dino", "Models & Providers → Providers", .models, .providers)
         case ("machine", "shell_integration"): return make("Shell integration", "Terminal", .terminal)
-        case ("machine", "shell_agents"): return make("Claude typed into a dino shell reports to dino", "Agents", .agents)
+        case ("machine", "shell_agents"): return make("Show Claude started in a shell in the sidebar", "Agents", .agents)
         case ("machine", "keep_awake"): return make("Keep your Mac awake while automations are scheduled", "Power", .power)
-        case ("machine", "awake_while_working"): return make("Keep the Mac awake while agents work", "Power", .power)
+        case ("machine", "awake_while_working"): return make("Keep your Mac awake while agents work", "Power", .power)
         case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", "Power", .power)
         case ("worktrees", "location"): return make("Worktree location", "Workspaces → Worktrees", .workspaces, .worktrees)
         case ("machine", "build_cache"), ("machine", "build_cache.enabled"): return make("Share one build cache across worktrees", "Workspaces → Worktrees", .workspaces, .worktrees)
@@ -1363,7 +1363,7 @@ private struct ManagedPane: View {
             let agent = agentName(r.split(separator: ".").first.map(String.init) ?? r)
             return make("When \(agent) Hits a Limit", "Agents → Limits", .agents)
         case ("tmux", _): return make(rest, "tmux", .tmux)
-        default: return make(path, "Not shown in Settings: it's in settings.toml", nil)
+        default: return make(path, "Only in settings.toml", nil)
         }
     }
 
@@ -1423,7 +1423,7 @@ private struct KeysPane: View {
                         row(key)
                     }
                 } footer: {
-                    Footnote("Keys stay on this Mac in \(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)/keys, readable only by you, and dino never shows them again or syncs them to your other Macs. They take effect immediately. Keychain storage comes with signed releases.")
+                    Footnote("Keys are stored on this Mac in \(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)/keys, readable only by you. dino never shows a key again and never syncs it. Changes take effect immediately.")
                 }
             }
             .formStyle(.grouped)
@@ -1431,7 +1431,7 @@ private struct KeysPane: View {
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { key in
             Button("Remove", role: .destructive) { store.setKey(key.name, value: nil) }
         } message: { _ in
-            Text("dino can't show it again, so you'll need to paste it to add it back.")
+            Text("To add it back later, you'll need to paste the key again.")
         }
     }
 
@@ -1468,7 +1468,7 @@ private struct KeysPane: View {
                 }
             }
             if key.source == "environment" {
-                Text("Set in your shell environment, which wins over a key stored here.")
+                Text("Set in your shell environment, which overrides a key stored here.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -1557,25 +1557,25 @@ private struct AgentsPane: View {
             } header: {
                 Text("On This Mac")
             } footer: {
-                Footnote("Install and Sign In run the agent's own commands in a new shell, where you can see them and answer their questions. dino never sees your logins.")
+                Footnote("Install and Sign In run the agent's own commands in a new shell, so you can watch them and answer any questions. dino never sees your sign-in details.")
             }
             AgentChoiceSection()
             Section {
-                Toggle("Claude typed into a dino shell reports to dino", isOn: Binding(
+                Toggle("Show Claude started in a shell in the sidebar", isOn: Binding(
                     get: { store.settings?.machine.shell_agents ?? true },
                     set: { on in store.update { $0.machine.shell_agents = on } }
                 ))
                 .disabled(store.settings?.machine.shell_integration == false)
                 .orgLocked("machine.shell_agents")
             } footer: {
-                Footnote("Run `claude` in any dino shell and it shows in the sidebar from its first moment, with its turns, questions and tasks, as a session dino started. Needs Shell integration (General). A shell's own menu has Keep as Terminal, for one that should stay a plain terminal.")
+                Footnote("When you run `claude` in a dino shell, it appears in the sidebar with its turns, questions and tasks, like any session dino starts. Requires Shell integration (Terminal). To keep a shell a plain terminal, choose Keep as Terminal from its menu.")
             }
             Section {
                 Picker("Show when an agent uses your Mac", selection: $usingDisplay) {
                     ForEach(UsingDisplay.allCases) { Text($0.label).tag($0.rawValue) }
                 }
             } footer: {
-                Footnote("When an agent sees your screen, clicks in your apps or drives a browser. Whatever you pick, the session's menu says so and has Stop.")
+                Footnote("Shows when an agent sees your screen, clicks or types in your apps, or controls a browser, whatever tool it uses. A banner you close stays hidden until the agent starts again. The session's menu always shows it and lets you stop the agent.")
             }
             if store.setup?.contains(where: { $0.id == "claude" && $0.installed }) == true {
                 ClaudeAccountsSection(act: openShell)
@@ -1584,7 +1584,7 @@ private struct AgentsPane: View {
             BypassSection()
             if agents.isEmpty {
                 Section {
-                    Text("No agent dino can start has a mode, model or effort to choose.").foregroundStyle(.secondary)
+                    Text("None of your agents has a mode, model or effort to choose.").foregroundStyle(.secondary)
                 }
             }
             // The organization may set one control and leave the others: each is locked on its own.
@@ -1594,7 +1594,7 @@ private struct AgentsPane: View {
                 }
             }
             Section {} footer: {
-                Footnote("New sessions start with these unless you choose otherwise in New Session…. Default is whatever the agent's own settings say. Change a running session from its toolbar: ⇧⌘M mode, ⇧⌘I model, ⇧⌘E effort.")
+                Footnote("New sessions start with these unless you pick something else when you start one. Default uses the agent's own settings. To change a running session, use its toolbar, or press ⇧⌘M for mode, ⇧⌘I for model, or ⇧⌘E for effort.")
             }
             // Agents → Limits: a session's budget, then where each agent goes at its limit.
             LimitsSection()
@@ -1688,7 +1688,7 @@ private struct AgentSetupRow: View {
                     .help(agent.install)
             } else if let command = agent.sign_in, agent.signed_in != true {
                 Button("Sign In…") { act(agent, "sign_in") }
-                    .help(agent.sign_in_hint.map { "Opens \(agent.name); type \($0) there" } ?? command)
+                    .help(agent.sign_in_hint.map { "Opens \(agent.name). Type \($0) there to sign in." } ?? command)
             }
         }
         .padding(.vertical, 2)
@@ -1701,7 +1701,7 @@ private struct AgentSetupRow: View {
             return "\(version) · \(note)"
         }
         if agent.signed_in == nil, let hint = agent.sign_in_hint {
-            return "\(version) · signs in with \(hint) inside \(agent.name)"
+            return "\(version) · To sign in, type \(hint) in \(agent.name)"
         }
         return version
     }
@@ -1743,7 +1743,7 @@ private struct ReposPane: View {
             } header: {
                 Text("Environment")
             } footer: {
-                Footnote("Set for every session dino starts in the repo or one of its worktrees, from the next start or restart. Values are kept in settings.toml, readable only by you, and when you're signed in they sync to your other Macs, matched by the repo's remote. Keep passwords and tokens out of them.")
+                Footnote("These variables are set for every session in the repo and its worktrees, from the next time a session starts or restarts. They're stored unencrypted, and when you're signed in they sync to your other Macs, matched by the repo's remote. Don't put passwords or tokens here.")
             }
             ForEach(shown, id: \.self) { path in
                 let env = repos[path]?.env ?? [:]
@@ -1831,8 +1831,8 @@ private struct EnvironmentsPane: View {
     /// What's wrong with a host as typed, if anything: it goes to ssh as one argument.
     static func problem(with host: String, hosts: [String: DinoSettings.SshHost]) -> String? {
         if host.isEmpty { return "Type a host: a name from ~/.ssh/config, or user@host." }
-        if host.hasPrefix("-") { return "A host can't start with “-”: ssh would read it as an option." }
-        if host.contains(where: \.isWhitespace) { return "A host is one word, as you'd type it after ssh. Ports and options go in ~/.ssh/config." }
+        if host.hasPrefix("-") { return "A host can't start with “-”." }
+        if host.contains(where: \.isWhitespace) { return "A host can't contain spaces. Put ports and options in ~/.ssh/config." }
         if hosts[host] != nil { return "\(host) is already in the list." }
         return nil
     }
@@ -1884,7 +1884,7 @@ private struct EnvironmentsPane: View {
             } header: {
                 Text("SSH Hosts")
             } footer: {
-                Footnote("New sessions can run on these machines: dino connects with ssh, as you would in Terminal, and starts the agent there. It must be installed on the host. Logins, keys and ports come from ~/.ssh/config. The folder is where sessions start when you don't choose one; empty means the home folder.")
+                Footnote("You can start new sessions on these machines. dino connects with ssh and starts the agent there, so the agent must be installed on that machine. Usernames, keys and ports come from your ~/.ssh/config. The folder is where sessions start if you don't choose one. Leave it empty to use the home folder.")
             }
             Section {
                 Menu("Add Host") {
@@ -1897,7 +1897,7 @@ private struct EnvironmentsPane: View {
                 .fixedSize()
             } footer: {
                 if store.configHosts.isEmpty {
-                    Footnote("Hosts in ~/.ssh/config show up here to pick from.")
+                    Footnote("Hosts in your ~/.ssh/config appear in this menu.")
                 }
             }
         }

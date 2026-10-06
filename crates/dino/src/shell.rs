@@ -34,7 +34,7 @@ fn this_dino() -> String {
 /// `dino init zsh|bash|fish`: the script to source (`eval "$(dino init zsh)"`).
 pub fn init(shell: Option<&str>) -> anyhow::Result<()> {
     let shell = shell.map(String::from).or_else(current).ok_or_else(|| anyhow::anyhow!("usage: dino init zsh|bash|fish"))?;
-    let text = script(&shell).ok_or_else(|| anyhow::anyhow!("dino has no integration for {shell}: zsh, bash and fish"))?;
+    let text = script(&shell).ok_or_else(|| anyhow::anyhow!("dino's shell integration supports zsh, bash and fish, not {shell}"))?;
     print!("{}", text.replace("__DINO_BIN__", &this_dino()));
     Ok(())
 }
@@ -70,9 +70,9 @@ fn without_block(text: &str) -> (String, bool) {
 /// write over, when it can't be read or isn't UTF-8.
 fn read_rc(rc: &Path) -> anyhow::Result<String> {
     match std::fs::read(rc) {
-        Ok(bytes) => String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} isn't UTF-8 text, so dino left it alone: add its line by hand", rc.display())),
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} isn't UTF-8 text, so dino didn't change it: add the line yourself", rc.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => anyhow::bail!("couldn't read {}, so dino left it alone: {e}", rc.display()),
+        Err(e) => anyhow::bail!("couldn't read {}, so dino didn't change it: {e}", rc.display()),
     }
 }
 
@@ -115,7 +115,7 @@ fn write_whole(path: &Path, text: &str) -> anyhow::Result<()> {
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let usage = "usage: dino shell install|uninstall [zsh|bash|fish]";
     let shell = args.get(1).cloned().or_else(current).ok_or_else(|| anyhow::anyhow!(usage))?;
-    anyhow::ensure!(script(&shell).is_some(), "dino has no integration for {shell}: zsh, bash and fish");
+    anyhow::ensure!(script(&shell).is_some(), "dino's shell integration supports zsh, bash and fish, not {shell}");
     let rc = rc_file(&shell)?;
     let target = resolved(&rc);
     let text = read_rc(&target)?;
@@ -127,17 +127,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 std::fs::create_dir_all(dir)?;
             }
             write_whole(&target, &format!("{rest}{sep}{}", block(&shell)))?;
-            println!("{} dino in {}; open a new {shell} to use it", if had { "Updated" } else { "Added" }, rc.display());
+            println!("{} dino in {}. Open a new {shell} to use it.", if had { "Updated" } else { "Added" }, rc.display());
             if shell == "bash" && cfg!(target_os = "macos") {
-                println!("macOS starts bash as a login shell, which reads ~/.bash_profile: make sure it sources ~/.bashrc");
+                println!("On macOS, bash reads ~/.bash_profile, not ~/.bashrc. Make sure ~/.bash_profile sources ~/.bashrc.");
             }
         }
         Some("uninstall") => {
             if had {
                 write_whole(&target, &rest)?;
-                println!("Removed dino from {}", rc.display());
+                println!("Removed dino from {}.", rc.display());
             } else {
-                println!("dino isn't in {}", rc.display());
+                println!("dino isn't in {}.", rc.display());
             }
         }
         _ => anyhow::bail!(usage),

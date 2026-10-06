@@ -209,9 +209,9 @@ pub(crate) fn set(id: &str, want: bool) -> anyhow::Result<()> {
         let ours = server();
         match agent_mcp::find(id, NAME) {
             Some(s) if s == ours => {}
-            Some(_) => anyhow::bail!("{name} already has a server named {NAME} that dino didn't add; dino leaves it as it is"),
+            Some(_) => anyhow::bail!("{name} already has an MCP server named {NAME} that dino didn't add, so dino left it alone"),
             None => {
-                let change = agent_mcp::adding(id, NAME, &ours).ok_or_else(|| anyhow::anyhow!("dino can't add servers to {name}"))?;
+                let change = agent_mcp::adding(id, NAME, &ours).ok_or_else(|| anyhow::anyhow!("dino can't add MCP servers to {name}"))?;
                 agent_mcp::apply(id, &bin, NAME, &change, Some(&ours))?;
                 anyhow::ensure!(agent_mcp::find(id, NAME).as_ref() == Some(&ours), "{name} didn't keep the server dino added");
             }
@@ -230,7 +230,7 @@ fn remove(id: &str, bin: &Path, added: &Added) -> anyhow::Result<()> {
         // Gone, or the user changed it: theirs now.
         return Ok(());
     }
-    let change = agent_mcp::removing(id, NAME).ok_or_else(|| anyhow::anyhow!("dino can't remove servers from {id}"))?;
+    let change = agent_mcp::removing(id, NAME).ok_or_else(|| anyhow::anyhow!("dino can't remove MCP servers from {id}"))?;
     agent_mcp::apply(id, bin, NAME, &change, None)
 }
 

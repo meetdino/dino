@@ -486,7 +486,7 @@ enum Mode {
         ("edits", "Accept edits", "Edits files without asking; asks before commands"),
         ("plan", "Plan", "Reads and plans; changes nothing"),
         ("auto", "Auto", "The agent decides what's safe to do without asking"),
-        ("bypass", "Bypass", "Never asks. Only in a sandbox you trust"),
+        ("bypass", "Bypass", "Never asks. Use only in a sandbox you trust"),
     ]
     static func label(_ id: String?) -> String {
         guard let id else { return "Default" }
@@ -850,7 +850,7 @@ final class DinoConnection: @unchecked Sendable {
         }
         guard ok == 0 else {
             close(fd)
-            throw DinoError.socket("can't connect to dinod at \(path)")
+            throw DinoError.socket("Can't connect to dino's background service at \(path).")
         }
     }
 
@@ -1062,7 +1062,7 @@ final class DinoConnection: @unchecked Sendable {
             let message = err.message ?? "error"
             // A request this dinod predates: it's still running an older build than the app.
             if message.hasPrefix("bad request: unknown variant") {
-                throw DinoError.daemon("dinod is older than this app, so it can't do this yet. Restart it: run `dino stop` (your sessions come back), then start dinod again.")
+                throw DinoError.daemon("dino's background service is older than this app and can't do this yet. To restart it, run `dino stop` in a terminal, then click Start Background Service in dino. Your sessions come back.")
             }
             throw DinoError.daemon(message)
         }
@@ -1085,7 +1085,7 @@ final class DinoConnection: @unchecked Sendable {
         var off = 0
         while off < count {
             let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress! + off, count - off) }
-            guard n > 0 else { throw DinoError.socket("dinod closed the connection") }
+            guard n > 0 else { throw DinoError.socket("dino's background service closed the connection.") }
             off += n
         }
         return buf
@@ -1162,7 +1162,7 @@ enum DinoEnvironment {
         guard p.terminationStatus == 0 else {
             // What it said, not a guess: on a new Mac, say, the folder it couldn't make.
             let why = String(decoding: said, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            throw DinoError.daemon("dinod didn't start: \(why.isEmpty ? "`dino ping` exited with \(p.terminationStatus)" : why)")
+            throw DinoError.daemon("dino's background service didn't start: \(why.isEmpty ? "`dino ping` exited with \(p.terminationStatus)" : why)")
         }
     }
 }

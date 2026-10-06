@@ -9,7 +9,7 @@ use dino_core::schedule::{ActionKind, Frequency, ScheduledRun, ScheduledTask, Tr
 use crate::out::{self, Cell, Column, Paint};
 use crate::{client, created, hinted, printable, say, unexpected};
 
-pub const HELP: &str = "Automations: dino does something by itself when something happens.
+pub const HELP: &str = "Automations: run an agent or a command on a schedule, or when something happens.
 
   dino automations [--json]               every automation: when it runs, what it does, its last run
   dino automations show <name>            one, with its runs: what each said and changed
@@ -132,7 +132,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             say(&format!("Deleted {}. Sessions it started keep running.", printable(&t.name)));
             Ok(())
         }
-        Some(other) => anyhow::bail!("dino automations doesn't know `{}`\n`dino automations --help` says what it does.", printable(other)),
+        Some(other) => anyhow::bail!("dino automations has no `{}` command\n`dino automations --help` lists them.", printable(other)),
     }
 }
 
@@ -537,7 +537,7 @@ fn apply(t: &mut ScheduledTask, args: &[String]) -> anyhow::Result<Option<String
                 println!("{HELP}");
                 std::process::exit(0);
             }
-            other if other.starts_with("--") => anyhow::bail!("dino automations doesn't know {}\n`dino automations --help` lists the options.", printable(other)),
+            other if other.starts_with("--") => anyhow::bail!("dino automations doesn't take {}\n`dino automations --help` lists the options.", printable(other)),
             word => words.push(word.to_string()),
         }
         i += 1;

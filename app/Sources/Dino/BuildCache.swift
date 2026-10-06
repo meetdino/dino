@@ -86,7 +86,7 @@ struct BuildCacheSection: View {
                 }
             )) {
                 Text("Share one build cache across worktrees")
-                Text("Rust, through sccache")
+                Text("For Rust projects, using sccache")
             }
             .orgLocked("machine.build_cache.enabled")
             if current.enabled {
@@ -95,18 +95,18 @@ struct BuildCacheSection: View {
                         HStack {
                             Text(info.install).font(.callout.monospaced()).textSelection(.enabled)
                             Button("Install…") { install() }
-                                .help("Runs \(info.install) in a new dino shell, where you see it run")
+                                .help("Runs \(info.install) in a new shell")
                         }
                     } label: {
                         Text("sccache isn't installed")
-                        Text("The cache starts working once it is.")
+                        Text("The cache starts working once you install it.")
                     }
                 } else if let info {
                     if let why = info.unused {
                         Label(why, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.callout)
                     } else {
                         LabeledContent("Hits") {
-                            Text(info.hitsLine ?? (info.running ? "None yet" : "None yet: it starts with the next session"))
+                            Text(info.hitsLine ?? (info.running ? "None yet" : "None yet. The cache starts with your next session."))
                                 .monospacedDigit()
                         }
                         LabeledContent("Size") { Text(info.sizeLine).monospacedDigit() }
@@ -132,7 +132,7 @@ struct BuildCacheSection: View {
         } header: {
             Text("Build Cache")
         } footer: {
-            Footnote("Every agent dino starts, and every dino shell, builds Rust through one cache on this Mac, so a new worktree compiles only what another worktree hasn't compiled already. Each worktree keeps its own target folder. A missing, broken or full cache never fails a build: it compiles as it would without one. A wrapper the repo or you set up yourself is used instead. Turning it on applies to sessions started from then on; off, at once.")
+            Footnote("Rust builds in your sessions and shells share one cache, so a new worktree compiles only what no other worktree has compiled yet. Each worktree still has its own target folder. If the cache is missing, broken or full, builds still work without it. A compiler wrapper that you or the repo set up takes priority. Turning the cache on applies to new sessions; turning it off applies right away.")
         }
         .task(id: current) {
             // Hits come in as sessions build; asking sccache is a quick local call.
@@ -178,7 +178,7 @@ struct BuildCacheOffer: View {
         HStack(spacing: 8) {
             Image(systemName: "shippingbox").foregroundStyle(Brand.green)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Builds could share one cache across worktrees").font(.callout)
+                Text("Speed up builds by sharing one cache across worktrees").font(.callout)
                 Text(install).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
             }
             Button("Install sccache") {
@@ -192,10 +192,10 @@ struct BuildCacheOffer: View {
             .buttonStyle(.borderedProminent)
             .tint(Brand.green)
             .controlSize(.small)
-            .help("Runs \(install) in a new dino shell, where you see it run")
+            .help("Runs \(install) in a new shell")
             Button { answered = true } label: { Image(systemName: "xmark").font(.caption) }
                 .buttonStyle(.borderless)
-                .help("Not now; Settings → Workspaces → Worktrees has it")
+                .help("Not now. You can turn it on later in Settings → Workspaces → Worktrees.")
         }
         .padding(.leading, 12)
         .padding(.trailing, 8)

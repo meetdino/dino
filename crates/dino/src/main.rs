@@ -42,54 +42,54 @@ fn printable(s: &str) -> String {
 }
 
 /// What `dino --help` says before the full list: what dino is, and where to start.
-const INTRO: &str = "dino runs your coding agents (Claude Code, Codex, …) and keeps them running:
-in the dino app, or here.
+const INTRO: &str = "dino runs your coding agents (Claude Code, Codex, …) and keeps them running,
+in the dino app or in this terminal.
 
-  dino                the dino app; in a dino session or piped, the sessions
-  dino claude         start Claude Code in this folder, or any agent dino knows
-  dino .              a shell in this folder, in the dino app
-  dino status         what's working and what needs you
-  dino found          agents already running on this Mac, in any terminal
+  dino                open the dino app (inside a dino session or piped: list sessions)
+  dino claude         start Claude Code (or another agent) in this folder
+  dino .              open a shell in this folder in the dino app
+  dino status         show which agents are working and which need you
+  dino found          list agent sessions started outside dino
 ";
 
 const USAGE: &str = "Sessions
-  dino [<agent> [args...]]          the app; with an agent, that agent in this folder
-  dino <folder> [<agent> [args...]] a shell or that agent there, in the dino app
-  dino ls [--usage] [--json]        every session, what needs you first
-  dino status [--tmux]              in a line; --tmux for tmux's status-right
+  dino [<agent> [args...]]          open the app, or start an agent in this folder
+  dino <folder> [<agent> [args...]] open a shell or an agent in that folder, in the app
+  dino ls [--usage] [--json]        list sessions, the ones that need you first
+  dino status [--tmux]              sum up agents in a line; --tmux for tmux's status bar
   dino new [--worktree] [--stay] <agent> [--on <provider> <model>] [args...]
-                                    start one in the background; prints its id
-  dino attach | resume | kill <id>
+                                    start a session in the background and print its id
+  dino attach | resume | kill <id>  open a session here, resume an ended one, or close one
   dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]
-                                    a new session on a copy of its conversation
-  dino rm [--force] <id>            delete it, and the worktree dino made for it
-  dino found [--all] [--json]       agents dino didn't start, to continue here
+                                    start a new session on a copy of a session's conversation
+  dino rm [--force] <id>            delete a session and the worktree dino made for it
+  dino found [--all] [--json]       list agent sessions started outside dino
   dino continue <id>                continue one of those in dino
   dino stats [--range 7d|30d|all] [--json]
-                                    usage across every agent: tokens, models, streaks
+                                    show usage across all agents: tokens, models, streaks
 
 Fan-out: one prompt to several agents, a git worktree each
   dino fan [--agents claude,codex,...] <prompt>
   dino groups | diff <id> | keep <id> | discard <group>
 
-Automations: dino does something by itself when something happens
+Automations: agents and commands that run on their own
   dino automations [show|add|edit|run|pause|resume|rm] …
                                     on a schedule, a PR, failed CI, changed files, …
 
 Setup
   dino login [--email | --device] | logout | sync [status|now|resolve|undo]
   dino login openrouter|chatgpt     connect a provider in your browser
-  dino login <plan> [--base <url>]  connect a coding plan with its key, read from stdin
+  dino login <plan> [--base <url>]  connect a coding plan; reads its API key from stdin
   dino claude-token [status|create|set|remove|add-account|remove-account <n>]
   dino fallback [<agent> [<provider>:<model>... | off] [--outages] [--new-sessions <agent>[:<model>]]]
-                                    where an agent goes when it hits a limit
-  dino power [status|setup|remove]  keep agents running with the lid closed
+                                    choose what an agent switches to when it hits a limit
+  dino power [status|setup|remove]  see what keeps your Mac awake; run agents with the lid closed
   dino build-cache [on|off|size <GB>|install]
-                                    one compiler cache for every session's builds
+                                    share one Rust build cache across sessions
   dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]
   dino ai suggest|agent -- <request> | search [--json|--pick]
                                     the shell's AI line and history search
-  dino mcp [--read-only]            an MCP server on stdio, for agents
+  dino mcp [--read-only]            serve dino's sessions to agents over MCP (stdio)
   dino ping | stop | daemon | --version
 
 `dino <command> --help` says more about ls, rm, found, stats, login, fan and automations.";
@@ -186,7 +186,7 @@ fn dino() -> anyhow::Result<()> {
             say(&format!("Closed group {}: its agents are stopped and their worktrees removed.", printable(&group)));
             return Ok(());
         }
-        Some("continue") => return cmd_continue(cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino continue <session-id prefix>"))?),
+        Some("continue") => return cmd_continue(cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino continue <id>\n`dino found` lists the sessions you can continue."))?),
         // Start dinod if needed; used by the app before it attaches surfaces.
         Some("ping") => {
             client::connect()?;
@@ -233,7 +233,7 @@ fn dino() -> anyhow::Result<()> {
         }
         Some("rm") => return cmd_rm(&cli[1..]),
         Some("resume") => {
-            let id = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino resume <id>\n`dino ls` lists the sessions; Ended ones resume."))?.clone();
+            let id = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino resume <id>\n`dino ls` lists the sessions; only ended ones can be resumed."))?.clone();
             done(client::request(&Request::Resume { id: id.clone() })?)?;
             say(&format!("Resumed session {id}. `dino attach {id}` opens it here.", id = printable(&id)));
             return Ok(());
@@ -241,11 +241,11 @@ fn dino() -> anyhow::Result<()> {
         Some("fork") => return cmd_fork(&cli[1..]),
         Some("stop") => {
             if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
-                println!("dinod isn't running.");
+                println!("dino's background service isn't running.");
                 return Ok(());
             }
             done(client::request(&Request::Shutdown)?)?;
-            say("Stopped dinod. Its sessions resume when it next starts.");
+            say("Stopped dino's background service. Your sessions resume the next time you open dino or run a dino command.");
             return Ok(());
         }
         Some(arg) if is_folder(arg) => return cmd_open(arg, &cli[1..]),
@@ -283,17 +283,17 @@ fn cmd_home() -> anyhow::Result<()> {
     for (command, what) in HOME_COMMANDS {
         println!("  {command:w$}  {what}");
     }
-    println!("\n{}", out::paint("`dino --help` for the rest.", Paint::Dim));
+    println!("\n{}", out::paint("`dino --help` lists all commands.", Paint::Dim));
     Ok(())
 }
 
 /// What plain `dino` suggests under the sessions: the commands used most.
 const HOME_COMMANDS: &[(&str, &str)] = &[
-    ("dino claude", "start Claude Code in this folder, or any agent dino knows"),
-    ("dino .", "a shell in this folder"),
-    ("dino attach <id>", "a session, in this terminal"),
-    ("dino status", "what's working and what needs you"),
-    ("dino found", "agents already running on this Mac, in any terminal"),
+    ("dino claude", "start Claude Code (or another agent) in this folder"),
+    ("dino .", "open a shell in this folder"),
+    ("dino attach <id>", "open a session in this terminal"),
+    ("dino status", "show which agents are working and which need you"),
+    ("dino found", "list agent sessions started outside dino"),
 ];
 
 /// Bring the dino app to the front, opening it if it isn't running. False without one installed.
@@ -382,13 +382,13 @@ fn done(resp: Response) -> anyhow::Result<()> {
 
 /// A reply this dino doesn't know: dinod is a different version.
 fn unexpected() -> anyhow::Error {
-    anyhow::anyhow!("dinod answered in a way this dino doesn't understand: it's probably another version.\n`dino stop` stops it (its sessions resume), and the next command starts this one's.")
+    anyhow::anyhow!("dino's background service is running a different version of dino.\nRun `dino stop`, then run this command again. Your sessions resume.")
 }
 
 /// dinod's error, with what to do about it when the command line knows better.
 fn hinted(message: String) -> anyhow::Error {
     if message.starts_with("no session ") {
-        return anyhow::anyhow!("{message}\n`dino ls` lists them.");
+        return anyhow::anyhow!("{message}\n`dino ls` lists your sessions.");
     }
     if let Some(name) = message.strip_prefix("unknown agent ") {
         return unknown_agent(name, false);
@@ -406,7 +406,7 @@ fn fallback_agent(name: &str) -> anyhow::Result<String> {
         Ok(Response::Launchers { launchers }) => launchers.into_iter().map(|l| l.short).filter(|s| dino_core::KNOWN_AGENTS.iter().any(|k| k.id == s)).collect::<Vec<_>>().join(", "),
         _ => String::new(),
     };
-    Err(anyhow::anyhow!("`{}` isn't an agent fallbacks can use. Agents here: {agents}.", printable(name)))
+    Err(anyhow::anyhow!("`{}` can't be used as a fallback. Agents you can use: {agents}.", printable(name)))
 }
 
 /// `name` isn't an agent dino can start: how to install it, when it's one dino knows, or the ones it
@@ -415,16 +415,16 @@ fn unknown_agent(name: &str, command: bool) -> anyhow::Error {
     let name = printable(name);
     if let Some(k) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == name || k.bin == name || k.was.contains(&&*name)) {
         let hint = discover::install_hint(k.id);
-        return anyhow::anyhow!("{} isn't installed (no `{}` on the PATH). Install it with\n\n    {hint}\n\nthen run this again.", k.name, k.bin);
+        return anyhow::anyhow!("{} isn't installed (there's no `{}` on your PATH). Install it with:\n\n    {hint}\n\nThen run this command again.", k.name, k.bin);
     }
     let agents = match client::request(&Request::Launchers) {
         Ok(Response::Launchers { launchers }) => launchers.into_iter().map(|l| l.short).collect::<Vec<_>>().join(", "),
         _ => String::new(),
     };
     if command {
-        anyhow::anyhow!("`{name}` isn't a dino command or an agent dino knows.\nAgents here: {agents}. `dino --help` lists the commands.")
+        anyhow::anyhow!("`{name}` isn't a dino command or a known agent.\nAgents you can start: {agents}. `dino --help` lists the commands.")
     } else {
-        anyhow::anyhow!("`{name}` isn't an agent dino knows. Agents here: {agents}.")
+        anyhow::anyhow!("`{name}` isn't a known agent. Agents you can start: {agents}.")
     }
 }
 
@@ -435,7 +435,7 @@ fn unknown_agent(name: &str, command: bool) -> anyhow::Error {
 fn cmd_status(tmux: bool) -> anyhow::Result<()> {
     if std::os::unix::net::UnixStream::connect(dino_core::ipc::socket_path()).is_err() {
         if !tmux {
-            println!("No agents: dinod isn't running. Start one with `dino claude`.");
+            println!("No agents are running. Start one with `dino claude`.");
         }
         return Ok(());
     }
@@ -462,13 +462,13 @@ fn cmd_status(tmux: bool) -> anyhow::Result<()> {
         let asking: Vec<_> = agents.iter().filter(|(st, _)| *st == SessionStatus::NeedsYou).collect();
         match asking.as_slice() {
             [] => {}
-            [(_, s)] => println!("\n{}", out::paint(&format!("`dino attach {}` to answer it.", printable(&s.id)), Paint::Dim)),
-            _ => println!("\n{}", out::paint("`dino attach <id>` to answer one.", Paint::Dim)),
+            [(_, s)] => println!("\n{}", out::paint(&format!("Run `dino attach {}` to answer it.", printable(&s.id)), Paint::Dim)),
+            _ => println!("\n{}", out::paint("Run `dino attach <id>` to answer one.", Paint::Dim)),
         }
         // What keeps the Mac awake, as the sidebar's foot says it; `dino power` lists them all.
         let session_name = |id: &str| sessions.iter().find(|s| s.id == id).map(awake_session_name);
         if let Some(awake) = power.and_then(|p| p.awake_line(session_name)) {
-            println!("\n{}", out::paint(&format!("{awake}  (`dino power` for who)"), Paint::Dim));
+            println!("\n{}", out::paint(&format!("{awake}  (`dino power` for details)"), Paint::Dim));
         }
     } else {
         println!("{line}");
@@ -531,18 +531,18 @@ fn folder(s: &SessionInfo) -> String {
 
 const LS_HELP: &str = "usage: dino ls [--usage] [--json]
 
-Every session dinod runs, what needs you first, then what's working, done, idle and ended.
-Statuses are the app's, worked out the same way; a turn that ended is Done until the next one.
+List every session: the ones that need you first, then working, done, idle and ended.
+Statuses match the app's. A session shows Done after its turn ends, until the next turn starts.
 
-  -u, --usage   add the tokens each one has used, in and out
-      --json    a JSON array for scripts, one object per session, with
+  -u, --usage   add each session's input and output tokens
+      --json    print a JSON array, one object per session, with
                   id, name, agent, status (needs_you, working, done, idle, ended, exited),
                   needs (what it asks for, or null), folder, host (or null),
                   last_active (ISO 8601 UTC, or null), input_tokens, output_tokens
                 Fields may be added; these keep their names and meanings.
 
-Piped, it prints a tab-separated line per session and no header: id, name, agent, status,
-folder (in full) and last active, with the values --json has.";
+When piped, it prints one tab-separated line per session, with no header: id, name, agent,
+status, folder (in full) and last active, with the values --json has.";
 
 /// `dino ls [--usage] [--json]`: every session, what wants you first.
 fn cmd_ls(args: &[String]) -> anyhow::Result<()> {
@@ -553,7 +553,7 @@ fn cmd_ls(args: &[String]) -> anyhow::Result<()> {
             println!("{LS_HELP}");
             return Ok(());
         }
-        anyhow::bail!("dino ls doesn't take `{}`\n`dino ls --help` says what it does.", printable(a));
+        anyhow::bail!("dino ls doesn't take `{}`\n`dino ls --help` lists its options.", printable(a));
     }
     let sessions = sessions()?;
     if json {
@@ -635,7 +635,7 @@ fn ls_table(sessions: &[SessionInfo], usage: bool) -> (Vec<Column>, Vec<Vec<Cell
 /// the lid closed.
 fn cmd_power(action: &str) -> anyhow::Result<()> {
     if !matches!(action, "status" | "setup" | "remove") {
-        println!("usage: dino power [status|setup|remove]\n\nstatus says what keeps the Mac awake now: dino while agents work, an agent's caffeinate, an app.\nsetup asks for an administrator's password once, so dino can keep the Mac awake with its lid closed while agents work (Settings → Power).");
+        println!("usage: dino power [status|setup|remove]\n\n  status   show what's keeping your Mac awake now: dino, an agent, or another app\n  setup    let dino keep your Mac awake with the lid closed while agents work\n           (asks for an administrator password once; same as Settings → Power)\n  remove   take that permission back");
         return Ok(());
     }
     let p = match client::request(&Request::Power { action: action.into() })? {
@@ -650,13 +650,13 @@ fn cmd_power(action: &str) -> anyhow::Result<()> {
     let session_name = |id: &str| sessions.iter().find(|s| s.id == id).map(awake_session_name);
     let machine = dino_core::settings::Settings::load().machine;
     let mut rows = vec![
-        ("Now", p.awake_line(session_name).unwrap_or_else(|| "nothing keeps the Mac awake; it sleeps when idle".into())),
-        ("While agents work", if machine.awake_while_working { "dino keeps the Mac awake".to_string() } else { "the Mac may sleep (Settings → Power keeps it awake)".into() }),
-        ("Lid closed", if machine.lid.enabled { "agents keep running".to_string() } else { "the Mac sleeps (Settings → Power keeps agents running)".into() }),
+        ("Now", p.awake_line(session_name).unwrap_or_else(|| "nothing; your Mac sleeps when idle".into())),
+        ("While agents work", if machine.awake_while_working { "dino keeps your Mac awake".to_string() } else { "your Mac can sleep; turn this on in Settings → Power".into() }),
+        ("Lid closed", if machine.lid.enabled { "agents keep running".to_string() } else { "your Mac sleeps; turn this on in Settings → Power to keep agents running".into() }),
         ("Permission", if p.ready == Some(true) { "set up".into() } else { "not set up: `dino power setup`".into() }),
     ];
     if p.external {
-        rows.push(("Sleep", "off, but not by dino; dino leaves it alone".into()));
+        rows.push(("Sleep", "turned off by something other than dino".into()));
     }
     if let Some(note) = &p.note {
         rows.push(("Last time", printable(note)));
@@ -666,7 +666,7 @@ fn cmd_power(action: &str) -> anyhow::Result<()> {
     }
     print!("{}", out::fields(&rows));
     if !p.awake.is_empty() {
-        let cols = [Column::keep("PROCESS"), Column::right("PID"), Column::end("SESSION", 10), Column::keep("KEEPS AWAY"), Column::keep("SINCE"), Column::end("SAYS", 12)];
+        let cols = [Column::keep("PROCESS"), Column::right("PID"), Column::end("SESSION", 10), Column::keep("PREVENTS"), Column::keep("SINCE"), Column::end("SAYS", 12)];
         let now = out::now();
         let rows: Vec<_> = p
             .awake
@@ -701,12 +701,14 @@ fn awake_session_name(s: &SessionInfo) -> String {
 
 const BUILD_CACHE_USAGE: &str = "usage: dino build-cache [on|off|size <GB>|install]
 
-Every agent dino starts, and every dino shell, builds Rust through one sccache cache on this Mac, so
-a new worktree compiles only what no other worktree has compiled already. Each worktree keeps its
-own target/. A missing, broken or full cache never fails a build: it compiles as it would without.
-Settings → Workspaces → Worktrees has the same. On and size apply to sessions started from now on.
+Rust builds in every dino session and shell share one sccache cache on your Mac, so a new worktree
+only compiles what no other worktree has compiled yet. Each worktree keeps its own target/. If the
+cache is missing, broken or full, builds still work without it. The same setting is in
+Settings → Workspaces → Worktrees. Changes apply to sessions you start afterwards.
 
-  install    run sccache's install command in a new dino shell, where it shows as it runs";
+  on, off    turn the build cache on or off
+  size <GB>  set how much disk space the cache may use
+  install    install sccache in a new dino shell, where you can watch it run";
 
 /// `dino build-cache`: the build cache's hits and misses, and turning it on and off.
 fn cmd_build_cache(args: &[String]) -> anyhow::Result<()> {
@@ -719,7 +721,7 @@ fn cmd_build_cache(args: &[String]) -> anyhow::Result<()> {
         ["off"] => Some((Some(false), None)),
         ["size", gb] => {
             let gb: u32 = gb.trim_end_matches(['G', 'g']).parse().ok().filter(|g| BuildCache::SIZES_GB.contains(g)).ok_or_else(|| {
-                anyhow::anyhow!("{} isn't a size from {} to {} GB", printable(gb), BuildCache::SIZES_GB.start(), BuildCache::SIZES_GB.end())
+                anyhow::anyhow!("the size must be from {} to {} GB, not {}", BuildCache::SIZES_GB.start(), BuildCache::SIZES_GB.end(), printable(gb))
             })?;
             Some((None, Some(gb)))
         }
@@ -729,7 +731,7 @@ fn cmd_build_cache(args: &[String]) -> anyhow::Result<()> {
                 Response::Error { message } => return Err(hinted(message)),
                 _ => return Err(unexpected()),
             };
-            say(&format!("Installing sccache in session {id}: `dino attach {id}` to watch."));
+            say(&format!("Installing sccache in session {id}. Run `dino attach {id}` to watch."));
             return Ok(());
         }
         _ => {
@@ -774,10 +776,10 @@ fn build_cache_rows(i: &dino_core::ipc::BuildCacheInfo) -> Vec<(&'static str, St
     let mut rows = vec![];
     let state = match (&i.sccache, i.enabled) {
         (_, false) => out::paint("off", Paint::Dim) + "  (`dino build-cache on` turns it on)",
-        (None, true) => out::paint("waiting for sccache", Paint::Orange) + &format!(": `{}`, or `dino build-cache install`", i.install),
+        (None, true) => out::paint("needs sccache", Paint::Orange) + &format!(": `{}`, or `dino build-cache install`", i.install),
         (Some(_), true) => match &i.unused {
             Some(why) => out::paint("not used", Paint::Orange) + &format!(": {}", printable(why)),
-            None => out::paint("on", Paint::Green) + "  every session dino starts from now on",
+            None => out::paint("on", Paint::Green) + "  for sessions you start from now on",
         },
     };
     rows.push(("Build cache", state));
@@ -791,7 +793,7 @@ fn build_cache_rows(i: &dino_core::ipc::BuildCacheInfo) -> Vec<(&'static str, St
             match s.hit_rate() {
                 Some(r) => format!("{} of {} compiles ({r:.0}%)", s.hits, s.hits + s.misses),
                 None if i.running => "none yet".into(),
-                None => "none yet: it starts with the first session".into(),
+                None => "none yet; the cache starts with your next session".into(),
             },
         ));
         if s.not_cacheable > 0 {
@@ -813,12 +815,12 @@ fn agent_name(id: &str) -> String {
 
 const FALLBACK_USAGE: &str = "usage: dino fallback [<agent> [<provider>:<model>... | off] [--outages] [--new-sessions <agent>[:<model>]]]
 
-When an agent's route hits its limit (its plan's window, its subscription's limit, its balance), dino
-sends its calls on to these routes, in order, until it resets: the agent never sees the failure.
-Providers are as Settings → Models & Providers lists them (`dino login` connects them): plan-zai,
-openrouter, ollama, chatgpt, …, and free (the free models, when they're on). Each must serve the API
-the agent speaks. --outages also falls back when a route is down. --new-sessions starts new sessions
-and scheduled tasks with another agent while this one is at its limit.
+When an agent hits a usage limit (its plan's window, its subscription's limit or its balance), dino
+sends its requests to these providers, in order, until the limit resets. The agent keeps working.
+Providers are the ones in Settings → Models & Providers (`dino login` connects one): plan-zai,
+openrouter, ollama, chatgpt, …, and free (the free models pool, when it's on). Each must support the
+API the agent uses. --outages also falls back when the agent's provider is down. --new-sessions starts
+new sessions and automations with another agent while this one is at its limit.
 
   dino fallback claude plan-zai:glm-4.6 ollama:qwen3:4b --new-sessions codex
   dino fallback codex off";
@@ -842,7 +844,7 @@ fn cmd_fallback(args: &[String]) -> anyhow::Result<()> {
     let provider_name = |id: &str| names.get(id).cloned().unwrap_or_else(|| printable(id));
     let Some(agent) = args.first() else {
         if settings.fallbacks.values().all(|f| f.steps.is_empty() && f.new_sessions.is_none()) {
-            println!("No agent falls back to anything. {}", FALLBACK_USAGE.lines().next().unwrap_or_default());
+            println!("No fallbacks are set. {}", FALLBACK_USAGE.lines().next().unwrap_or_default());
         }
         for id in settings.fallbacks.keys() {
             print!("{}", show_fallback(&settings, id, &provider_name));
@@ -868,14 +870,14 @@ fn cmd_fallback(args: &[String]) -> anyhow::Result<()> {
                     let to = words.next().ok_or_else(|| anyhow::anyhow!("--new-sessions needs an agent: --new-sessions codex[:<model>]"))?;
                     let (id, model) = to.split_once(':').map_or((to.as_str(), None), |(a, m)| (a, Some(m.to_string())));
                     let id = fallback_agent(id)?;
-                    anyhow::ensure!(id != agent, "new sessions can't fall back to the agent itself");
+                    anyhow::ensure!(id != agent, "--new-sessions needs a different agent from this one");
                     f.new_sessions = Some(AgentSwitch { agent: id, model, ..Default::default() });
                 }
                 step => {
                     // Models have colons of their own (qwen3:4b); provider ids don't.
                     let (provider, model) = step.split_once(':').filter(|(p, m)| !p.is_empty() && !m.is_empty()).ok_or_else(|| anyhow::anyhow!("{} isn't <provider>:<model>\n\n{FALLBACK_USAGE}", printable(step)))?;
-                    anyhow::ensure!(names.contains_key(provider), "dino doesn't know a provider called {}. `dino login` connects one.", printable(provider));
-                    anyhow::ensure!(settings.policies.allows_fallback(provider), "your policies don't let agents fall back to {}", provider_name(provider));
+                    anyhow::ensure!(names.contains_key(provider), "there's no provider called {}. `dino login` connects one.", printable(provider));
+                    anyhow::ensure!(settings.policies.allows_fallback(provider), "agents aren't allowed to fall back to {} (Settings → Agents → Limits)", provider_name(provider));
                     f.steps.push(FallbackStep { provider: provider.into(), model: model.into(), ..Default::default() });
                 }
             }
@@ -895,7 +897,7 @@ fn cmd_fallback(args: &[String]) -> anyhow::Result<()> {
 fn show_fallback(settings: &dino_core::settings::Settings, agent: &str, provider_name: &dyn Fn(&str) -> String) -> String {
     let f = settings.fallbacks.get(agent).cloned().unwrap_or_default();
     let steps = if f.steps.is_empty() {
-        "nothing: its route's own answer".to_string()
+        "nothing (the agent gets the limit error)".to_string()
     } else {
         f.steps.iter().enumerate().map(|(i, s)| format!("{}. {} · {}", i + 1, provider_name(&s.provider), printable(&s.model))).collect::<Vec<_>>().join("  ")
     };
@@ -922,11 +924,15 @@ fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
     }
     if !matches!(action, "status" | "create" | "set" | "remove") {
         println!(
-            "usage: dino claude-token [status|create|set|remove|add-account|remove-account]\n\n\
-             create runs `claude setup-token` in a dino shell and keeps the token it prints; set reads one from stdin.\n\
-             Only Claude Code gets it: on SSH environments, and on this Mac when Claude Code here isn't signed in (Settings → Agents).\n\n\
-             add-account reads a `claude setup-token` token of another of your Claude accounts from stdin: when the one Claude Code\n\
-             signed in with reaches its limit, its calls go on with that account until the limit resets. remove-account <n> forgets one."
+            "usage: dino claude-token [status|create|set|remove|add-account|remove-account <n>]\n\n\
+             A Claude subscription token lets Claude Code use your Claude plan on SSH hosts, and on this Mac\n\
+             when Claude Code isn't signed in here (Settings → Agents). No other agent gets it.\n\n\
+             \x20 create              run `claude setup-token` in a dino shell and keep the token it prints\n\
+             \x20 set                 read a token from stdin\n\
+             \x20 remove              forget the token\n\
+             \x20 add-account         read a token for another of your Claude accounts from stdin; when one\n\
+             \x20                     account hits its limit, Claude Code switches to the next until it resets\n\
+             \x20 remove-account <n>  forget account <n>"
         );
         return Ok(());
     }
@@ -956,7 +962,7 @@ fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
         },
     )];
     if let Some(s) = t.signed_in {
-        rows.push(("Claude Code here", if s { "signed in on its own".into() } else { "not signed in: sessions here use the token".into() }));
+        rows.push(("Claude Code here", if s { "signed in".into() } else { "not signed in: sessions here use the token".into() }));
     }
     if let Some(id) = t.creating {
         rows.push(("Creating", format!("in session {}: finish signing in in your browser", printable(&id))));
@@ -975,7 +981,7 @@ fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
     }
     print!("{}", out::fields(&rows));
     if !accounts.is_empty() {
-        println!("\nWhen an account hits its limit, Claude Code goes on with the next one until it resets.");
+        println!("\nWhen an account hits its limit, Claude Code switches to the next one until the limit resets.");
     }
     Ok(())
 }
@@ -1008,7 +1014,7 @@ fn cmd_claude_account(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
         _ => return Err(unexpected()),
     };
     match (info.added, account) {
-        (Some(n), _) => println!("Account {n} added. When an account hits its limit, Claude Code goes on with the next one until it resets."),
+        (Some(n), _) => println!("Account {n} added. When an account hits its limit, Claude Code switches to the next one until the limit resets."),
         (None, Some(n)) => println!("Account {n} removed."),
         _ => {}
     }
@@ -1017,21 +1023,20 @@ fn cmd_claude_account(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
 
 const RM_HELP: &str = "usage: dino rm [--force] <id>
 
-Delete a session: its agent stops, dino forgets it, and the worktree dino made for it is removed,
-with its branch unless that has commits that aren't merged. A shell's folder, or a checkout of
-yours, is never removed. The agent's own conversation stays: `dino found --all` lists it.
+Delete a session: its agent stops and the session leaves dino. If dino made a worktree for it, the
+worktree is removed too, and so is its branch unless the branch has unmerged commits (pushed or
+not). A shell's folder and your own checkouts are never removed. The agent's conversation is kept:
+`dino found --all` lists it.
 
-  -f, --force   delete it even when its worktree has uncommitted changes, which are lost
-
-A branch with commits that aren't merged stays, pushed or not.";
+  -f, --force   delete even if the worktree has uncommitted changes (they are lost)";
 
 /// `dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]`: a new session on a copy of session
 /// `id`'s conversation, by the agent's own fork, in a new worktree unless told otherwise.
 fn cmd_fork(args: &[String]) -> anyhow::Result<()> {
     const USAGE: &str = "usage: dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]\n\
-        A new session on a copy of session <id>'s conversation, made by its agent's own fork (Claude Code,\n\
-        Codex), with its mode, model and account; the original stays as it is. It starts in a new git\n\
-        worktree off the session's checkout unless --no-worktree. Words after -- are its first prompt.";
+        Start a new session on a copy of session <id>'s conversation, made by its agent (Claude Code or\n\
+        Codex), with the same mode, model and account. The original session doesn't change. The new\n\
+        session gets its own git worktree unless you pass --no-worktree. Words after -- are its first prompt.";
     let (opts, prompt) = match args.iter().position(|a| a == "--") {
         Some(i) => (&args[..i], Some(args[i + 1..].join(" ")).filter(|p| !p.trim().is_empty())),
         None => (args, None),
@@ -1071,12 +1076,12 @@ fn cmd_rm(args: &[String]) -> anyhow::Result<()> {
             println!("{RM_HELP}");
             return Ok(());
         }
-        Some(a) if a.starts_with('-') => anyhow::bail!("dino rm doesn't take `{}`\n`dino rm --help` says what it does.", printable(a)),
+        Some(a) if a.starts_with('-') => anyhow::bail!("dino rm doesn't take `{}`\n`dino rm --help` lists its options.", printable(a)),
         Some(a) => a.clone(),
         None => anyhow::bail!("usage: dino rm [--force] <id>\n`dino ls` lists the sessions."),
     };
     if let Some(a) = ids.next() {
-        anyhow::bail!("dino rm takes one session, not `{}` too\n`dino rm --help` says what it does.", printable(a));
+        anyhow::bail!("dino rm takes one session, not `{}` too\n`dino rm --help` lists its options.", printable(a));
     }
     let deletion = |dry_run| match client::request(&Request::Delete { id: id.clone(), dry_run })? {
         Response::Deletion { deletion } => Ok(deletion),
@@ -1088,7 +1093,7 @@ fn cmd_rm(args: &[String]) -> anyhow::Result<()> {
         let plan = deletion(true)?;
         if let (true, Some(path)) = (plan.uncommitted > 0, &plan.worktree) {
             anyhow::bail!(
-                "session {shown}'s worktree {} has {}, which deleting it would lose.\n`dino rm --force {shown}` deletes it anyway.",
+                "session {shown}'s worktree {} has {}. Deleting it would lose them.\n`dino rm --force {shown}` deletes it anyway.",
                 printable(path),
                 count(plan.uncommitted, "uncommitted change")
             );
@@ -1101,10 +1106,10 @@ fn cmd_rm(args: &[String]) -> anyhow::Result<()> {
     };
     if let (true, Some(branch)) = (done.keeps_branch, &done.branch) {
         let unpushed = if done.unpushed > 0 { format!(", with {}", count(done.unpushed, "unpushed commit")) } else { String::new() };
-        said += &format!(" Its branch {} stays{unpushed}: it isn't merged.", printable(branch));
+        said += &format!(" Kept its branch {}{unpushed}, because it isn't merged.", printable(branch));
     }
     if let Some(other) = &done.kept_for {
-        said += &format!(" Its worktree stays: {} is in it.", printable(other));
+        said += &format!(" Kept its worktree, because {} is using it.", printable(other));
     }
     say(&said);
     Ok(())
@@ -1117,14 +1122,14 @@ fn count(n: u32, thing: &str) -> String {
 
 const FOUND_HELP: &str = "usage: dino found [--all] [--json]
 
-Agent sessions dino didn't start, that `dino continue <id>` continues in dino: running in other
-terminals (tmux too), recent ones on this Mac, and Claude Code on the web.
+List agent sessions dino didn't start: running in other terminals (tmux too), recent ones on this
+Mac, and Claude Code on the web. `dino continue <id>` continues one in dino.
 
-  --all    every recent one, not only the newest 25
-  --json   a JSON array, one object per session
+  --all    list every recent session, not only the newest 25
+  --json   print a JSON array, one object per session
 
-Piped, it prints a tab-separated line per session and no header: where it was found (running,
-recent or cloud), its full id, agent, title, folder, status and when it last changed.";
+When piped, it prints one tab-separated line per session, with no header: where it was found
+(running, recent or cloud), its full id, agent, title, folder, status and when it last changed.";
 
 /// Agent sessions outside dino that it can continue: running elsewhere, recent, cloud.
 fn cmd_found(args: &[String]) -> anyhow::Result<()> {
@@ -1136,7 +1141,7 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
             println!("{FOUND_HELP}");
             return Ok(());
         }
-        anyhow::bail!("dino found doesn't take `{}`\n`dino found --help` says what it does.", printable(a));
+        anyhow::bail!("dino found doesn't take `{}`\n`dino found --help` lists its options.", printable(a));
     }
     // Through dinod, so its own sessions aren't listed as "elsewhere".
     let Response::Found { sessions } = client::request(&Request::Found { cloud: true, running_only: false })? else { return Err(unexpected()) };
@@ -1229,7 +1234,7 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
         section("Claude Code on the web");
         for f in cloud {
             // Not a session yet: the app's session browser lists the web's to pick from.
-            let what = if f.session_id.is_empty() { "Pick a web session to teleport in the dino app: Session → Continue a Session… (⌘K)".into() } else { format!("{}  {}", printable(&shown(f)), printable(&f.title)) };
+            let what = if f.session_id.is_empty() { "To continue a web session, open the dino app and choose Session → Continue a Session… (⌘K)".into() } else { format!("{}  {}", printable(&shown(f)), printable(&f.title)) };
             println!("{what}");
         }
     }
@@ -1269,7 +1274,7 @@ fn cmd_fan(args: &[String]) -> anyhow::Result<()> {
 /// to paste), then wait until dinod has what it gave.
 fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
     let Some(provider) = provider else {
-        println!("usage: dino login openrouter|chatgpt\n\n  openrouter  Connect OpenRouter in your browser; dino keeps the key it gets, and never shows it.\n  chatgpt     Sign in with ChatGPT, so agents in dino can use your ChatGPT plan (up to the weekly\n              cap you set for dino in ChatGPT → Settings → Usage).");
+        println!("usage: dino login openrouter|chatgpt\n\n  openrouter  connect OpenRouter in your browser; dino stores the key and never shows it\n  chatgpt     sign in with ChatGPT, so agents in dino can use your ChatGPT plan (up to the weekly\n              cap you set for dino in ChatGPT → Settings → Usage)");
         return Ok(());
     };
     if let Response::Providers { providers } = client::request(&Request::Providers)?
@@ -1297,7 +1302,7 @@ fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
             anyhow::bail!("{e}");
         }
     }
-    anyhow::bail!("gave up waiting for the browser")
+    anyhow::bail!("timed out waiting for you to finish in the browser")
 }
 
 /// The provider id of coding plan `name` (`zai` or `plan-zai`), if it is one.
@@ -1316,7 +1321,7 @@ fn cmd_login_plan(args: &[String]) -> anyhow::Result<()> {
         _ => anyhow::bail!("usage: dino login {} [--base <url>] < key", args[0]),
     };
     let preset = dino_core::plans::preset(&id).ok_or_else(unexpected)?;
-    anyhow::ensure!(base.is_some() || preset.id != dino_core::plans::OTHER, "the generic entry needs its base URL: dino login other --base <url> < key");
+    anyhow::ensure!(base.is_some() || preset.id != dino_core::plans::OTHER, "`other` needs a base URL: dino login other --base <url> < key");
     if out::tty() {
         eprintln!("Paste {}'s API key, then press Return and Ctrl-D:", preset.name);
     }
@@ -1386,7 +1391,7 @@ fn cmd_continue(prefix: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no session found starting with {}\n`dino found` lists the ones dino can continue.", printable(prefix)))?;
     let title = printable(&session.title);
     if session.pid.is_some() {
-        eprintln!("Moving “{title}” into dino; it waits for its current turn to finish…");
+        eprintln!("Moving “{title}” into dino once its current turn finishes…");
     }
     let id = created(client::request(&Request::Adopt { session, cwd: None })?)?;
     if out::tty() {

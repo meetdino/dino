@@ -974,7 +974,7 @@ fn follow(d: &Daemon) {
         if baseline == 0 {
             let restored = d.schedule.live.lock().unwrap().get(&run_id).is_some_and(|l| l.restored);
             // A command whose result was lost when dinod stopped.
-            let why = restored.then(|| "dinod stopped while it ran".to_string());
+            let why = restored.then(|| "dino's background service stopped while it ran".to_string());
             finish(d, &t, &run_id, !restored, why);
             continue;
         }

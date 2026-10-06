@@ -91,8 +91,8 @@ struct SecureInputMark: View {
                 .background(Circle().fill(Color(nsColor: .systemBlue).opacity(0.85)))
                 .padding(8)
                 .help(secure.prompt == id
-                    ? "Secure Keyboard Entry is on while this prompt reads a password: other apps can't read your keys"
-                    : "Secure Keyboard Entry is on: other apps can't read your keys (dino menu)")
+                    ? "Secure Keyboard Entry is on while this prompt asks for a password, so other apps can't read what you type"
+                    : "Secure Keyboard Entry is on, so other apps can't read what you type. Turn it off in the dino menu.")
                 .accessibilityLabel("Secure Keyboard Entry is on")
                 .transition(.opacity)
         }

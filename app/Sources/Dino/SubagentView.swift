@@ -126,7 +126,7 @@ struct SubagentPane: View {
                 Divider()
                 let id = detail?.id
                 ConversationView(page: detail?.conversation, task: detail?.task, loading: detail == nil && failed == nil,
-                                 unreadable: failed ?? "Its conversation can’t be read: only Claude’s subagents write one dino can show.") { before in
+                                 unreadable: failed ?? "This conversation can’t be shown. dino can only show conversations of Claude Code subagents.") { before in
                     guard let id else { return nil }
                     return try? await ConversationPage.fetch(agent: "claude", id: id, before: before).get()
                 }
@@ -162,7 +162,7 @@ struct SubagentPane: View {
                     Button(parent?.name ?? "session \(session)") { model.select(session) }
                         .buttonStyle(.link)
                         .disabled(parent == nil)
-                        .help(parent == nil ? "That session is gone" : "Go to the session it runs in")
+                        .help(parent == nil ? "That session no longer exists" : "Go to the session it runs in")
                 }
                 if let branch = worktree?.branch {
                     Text("·")
@@ -181,7 +181,7 @@ struct SubagentPane: View {
                         model.folder = URL(fileURLWithPath: path)
                         startHere = true
                     } label: { Label("Start a Session Here…", systemImage: "plus") }
-                        .help("A new session of its own in this worktree")
+                        .help("Start a new session in this worktree")
                     if let editor = ExternalEditor.preferred(for: path) {
                         Button("Open in \(editor.name)") { editor.openFolder(path) }
                     }
@@ -197,8 +197,8 @@ struct SubagentPane: View {
                 }
             }
             Text(path == nil
-                ? "Read-only: it runs inside \(parent?.name ?? "its parent session")’s agent, so it can’t be typed into."
-                : "Read-only: it runs inside \(parent?.name ?? "its parent session")’s agent, so it can’t be typed into. Start a session here to work in its worktree yourself.")
+                ? "Read-only: this subagent runs inside \(parent?.name ?? "its parent session")’s agent, so you can’t type into it."
+                : "Read-only: this subagent runs inside \(parent?.name ?? "its parent session")’s agent, so you can’t type into it. Start a session here to work in its worktree yourself.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }

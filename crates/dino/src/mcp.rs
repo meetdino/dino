@@ -130,7 +130,7 @@ fn tools(read_only: bool) -> Vec<Value> {
 }
 
 fn call(name: &str, args: &Value, me: Option<&str>) -> anyhow::Result<String> {
-    let mut dinod = Control::open_existing().map_err(|_| anyhow::anyhow!("dinod isn't running"))?;
+    let mut dinod = Control::open_existing().map_err(|_| anyhow::anyhow!("dino isn't running"))?;
     let mut ask = |req: Request| match dinod.request(&req)? {
         Response::Error { message } => Err(anyhow::anyhow!(message)),
         other => Ok(other),
@@ -138,7 +138,7 @@ fn call(name: &str, args: &Value, me: Option<&str>) -> anyhow::Result<String> {
     let arg = |k: &str| args[k].as_str().map(str::to_string);
     match name {
         "list_sessions" => {
-            let Response::State { sessions, .. } = ask(Request::State)? else { anyhow::bail!("unexpected reply from dinod") };
+            let Response::State { sessions, .. } = ask(Request::State)? else { anyhow::bail!("unexpected reply from dino") };
             if sessions.is_empty() {
                 return Ok("No sessions.".into());
             }
@@ -147,7 +147,7 @@ fn call(name: &str, args: &Value, me: Option<&str>) -> anyhow::Result<String> {
         "read_session" => {
             let id = resolve(&mut ask, &arg("session").unwrap_or_default())?;
             let lines = args["lines"].as_u64().map(|n| n.min(u32::MAX as u64) as u32);
-            let Response::Text { text } = ask(Request::ReadSession { id, lines })? else { anyhow::bail!("unexpected reply from dinod") };
+            let Response::Text { text } = ask(Request::ReadSession { id, lines })? else { anyhow::bail!("unexpected reply from dino") };
             Ok(text)
         }
         "send_message" => {
@@ -158,7 +158,7 @@ fn call(name: &str, args: &Value, me: Option<&str>) -> anyhow::Result<String> {
         "create_session" => {
             let launcher = arg("agent").filter(|a| !a.is_empty()).unwrap_or_else(|| "claude".into());
             let req = Request::Start { launcher, cwd: arg("cwd"), prompt: arg("prompt"), worktree: args["worktree"].as_bool().unwrap_or(false), by: me.map(Into::into) };
-            let Response::Created { id } = ask(req)? else { anyhow::bail!("unexpected reply from dinod") };
+            let Response::Created { id } = ask(req)? else { anyhow::bail!("unexpected reply from dino") };
             let Response::State { sessions, .. } = ask(Request::State)? else { return Ok(format!("Started session {id}.")) };
             Ok(match sessions.iter().find(|s| s.id == id) {
                 Some(s) => format!("Started {}", describe(s, &sessions, me)),
@@ -173,7 +173,7 @@ fn call(name: &str, args: &Value, me: Option<&str>) -> anyhow::Result<String> {
 fn resolve(ask: &mut impl FnMut(Request) -> anyhow::Result<Response>, key: &str) -> anyhow::Result<String> {
     let key = key.trim();
     anyhow::ensure!(!key.is_empty(), "say which session (its id or name, from list_sessions)");
-    let Response::State { sessions, .. } = ask(Request::State)? else { anyhow::bail!("unexpected reply from dinod") };
+    let Response::State { sessions, .. } = ask(Request::State)? else { anyhow::bail!("unexpected reply from dino") };
     sessions
         .iter()
         .find(|s| s.id == key)
