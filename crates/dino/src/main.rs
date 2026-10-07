@@ -1428,19 +1428,72 @@ fn cmd_login_plan(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_continue_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.is_empty() {
+        Err("a session ID prefix cannot be empty\n`dino found` lists the ones dino can continue.".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// The session `prefix` names: an exact id, else the only one it starts.
+fn continue_target(sessions: &[dino_core::found::FoundSession], prefix: &str) -> Result<usize, String> {
+    validate_continue_prefix(prefix)?;
+
+    if let Some(index) = sessions.iter().position(|f| f.session_id == prefix) {
+        return Ok(index);
+    }
+
+    let matches: Vec<_> = sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !f.session_id.is_empty() && f.session_id.starts_with(prefix))
+        .collect();
+    match matches.as_slice() {
+        [] => Err(format!(
+            "no session found starting with {}\n`dino found` lists the ones dino can continue.",
+            printable(prefix)
+        )),
+        [(index, _)] => Ok(*index),
+        _ => {
+            let details = matches
+                .iter()
+                .map(|(_, f)| {
+                    let mut location = f.cwd.clone().unwrap_or_else(|| "unknown folder".into());
+                    if let Some(tmux) = &f.tmux {
+                        location.push_str(&format!(" (tmux {})", tmux.label));
+                    } else if let Some(terminal) = &f.terminal {
+                        location.push_str(&format!(" ({terminal})"));
+                    }
+                    format!(
+                        "  {} | {} | {} | {}",
+                        printable(&f.session_id),
+                        printable(&f.agent),
+                        printable(&f.title),
+                        printable(&location)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(format!(
+                "{} matches several sessions; use a longer ID prefix:\n{details}",
+                printable(prefix)
+            ))
+        }
+    }
+}
+
 /// Continue a session dino didn't start (see `dino found`).
 fn cmd_continue(prefix: &str) -> anyhow::Result<()> {
-    // Hidden ones too: hiding only keeps a session out of the lists.
+    validate_continue_prefix(prefix).map_err(anyhow::Error::msg)?;
     let mut sessions = vec![];
     for hidden in [false, true] {
         let every = Request::Found { cloud: false, running_only: false, limit: None, query: None, hidden };
         let Response::Found { sessions: found, .. } = client::request(&every)? else { return Err(unexpected()) };
         sessions.extend(found);
     }
-    let session = sessions
-        .into_iter()
-        .find(|f| !f.session_id.is_empty() && f.session_id.starts_with(prefix))
-        .ok_or_else(|| anyhow::anyhow!("no session found starting with {}\n`dino found` lists the ones dino can continue.", printable(prefix)))?;
+    let index = continue_target(&sessions, prefix).map_err(anyhow::Error::msg)?;
+    let session = sessions.remove(index);
     let title = printable(&session.title);
     if session.pid.is_some() {
         eprintln!("Moving “{title}” into dino once its current turn finishes…");
@@ -1457,6 +1510,66 @@ fn cmd_continue(prefix: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn found_session(
+        id: &str,
+        agent: &str,
+        title: &str,
+        cwd: &str,
+    ) -> dino_core::found::FoundSession {
+        dino_core::found::FoundSession {
+            source: dino_core::found::Source::Recent,
+            agent: agent.into(),
+            session_id: id.into(),
+            title: title.into(),
+            cwd: Some(cwd.into()),
+            updated_at: 0,
+            pid: None,
+            status: None,
+            terminal: None,
+            args: Vec::new(),
+            url: None,
+            tmux: None,
+            unsure: None,
+        }
+    }
+
+    #[test]
+    fn continue_prefers_exact_ids_and_accepts_unique_prefixes() {
+        let sessions = [
+            found_session("session-1234", "claude", "Long", "/work/long"),
+            found_session("session", "codex", "Exact", "/work/exact"),
+        ];
+        assert_eq!(continue_target(&sessions, "session"), Ok(1));
+        assert_eq!(continue_target(&sessions, "session-1"), Ok(0));
+    }
+
+    #[test]
+    fn continue_rejects_empty_and_ambiguous_prefixes_with_choices() {
+        let mut first = found_session("deadbeef-one", "claude", "First task", "/workspace/one");
+        first.terminal = Some("iTerm2".into());
+        let second = found_session("deadbeef-two", "codex", "Second task", "/workspace/two");
+        let sessions = [first, second];
+
+        assert!(
+            continue_target(&sessions, "")
+                .unwrap_err()
+                .contains("cannot be empty")
+        );
+        let error = continue_target(&sessions, "deadbeef").unwrap_err();
+        for detail in [
+            "deadbeef-one",
+            "claude",
+            "First task",
+            "/workspace/one (iTerm2)",
+            "deadbeef-two",
+            "codex",
+            "Second task",
+            "/workspace/two",
+        ] {
+            assert!(error.contains(detail), "missing {detail:?} in {error:?}");
+        }
+    }
 
     #[test]
     fn control_characters_are_not_printed() {
