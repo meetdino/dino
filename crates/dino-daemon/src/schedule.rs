@@ -583,13 +583,30 @@ pub(crate) fn fallback(d: &Daemon, l: &LauncherInfo) -> Option<(LauncherInfo, Ag
 }
 
 /// Why `l` can't take a run now: a route its own account uses is known spent (see `fallbacks`), or
-/// its subscription's window is used up (as the provider last said).
+/// its subscription's window is used up (as the provider last said). Claude Code with more of the
+/// user's Claude accounts, its calls through dino: only once every one of them is, as each last
+/// found it, for dino's proxy signs its calls with one that isn't (see `dino_proxy::accounts`).
 pub(crate) fn at_limit(d: &Daemon, l: &LauncherInfo) -> Option<String> {
+    at_limit_routed(d, l, || Settings::load().routing.proxy)
+}
+
+/// `at_limit`, `routed` saying whether its new sessions talk through dino (Settings → routing).
+pub(crate) fn at_limit_routed(d: &Daemon, l: &LauncherInfo, routed: impl FnOnce() -> bool) -> Option<String> {
+    let accounts = (l.agent_id == "claude").then(|| d.proxy.claude_accounts_now()).flatten().filter(|_| routed());
+    if let Some(accounts) = &accounts
+        && let Some(first) = dino_proxy::accounts::all_spent(accounts.iter().map(|(_, l, q)| (l.as_ref(), q.as_ref())), now_secs())
+    {
+        let until = first.resets_at.map(|r| format!(" until {}, when the first resets", clock(r))).unwrap_or_default();
+        let all = if accounts.len() == 2 { "both".to_string() } else { format!("all {}", accounts.len()) };
+        return Some(format!("{} is at its limit on {all} Claude accounts{until}", l.label));
+    }
     if let Some(spent) = fallbacks::limits(d).into_iter().find(|s| s.agent_id == l.agent_id) {
         let until = spent.resets_at.map(|r| format!(" until {}", clock(r))).unwrap_or_default();
         return Some(format!("{} is at its {} ({}){until}", l.label, spent.reason, spent.name));
     }
     let provider = match l.agent_id.as_str() {
+        // Its own windows say nothing while another account has room.
+        "claude" if accounts.is_some() => return None,
         "claude" => "anthropic",
         "codex" => "chatgpt",
         _ => return None,
@@ -601,7 +618,7 @@ pub(crate) fn at_limit(d: &Daemon, l: &LauncherInfo) -> Option<String> {
     Some(format!("{} is at its {name} limit{until}", l.label))
 }
 
-fn clock(t: u64) -> String {
+pub(crate) fn clock(t: u64) -> String {
     let tm = local(t);
     format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
