@@ -175,8 +175,8 @@ fn range_words(r: Range) -> &'static str {
 pub fn tokens(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),
-        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
-        1_000_000..1_000_000_000 => format!("{:.1}M", n as f64 / 1e6),
+        1_000..999_950 => format!("{:.1}k", n as f64 / 1e3),
+        999_950..999_950_000 => format!("{:.1}M", n as f64 / 1e6),
         _ => format!("{:.2}B", n as f64 / 1e9),
     }
 }
@@ -455,7 +455,28 @@ mod tests {
         assert_eq!(weekday("2026-10-05"), 0, "a Monday");
         assert_eq!(weekday("2026-10-04"), 6, "a Sunday");
         assert_eq!(weekday("2024-02-29"), 3);
-        assert_eq!((tokens(999), tokens(1500), tokens(2_500_000), tokens(3_210_000_000)), ("999".into(), "1.5k".into(), "2.5M".into(), "3.21B".into()));
+        assert_eq!(
+            (
+                tokens(999),
+                tokens(1_000),
+                tokens(999_949),
+                tokens(999_999),
+                tokens(999_999_999),
+                tokens(5_000_000_000),
+            ),
+            (
+                "999".into(),
+                "1.0k".into(),
+                "999.9k".into(),
+                "1.0M".into(),
+                "1.00B".into(),
+                "5.00B".into(),
+            )
+        );
+        assert_eq!(
+            (tokens(1_500), tokens(2_500_000), tokens(3_210_000_000)),
+            ("1.5k".into(), "2.5M".into(), "3.21B".into())
+        );
         assert_eq!((duration(42_000), duration(14 * 60_000), duration(134 * 60_000)), ("42s".into(), "14m".into(), "2h 14m".into()));
     }
 }

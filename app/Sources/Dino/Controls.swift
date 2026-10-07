@@ -321,8 +321,9 @@ struct ContextRing: View {
 func roundTokens(_ n: UInt64) -> String {
     switch n {
     case ..<1000: "\(n)"
-    case ..<1_000_000: "\(Int((Double(n) / 1e3).rounded()))k"
-    default: (Double(n) / 1e6).formatted(.number.precision(.fractionLength(0...2))) + "M"
+    case 1_000..<999_500: "\(Int((Double(n) / 1e3).rounded()))k"
+    case 999_500..<999_995_000: (Double(n) / 1e6).formatted(.number.precision(.fractionLength(0...2))) + "M"
+    default: (Double(n) / 1e9).formatted(.number.precision(.fractionLength(0...2))) + "B"
     }
 }
 
