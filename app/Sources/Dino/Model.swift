@@ -85,8 +85,15 @@ final class DinoModel: ObservableObject {
     @Published var launchers: [LauncherInfo] = []
     @Published var selected: String? {
         // Remembered per dinod, so reopening the app comes back to the same session.
-        didSet { if let id = selected, !id.contains(":") { UserDefaults.standard.set(id, forKey: Self.lastSelectedKey) } }
+        didSet {
+            if let id = selected, !id.contains(":") { UserDefaults.standard.set(id, forKey: Self.lastSelectedKey) }
+            // Something else shown: ⌘N starts where that is, not in a folder whose row was clicked before.
+            if selected != oldValue { clickedFolder = nil }
+        }
     }
+    /// The folder whose row was clicked last, while the session shown stayed (see `startHere`):
+    /// ⌘N starts there, the folder you chose, rather than where that session is.
+    var clickedFolder: String?
     static let lastSelectedKey = "selected.\(DinoEnvironment.home)"
     @Published var error: String?
     /// Agent sessions dino didn't start (running elsewhere, recent, cloud).
@@ -693,7 +700,9 @@ final class DinoModel: ObservableObject {
 
     /// A folder's row was clicked: new sessions start there, and what's shown stays.
     func startHere(_ tag: String) {
-        if let path = Self.folderPath(tag) { moveFolder(to: path) }
+        guard let path = Self.folderPath(tag) else { return }
+        moveFolder(to: path)
+        clickedFolder = path
     }
 
     /// The folder a sidebar selection stands for: "dir:" a checkout, "repo:" a repo's own row.
@@ -1338,12 +1347,7 @@ final class DinoModel: ObservableObject {
     }
 
     func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.directoryURL = folder
-        panel.prompt = "Use Folder"
-        if panel.runModal() == .OK, let url = panel.url { folder = url }
+        if let url = FolderPanel.choose(in: folder, verb: "Use") { folder = url }
     }
 
     /// Stop the sessions in a worktree dino made and remove it and its branch; `apply` first brings
