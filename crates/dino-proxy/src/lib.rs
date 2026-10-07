@@ -635,6 +635,7 @@ impl Proxy {
         let budget = Arc::new(AtomicU64::new(0));
         let state = AppState {
             free_models: Arc::default(),
+            free_wake: Arc::default(),
             stats: stats.clone(),
             upstream: Arc::default(),
             router: Arc::default(),
@@ -687,6 +688,7 @@ impl Proxy {
     /// Use these keys from the next request on.
     pub fn set_keys(&self, keys: HashMap<String, String>) {
         *self.keys.write().unwrap() = keys;
+        self.state.free_wake.notify_one();
     }
 
     /// Route `key` is spent (or down) and nothing of the user's own stands in: for Claude Code's
@@ -754,6 +756,9 @@ impl Proxy {
     /// leaves this Mac, and its model list isn't refreshed.
     pub fn set_free_models(&self, on: bool) {
         self.state.free_models.store(on, Ordering::Relaxed);
+        if on {
+            self.state.free_wake.notify_one();
+        }
     }
 
     pub fn free_models(&self) -> bool {
@@ -841,6 +846,8 @@ fn clean_path(rest: &str) -> Option<&str> {
 pub(crate) struct AppState {
     /// The free tier is turned on (see `Proxy::set_free_models`).
     free_models: Arc<AtomicBool>,
+    /// Wakes the free tier's model look (`catalog::keep_fresh`) when it's turned on or a key comes.
+    free_wake: Arc<tokio::sync::Notify>,
     stats: Arc<Stats>,
     upstream: Arc<upstream::Upstream>,
     router: Arc<dino_router::Router>,

@@ -56,6 +56,8 @@ pub struct Probe {
     pub ms: f64,
     /// Its place in the provider's featured list, best first.
     pub rank: Option<usize>,
+    /// It has been tried: what `answers`, `tools` and `ms` say was learned, not assumed.
+    pub tried: bool,
     /// Most output tokens it takes, as the provider publishes it or as it said when refusing more.
     pub max_output: Option<u64>,
 }
@@ -87,7 +89,9 @@ impl Router {
     }
 
     /// Preference order for `tier`: only models that call tools; quick chores to the quickest,
-    /// everything else by the provider's own ranking, then speed.
+    /// everything else by the provider's own ranking, then speed. After them, the provider's own
+    /// picks not tried yet, by its ranking: until they have been (the free tier was just turned on,
+    /// and trying them all takes a minute or more), a request goes to them rather than nowhere.
     fn pool(&self, tier: Tier) -> Vec<Model> {
         let probes = self.probes.lock().unwrap();
         let mut usable: Vec<&Probe> = probes.iter().filter(|p| p.tools).collect();
@@ -96,7 +100,9 @@ impl Router {
             Tier::Fast => usable.sort_by(by_speed),
             _ => usable.sort_by(|a, b| a.rank.unwrap_or(usize::MAX).cmp(&b.rank.unwrap_or(usize::MAX)).then(by_speed(a, b))),
         }
-        usable.into_iter().map(|p| Model { id: p.id.clone() }).collect()
+        let mut untried: Vec<&Probe> = probes.iter().filter(|p| !p.tried && p.rank.is_some()).collect();
+        untried.sort_by_key(|p| p.rank);
+        usable.into_iter().chain(untried).map(|p| Model { id: p.id.clone() }).collect()
     }
 
     /// The quickest model that answers, to classify requests with.
@@ -311,7 +317,7 @@ mod tests {
     fn the_pool_is_what_was_learned() {
         let r = Router::default();
         assert!(r.candidates(Tier::Code).is_empty() && r.classifier().is_none(), "nothing known, nothing offered");
-        let p = |id: &str, tools: bool, ms: f64, rank: Option<usize>| Probe { id: id.into(), answers: true, tools, ms, rank, max_output: None };
+        let p = |id: &str, tools: bool, ms: f64, rank: Option<usize>| Probe { id: id.into(), answers: true, tools, ms, rank, tried: true, max_output: None };
         r.set_probes(vec![p("a/slow-top", true, 9000.0, Some(0)), p("b/quick", true, 800.0, None), p("c/no-tools", false, 200.0, None), p("d/mid", true, 2000.0, None)]);
         let ids = |t| r.candidates(t).into_iter().map(|m| m.id).collect::<Vec<_>>();
         assert_eq!(ids(Tier::Fast), ["b/quick", "d/mid", "a/slow-top"], "chores to the quickest");
@@ -321,6 +327,22 @@ mod tests {
         assert_eq!(r.max_output(&Model { id: "b/quick".into() }), Some(4096));
         r.record_failure(&Model { id: "b/quick".into() });
         assert_eq!(ids(Tier::Fast), ["d/mid", "a/slow-top", "b/quick"], "a failing model waits");
+    }
+
+    /// Just turned on, before its models have been tried: the provider's own picks, by its
+    /// ranking, rather than nothing; once tried, only those that called a tool.
+    #[test]
+    fn before_its_models_are_tried_the_providers_picks_are_offered() {
+        let r = Router::default();
+        let untried = |id: &str, rank: Option<usize>| Probe { id: id.into(), ms: f64::MAX, rank, ..Probe::default() };
+        r.set_probes(vec![untried("x/embed", None), untried("b/second", Some(1)), untried("a/first", Some(0))]);
+        let ids = |t| r.candidates(t).into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(ids(Tier::Code), ["a/first", "b/second"]);
+        assert_eq!(ids(Tier::Fast), ["a/first", "b/second"]);
+        let worked = Probe { id: "c/tried".into(), answers: true, tools: true, ms: 900.0, rank: None, tried: true, max_output: None };
+        let failed = Probe { id: "b/second".into(), ms: 45_000.0, rank: Some(1), tried: true, ..Probe::default() };
+        r.set_probes(vec![untried("a/first", Some(0)), failed, worked]);
+        assert_eq!(ids(Tier::Code), ["c/tried", "a/first"], "known to work first; one that didn't, never");
     }
 
     #[test]
