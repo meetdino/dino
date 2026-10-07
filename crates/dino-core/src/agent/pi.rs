@@ -483,19 +483,23 @@ impl Agent for Pi {
         Some(s)
     }
 
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         if self.free {
             return vec![];
         }
         let mut out = vec![];
         for p in transcripts() {
             let Some(id) = id_of(&p) else { continue };
+            let updated = history::modified(&p);
+            if leave_out(&id, updated) {
+                continue;
+            }
             let meta = meta(&p);
-            if meta.hidden || running(&id) {
+            if meta.hidden {
                 continue;
             }
             let title = meta.title.unwrap_or_else(|| "Pi session".into());
-            out.push(history::recent("pi", id, title, meta.cwd, history::modified(&p)));
+            out.push(history::recent("pi", id, title, meta.cwd, updated));
         }
         out
     }

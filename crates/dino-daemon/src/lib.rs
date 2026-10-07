@@ -1427,7 +1427,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::Found { cloud, running_only } => Response::Found { sessions: discover(d, cloud, running_only) },
+            Request::Found { cloud, running_only, limit, query } => {
+                let (sessions, more) = discover(d, cloud, running_only, limit, query.as_deref().unwrap_or(""));
+                Response::Found { sessions, more }
+            }
             Request::TmuxShow { socket, pane } => {
                 let tty = tmux::show(&socket, &pane);
                 // The dino tab whose shell runs that client, to bring it forward too.
@@ -3441,8 +3444,10 @@ fn home() -> PathBuf {
 
 // ---- Continue anything: sessions dino didn't start. ----
 
-/// Found sessions minus the ones dino itself is running, or that run inside its shells.
-fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
+/// Found sessions minus the ones dino itself is running, or that run inside its shells. Of the
+/// finished ones, the newest `limit`, or those matching `query` (see `history::finished`); and
+/// whether older ones were left out.
+fn discover(d: &Daemon, cloud: bool, running_only: bool, limit: Option<usize>, query: &str) -> (Vec<FoundSession>, bool) {
     let sessions = d.sessions.lock().unwrap().clone();
     let inside: Vec<FoundSession> = sessions.iter().filter_map(|s| s.inside.lock().unwrap().found.clone()).collect();
     // dino's own conversations, live or archived, are listed as dino sessions already.
@@ -3456,13 +3461,49 @@ fn discover(d: &Daemon, cloud: bool, running_only: bool) -> Vec<FoundSession> {
     let mut running = found::scan(&roots, &|f| (!f.session_id.is_empty() && ours.contains(&f.session_id)) || in_shell(f));
     // Agents in tmux panes: which pane, and whether they're asking.
     tmux::place(&mut running);
-    let mut out = if running_only { vec![] } else { dino_core::history::finished(&found::live()) };
+    let (mut out, mut more) = if running_only { (vec![], false) } else { history(d, limit, query) };
     out.retain(|f| !ours.contains(&f.session_id));
+    if let Some(n) = limit {
+        more |= out.len() > n;
+        out.truncate(n);
+    }
     out.splice(0..0, running);
     if cloud {
         out.extend(found::cloud(&|id| d.launcher(id).map(|l| PathBuf::from(&l.program))));
     }
-    out
+    (out, more)
+}
+
+/// The conversations on disk nothing runs (`history::finished`). What's read of them is kept in
+/// dino's folder between runs. Asked for the newest few, it reads the rest once in the background,
+/// so a search through all of them needn't wait for that.
+fn history(d: &Daemon, limit: Option<usize>, query: &str) -> (Vec<FoundSession>, bool) {
+    static LOADED: std::sync::Once = std::sync::Once::new();
+    static READ_ALL: std::sync::Once = std::sync::Once::new();
+    let file = d.home.join("history-cache.json");
+    LOADED.call_once(|| dino_core::history::load_cache(&file));
+    let found = dino_core::history::finished(&found::live(), limit, query);
+    let read_all = limit.is_none() || !query.trim().is_empty();
+    READ_ALL.call_once(|| {
+        if !read_all {
+            let file = file.clone();
+            std::thread::spawn(move || {
+                dino_core::history::finished(&[], None, "");
+                keep_history(&file);
+            });
+        }
+    });
+    std::thread::spawn(move || keep_history(&file));
+    found
+}
+
+/// Keep what dinod read of conversations for its next run (`history::keep_cache`), one at a time.
+fn keep_history(file: &Path) {
+    static KEEPING: Mutex<()> = Mutex::new(());
+    let _one = KEEPING.lock().unwrap();
+    if let Err(e) = dino_core::history::keep_cache(file) {
+        eprintln!("dinod: couldn't keep what it read of conversations in {}: {e}", file.display());
+    }
 }
 
 /// Hand a session over to dino. A running one is left to finish its current turn, stopped, and
