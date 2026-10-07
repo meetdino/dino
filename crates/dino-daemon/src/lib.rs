@@ -2146,6 +2146,9 @@ fn local_spec(
         wired_args.extend(after);
     } else if let Some(a) = adapter {
         let (before, after) = a.session_args(agent_session, restoring);
+        if let Some(c) = agent_session.as_deref() {
+            a.prepare_session(c, &cwd);
+        }
         wired_args.splice(0..0, before);
         wired_args.extend(after);
     }

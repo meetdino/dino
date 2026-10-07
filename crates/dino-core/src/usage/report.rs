@@ -325,7 +325,7 @@ fn midnight(day: i64) -> i64 {
 }
 
 /// Year, month, day of days since 1970-01-01.
-fn civil(z: i64) -> (i64, i64, i64) {
+pub(crate) fn civil(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = z - era * 146097;
