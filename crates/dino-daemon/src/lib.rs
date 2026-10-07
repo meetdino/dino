@@ -40,6 +40,7 @@ mod fork;
 mod fsevents;
 mod gitstate;
 mod github;
+mod hidden;
 mod lid;
 mod lifecycle;
 mod mode;
@@ -1427,10 +1428,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::Found { cloud, running_only, limit, query } => {
-                let (sessions, more) = discover(d, cloud, running_only, limit, query.as_deref().unwrap_or(""));
-                Response::Found { sessions, more }
+            Request::Found { cloud, running_only, limit, query, hidden } => {
+                let (sessions, more, hidden) = discover(d, cloud, running_only, limit, query.as_deref().unwrap_or(""), hidden);
+                Response::Found { sessions, more, hidden }
             }
+            Request::Hide { session, hidden } => match hidden::set(&d.home, &session, hidden) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::TmuxShow { socket, pane } => {
                 let tty = tmux::show(&socket, &pane);
                 // The dino tab whose shell runs that client, to bring it forward too.
@@ -3444,10 +3449,11 @@ fn home() -> PathBuf {
 
 // ---- Continue anything: sessions dino didn't start. ----
 
-/// Found sessions minus the ones dino itself is running, or that run inside its shells. Of the
-/// finished ones, the newest `limit`, or those matching `query` (see `history::finished`); and
-/// whether older ones were left out.
-fn discover(d: &Daemon, cloud: bool, running_only: bool, limit: Option<usize>, query: &str) -> (Vec<FoundSession>, bool) {
+/// Found sessions minus the ones dino itself is running, or that run inside its shells, and the
+/// ones the user hid (only those, with `hidden`). Of the finished ones, the newest `limit`, or
+/// those matching `query` (see `history::finished`). Also whether older ones were left out, and
+/// how many are hidden.
+fn discover(d: &Daemon, cloud: bool, running_only: bool, limit: Option<usize>, query: &str, hidden: bool) -> (Vec<FoundSession>, bool, usize) {
     let sessions = d.sessions.lock().unwrap().clone();
     let inside: Vec<FoundSession> = sessions.iter().filter_map(|s| s.inside.lock().unwrap().found.clone()).collect();
     // dino's own conversations, live or archived, are listed as dino sessions already.
@@ -3461,17 +3467,26 @@ fn discover(d: &Daemon, cloud: bool, running_only: bool, limit: Option<usize>, q
     let mut running = found::scan(&roots, &|f| (!f.session_id.is_empty() && ours.contains(&f.session_id)) || in_shell(f));
     // Agents in tmux panes: which pane, and whether they're asking.
     tmux::place(&mut running);
-    let (mut out, mut more) = if running_only { (vec![], false) } else { history(d, limit, query) };
-    out.retain(|f| !ours.contains(&f.session_id));
-    if let Some(n) = limit {
+    let hid = hidden::load(&d.home);
+    let shown = running.len();
+    running.retain(|f| hid.has(f) == hidden);
+    let count = hid.conversations() + if hidden { running.len() } else { shown - running.len() };
+    let (mut out, mut more) = match (running_only, hidden) {
+        (true, _) => (vec![], false),
+        // Hidden ones, however old.
+        (false, true) => (history(d, None, query).0, false),
+        (false, false) => history(d, limit, query),
+    };
+    out.retain(|f| !ours.contains(&f.session_id) && hid.has(f) == hidden);
+    if let Some(n) = limit.filter(|_| !hidden) {
         more |= out.len() > n;
         out.truncate(n);
     }
     out.splice(0..0, running);
-    if cloud {
+    if cloud && !hidden {
         out.extend(found::cloud(&|id| d.launcher(id).map(|l| PathBuf::from(&l.program))));
     }
-    (out, more)
+    (out, more, count)
 }
 
 /// The conversations on disk nothing runs (`history::finished`). What's read of them is kept in

@@ -204,7 +204,13 @@ pub enum Request {
         /// Only finished conversations whose title, folder or id has this, however old.
         #[serde(default)]
         query: Option<String>,
+        /// The ones the user hid (see `Hide`), instead of the rest.
+        #[serde(default)]
+        hidden: bool,
     },
+    /// Hide a found session from "On this Mac" and the session browser, or (`hidden` false) show
+    /// it again: a running one until its process ends, a finished conversation until shown again.
+    Hide { session: crate::found::FoundSession, hidden: bool },
     /// Read a conversation, a found session's or a subagent's (see `history::conversation`).
     Conversation { agent: String, session_id: String, before: Option<u64> },
     /// Usage statistics over `range` (see `usage::report`): what the proxy carried, and agents'
@@ -441,11 +447,14 @@ pub enum Response {
     Created { id: String },
     ShellOutput { output: Option<String>, exit: Option<i32> },
     SessionCost { cost: SessionCost },
-    /// `more`: older finished conversations were left out (past `limit`).
+    /// `more`: older finished conversations were left out (past `limit`). `hidden`: how many the
+    /// user hid (none of them are listed, unless asked for).
     Found {
         sessions: Vec<crate::found::FoundSession>,
         #[serde(default)]
         more: bool,
+        #[serde(default)]
+        hidden: usize,
     },
     /// Shown in the tmux client on `tty`; `session` is the dino tab that client runs in, if any.
     /// Neither when no client is attached.
@@ -1381,11 +1390,11 @@ mod tests {
     #[test]
     fn found_asks_for_all_history_unless_told_otherwise() {
         // An app or CLI from before the window asks as it did, and gets every conversation.
-        let Request::Found { cloud, running_only, limit, query } = serde_json::from_str(r#"{"type":"found","cloud":true}"#).unwrap() else { panic!() };
-        assert_eq!((cloud, running_only, limit, query), (true, false, None, None));
-        // And an answer from a dinod before it reads as nothing left out.
-        let Response::Found { sessions, more } = serde_json::from_str(r#"{"type":"found","sessions":[]}"#).unwrap() else { panic!() };
-        assert!(sessions.is_empty() && !more);
+        let Request::Found { cloud, running_only, limit, query, hidden } = serde_json::from_str(r#"{"type":"found","cloud":true}"#).unwrap() else { panic!() };
+        assert_eq!((cloud, running_only, limit, query, hidden), (true, false, None, None, false));
+        // And an answer from a dinod before it reads as nothing left out or hidden.
+        let Response::Found { sessions, more, hidden } = serde_json::from_str(r#"{"type":"found","sessions":[]}"#).unwrap() else { panic!() };
+        assert!(sessions.is_empty() && !more && hidden == 0);
     }
 
     #[test]

@@ -103,6 +103,9 @@ final class DinoModel: ObservableObject {
     @Published var historyMore = false
     /// A search or "Show older" is being answered.
     @Published var loadingHistory = false
+    /// What the user hid (see `hide`), loaded when the browser shows them, and how many there are.
+    @Published var hiddenFound: [FoundSession] = []
+    @Published var hiddenCount = 0
     /// A handoff in progress: the session being moved, and whether we're waiting on its turn.
     /// Found sessions waiting to continue in dino, by `FoundSession.id`; see `adopt`.
     @Published var adopting: Set<String> = []
@@ -1035,9 +1038,10 @@ final class DinoModel: ObservableObject {
 
     private func loadFound(cloud: Bool) async {
         let (limit, query) = (historyLimit, historyQuery)
-        guard let (list, more) = await Task.detached(operation: {
+        guard let (list, more, hidden) = await Task.detached(operation: {
             try? DinoConnection(path: DinoEnvironment.socketPath).found(cloud: cloud, limit: limit, query: query)
         }).value else { return }
+        if hidden != hiddenCount { hiddenCount = hidden }
         // Asked for something else since (typed on, or "Show older"): that answer is the one shown.
         guard limit == historyLimit, query == historyQuery else { return }
         // Without cloud, keep the cloud entries already loaded.
@@ -1045,6 +1049,37 @@ final class DinoModel: ObservableObject {
         if merged != found { found = merged }
         if more != historyMore { historyMore = more }
         loadedHistory = true
+    }
+
+    /// The sessions the user hid, for the browser to show.
+    func loadHidden() {
+        Task {
+            guard let (list, _, count) = await Task.detached(operation: {
+                try? DinoConnection(path: DinoEnvironment.socketPath).found(cloud: false, limit: 0, query: "", hidden: true)
+            }).value else { return }
+            hiddenFound = list
+            hiddenCount = count
+        }
+    }
+
+    /// Hide `f` from "On this Mac" and the browser (a running one until it ends), or (`hide`
+    /// false) show it again. dinod keeps the list; the agent's own files are left alone.
+    func hide(_ f: FoundSession, _ hide: Bool = true) {
+        Task {
+            let failed = await Task.detached(operation: { () -> String? in
+                do { try DinoConnection(path: DinoEnvironment.socketPath).hide(f, hidden: hide); return nil } catch { return error.localizedDescription }
+            }).value
+            if let failed { error = failed; return }
+            if hide {
+                found.removeAll { $0 == f }
+                hiddenCount += 1
+            } else {
+                hiddenFound.removeAll { $0 == f }
+                hiddenCount = max(0, hiddenCount - 1)
+                // Back where it belongs.
+                await loadFound(cloud: false)
+            }
+        }
     }
 
     /// Ask before continuing running `f` in dino; one whose conversation dino can't tell says why

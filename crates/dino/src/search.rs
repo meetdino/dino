@@ -82,7 +82,7 @@ fn sessions() -> (Vec<Item>, Vec<Item>) {
             live.push(Item { kind: "session", text, detail: format!("{} · {}", s.agent_id, tilde(&s.cwd)), command: format!("dino attach {}", s.id) });
         }
     }
-    let newest = Request::Found { cloud: false, running_only: false, limit: Some(200), query: None };
+    let newest = Request::Found { cloud: false, running_only: false, limit: Some(200), query: None, hidden: false };
     if let Ok(Response::Found { sessions, .. }) = c.request(&newest) {
         for f in sessions.into_iter().filter(|f| !f.session_id.is_empty()).take(200) {
             let prefix: String = f.session_id.chars().take(8).collect();
