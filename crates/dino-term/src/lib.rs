@@ -279,15 +279,19 @@ impl PtyTransport {
     fn foreground(&self) -> Option<u32> {
         self.master.lock().unwrap().process_group_leader().and_then(|p| u32::try_from(p).ok())
     }
-    /// Whether the program reads a password (see [`Shared::password`]).
-    fn password(&self) -> Option<bool> {
+    /// The terminal's local modes, as the program set them.
+    fn lflag(&self) -> Option<libc::tcflag_t> {
         let fd = self.fd?;
         // SAFETY: `fd` is the master's, open while `self` is; `t` is written by tcgetattr.
         let mut t: libc::termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(fd, &mut t) } != 0 {
             return None;
         }
-        Some(t.c_lflag & libc::ICANON != 0 && t.c_lflag & libc::ECHO == 0)
+        Some(t.c_lflag)
+    }
+    /// Whether the program reads a password (see [`Shared::password`]).
+    fn password(&self) -> Option<bool> {
+        self.lflag().map(|l| l & libc::ICANON != 0 && l & libc::ECHO == 0)
     }
 }
 
@@ -641,6 +645,13 @@ impl Pane {
     /// (a shell's current command).
     pub fn foreground(&self) -> Option<u32> {
         self.shared.transport.get()?.foreground()
+    }
+
+    /// The program reads keys as they're pressed, its terminal out of line mode, as a full-screen
+    /// program does once it takes input. Before that, what's typed is echoed and kept as a line
+    /// (and a program starting up may throw it away). False when that can't be told (no PTY here).
+    pub fn reads_keys(&self) -> bool {
+        self.shared.transport.get().and_then(|t| t.lflag()).is_some_and(|l| l & libc::ICANON == 0)
     }
 
     pub fn size(&self) -> (u16, u16) {

@@ -1806,6 +1806,9 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     if let Some(r) = ended.filter(|_| host.is_none()) {
         session_claude_config(&repo_env(&settings, Path::new(&r.cwd)), &r.account);
     }
+    // An agent that takes no first message on its command line (Kimi Code, Amp) gets it typed in,
+    // once it's ready for one.
+    let typed_prompt = prompt.clone().filter(|p| ended.is_none() && prompt_args(&l.agent_id, p.clone()).is_empty());
     let (spec, cwd, server, reach) = match &host {
         _ if ended.is_some() => (None, PathBuf::from(ended.map(|r| r.cwd.clone()).unwrap_or_default()), None, vec![]),
         Some(host) => {
@@ -1963,6 +1966,9 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         if s.server.is_some() && !s.pane.is_exited() {
             agentserver::follow(d.proxy.stats.clone(), s);
         }
+    }
+    if let Some(p) = typed_prompt {
+        schedule::type_when_ready(d, &id, &p);
     }
     Ok(id)
 }

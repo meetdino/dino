@@ -33,6 +33,9 @@ const LATE: u64 = 120;
 /// How long a shell gets to start before its task's command is typed in.
 const SHELL_READY: Duration = Duration::from_secs(30);
 
+/// How long an agent waiting for its first message has to keep waiting while its screen moves.
+const AGENT_STEADY: Duration = Duration::from_secs(3);
+
 /// How often the deciding thread looks, with nothing going on (schedules are to the minute).
 const IDLE_LOOK: Duration = Duration::from_secs(30);
 /// … while a run is going or files changed,
@@ -829,21 +832,43 @@ pub(crate) fn check_trust(l: &LauncherInfo, dir: &Path, worktree: bool) -> anyho
     Ok(())
 }
 
-/// Type `text` into a new session once it has drawn its prompt and gone quiet.
+/// Type `text` into a new session once it waits for it: a shell's command, once the shell has drawn
+/// its prompt and gone quiet; the first message of an agent that takes none on its command line,
+/// once it reads keys (see `Pane::reads_keys`: starting up, it can go quiet for a while, and what's
+/// typed then is lost), shows something, and has gone quiet or stayed so for `AGENT_STEADY` (one
+/// whose screen keeps moving, as Amp's welcome does). Never while it asks something on its screen
+/// (whether to trust the folder, to sign in), which the text would answer: the user answers that,
+/// and the text goes in after.
 pub(crate) fn type_when_ready(d: &Daemon, id: &str, text: &str) {
     let Some(s) = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() else { return };
     let text = text.to_string();
     std::thread::spawn(move || {
         let start = Instant::now();
-        while start.elapsed() < SHELL_READY && !s.pane.is_exited() {
-            if s.last_write.lock().unwrap().is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
+        let shell = s.agent_id == "shell";
+        let asks = |screen: &str| s.adapter().is_some_and(|a| a.asking(screen).is_some());
+        // Since when the agent has read keys, shown something and asked nothing.
+        let mut steady: Option<Instant> = None;
+        loop {
+            if s.pane.is_exited() {
+                return;
+            }
+            let quiet = s.last_write.lock().unwrap().is_some_and(|t| t.elapsed() > Duration::from_secs(1));
+            let ready = if shell {
+                (quiet || start.elapsed() > SHELL_READY) && !asks(&s.pane.text(0))
+            } else {
+                let waits = s.pane.reads_keys() && {
+                    let screen = s.pane.text(0);
+                    !screen.trim().is_empty() && !asks(&screen)
+                };
+                steady = steady.filter(|_| waits).or_else(|| waits.then(Instant::now));
+                waits && (quiet || steady.is_some_and(|t| t.elapsed() > AGENT_STEADY))
+            };
+            if ready {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(250));
         }
-        if !s.pane.is_exited() {
-            send_input(&s, &text, true);
-        }
+        send_input(&s, &text, true);
     });
 }
 
