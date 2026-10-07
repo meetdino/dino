@@ -6116,6 +6116,60 @@ while (sysread(STDIN, my $c, 1)) {
         before.save().unwrap();
     }
 
+    /// An automation of Claude's with more of the user's Claude accounts: its own account spent
+    /// isn't Claude at its limit while another has room (dino's proxy signs its calls with that
+    /// one); every one spent is, until the first resets. Without another account, or with its
+    /// calls not through dino, its own windows say, as before.
+    #[test]
+    fn claude_is_at_its_limit_only_with_every_account_spent() {
+        use dino_proxy::{Quota, Window, fallback::{Kind, Limited}};
+        test_home();
+        let sh = |agent: &str| LauncherInfo { short: agent.into(), agent_id: agent.into(), label: "Claude Code".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let d = test_daemon(vec![sh("claude")]);
+        let claude = d.launcher("claude").unwrap();
+        let now = now_secs();
+        let full = |resets: u64| Quota { windows: vec![("7d".into(), Window { utilization: 1.0, resets_at: Some(resets), status: None })] };
+        let at = |routed: bool| schedule::at_limit_routed(&d, &claude, || routed);
+        let quotas = |key: &str, q: Quota| d.proxy.stats.quotas.lock().unwrap().insert(key.into(), q);
+
+        // Only its own account, its 7d window used up: as before.
+        quotas("anthropic", full(now + 7200));
+        let alone = at(true).expect("at its limit");
+        assert!(alone.starts_with("Claude Code is at its 7d limit until "), "{alone}");
+
+        // Another account, nothing known of it yet: the run goes ahead, and through dino it's that
+        // account that answers. With its calls not through dino, its own account still says.
+        let two = "sk-ant-oat01-unit-two";
+        d.proxy.set_keys(HashMap::from([("CLAUDE_ACCOUNT_2".to_string(), two.to_string())]));
+        assert_eq!(at(true), None);
+        assert_eq!(at(false), Some(alone.clone()));
+        // Its own also refused: still account 2.
+        d.proxy.stats.limited.lock().unwrap().insert("anthropic#own".into(), Limited { name: "Claude".into(), kind: Kind::Quota, said: "spent".into(), resets_at: Some(now + 7200), retry_at: now + 7200 });
+        d.fallback_seen.lock().unwrap().add("claude", "anthropic#own");
+        assert_eq!(at(true), None);
+        assert!(fallbacks::limits(&d).is_empty(), "nor do new sessions start with another agent");
+        // Room left on account 2's own windows: the same.
+        let key = dino_proxy::accounts::key(two);
+        quotas(&key, Quota { windows: vec![("5h".into(), Window { utilization: 0.3, resets_at: Some(now + 600), status: None })] });
+        assert_eq!(at(true), None);
+
+        // Account 2's window used up too, back sooner than its own: skipped until then.
+        let sooner = now + 3600;
+        quotas(&key, full(sooner));
+        let all = at(true).expect("every account spent");
+        let clock = schedule::clock(sooner);
+        assert_eq!(all, format!("Claude Code is at its limit on both Claude accounts until {clock}, when the first resets"));
+        assert_eq!(fallbacks::limits(&d).len(), 1, "new sessions see the limit too");
+        // A refusal says it as well: account 2 refused, its windows forgotten.
+        d.proxy.stats.quotas.lock().unwrap().remove(&key);
+        assert_eq!(at(true), None);
+        d.proxy.stats.limited.lock().unwrap().insert(key.clone(), Limited { name: "Claude account 2".into(), kind: Kind::Quota, said: "spent".into(), resets_at: Some(sooner), retry_at: sooner });
+        assert_eq!(at(true), Some(all));
+        // Merely down isn't spent.
+        d.proxy.stats.limited.lock().unwrap().get_mut(&key).unwrap().kind = Kind::Outage;
+        assert_eq!(at(true), None);
+    }
+
     /// A closed session is gone from every list but its program and screen wait, unseen, for the
     /// time to undo it: reopened, it's back where it was, as it was; after that, it ends as killed.
     #[test]

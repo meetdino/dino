@@ -8,7 +8,7 @@
 //! through Sign in with ChatGPT (see `siwc`), `local/<runtime>` a model server on this Mac (see `local`),
 //! `plan/<id>` a coding plan with the key the user pasted (see `plan`).
 
-mod accounts;
+pub mod accounts;
 mod catalog;
 pub mod codex;
 pub mod computer;
@@ -692,11 +692,17 @@ impl Proxy {
     }
 
     /// Route `key` is spent (or down) and nothing of the user's own stands in: for Claude Code's
-    /// subscription, none of their other Claude accounts answers instead (see `accounts`).
-    pub fn spent(&self, key: &str) -> Option<fallback::Limited> {
+    /// subscription, none of their other Claude accounts has room (see `accounts::spent`).
+    /// `switch`: its calls go through here, where another account can sign them.
+    pub fn spent(&self, key: &str, switch: bool) -> Option<fallback::Limited> {
         let l = self.stats.limited(key)?;
-        let subscription = key.starts_with("anthropic#") && l.name == fallback::CLAUDE;
-        let spare = subscription && accounts::others(&self.keys.read().unwrap()).iter().any(|(_, t)| self.stats.limited(&accounts::key(t)).is_none());
+        let subscription = switch && key.starts_with("anthropic#") && l.name == fallback::CLAUDE;
+        let now = fallback::now();
+        let spare = subscription
+            && accounts::others(&self.keys.read().unwrap()).iter().any(|(_, t)| {
+                let k = accounts::key(t);
+                accounts::spent(self.stats.limited(&k).as_ref(), self.stats.quota(&k).as_ref(), now).is_none()
+            });
         (!spare).then_some(l)
     }
 
@@ -2526,7 +2532,7 @@ mod tests {
         assert_eq!((f.name.as_str(), f.from_name.as_str(), f.resets_at), ("Claude account 3", "Claude", Some(spent_until)));
         assert_eq!((s.last_error, s.limit_error), (None, None), "the turn didn't fail");
         let own = proxy.stats.limited_routes().into_iter().find(|(k, _)| k.starts_with("anthropic#") && !k.contains("account")).unwrap().0;
-        assert!(proxy.stats.limited(&own).is_some() && proxy.spent(&own).is_none(), "Claude Code isn't at its limit while another account answers");
+        assert!(proxy.stats.limited(&own).is_some() && proxy.spent(&own, true).is_none() && proxy.spent(&own, false).is_some(), "Claude Code isn't at its limit while another account answers");
         // As Settings lists them: its own and account 2 spent until the reset, account 3 not; by
         // token, so reordered they stay as they were found.
         let (own_spent, others) = proxy.claude_accounts(&["sk-ant-oat01-fourth", "sk-ant-oat01-third"]);
