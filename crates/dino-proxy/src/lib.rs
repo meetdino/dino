@@ -158,6 +158,8 @@ pub struct SessionStats {
     pub todos: Vec<tasks::Todo>,
     /// Shell commands and monitors it runs in the background.
     pub background: Vec<tasks::Background>,
+    /// Prompts it scheduled for itself (Claude's CronCreate), as it last said it has them.
+    pub crons: Vec<tasks::Cron>,
     /// What the agent said still ran when its last turn ended (ids in `subagents` and
     /// `background`): it isn't done while that work is.
     pub(crate) waiting_on: Vec<String>,
@@ -471,6 +473,9 @@ impl Stats {
         self.update(id, |s| {
             s.agent_mode = None;
             s.agent_model = None;
+            // The prompts the last one scheduled ended with it; one resuming its conversation
+            // brings back its own, which it lists at its first turn's end.
+            s.crons.clear();
         });
     }
 
@@ -579,6 +584,7 @@ impl Stats {
         s.pending_agents.clear();
         s.todos.clear();
         s.background.clear();
+        s.crons.clear();
         s.waiting_on.clear();
         s.computer = None;
         s.fallback = None;

@@ -1054,6 +1054,28 @@ pub struct SessionTasks {
     pub subagents: Vec<SubagentInfo>,
     #[serde(default)]
     pub background: Vec<BackgroundInfo>,
+    /// Prompts the agent scheduled for itself (Claude's CronCreate); none once it has exited.
+    #[serde(default)]
+    pub crons: Vec<CronInfo>,
+}
+
+/// A prompt the agent scheduled for itself. It's the agent's: it runs it while it's open and drops
+/// it when it's deleted, has run (once), expires or the agent exits; dino only shows it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CronInfo {
+    /// The agent's id for it.
+    pub id: String,
+    /// The 5-field cron expression it was given, local time.
+    pub schedule: String,
+    pub recurring: bool,
+    pub prompt: String,
+    /// How the agent put the schedule ("Every hour at :23"), when dino saw it made.
+    #[serde(default)]
+    pub human: Option<String>,
+    /// When the expression next matches (Unix seconds), as dino reads it; the agent may start it
+    /// a little later. None when dino can't read the expression.
+    #[serde(default)]
+    pub next_due: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

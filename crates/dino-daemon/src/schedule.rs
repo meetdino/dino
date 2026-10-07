@@ -1397,6 +1397,71 @@ pub(crate) fn next_due(f: Frequency, now: u64) -> Option<u64> {
     (0..=7).map(|ahead| on_day(&base, ahead, hour, minute)).find(|&t| t > now && runs_on(f, t))
 }
 
+/// The first time after `now` a 5-field cron expression (`minute hour day-of-month month
+/// day-of-week`, local time) matches: what an agent scheduled for itself, read as it reads it
+/// (Claude's CronCreate): `*`, values, ranges, steps and lists; Sunday is 0 or 7; a day matches
+/// either day field when both are given (vixie cron). None for what it doesn't read, or nothing
+/// within five years (February 30th).
+pub(crate) fn cron_next(expr: &str, now: u64) -> Option<u64> {
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    let [minute, hour, dom, month, dow] = fields[..] else { return None };
+    let minutes = cron_field(minute, 0, 59)?;
+    let hours = cron_field(hour, 0, 23)?;
+    let days = cron_field(dom, 1, 31)?;
+    let months = cron_field(month, 1, 12)?;
+    let mut weekdays = cron_field(dow, 0, 7)?;
+    if weekdays & (1 << 7) != 0 {
+        weekdays |= 1;
+    }
+    let either = !dom.starts_with('*') && !dow.starts_with('*');
+    let base = local(now);
+    for ahead in 0..=(5 * 366) {
+        let day = local(on_day(&base, ahead, 12, 0));
+        let on_dom = days & (1 << day.tm_mday) != 0;
+        let on_dow = weekdays & (1 << day.tm_wday) != 0;
+        let on = if either { on_dom || on_dow } else { on_dom && on_dow };
+        if months & (1 << (day.tm_mon + 1)) == 0 || !on {
+            continue;
+        }
+        for h in (0..24u8).filter(|h| hours & (1 << h) != 0) {
+            for m in (0..60u8).filter(|m| minutes & (1 << m) != 0) {
+                let t = on_day(&base, ahead, h, m);
+                // Not a time that day has (the hour the clocks skip).
+                let got = local(t);
+                if t > now && got.tm_hour == i32::from(h) && got.tm_min == i32::from(m) {
+                    return Some(t);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The values one cron field allows, as bits.
+fn cron_field(field: &str, lo: u32, hi: u32) -> Option<u64> {
+    let mut bits = 0u64;
+    for part in field.split(',') {
+        let (range, step) = match part.split_once('/') {
+            Some((r, s)) => (r, s.parse::<u32>().ok().filter(|&s| s > 0)?),
+            None => (part, 1),
+        };
+        let (from, to) = if range == "*" {
+            (lo, hi)
+        } else if let Some((a, b)) = range.split_once('-') {
+            (a.parse().ok()?, b.parse().ok()?)
+        } else {
+            let a: u32 = range.parse().ok()?;
+            // "5/15": from 5 to the end, every 15.
+            (a, if step > 1 { hi } else { a })
+        };
+        if from < lo || to > hi || from > to {
+            return None;
+        }
+        bits |= (from..=to).step_by(step as usize).fold(0, |b, v| b | 1 << v);
+    }
+    Some(bits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1493,5 +1558,32 @@ mod tests {
         new_york();
         assert_eq!(prev_due(Frequency::Manual, TUE_1000), None);
         assert_eq!(next_due(Frequency::Manual, TUE_1000), None);
+    }
+
+    #[test]
+    fn cron_expressions_as_an_agent_gives_them() {
+        new_york();
+        // Every hour at :23 (the founder's example).
+        assert_eq!(cron_next("23 * * * *", TUE_1000), Some(TUE_1000 + 23 * 60));
+        assert_eq!(cron_next("23 * * * *", TUE_1000 + 23 * 60), Some(TUE_1000 + 83 * 60));
+        assert_eq!(cron_next("*/15 * * * *", TUE_1014), Some(TUE_1015));
+        assert_eq!(cron_next("0 9 * * *", TUE_1000), Some(WED_0900));
+        assert_eq!(cron_next("0 9 * * 1-5", TUE_0800), Some(TUE_0900));
+        // Monday 9:00 from Tuesday: six days on; Sunday as 7 is Sunday.
+        assert_eq!(cron_next("0 9 * * 1", TUE_1000), Some(MON_0900 + 7 * 86400));
+        assert_eq!(cron_next("0 9 * * 7", TUE_1000), cron_next("0 9 * * 0", TUE_1000));
+        // A date: March 15, 2:30 PM (EDT).
+        assert_eq!(cron_next("30 14 15 3 *", TUE_1000), Some(1773599400));
+        // Both day fields: either one (vixie cron), so the 11th (a Wednesday) or any Monday.
+        assert_eq!(cron_next("0 9 11 * 1", TUE_1000), Some(WED_0900));
+        assert_eq!(cron_next("0 9 1,15 * *", TUE_1000), Some(1773579600));
+        // What it doesn't read, and a day that never comes.
+        for bad in ["", "* * * *", "60 * * * *", "*/0 * * * *", "0 9 * * MON", "0 9 L * *", "5-1 * * * *"] {
+            assert_eq!(cron_next(bad, TUE_1000), None, "{bad}");
+        }
+        assert_eq!(cron_next("0 9 30 2 *", TUE_1000), None);
+        // The hour the clocks skipped (2:30 AM, Sunday March 8th) isn't a time: next year's.
+        let sat = TUE_1000 - 3 * 86400;
+        assert_eq!(cron_next("30 2 8 3 *", sat - 86400), Some(1804491000));
     }
 }

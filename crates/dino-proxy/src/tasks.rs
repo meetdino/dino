@@ -1,6 +1,8 @@
 //! What an agent keeps track of besides its conversation, from its hooks: its task list and the
 //! work it runs in the background. Claude's task tools change one task per call, so the list is
 //! kept here and updated call by call; `Stop` lists what's still running in the background.
+//! Its own scheduled prompts (Claude's CronCreate, `/loop`) too: only the agent holds them, in
+//! memory, so they're followed the same way, and `Stop` lists the ones it still has.
 
 use crate::{Stats, Subagent};
 use serde_json::Value;
@@ -30,6 +32,22 @@ pub struct Background {
     pub started: u64,
     pub finished: Option<u64>,
     pub running: bool,
+}
+
+/// A prompt the agent scheduled for itself (Claude's CronCreate): it lives in the agent, which runs
+/// it while it's open and drops it when it's deleted, has run (once), expires or the agent exits.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cron {
+    /// The agent's id for it (Claude: 8 hex digits, which CronDelete takes).
+    pub id: String,
+    /// Its 5-field cron expression, local time, as the agent was given it.
+    pub schedule: String,
+    pub recurring: bool,
+    pub prompt: String,
+    /// How the agent itself put the schedule ("Every hour at :23"), when dino saw it made.
+    pub human: Option<String>,
+    /// Unix seconds dino saw it made; 0 when it was already there (listed at a turn's end).
+    pub created: u64,
 }
 
 pub fn now() -> u64 {
@@ -130,16 +148,64 @@ pub(crate) fn record(stats: &Stats, session: &str, event: &str, v: &Value) {
                 }
             });
         }
+        ("PostToolUse", "CronCreate") => {
+            let Some(id) = text(&response["id"]) else { return };
+            let cron = Cron {
+                id,
+                schedule: text(&input["cron"]).unwrap_or_default(),
+                // Recurring unless it says otherwise, as Claude takes it.
+                recurring: response["recurring"].as_bool().or_else(|| input["recurring"].as_bool()).unwrap_or(true),
+                prompt: text(&input["prompt"]).unwrap_or_default(),
+                human: text(&response["humanSchedule"]),
+                created: now(),
+            };
+            stats.update(session, |s| match s.crons.iter_mut().find(|c| c.id == cron.id) {
+                Some(c) => *c = cron,
+                None => s.crons.push(cron),
+            });
+        }
+        ("PostToolUse", "CronDelete") => {
+            let Some(id) = text(&input["id"]).or_else(|| text(&response["id"])) else { return };
+            stats.update(session, |s| s.crons.retain(|c| c.id != id));
+        }
         // `/clear` starts a new conversation with a new task list.
         ("SessionStart", _) if v["source"].as_str() == Some("clear") => stats.update(session, |s| s.todos.clear()),
-        // A new agent process: what the last one left running ended with it.
-        ("SessionStart", _) if matches!(v["source"].as_str(), Some("startup" | "resume")) => stats.update(session, |s| s.waiting_on.clear()),
+        // A new agent process: what the last one left running ended with it. Its scheduled
+        // prompts too; one resumed brings back its own, which its first `Stop` lists.
+        ("SessionStart", _) if matches!(v["source"].as_str(), Some("startup" | "resume")) => stats.update(session, |s| {
+            s.waiting_on.clear();
+            s.crons.clear();
+        }),
         ("Stop", _) => {
+            if let Some(listed) = v["session_crons"].as_array() {
+                stats.update(session, |s| s.crons = listed_crons(&s.crons, listed));
+            }
             let Some(listed) = v["background_tasks"].as_array() else { return };
             stats.update(session, |s| reconcile(s, listed));
         }
         _ => {}
     }
+}
+
+/// The scheduled prompts the agent still has at the end of a turn (Claude's `session_crons`): the
+/// whole list, so ones that ran once, expired or went otherwise are gone, and ones made before dino
+/// was watching (a resumed conversation's) are there. What dino saw of the ones it knew stays.
+fn listed_crons(known: &[Cron], listed: &[Value]) -> Vec<Cron> {
+    listed
+        .iter()
+        .filter_map(|l| {
+            let id = l["id"].as_str().filter(|id| !id.is_empty())?;
+            let seen = known.iter().find(|c| c.id == id);
+            Some(Cron {
+                id: id.into(),
+                schedule: l["schedule"].as_str().or_else(|| l["cron"].as_str()).map(String::from).or_else(|| seen.map(|c| c.schedule.clone())).unwrap_or_default(),
+                recurring: l["recurring"].as_bool().or_else(|| seen.map(|c| c.recurring)).unwrap_or(true),
+                prompt: l["prompt"].as_str().map(String::from).or_else(|| seen.map(|c| c.prompt.clone())).unwrap_or_default(),
+                human: seen.and_then(|c| c.human.clone()),
+                created: seen.map_or(0, |c| c.created),
+            })
+        })
+        .collect()
 }
 
 fn started(stats: &Stats, session: &str, mut b: Background) {
@@ -299,5 +365,59 @@ mod tests {
         assert_eq!(stats.session("s").waiting(), (0, 1));
         feed("SessionStart", json!({"source": "resume"}));
         assert_eq!(stats.session("s").waiting(), (0, 0));
+    }
+
+    /// Payloads as Claude Code 2.1.293 sends them.
+    #[test]
+    fn scheduled_prompts_from_cron_tools_and_stop() {
+        let stats = Stats::default();
+        let feed = |event: &str, v: Value| record(&stats, "s", event, &v);
+        let ids = |stats: &Stats| stats.session("s").crons.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        feed("PostToolUse", json!({"tool_name": "CronCreate",
+            "tool_input": {"cron": "23 * * * *", "prompt": "Post-merge production watch: say hi", "recurring": true},
+            "tool_response": {"id": "efc5ae94", "humanSchedule": "Every hour at :23", "recurring": true, "durable": false}}));
+        feed("PostToolUse", json!({"tool_name": "CronCreate",
+            "tool_input": {"cron": "59 23 31 12 *", "prompt": "new year", "recurring": false},
+            "tool_response": {"id": "08ec38c8", "humanSchedule": "59 23 31 12 *", "recurring": false, "durable": false}}));
+        // A subagent's own stays out of it, as its other tools do.
+        feed("PostToolUse", json!({"tool_name": "CronCreate", "agent_id": "a1",
+            "tool_input": {"cron": "* * * * *", "prompt": "x"}, "tool_response": {"id": "aaaaaaaa"}}));
+        let s = stats.session("s");
+        assert_eq!(ids(&stats), vec!["efc5ae94", "08ec38c8"]);
+        assert_eq!((s.crons[0].schedule.as_str(), s.crons[0].recurring, s.crons[0].human.as_deref()), ("23 * * * *", true, Some("Every hour at :23")));
+        assert!(!s.crons[1].recurring && s.crons[1].created > 0);
+
+        feed("PostToolUse", json!({"tool_name": "CronDelete", "tool_input": {"id": "08ec38c8"}, "tool_response": {"id": "08ec38c8"}}));
+        assert_eq!(ids(&stats), vec!["efc5ae94"]);
+
+        // The turn's end lists what it has: a `/loop` wakeup it made, and not one gone since.
+        feed("Stop", json!({"background_tasks": [], "session_crons": [
+            {"id": "efc5ae94", "schedule": "23 * * * *", "recurring": true, "prompt": "Post-merge production watch: say hi"},
+            {"id": "f5672ede", "schedule": "46 11 * * *", "recurring": false, "prompt": "ping"}]}));
+        let s = stats.session("s");
+        assert_eq!(ids(&stats), vec!["efc5ae94", "f5672ede"]);
+        assert_eq!(s.crons[0].human.as_deref(), Some("Every hour at :23"), "what dino saw stays");
+        assert_eq!(s.crons[1].created, 0);
+        // The one-shot ran: the next turn's end no longer lists it.
+        feed("Stop", json!({"background_tasks": [], "session_crons": [
+            {"id": "efc5ae94", "schedule": "23 * * * *", "recurring": true, "prompt": "Post-merge production watch: say hi"}]}));
+        assert_eq!(ids(&stats), vec!["efc5ae94"]);
+        // An agent that says nothing of them leaves them as they are.
+        feed("Stop", json!({"background_tasks": []}));
+        assert_eq!(ids(&stats), vec!["efc5ae94"]);
+
+        // A new process starts with none (dino starting it again, or its SessionStart); a resumed
+        // one lists its own at its first turn's end.
+        stats.restarted("s");
+        assert!(stats.session("s").crons.is_empty());
+        stats.update("s", |s| s.crons.push(Cron { id: "x".into(), ..Default::default() }));
+        feed("SessionStart", json!({"source": "resume"}));
+        assert!(stats.session("s").crons.is_empty());
+        feed("Stop", json!({"session_crons": [{"id": "efc5ae94", "schedule": "23 * * * *", "recurring": true, "prompt": "p"}]}));
+        assert_eq!(ids(&stats), vec!["efc5ae94"]);
+        // The agent exits: they go with it.
+        stats.update("s", |s| s.hooked = true);
+        assert!(stats.agent_left("s"));
+        assert!(stats.session("s").crons.is_empty());
     }
 }
