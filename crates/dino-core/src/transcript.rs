@@ -43,9 +43,13 @@ fn read_last(p: &Path, bytes: u64) -> Option<String> {
 
 /// Codex's rollout for conversation `id`: `~/.codex/sessions/Y/M/D/rollout-<time>-<id>.jsonl`.
 pub fn codex_path(id: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    codex_path_in(&std::env::var_os("HOME").map(PathBuf::from)?.join(".codex/sessions"), id)
+}
+
+/// Codex's rollout for conversation `id` among those kept in `sessions` (a Codex home's).
+pub fn codex_path_in(sessions: &Path, id: &str) -> Option<PathBuf> {
     let suffix = format!("-{id}.jsonl");
-    let mut stack = vec![home.join(".codex/sessions")];
+    let mut stack = vec![sessions.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for p in std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()) {
             if p.is_dir() {

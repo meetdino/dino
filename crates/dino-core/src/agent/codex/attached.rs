@@ -2,8 +2,9 @@
 //! them (`codex app-server --managed-daemon`, Codex 0.160.1). The process in the terminal then has
 //! no file of its conversation open, and Codex keeps no record of which terminal runs which (asked
 //! for in openai/codex#48880). What it does keep: the conversations its server has loaded, each a
-//! lock file named for it (`~/.codex/thread-writer-locks/<id>.lock`), made as it loads it and gone
-//! once it lets it go; and when each began, in its id (a UUIDv7).
+//! lock file named for it (`~/.codex/thread-writer-locks/<id>.lock`, in the Codex home it runs
+//! with: `$CODEX_HOME`), made as it loads it and gone once it lets it go; and when each began, in
+//! its id (a UUIDv7). Each Codex home has a server of its own.
 //!
 //! A Codex begins its conversation as it starts, in its folder: its server has it loaded within a
 //! fraction of a second, and keeps it loaded while the Codex is on it. One that starts on a Codex
@@ -50,6 +51,8 @@ pub const MOVED: &str = "It may have moved to another conversation since it star
 #[derive(Debug, Clone)]
 pub struct Tui {
     pub pid: u32,
+    /// The Codex home it runs with (its `CODEX_HOME`), whose server it works with.
+    pub home: PathBuf,
     /// When it started, in milliseconds since the epoch.
     pub started_ms: u64,
     /// The folder it works in (its `-C`, else its own), resolved.
@@ -87,9 +90,9 @@ pub enum Attached {
     None,
 }
 
-/// What each of `tuis` is on, with Codex's server having `loaded` loaded at `now_ms`, up since
-/// `up_ms` (when known), `claimed` being others' for sure (dino's own sessions'), and each Codex
-/// that holds its own open.
+/// What each of `tuis` (of one Codex home) is on, with its server having `loaded` loaded at
+/// `now_ms`, up since `up_ms` (when known), `claimed` being others' for sure (dino's own
+/// sessions'), and each Codex that holds its own open.
 pub fn attach(tuis: &[Tui], loaded: &[Loaded], up_ms: Option<u64>, claimed: &[String], now_ms: u64) -> HashMap<u32, Attached> {
     let mut taken: HashSet<&str> = claimed.iter().map(String::as_str).collect();
     taken.extend(tuis.iter().filter_map(|t| t.open.as_deref().or(t.told.as_deref())));
@@ -250,10 +253,10 @@ struct Written {
 
 static WRITTEN: Mutex<Option<HashMap<String, Written>>> = Mutex::new(None);
 
-/// The conversations Codex's shared server (of the Codex home under `home`) has loaded now: its
-/// writer locks. Those of a subagent or a headless run aren't a terminal's, and aren't listed.
+/// The conversations Codex's shared server (of Codex home `home`) has loaded now: its writer
+/// locks. Those of a subagent or a headless run aren't a terminal's, and aren't listed.
 pub fn loaded_in(home: &Path) -> Vec<Loaded> {
-    let dir = home.join(".codex/thread-writer-locks");
+    let dir = home.join("thread-writer-locks");
     let mut out = vec![];
     let mut seen = HashSet::new();
     for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
@@ -269,9 +272,9 @@ pub fn loaded_in(home: &Path) -> Vec<Loaded> {
         }
         out.push(Loaded { id: id.to_string(), at_ms, written: written.is_some(), cwd: written.and_then(|w| w.cwd) });
     }
-    // Forget the ones let go.
+    // Forget the ones it let go.
     if let Some(w) = WRITTEN.lock().unwrap().as_mut() {
-        w.retain(|id, _| seen.contains(id));
+        w.retain(|id, w| seen.contains(id) || !w.path.starts_with(home));
     }
     out
 }
@@ -281,19 +284,19 @@ fn written(home: &Path, id: &str, begun_ms: u64) -> Option<Written> {
     if let Some(w) = WRITTEN.lock().unwrap().get_or_insert_default().get(id) {
         return Some(w.clone());
     }
-    let path = super::rollout_in(&home.join(".codex/sessions"), id, begun_ms / 1000)?;
+    let path = super::rollout_in(&home.join("sessions"), id, begun_ms / 1000)?;
     let meta = history::codex_meta(&path);
     let w = Written { cwd: meta.cwd.map(|c| resolved(Path::new(&c))), hidden: meta.hidden, path };
     WRITTEN.lock().unwrap().get_or_insert_default().insert(id.to_string(), w.clone());
     Some(w)
 }
 
-/// When Codex's shared server (of the Codex home under `home`) came up, in milliseconds since the
+/// When Codex's shared server (of Codex home `home`) came up, in milliseconds since the
 /// epoch, while it runs: the process its record names (`app-server-daemon/daemon.pid`, or
 /// `app-server.pid` where Codex runs it from its standalone package), still the one that started
 /// when the record says (its pid may be another process's since).
 pub fn up_in(home: &Path) -> Option<u64> {
-    let dir = home.join(".codex/app-server-daemon");
+    let dir = home.join("app-server-daemon");
     ["daemon.pid", "app-server.pid"].iter().find_map(|f| {
         let record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(f)).ok()?).ok()?;
         let started = &record["processIdentity"];
@@ -302,9 +305,9 @@ pub fn up_in(home: &Path) -> Option<u64> {
     })
 }
 
-/// Conversation `id` is loaded by a Codex server of the Codex home under `home` (its lock is there).
+/// Conversation `id` is loaded by a Codex server of Codex home `home` (its lock is there).
 pub fn in_server(home: &Path, id: &str) -> bool {
-    begun_ms(id).is_some() && home.join(".codex/thread-writer-locks").join(format!("{id}.lock")).exists()
+    begun_ms(id).is_some() && home.join("thread-writer-locks").join(format!("{id}.lock")).exists()
 }
 
 /// Loaded conversation `id`'s rollout, once [`loaded_in`] has seen it written.
@@ -322,7 +325,7 @@ mod tests {
     use super::*;
 
     fn tui(pid: u32, started_ms: u64, cwd: &str) -> Tui {
-        Tui { pid, started_ms, cwd: Some(PathBuf::from(cwd)), open: None, told: None, picks: false }
+        Tui { pid, home: PathBuf::new(), started_ms, cwd: Some(PathBuf::from(cwd)), open: None, told: None, picks: false }
     }
 
     fn loaded(id: &str, at_ms: u64, cwd: Option<&str>) -> Loaded {
@@ -493,7 +496,7 @@ mod tests {
     #[test]
     fn when_its_server_came_up() {
         let home = std::env::temp_dir().join(format!("dino-codex-up-{}", std::process::id()));
-        let dir = home.join(".codex/app-server-daemon");
+        let dir = home.join("app-server-daemon");
         std::fs::create_dir_all(&dir).unwrap();
         let me = procinfo::process(std::process::id()).unwrap();
         let record = |started_us: u64| format!(r#"{{"pid":{},"processStartTime":"Tue Oct  6 19:14:36 2026","processIdentity":{{"bootId":"C14C44A7","uniqueId":1,"startSeconds":{},"startMicroseconds":{}}}}}"#, me.pid, started_us / 1_000_000, started_us % 1_000_000);
