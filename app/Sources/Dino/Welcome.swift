@@ -144,6 +144,7 @@ struct WelcomeCard: View {
                 startsPicker
             }
             group("Optional") {
+                NeedsYouNotifyToggle()
                 computerUse
                 // Not checked here: asking macOS whether dino may control the Mac lists dino in
                 // System Settings, which waits until you go to Permissions.
