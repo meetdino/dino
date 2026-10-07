@@ -124,9 +124,9 @@ if (( BASH_VERSINFO[0] >= 4 )); then
       READLINE_POINT=${#READLINE_LINE}
     fi
   }
-  bind -x '"\e[57300~": _dino_ai_line'
+  bind -x '"\e[105;9u": _dino_ai_line'
   bind -x "\"${DINO_AI_KEY:-\\ei}\": _dino_ai_line"
-  bind -x '"\e[57301~": _dino_ai_agent'
+  bind -x '"\e[13;9u": _dino_ai_agent'
   bind -x '"\e\C-m": _dino_ai_agent'
   bind -x '"\er": _dino_search'
   [[ -n $DINO_SEARCH_CTRL_R ]] && bind -x '"\C-r": _dino_search'
@@ -140,8 +140,8 @@ else
   bind '"\e[57398~": accept-line'
   bind '"\e[57396~": end-of-line'
   bind '"\e[57395~": previous-history'
-  bind '"\e[57300~": "\e[57397~# \e[57396~ \e[57398~\e[57395~"'
+  bind '"\e[105;9u": "\e[57397~# \e[57396~ \e[57398~\e[57395~"'
   bind "\"${DINO_AI_KEY:-\\ei}\": \"\\e[57397~# \\e[57396~ \\e[57398~\\e[57395~\""
-  bind '"\e[57301~": "\e[57397~#@ \e[57398~"'
+  bind '"\e[13;9u": "\e[57397~#@ \e[57398~"'
   bind '"\e\C-m": "\e[57397~#@ \e[57398~"'
 fi
