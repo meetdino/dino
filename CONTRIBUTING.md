@@ -6,7 +6,8 @@ you use, and get it merged.
 ## Setup
 
 - macOS 14 or later, the Xcode Command Line Tools (`xcode-select --install`), and Rust through
-  [rustup](https://rustup.rs) (stable, 1.88 or later: the workspace uses edition 2024 and let chains).
+  [rustup](https://rustup.rs) (stable, 1.91 or later: a dependency, anyllm_translate, uses
+  `str::floor_char_boundary`, stable since 1.91).
 - Optional, for the end-to-end checks: [Claude Code](https://claude.com/claude-code) signed in, and
   Python 3 (macOS has it).
 
