@@ -757,7 +757,7 @@ pub struct ComputerUseAgentInfo {
     pub on: bool,
     /// What dino runs (or edits) to add it, exactly.
     pub command: String,
-    /// The agent has computer use of its own, and how to turn it on; it isn't offered then.
+    /// The agent has computer use of its own, and how to turn it on: another way, never touched.
     #[serde(default)]
     pub native: Option<String>,
     /// The agent already has a server by that name that dino didn't add: left alone.

@@ -241,7 +241,7 @@ struct ComputerUseOptions: View {
     @State private var busy: String?
     @State private var error: String?
 
-    private var locked: Bool { store.isLocked("experimental.computer_use") }
+    private var locked: Bool { store.isLocked("machine.computer_use") }
 
     var body: some View {
         Group {
@@ -301,10 +301,7 @@ struct ComputerUseOptions: View {
     }
 
     @ViewBuilder private func agentRow(_ a: ComputerUseAgent) -> some View {
-        // One dino added before it had its own (a plan changed) stays switchable, to remove it.
-        if let native = a.native, !a.on {
-            LabeledContent(a.name) { Text(native).font(.caption).foregroundStyle(.secondary) }
-        } else if a.theirs == true {
+        if a.theirs == true {
             LabeledContent(a.name) { Text("Already set up with your own open-computer-use. dino leaves it as is.").font(.caption).foregroundStyle(.secondary) }
         } else {
             Toggle(isOn: Binding(get: { a.on }, set: { on in
@@ -317,6 +314,10 @@ struct ComputerUseOptions: View {
                 Text(a.on ? "Added with: \(a.command)" : "Adds it with: \(a.command)")
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
+                // Its own computer use, never touched: another way to the same thing.
+                if let native = a.native {
+                    Text(native).font(.caption)
+                }
                 if a.id == "codex" {
                     Text("Codex's own Computer Use is documented for the Codex app, not the Codex CLI.").font(.caption)
                 }
