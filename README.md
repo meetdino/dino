@@ -54,7 +54,9 @@ dino to Applications; dino → Install Command Line Tool… puts the `dino` comm
 curl -fsSL https://meetdino.com/install.sh | sh
 ```
 
-dino updates itself.
+dino updates itself. Installed it with `brew install asdf9384/tap/dino`, the tap's old name? Run
+`brew install meetdino/tap/dino` once: Homebrew stopped trusting the tap when it moved, and until
+then `brew upgrade` skips dino.
 
 ## Quick start
 
