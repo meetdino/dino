@@ -15,7 +15,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 dino-router = { path = "../dino-router" }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "time", "sync"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "time", "io-util"] }
