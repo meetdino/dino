@@ -23,7 +23,7 @@ fn expect_status(r: Response) -> anyhow::Result<SyncStatus> {
     }
 }
 
-const USAGE: &str = "usage: dino login [--email [<address>] | --device] [<server>]
+pub(crate) const USAGE: &str = "usage: dino login [--email [<address>] | --device] [<server>]
 
 Sign in to your dino account with GitHub, so your settings follow you to your other Macs. API
 keys and tokens, sessions, terminal content and agent logins never leave this Mac.
