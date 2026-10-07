@@ -151,20 +151,3 @@ struct ForkSheet: View {
         }
     }
 }
-
-/// "forked from <parent>" under a fork's name in the sidebar.
-struct ForkedFromLine: View {
-    @EnvironmentObject var model: DinoModel
-    let from: ForkedFrom
-
-    var body: some View {
-        let parent = model.sessions.first { $0.id == from.session }
-        HStack(spacing: 4) {
-            Image(systemName: "arrow.triangle.branch").accessibilityHidden(true)
-            Text("forked from \(parent?.display ?? from.name)").lineLimit(1).truncationMode(.tail)
-        }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .help(parent == nil ? "Forked from “\(from.name)”, which has since closed" : "Forked from “\(parent?.display ?? from.name)”: a copy of its conversation")
-    }
-}

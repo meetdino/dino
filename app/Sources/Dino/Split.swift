@@ -484,6 +484,16 @@ struct SessionMenu: View {
         if session.exited {
             Button(session.agent_id == "shell" ? "Restart" : "Resume") { model.resume(session.id) }
         }
+        // The sessions it's linked to (the row's tooltip says how): the one it was forked from,
+        // and the ones that started or messaged it, or it them.
+        if let from = session.forked_from, let parent = model.sessions.first(where: { $0.id == from.session }) {
+            Button("Go to \(parent.display)") { model.select(parent.id) }
+                .help("Forked from “\(parent.display)”: this is a copy of its conversation")
+        }
+        ForEach(Array(PeerLinks.of(session, in: model).enumerated()), id: \.offset) { _, link in
+            Button("Go to \(model.sessions.first { $0.id == link.id }?.display ?? link.text)") { model.select(link.id) }
+                .help(link.help)
+        }
         Divider()
         let pinned = session.pinned == true
         Button(pinned ? "Unpin" : "Pin") { model.pin(session.id, !pinned) }

@@ -40,9 +40,9 @@ final class AwakeSummary: ObservableObject {
     }
 }
 
-/// What keeps the Mac awake, at the foot of the sidebar: one line saying what's true now
-/// ("Staying awake · 2 agents working"), opening to every process that does. Hidden when nothing
-/// you'd care about keeps it awake.
+/// What keeps the Mac awake, at the foot of the sidebar beside Usage: a cup whose tooltip says
+/// what's true now ("Staying awake · 2 agents working"), opening to every process that does.
+/// Hidden when nothing you'd care about keeps it awake.
 struct AwakeStatus: View {
     @EnvironmentObject var model: DinoModel
     @ObservedObject private var state = AwakeSummary.shared
@@ -51,15 +51,10 @@ struct AwakeStatus: View {
     var body: some View {
         if let power = state.info, let line = power.awakeLine(session: model.awakeSessionName) {
             Button { showing.toggle() } label: {
-                Label {
-                    Text(line).lineLimit(1).truncationMode(.tail)
-                } icon: {
-                    Image(systemName: power.holding ? "laptopcomputer" : "cup.and.heat.waves")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                Image(systemName: power.holding ? "laptopcomputer" : "cup.and.heat.waves")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("\(line). Click to see everything keeping your Mac awake.")

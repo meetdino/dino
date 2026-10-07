@@ -36,5 +36,11 @@ let package = Package(
             // Sparkle.framework sits in Contents/Frameworks of the app bundle.
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
+        // What the app decides without drawing: `swift test` (scripts/check.sh runs it).
+        .testTarget(
+            name: "DinoTests",
+            dependencies: ["Dino"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

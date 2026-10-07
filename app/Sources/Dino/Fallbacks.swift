@@ -293,19 +293,6 @@ struct FallbackChip: View {
     }
 }
 
-/// The sidebar row's line for a session on a fallback.
-struct FallbackLine: View {
-    let fallback: FallbackInfo
-
-    var body: some View {
-        Label(fallback.rowLabel, systemImage: fallback.isAccount ? "person.2" : "arrow.triangle.branch")
-            .font(.caption)
-            .foregroundStyle(.orange)
-            .lineLimit(1)
-            .truncationMode(.tail)
-    }
-}
-
 /// New Session's word on an agent at its limit, and the choice to start it anyway.
 struct LimitNotice: View {
     let limit: AgentLimit
