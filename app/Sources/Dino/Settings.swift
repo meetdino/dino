@@ -1814,11 +1814,7 @@ private struct ReposPane: View {
                     }
                     if known.contains(where: { !shown.contains($0.path) }) { Divider() }
                     Button("Choose Folder…") {
-                        let panel = NSOpenPanel()
-                        panel.canChooseDirectories = true
-                        panel.canChooseFiles = false
-                        panel.prompt = "Add"
-                        if panel.runModal() == .OK, let url = panel.url { adding = url.path }
+                        if let url = FolderPanel.choose(in: nil, verb: "Add", canCreate: false) { adding = url.path }
                     }
                 }
                 .fixedSize()

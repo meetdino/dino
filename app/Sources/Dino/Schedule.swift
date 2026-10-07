@@ -1334,12 +1334,7 @@ struct ScheduleSheet: View {
     }
 
     private func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.directoryURL = URL(fileURLWithPath: task.cwd)
-        panel.prompt = "Use Folder"
-        if panel.runModal() == .OK, let url = panel.url { task.cwd = url.path }
+        if let url = FolderPanel.choose(in: URL(fileURLWithPath: task.cwd), verb: "Use", canCreate: false) { task.cwd = url.path }
     }
 
     private func save() {

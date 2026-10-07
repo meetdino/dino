@@ -543,7 +543,7 @@ private struct ModelRowView: View {
     /// A new session of `v`'s agent on this model, shown in the main window.
     private func run(_ v: Verdict) {
         guard let l = dino.launchers.first(where: { $0.agent_id == v.agent }) else { return }
-        dino.newSession(l, in: dino.agentFolder(dino.folder.path), route: ProviderRoute(provider: model.provider, model: model.id))
+        dino.newSessionHere(l, route: ProviderRoute(provider: model.provider, model: model.id))
         NSApp.windows.first { w in w.isVisible && !(w.identifier?.rawValue.hasPrefix(SettingsView.windowID) ?? false) && w.canBecomeMain }?
             .makeKeyAndOrderFront(nil)
     }

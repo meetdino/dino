@@ -4172,14 +4172,17 @@ fn tree(d: &Daemon, folders: Vec<String>) -> Vec<ipc::RepoInfo> {
 /// `tree`, reading worktrees until `until` at most (see `gitstate::summaries`).
 fn tree_until(d: &Daemon, folders: Vec<String>, until: Option<Instant>) -> Vec<ipc::RepoInfo> {
     // A shell is where it has `cd`d to (already resolved), not where it started.
-    let mut dirs: Vec<String> = d
-        .sessions
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|s| s.host.is_none())
-        .map(|s| s.pane.shared.cwd.lock().unwrap().clone().filter(|_| s.agent_id == "shell").unwrap_or_else(|| real(&s.cwd)))
-        .collect();
+    let mut dirs: Vec<String> = Vec::new();
+    // Where each agent runs: always a row of its own, so the row a session is under is the folder
+    // its agent is really in (an agent in ~/Movies is never shown as in your home folder).
+    let mut agents: Vec<String> = Vec::new();
+    for s in d.sessions.lock().unwrap().iter().filter(|s| s.host.is_none()) {
+        let dir = s.pane.shared.cwd.lock().unwrap().clone().filter(|_| s.agent_id == "shell").unwrap_or_else(|| real(&s.cwd));
+        if s.agent_id != "shell" {
+            agents.push(dir.clone());
+        }
+        dirs.push(dir);
+    }
     // A session's worktree stays after the session ends, until the user closes it.
     let made: Vec<String> = d.worktrees.lock().unwrap().iter().map(|w| real(&w.path)).collect();
     dirs.extend(made.iter().cloned());
@@ -4249,8 +4252,9 @@ fn tree_until(d: &Daemon, folders: Vec<String>, until: Option<Instant>) -> Vec<i
                 let no_commits = w[0].head.as_deref().is_some_and(|h| h.bytes().all(|b| b == b'0'));
                 repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w, default_branch: Some(default_branch), no_commits });
             }
-            // A plain folder stands for everything under it, except repos, which get their own node.
-            _ if plain.iter().any(|p| inside(&dir, p)) => {}
+            // A plain folder stands for everything under it (where a shell has `cd`d), except repos
+            // and the folders agents run in, which get their own node.
+            _ if !agents.contains(&dir) && plain.iter().any(|p| inside(&dir, p)) => {}
             _ => plain.push(dir),
         }
     }
@@ -6015,6 +6019,38 @@ while (sysread(STDIN, my $c, 1)) {
         wait_for("the commit to show", Box::new(|| find(&ask(), &wts[3]).git.is_some_and(|g| g.ahead == 1 && g.label == "Fix the parser")));
         assert_eq!(read_since(then), [real(&wts[3])], "only the worktree whose HEAD moved");
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// The row an agent's session is under is the folder it runs in: an agent in a folder inside
+    /// a plain folder (~/Movies in your home folder, where a shell is) gets a row of its own, never
+    /// the outer folder's. A shell's folder inside one is still that one's.
+    #[test]
+    fn an_agent_in_a_folder_inside_a_plain_folder_is_under_its_own_row() {
+        let home = test_home().join(format!("plain-home-{}", std::process::id()));
+        let movies = home.join("Movies");
+        let deeper = home.join("Documents");
+        std::fs::create_dir_all(&movies).unwrap();
+        std::fs::create_dir_all(&deeper).unwrap();
+        let agent = LauncherInfo { short: "agent".into(), agent_id: "agent".into(), label: "Agent".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let d = test_daemon(vec![shell(), agent]);
+        let shell_id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
+        let agent_id = spawn(&d, Launch::new("agent", vec![], Some(movies.display().to_string()))).unwrap();
+        let rows = |folders: Vec<String>| -> Vec<String> {
+            let mut rows: Vec<String> = tree(&d, folders).iter().map(|r| real(Path::new(&r.path))).collect();
+            rows.sort();
+            rows
+        };
+        let want = vec![real(&home), real(&movies)];
+        assert_eq!(rows(vec![]), want);
+        // Whichever folder the app is in.
+        assert_eq!(rows(vec![home.display().to_string()]), want);
+        assert_eq!(rows(vec![movies.display().to_string()]), want);
+        // A shell that `cd`s further in stays under the folder it's in.
+        *session(&d, &shell_id).pane.shared.cwd.lock().unwrap() = Some(real(&deeper));
+        assert_eq!(rows(vec![home.display().to_string()]), want);
+        kill(&d, &agent_id);
+        kill(&d, &shell_id);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A new repo, no worktrees but its main checkout (an agent's first session in it): its tree

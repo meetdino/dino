@@ -67,13 +67,7 @@ struct NewProjectSheet: View {
     }
 
     private func choose() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.directoryURL = URL(fileURLWithPath: parent)
-        panel.prompt = "Use Folder"
-        if panel.runModal() == .OK, let url = panel.url { parent = url.path }
+        if let url = FolderPanel.choose(in: URL(fileURLWithPath: parent), verb: "Use") { parent = url.path }
     }
 
     private func create() {

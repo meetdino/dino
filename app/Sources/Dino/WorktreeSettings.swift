@@ -257,13 +257,7 @@ struct WorktreesPane: View {
     }
 
     private func chooseLocation() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Use Folder"
-        panel.message = "dino creates a folder here for each repo's worktrees."
-        if panel.runModal() == .OK, let url = panel.url {
+        if let url = FolderPanel.choose(in: nil, verb: "Use", message: "dino creates a folder here for each repo's worktrees.") {
             location = (url.path as NSString).abbreviatingWithTildeInPath
             saveLocation()
         }
