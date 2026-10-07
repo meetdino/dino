@@ -149,58 +149,37 @@ private struct ExchangeView: View {
     }
 }
 
-/// Sessions that started or messaged each other through `dino mcp`, under a sidebar row:
-/// "from claude" on the one it came from, the other's name on the one that reached out. Each selects that session.
-struct PeerChips: View {
-    @EnvironmentObject var model: DinoModel
-    let session: SessionInfo
-
-    private struct Link: Identifiable {
+/// Sessions that started or messaged each other through `dino mcp`: "from claude" on the one it
+/// came from, the other's name on the one that reached out. The row's tooltip and VoiceOver say
+/// them; its menu goes to each.
+enum PeerLinks {
+    struct Link: Identifiable, Equatable {
         var id: String
         var text: String
-        var icon: String
         var help: String
     }
 
-    private var links: [Link] {
-        let find = { (id: String) in model.sessions.first { $0.id == id } }
+    @MainActor
+    static func of(_ session: SessionInfo, in model: DinoModel) -> [Link] {
+        of(session, among: model.sessions)
+    }
+
+    static func of(_ session: SessionInfo, among sessions: [SessionInfo]) -> [Link] {
+        let find = { (id: String) in sessions.first { $0.id == id } }
         var out: [Link] = []
         if let by = session.started_by, let p = find(by) {
-            out.append(Link(id: p.id, text: "from \(p.display)", icon: "arrow.turn.left.up", help: "Started by \(p.display)'s agent"))
+            out.append(Link(id: p.id, text: "from \(p.display)", help: "Started by \(p.display)'s agent"))
         }
         if let by = session.messaged_by, by != session.started_by, let p = find(by) {
-            out.append(Link(id: p.id, text: "from \(p.display)", icon: "text.bubble", help: "Last messaged by \(p.display)'s agent"))
+            out.append(Link(id: p.id, text: "from \(p.display)", help: "Last messaged by \(p.display)'s agent"))
         }
-        for c in model.sessions where c.id != session.id {
+        for c in sessions where c.id != session.id {
             if c.started_by == session.id {
-                out.append(Link(id: c.id, text: c.display, icon: "arrow.turn.right.down", help: "Its agent started \(c.display)"))
+                out.append(Link(id: c.id, text: c.display, help: "Its agent started \(c.display)"))
             } else if c.messaged_by == session.id {
-                out.append(Link(id: c.id, text: c.display, icon: "text.bubble", help: "Its agent last messaged \(c.display)"))
+                out.append(Link(id: c.id, text: c.display, help: "Its agent last messaged \(c.display)"))
             }
         }
         return out
-    }
-
-    var body: some View {
-        let links = links
-        if !links.isEmpty {
-            HStack(spacing: 4) {
-                ForEach(links) { l in
-                    Button { model.select(l.id) } label: {
-                        HStack(spacing: 2) {
-                            Image(systemName: l.icon).imageScale(.small)
-                            Text(l.text).lineLimit(1).truncationMode(.middle)
-                        }
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(.quaternary.opacity(0.6)))
-                    }
-                    .buttonStyle(.plain)
-                    .help(l.help)
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
     }
 }

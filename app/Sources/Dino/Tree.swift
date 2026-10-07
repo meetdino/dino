@@ -379,54 +379,6 @@ enum SessionFilter: String, CaseIterable, Identifiable {
     }
 }
 
-/// All · Working · Needs you · Done · Idle, with counts; one click each. Words when they fit,
-/// else each status's mark with its count and the chosen one's word.
-struct FilterBar: View {
-    @EnvironmentObject var model: DinoModel
-    @Binding var filter: SessionFilter
-
-    var body: some View {
-        let filters = SessionFilter.allCases.filter { $0 != .archived }
-        let counts = Dictionary(uniqueKeysWithValues: filters.map { f in
-            (f, model.sidebarSessions.filter { f.passes(model.status(of: $0)) && model.sidebarShows($0) }.count)
-        })
-        ViewThatFits(in: .horizontal) {
-            bar(filters, counts, words: true)
-            bar(filters, counts, words: false)
-        }
-    }
-
-    private func bar(_ filters: [SessionFilter], _ counts: [SessionFilter: Int], words: Bool) -> some View {
-        HStack(spacing: 2) {
-            ForEach(filters) { f in
-                let count = counts[f] ?? 0
-                let on = f == filter
-                Button { filter = f } label: {
-                    HStack(spacing: 3) {
-                        if words || on || f == .all {
-                            Text(f.label).lineLimit(1).fixedSize()
-                        } else {
-                            Image(systemName: f.symbol).imageScale(.small)
-                                .foregroundStyle(count > 0 ? AnyShapeStyle(f.color) : AnyShapeStyle(.tertiary))
-                        }
-                        Text("\(count)").monospacedDigit()
-                            .foregroundStyle(on ? AnyShapeStyle(.primary) : count > 0 && f != .all ? AnyShapeStyle(f.color) : AnyShapeStyle(.tertiary))
-                    }
-                    .font(.caption.weight(on ? .semibold : .regular))
-                    .padding(.horizontal, 6).padding(.vertical, 3)
-                    .background(Capsule().fill(on ? Color.primary.opacity(0.1) : .clear))
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .help("\(f.label): \(f.help)")
-                .accessibilityLabel("\(f.label), \(count)")
-                .accessibilityAddTraits(on ? .isSelected : [])
-            }
-            Spacer(minLength: 0)
-        }
-    }
-}
-
 /// The way into the archive, beside the dino mark: the filters below keep their room.
 struct ArchiveToggle: View {
     @EnvironmentObject var model: DinoModel
@@ -435,21 +387,12 @@ struct ArchiveToggle: View {
     var body: some View {
         let on = filter == .archived
         Button { filter = on ? .all : .archived } label: {
-            HStack(spacing: 3) {
-                Image(systemName: on ? "archivebox.fill" : "archivebox")
-                Text("Archived")
-                if !model.archived.isEmpty {
-                    Text("\(model.archived.count)").monospacedDigit()
-                }
-            }
-            .font(.caption.weight(on ? .semibold : .regular))
-            .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-            .padding(.horizontal, 6).padding(.vertical, 3)
-            .background(Capsule().fill(on ? Color.primary.opacity(0.1) : .clear))
-            .contentShape(Capsule())
+            Image(systemName: on ? "archivebox.fill" : "archivebox")
+                .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(on ? "Back to every session" : SessionFilter.archived.help)
+        .help(on ? "Back to every session" : "Archived (\(model.archived.count)): " + SessionFilter.archived.help)
         .accessibilityLabel(on ? "Back to sessions" : "Archived, \(model.archived.count)")
     }
 }
@@ -534,14 +477,28 @@ struct SessionSearchField: View {
     }
 }
 
-/// Narrow the sidebar to one project, this Mac, or one SSH host.
+/// The Filter menu: group the sidebar by project or by state, show one status (with each one's
+/// count), and narrow it to one project, this Mac, or one SSH host.
 struct ScopeMenu: View {
     @EnvironmentObject var model: DinoModel
+    @Binding var filter: SessionFilter
+    @AppStorage(SidebarGrouping.key) private var grouping = SidebarGrouping.project
 
     var body: some View {
         let hosts = Set(model.sessions.compactMap(\.host)).sorted()
-        let on = model.sidebarScope != nil
+        let on = model.sidebarScope != nil || filter != .all
+        let statuses = model.sidebarSessions.filter(model.sidebarShows).map(model.status(of:))
         Menu {
+            Picker("Group By", selection: $grouping) {
+                ForEach(SidebarGrouping.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.inline)
+            Picker("Status", selection: $filter) {
+                ForEach(SessionFilter.allCases.filter { $0 != .archived }) { f in
+                    Text("\(f.label)  \(statuses.filter(f.passes).count)").tag(f)
+                }
+            }
+            .pickerStyle(.inline)
             Picker("Show", selection: $model.sidebarScope) {
                 Text("Everywhere").tag(SidebarScope?.none)
                 if !hosts.isEmpty {
@@ -566,37 +523,63 @@ struct ScopeMenu: View {
                 .pickerStyle(.inline)
             }
         } label: {
-            Image(systemName: on ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+            // A label, not a bare image: VoiceOver names the button by it, not by the symbol.
+            Label(Self.summary(scope: model.sidebarScopeName, filter: filter, grouping: grouping),
+                  systemImage: on ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                .labelStyle(.iconOnly)
                 .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(model.sidebarScopeName.map { "Showing \($0)" } ?? "Show one project or host")
-        .accessibilityLabel(model.sidebarScopeName.map { "Showing \($0)" } ?? "Show one project or host")
+        .help(Self.summary(scope: model.sidebarScopeName, filter: filter, grouping: grouping))
+        .accessibilityLabel(Self.summary(scope: model.sidebarScopeName, filter: filter, grouping: grouping))
+    }
+
+    /// "Filter and group: by project, Needs you only, in acme-api".
+    static func summary(scope: String?, filter: SessionFilter, grouping: SidebarGrouping) -> String {
+        var parts = ["by \(grouping.label.lowercased())"]
+        if filter != .all, filter != .archived { parts.append("\(filter.label) only") }
+        if let scope { parts.append("in \(scope)") }
+        return "Filter and group: " + parts.joined(separator: ", ")
     }
 }
 
-/// What the sidebar is narrowed to, with a way back to everything.
+/// What the sidebar is narrowed to (a status, a project or host), each with a way back.
 struct ScopeChip: View {
     @EnvironmentObject var model: DinoModel
+    @Binding var filter: SessionFilter
 
     var body: some View {
-        if let name = model.sidebarScopeName {
-            Button { model.sidebarScope = nil } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "line.3.horizontal.decrease")
-                    Text(name).lineLimit(1)
-                    Image(systemName: "xmark").foregroundStyle(.secondary)
+        HStack(spacing: 4) {
+            if filter != .all, filter != .archived {
+                let count = model.sidebarSessions.filter { filter.passes(model.status(of: $0)) && model.sidebarShows($0) }.count
+                chip(icon: filter.symbol, tint: filter.color, text: "\(filter.label)  \(count)", help: "\(filter.label): \(filter.help). Click to show every status again.") {
+                    filter = .all
                 }
-                .font(.caption)
-                .padding(.horizontal, 7).padding(.vertical, 3)
-                .background(Capsule().fill(Color.primary.opacity(0.1)))
-                .contentShape(Capsule())
             }
-            .buttonStyle(.plain)
-            .help("Show every session again")
+            if let name = model.sidebarScopeName {
+                chip(icon: "line.3.horizontal.decrease", tint: nil, text: name, help: "Show every session again") { model.sidebarScope = nil }
+            }
+            Spacer(minLength: 0)
         }
+    }
+
+    private func chip(icon: String, tint: Color?, text: String, help: String, clear: @escaping () -> Void) -> some View {
+        Button(action: clear) {
+            HStack(spacing: 4) {
+                Image(systemName: icon).foregroundStyle(tint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.primary))
+                Text(text).lineLimit(1)
+                Image(systemName: "xmark").foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(Capsule().fill(Color.primary.opacity(0.1)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel("\(text), clear")
     }
 }
 
@@ -713,7 +696,7 @@ struct RepoRows: View {
             if !node.others.isEmpty {
                 OpeningRows(open: opened("others:\(node.id)"), tag: "others:\(node.id)") {
                     OtherWorktreesHeader(others: node.others)
-                        .contextMenu { cleanUpItems(node.others) }
+                        .contextMenu { CleanUpItems(others: node.others) }
                 } content: {
                     let listed = node.othersListed(all: allOthers)
                     ForEach(listed) { place in
@@ -740,34 +723,13 @@ struct RepoRows: View {
     /// The repo's own row: a box for a git repo, a folder for a folder that isn't one, and the
     /// main checkout's branch when it isn't the default one.
     private var repoLabel: some View {
-        PlaceRow(icon: FolderLook.icon(repo: node.isGit), title: node.repo.name, detail: nil, branch: node.repo.offDefaultBranch)
+        // No box or folder icon: its tooltip says which it is.
+        PlaceRow(icon: nil, title: node.repo.name, detail: nil, branch: node.repo.offDefaultBranch)
             .help(FolderLook.help(repo: node.isGit, path: node.repo.path)
                 + (node.repo.offDefaultBranch.map { "\nOn \($0), not \(node.repo.defaultBranch ?? "its default branch")" } ?? ""))
             // On the label only: on the rows under it too, right-clicking a session showed its
             // folder's menu instead of its own.
-            .contextMenu {
-                Button("Copy Path") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(node.repo.path, forType: .string)
-                }
-                Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: node.repo.path) }
-                if !node.others.isEmpty {
-                    Divider()
-                    cleanUpItems(node.others)
-                }
-            }
-    }
-
-    /// Clean Up Merged takes the ones whose work landed with nothing to lose, at once; Clean Up…
-    /// every one nothing works in, after saying what would be lost.
-    @ViewBuilder
-    private func cleanUpItems(_ others: [PlaceNode]) -> some View {
-        let merged = others.filter(\.mergedAndClean)
-        let removable = others.filter(\.removable)
-        Button(merged.isEmpty ? "Clean Up Merged" : "Clean Up \(merged.count) Merged") { model.cleanWorktrees(merged.map(\.path)) }
-            .disabled(merged.isEmpty)
-        Button(removable.isEmpty ? "Clean Up…" : "Clean Up \(removable.count)…") { model.cleaningUp = CleanUpPlan(places: removable) }
-            .disabled(removable.isEmpty)
+            .contextMenu { RepoMenuItems(node: node) }
     }
 
     @ViewBuilder
@@ -820,10 +782,8 @@ struct RepoRows: View {
         return tail.count >= 4 && tail.allSatisfy(\.isHexDigit) && tail.contains(where: \.isNumber)
     }
 
-    @ViewBuilder
     private func placeMenu(_ place: PlaceNode) -> some View {
-        WorktreeClosingItems(place: place)
-        Button("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: place.path) }
+        PlaceMenuItems(place: place)
     }
 
     private func worktreeRows(_ places: [PlaceNode]) -> some View {
@@ -941,7 +901,7 @@ struct HostRows: View {
 }
 
 struct PlaceRow: View {
-    let icon: String
+    let icon: String?
     let title: String
     let detail: String?
     /// A branch to show beside the title, as session rows show theirs.
@@ -950,7 +910,9 @@ struct PlaceRow: View {
     var body: some View {
         HStack(spacing: 6) {
             // Not a Label: sidebar rows tint Label icons with the accent color.
-            Image(systemName: icon).foregroundStyle(.secondary).frame(width: 16).accessibilityHidden(true)
+            if let icon {
+                Image(systemName: icon).foregroundStyle(.secondary).frame(width: 16).accessibilityHidden(true)
+            }
             Text(title).fontWeight(.medium).lineLimit(1)
             if let detail {
                 Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)

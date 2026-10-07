@@ -27,28 +27,10 @@ struct PRLook {
     }
 }
 
-/// "#12" in a session's sidebar row, tinted by its checks.
-struct PRChip: View {
-    let pr: PrInfo
-    var auto: AutoPr?
-
-    var body: some View {
-        let look = PRLook(pr)
-        let automatic = pr.isOpen && auto?.any == true
-        HStack(spacing: 3) {
-            Image(systemName: look.icon)
-            Text("#\(pr.number)").monospacedDigit()
-            if automatic {
-                Text("auto").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
-            }
-        }
-        .font(.caption)
-        .foregroundStyle(look.color)
-        .help("PR #\(pr.number): \(pr.title) · \(look.label)" + (automatic ? " · \(Self.describe(auto!))" : ""))
-    }
-
-    static func describe(_ a: AutoPr) -> String {
-        switch (a.fix, a.merge) {
+extension AutoPr {
+    /// What dino does about the PR by itself, in words: "fixes failing checks and merges when they pass".
+    var describe: String {
+        switch (fix, merge) {
         case (true, true): "fixes failing checks and merges when they pass"
         case (true, false): "fixes failing checks"
         default: "merges when checks pass"

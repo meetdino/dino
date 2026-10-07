@@ -320,6 +320,8 @@ struct SessionName: View {
     let place: DinoModel.RenamePlace
     let font: Font
     var color: Color = .primary
+    /// Its own tooltip; off on a sidebar row, whose one tooltip says how to rename.
+    var tooltip = true
 
     @State private var draft = ""
     @FocusState private var focused: Bool
@@ -343,14 +345,18 @@ struct SessionName: View {
                 .help("Press Return to rename. Leave it empty to use the agent's own title.")
         } else {
             // A shell goes by its tab's name everywhere: its folder, or the agent run in it.
-            Text(model.tabName(session))
+            let name = Text(model.tabName(session))
                 .font(font)
                 .foregroundStyle(color)
                 .lineLimit(1)
                 // In the tab only: on a sidebar row a gesture on the name swallows the click that
                 // should select the row, so there the list's own double-click renames (see Sidebar).
                 .simultaneousGesture(TapGesture(count: 2).onEnded { model.renaming = Renaming(id: session.id, place: place) }, including: place == .tab ? .all : .none)
-                .help(session.label == nil ? "Double-click to rename" : "\(session.name) · double-click to rename")
+            if tooltip {
+                name.help(session.label == nil ? "Double-click to rename" : "\(session.name) · double-click to rename")
+            } else {
+                name
+            }
         }
     }
 }

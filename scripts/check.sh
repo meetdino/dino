@@ -17,7 +17,7 @@ fi
 # what cargo build compiled.
 cargo build
 cargo test --workspace
-(cd app && swift build)
+(cd app && swift build && swift test)
 scripts/lint.sh
 # cloud/ builds crates/dino-sync, whose version is the workspace's: a version bump has to reach
 # cloud/Cargo.lock too, or cloud's --locked builds (CI, its Docker image) refuse to start.

@@ -127,6 +127,9 @@ jobs:
       - name: swift build
         working-directory: app
         run: swift build -c release
+      - name: swift test
+        working-directory: app
+        run: swift test
 
   cloud:
     needs: changes

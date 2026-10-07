@@ -19,6 +19,7 @@ struct DinoApp: App {
     @StateObject private var model = DinoModel()
     @AppStorage(QuitChoice.key) private var quitChoice = ""
     @AppStorage(Appearance.key) private var appearance = Appearance.system.rawValue
+    @AppStorage(SidebarGrouping.key) private var grouping = SidebarGrouping.project
     @Environment(\.openWindow) private var openWindow
 
     init() {
@@ -137,6 +138,11 @@ struct DinoApp: App {
                 TerminalToggleItem().environmentObject(model)
                 Divider()
                 Button("Show Archived") { model.showArchived() }
+                // As in the sidebar's Filter menu.
+                Picker("Group Sidebar By", selection: $grouping) {
+                    ForEach(SidebarGrouping.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.menu)
                 Divider()
                 Picker("Appearance", selection: Binding(get: { appearance }, set: { (Appearance(rawValue: $0) ?? .system).choose() })) {
                     ForEach(Appearance.allCases) { Text($0.label).tag($0.rawValue) }
@@ -852,10 +858,11 @@ struct Sidebar: View {
     /// Tree nodes the user closed, newline-joined (SceneStorage can't hold a Set).
     @SceneStorage("sidebar.collapsed") private var collapsedIDs = ""
     @AppStorage("sidebar.filter") private var filter = SessionFilter.all
+    @AppStorage(SidebarGrouping.key) private var grouping = SidebarGrouping.project
     /// "On this Mac" shows all its agents, not just the newest few.
     @State private var allElsewhere = false
-    /// "On this Mac" closed, among the collapsed nodes.
-    static let elsewhereKey = "section:elsewhere"
+    /// "On this Mac" opened, among the collapsed nodes: it starts closed, with its count.
+    static let elsewhereKey = "open:section:elsewhere"
     /// How many of its agents "On this Mac" shows before "N more…".
     static let elsewhereShown = 5
     /// The row the keyboard is on when it has nothing of its own to show (see the list's
@@ -929,40 +936,49 @@ struct Sidebar: View {
                 // Headings are plain rows, not List section headers: when the sidebar's height
                 // changed (the usage panel, the filter bar) while sections came and went, the table
                 // tied a header to a row of another section and threw, quitting the app.
-                SidebarHeading(title: "Workspaces")
-                Group {
-                    // Shells live in the tabs: a folder with only those (or nothing) left in it
-                    // would be a workspace row with nothing under it.
-                    ForEach(tree.repos.filter { $0.worthShowing(here: model.folder.path) }) { node in
-                        RepoRows(node: node, filter: filter, collapsed: collapsed)
+                if grouping == .state {
+                    // Every session dino lists, under what it's doing; the tree only says where.
+                    StateSections(
+                        sessions: model.sidebarSessions.filter { filter.passes(model.status(of: $0)) && model.sidebarShows($0) },
+                        only: filter == .all ? nil : filter,
+                        // Unfiltered: a tag's repo menu offers its worktrees' clean-up.
+                        tree: filter == .all && !narrowed ? tree : SessionTree.build(repos: model.repos, sessions: model.sidebarSessions),
+                        collapsed: collapsed
+                    )
+                    if filter != .all || narrowed, model.sidebarSessions.allSatisfy({ !filter.passes(model.status(of: $0)) || !model.sidebarShows($0) }) {
+                        emptyNote(narrowed: narrowed)
                     }
-                    let remote = Dictionary(grouping: tree.unfiled.filter { $0.host != nil }) { $0.host ?? "" }
-                    ForEach(remote.keys.sorted(), id: \.self) { host in
-                        HostRows(host: host, sessions: remote[host] ?? [], collapsed: collapsed)
-                    }
-                    ForEach(tree.unfiled.filter { $0.host == nil }) { s in
-                        SessionRow(session: s, index: 0)
-                            .tag(s.id)
-                            .contextMenu { SessionMenu(session: s) }
-                    }
-                    if filter != .all || narrowed, tree.repos.isEmpty, tree.unfiled.isEmpty {
-                        let q = model.sidebarQuery.trimmingCharacters(in: .whitespaces)
-                        Text(!q.isEmpty ? "No session matches “\(q)”"
-                            : narrowed ? "No sessions here"
-                            : filter == .needsYou ? "Nothing needs you"
-                            : filter == .done ? "Nothing new has finished" : "No \(filter.label.lowercased()) sessions")
-                            .font(.callout).foregroundStyle(.tertiary)
+                } else {
+                    SidebarHeading(title: "Workspaces")
+                    Group {
+                        // Shells live in the tabs: a folder with only those (or nothing) left in it
+                        // would be a workspace row with nothing under it.
+                        ForEach(tree.repos.filter { $0.worthShowing(here: model.folder.path) }) { node in
+                            RepoRows(node: node, filter: filter, collapsed: collapsed)
+                        }
+                        let remote = Dictionary(grouping: tree.unfiled.filter { $0.host != nil }) { $0.host ?? "" }
+                        ForEach(remote.keys.sorted(), id: \.self) { host in
+                            HostRows(host: host, sessions: remote[host] ?? [], collapsed: collapsed)
+                        }
+                        ForEach(tree.unfiled.filter { $0.host == nil }) { s in
+                            SessionRow(session: s, index: 0)
+                                .tag(s.id)
+                                .contextMenu { SessionMenu(session: s) }
+                        }
+                        if filter != .all || narrowed, tree.repos.isEmpty, tree.unfiled.isEmpty {
+                            emptyNote(narrowed: narrowed)
+                        }
                     }
                 }
                 // Other terminals' sessions aren't dino's to sort by status.
                 if !model.elsewhere.isEmpty, filter == .all, !narrowed {
                     let elsewhere = model.elsewhere
-                    let open = !collapsed.wrappedValue.contains(Self.elsewhereKey)
-                    ElsewhereHeading(count: elsewhere.count, open: Binding(
+                    let open = collapsed.wrappedValue.contains(Self.elsewhereKey)
+                    ElsewhereHeading(count: elsewhere.count, asking: elsewhere.filter(\.asking).count, open: Binding(
                         get: { open },
                         set: { o in
                             var set = collapsed.wrappedValue
-                            if o { set.remove(Self.elsewhereKey) } else { set.insert(Self.elsewhereKey) }
+                            if o { set.insert(Self.elsewhereKey) } else { set.remove(Self.elsewhereKey) }
                             collapsed.wrappedValue = set
                         }
                     ))
@@ -997,24 +1013,14 @@ struct Sidebar: View {
                         }
                     }
                     if model.scheduled.isEmpty {
-                        // A few ready ones to start from, and the rest a click away.
-                        ForEach(AutomationTemplate.suggested, id: \.id) { s in
-                            if let t = AutomationTemplate.named(s.id) {
-                                Button { model.newTask(from: t) } label: {
-                                    Label { Text(s.short).lineLimit(1) } icon: { Image(systemName: t.icon).foregroundStyle(.secondary) }
-                                }
-                                .buttonStyle(.plain)
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                                .help(t.blurb)
-                            }
-                        }
+                        // One row: a new automation opens on the template gallery, which has them all.
                         Button { model.newTask() } label: {
-                            Label { Text("More templates…") } icon: { Image(systemName: "square.grid.2x2").foregroundStyle(.tertiary) }
+                            Label { Text("Start from a template…") } icon: { Image(systemName: "square.grid.2x2").foregroundStyle(.secondary) }
                         }
                         .buttonStyle(.plain)
                         .font(.callout)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
+                        .help("Fix CI on your PRs, run tests on save, summarize changes each morning, and more")
                     }
                 }
             }
@@ -1062,7 +1068,8 @@ struct Sidebar: View {
     @discardableResult
     private func setOpen(_ tag: String, _ open: Bool?) -> KeyPress.Result {
         let tree = SessionTree.build(repos: model.repos, sessions: model.sidebarSessions)
-        guard let (key, startsOpen) = tree.repos.lazy.compactMap({ $0.opening(tag) }).first else { return .ignored }
+        let section: (String, Bool)? = tag.hasPrefix("state:") ? (tag, true) : nil
+        guard let (key, startsOpen) = section ?? tree.repos.lazy.compactMap({ $0.opening(tag) }).first else { return .ignored }
         var set = collapsed.wrappedValue
         let isOpen = startsOpen != set.contains(key)
         let want = open ?? !isOpen
@@ -1070,6 +1077,17 @@ struct Sidebar: View {
         if want == startsOpen { set.remove(key) } else { set.insert(key) }
         collapsed.wrappedValue = set
         return .handled
+    }
+
+    /// What a filter, a search or a scope left: nothing.
+    private func emptyNote(narrowed: Bool) -> some View {
+        let q = model.sidebarQuery.trimmingCharacters(in: .whitespaces)
+        return Text(!q.isEmpty ? "No session matches “\(q)”"
+            : narrowed ? "No sessions here"
+            : filter == .needsYou ? "Nothing needs you"
+            : filter == .done ? "Nothing new has finished" : "No \(filter.label.lowercased()) sessions")
+            .font(.callout).foregroundStyle(.tertiary)
+            .selectionDisabled()
     }
 
     /// An agent running in another terminal: shown where tmux keeps it, or offered to move to dino.
@@ -1124,7 +1142,7 @@ struct Sidebar: View {
                                 .foregroundStyle(.secondary)
                                 .help("Find sessions (⇧⌘F)")
                                 .accessibilityLabel("Find sessions")
-                            ScopeMenu()
+                            ScopeMenu(filter: $filter)
                         }
                         ArchiveToggle(filter: $filter)
                         // Starting work lives with the sessions it makes: here, not in the toolbar.
@@ -1134,11 +1152,10 @@ struct Sidebar: View {
                 if filter != .archived, model.findingSessions || !model.sidebarQuery.isEmpty {
                     SessionSearchField()
                 }
-                if filter != .archived, model.sidebarScope != nil {
-                    ScopeChip()
-                }
-                if filter != .archived, !model.sessions.isEmpty || filter != .all {
-                    FilterBar(filter: $filter)
+                // What narrows the list, each with its way back; the status filters are in the
+                // Filter menu, as the rows' marks say each one's status.
+                if filter != .archived, model.sidebarScope != nil || filter != .all {
+                    ScopeChip(filter: $filter)
                 }
             }
             .padding(.horizontal, 14)
@@ -1171,175 +1188,6 @@ struct SidebarHeading<Trailing: View>: View {
         .padding(.top, 8)
         .selectionDisabled()
         .accessibilityAddTraits(.isHeader)
-    }
-}
-
-struct SessionRow: View {
-    @EnvironmentObject var model: DinoModel
-    /// The session as it is now: how it's doing changes here, redrawing this row, not the sidebar.
-    @ObservedObject private var live: LiveSession
-    let index: Int
-    /// The worktree's branch, on the row instead of a header above a single session.
-    var branch: String?
-    /// The repo or worktree it's filed under: a shell's folder shows only when it's somewhere else.
-    var root: String?
-    @State private var hovering = false
-    @State private var anchor = CostAnchorView()
-
-    init(session: SessionInfo, index: Int, branch: String? = nil, root: String? = nil) {
-        _live = ObservedObject(wrappedValue: LiveSessions.of(session))
-        self.index = index
-        self.branch = branch
-        self.root = root
-    }
-
-    private var session: SessionInfo { live.info }
-
-    var body: some View {
-        let status = model.status(of: session)
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                StatusDot(status: status)
-                    .overlay { RowProgress(signal: PaneSignals.of(session.id)) }
-                SessionName(session: session, place: .sidebar, font: .body.weight(.semibold))
-                    .layoutPriority(1)
-                if let branch {
-                    BranchChip(branch: branch)
-                        .help("Branch \(branch)\(root.map { "\n\($0)" } ?? "")")
-                }
-                if let task = session.scheduled {
-                    Image(systemName: "bolt")
-                        .font(.caption).foregroundStyle(.tertiary)
-                        .help("Started by the automation “\(task)”")
-                        .accessibilityLabel("Started by the automation \(task)")
-                }
-                if let reach = session.reach { UsingMark(session: session, reach: reach) }
-                if let why = session.instead_of {
-                    let asked = model.launchers.first { $0.agent_id == why.agent_id }?.label ?? why.agent_id
-                    Image(systemName: "arrow.uturn.right")
-                        .font(.caption).foregroundStyle(.tertiary)
-                        .help("Started instead of \(asked): \(why.name) was at its limit\(why.resets_at.map { " until \(Clock.short($0))" } ?? "")")
-                        .accessibilityLabel("Started instead of \(asked)")
-                }
-                if let pr = model.pr(of: session) { PRChip(pr: pr, auto: session.auto) }
-                if let split = model.split(of: session.id) {
-                    let others = split.panes.filter { $0 != session.id }.map { id in model.sessions.first { $0.id == id }?.display ?? "another session" }
-                    let other = ListFormatter.localizedString(byJoining: others)
-                    Image(systemName: split.panes.count > 2 ? "rectangle.split.3x1" : "rectangle.split.2x1")
-                        .font(.caption).foregroundStyle(.tertiary)
-                        .help("In a split with \(other)")
-                        .accessibilityLabel("In a split with \(other)")
-                }
-                Spacer(minLength: 4)
-                if session.pinned == true {
-                    Image(systemName: "pin.fill")
-                        .font(.caption2).foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(45))
-                        .help("Pinned: stays at the top of its group and is never archived automatically")
-                        .accessibilityLabel("Pinned")
-                }
-                if hovering, model.canArchive(session.id) {
-                    // Where Claude desktop has it: on the row, under the pointer.
-                    Button { model.archive(session.id) } label: { Image(systemName: "archivebox") }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Archive (⇧⌘A): stop this session and move it to Archived, where you can resume it later")
-                        .accessibilityLabel("Archive")
-                } else {
-                    Text(status.label).font(.caption).foregroundStyle(status.color).lineLimit(1).fixedSize()
-                        .help(status.detail ?? status.label)
-                }
-            }
-            if let from = session.forked_from {
-                ForkedFromLine(from: from)
-            }
-            if detail != nil || modelText != nil {
-                HStack(spacing: 6) {
-                    if let detail { detail.lineLimit(1).truncationMode(.tail) }
-                    Spacer(minLength: 6)
-                    if let modelText {
-                        Text(modelText).font(.caption).foregroundStyle(.tertiary).lineLimit(1).fixedSize()
-                        if let ctx = session.contextUse {
-                            ContextRing(used: ctx.used, limit: ctx.limit, size: 10)
-                        }
-                    }
-                }
-                .help(usageHelp)
-            }
-            // On the account every other session is on too: the footer says it once.
-            if let f = session.fallback, !model.saysInFooter(f) {
-                FallbackLine(fallback: f).help(FallbackChip.detail(f, session.usage_by_route ?? []))
-            }
-            if let error = session.error {
-                ErrorLine(message: error)
-            }
-            PeerChips(session: session)
-        }
-        .padding(.vertical, 3)
-        .background(CostAnchor(holder: anchor))
-        .onHover {
-            hovering = $0
-            // What it costs the Mac, in a card beside the row; only for what runs on this Mac.
-            if !$0 || (session.host == nil && !session.exited) { CostCard.shared.hover(session.id, anchor: anchor.view, on: $0) }
-        }
-        .onDisappear { CostCard.shared.hover(session.id, anchor: nil, on: false) }
-    }
-
-    /// The one thing worth a second line: what it's asking, what it waits on, a server it left
-    /// running, or where a shell has gone.
-    private var detail: Text? {
-        let status = model.status(of: session)
-        if let needs = session.needs {
-            return Text(needs).font(.caption).foregroundStyle(SessionStatus.needsYou.color)
-        }
-        if status == .waiting, let on = session.waitingOn {
-            return Text("Waiting on \(on)").font(.caption).foregroundStyle(.secondary)
-        }
-        if status == .idle || status == .done, let ports = session.serving {
-            return Text("Serving :\(ports.replacingOccurrences(of: ", ", with: " :"))").font(.caption).foregroundStyle(.secondary)
-        }
-        if let here = shellPlace {
-            let path = Text(here).font(.caption.monospaced()).foregroundStyle(.secondary)
-            guard let code = session.last_exit, code != 0 else { return path }
-            return path + Text("  exit \(code)").font(.caption.monospaced()).foregroundStyle(SessionStatus.exited.color)
-        }
-        if let code = session.last_exit, code != 0, session.inside == nil {
-            return Text("exit \(code)").font(.caption.monospaced()).foregroundStyle(SessionStatus.exited.color)
-        }
-        if status == .thinking { return Text("Thinking").font(.caption).foregroundStyle(.secondary) }
-        return nil
-    }
-
-    /// A shell's folder when it isn't the place it's filed under: relative inside it, else in full.
-    private var shellPlace: String? {
-        guard session.inside == nil, let here = session.shell_cwd else { return nil }
-        let base = root ?? session.cwd
-        if let base, here == base { return nil }
-        if let base, SessionTree.contains(base, here) { return String(here.dropFirst(base.count + 1)) }
-        return NSString(string: here).abbreviatingWithTildeInPath
-    }
-
-    /// The model it's on: as its agent says (routing off too), else as its last call asked.
-    private var modelText: String? {
-        guard session.agent_model != nil || session.requests > 0, let now = session.modelNow else { return nil }
-        let m = shortModel(now)
-        return session.tier.map { "\($0) → \(m)" } ?? m
-    }
-
-    private var usageHelp: String {
-        var lines: [String] = []
-        if let m = session.modelNow { lines.append(m) }
-        if session.requests > 0 {
-            lines.append("↑\(tokens(session.input_tokens)) in · ↓\(tokens(session.output_tokens)) out, \(session.requests) request\(session.requests == 1 ? "" : "s")")
-        }
-        if let ctx = session.contextUse {
-            lines.append("Context \(tokens(ctx.used)) of \(tokens(ctx.limit))")
-        }
-        // Answered by more than one route: what each one did.
-        if let routes = session.usage_by_route, routes.count > 1 {
-            lines += routes.map { "\($0.name): ↑\(tokens($0.input_tokens)) in · ↓\(tokens($0.output_tokens)) out" }
-        }
-        return lines.joined(separator: "\n")
     }
 }
 
@@ -1393,7 +1241,7 @@ struct StatusDot: View {
 /// A dot or ring that fades in and out. Core Animation runs it in the render server: a SwiftUI
 /// repeating animation re-renders the whole window on the main thread every frame while any
 /// session is busy.
-private struct Pulse: NSViewRepresentable {
+struct Pulse: NSViewRepresentable {
     let color: NSColor
     let ring: Bool
     let period: Double
@@ -1494,43 +1342,46 @@ struct UsagePanel: View {
         let fullest = current.filter { !$0.window.isPast }.max { $0.window.utilization < $1.window.utilization }
         let allSpent = accounts != nil && answering == nil
         VStack(alignment: .leading, spacing: 8) {
-            AwakeStatus()
-            Button { withAnimation(.easeOut(duration: 0.15)) { open.toggle() } } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                        .foregroundStyle(.tertiary)
-                    Text("Usage").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    if !open {
-                        if allSpent, let back = accounts?.compactMap(\.backAt).min() {
-                            Spacer(minLength: 0)
-                            Text("Claude back \(Clock.short(back))").font(.caption).foregroundStyle(SessionStatus.exited.color).lineLimit(1)
-                        } else {
-                            if let answering, answering.number != 1 {
-                                Text("account \(answering.number)").font(.caption).foregroundStyle(.secondary).lineLimit(1).fixedSize()
-                            }
-                            if let fullest {
-                                let pct = Double(fullest.window.utilization)
-                                ProgressView(value: min(max(pct, 0), 1)).tint(QuotaBar.color(pct)).controlSize(.mini)
-                                Text("\(Int((pct * 100).rounded()))%").font(.caption.monospacedDigit()).foregroundStyle(QuotaBar.color(pct))
-                            } else {
+            HStack(spacing: 6) {
+                // One line: what keeps the Mac awake is its cup, with the line in its tooltip.
+                AwakeStatus()
+                Button { withAnimation(.easeOut(duration: 0.15)) { open.toggle() } } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .rotationEffect(.degrees(open ? 90 : 0))
+                            .foregroundStyle(.tertiary)
+                        Text("Usage").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        if !open {
+                            if allSpent, let back = accounts?.compactMap(\.backAt).min() {
                                 Spacer(minLength: 0)
+                                Text("Claude back \(Clock.short(back))").font(.caption).foregroundStyle(SessionStatus.exited.color).lineLimit(1)
+                            } else {
+                                if let answering, answering.number != 1 {
+                                    Text("account \(answering.number)").font(.caption).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                                }
+                                if let fullest {
+                                    let pct = Double(fullest.window.utilization)
+                                    ProgressView(value: min(max(pct, 0), 1)).tint(QuotaBar.color(pct)).controlSize(.mini)
+                                    Text("\(Int((pct * 100).rounded()))%").font(.caption.monospacedDigit()).foregroundStyle(QuotaBar.color(pct))
+                                } else {
+                                    Spacer(minLength: 0)
+                                }
                             }
+                        } else {
+                            Spacer(minLength: 0)
                         }
-                    } else {
-                        Spacer(minLength: 0)
                     }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(summary(answering: answering, fullest: fullest) + " Click for every window.")
-            .accessibilityLabel("Usage")
-            .accessibilityValue(summary(answering: answering, fullest: fullest))
-            .accessibilityHint(open ? "Collapses usage" : "Shows every usage window")
-            .contextMenu {
-                Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
+                .buttonStyle(.plain)
+                .help(summary(answering: answering, fullest: fullest) + " Click for every window.")
+                .accessibilityLabel("Usage")
+                .accessibilityValue(summary(answering: answering, fullest: fullest))
+                .accessibilityHint(open ? "Collapses usage" : "Shows every usage window")
+                .contextMenu {
+                    Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
+                }
             }
             if open {
                 if let accounts {
@@ -1782,12 +1633,18 @@ struct AgentBadge: View {
 /// anywhere on it closes or opens the section.
 struct ElsewhereHeading: View {
     let count: Int
+    /// Of them, asking for something in their tmux pane: said on the heading while it's closed.
+    var asking = 0
     @Binding var open: Bool
 
     var body: some View {
         Button { open.toggle() } label: {
             HStack(spacing: 4) {
                 Text("On this Mac").font(.subheadline.weight(.semibold))
+                if asking > 0, !open {
+                    Image(systemName: "exclamationmark.circle.fill").foregroundStyle(SessionStatus.needsYou.color)
+                        .font(.caption)
+                }
                 Spacer()
                 Text("\(count)").font(.caption).monospacedDigit()
                 Image(systemName: "chevron.right")
@@ -1802,7 +1659,7 @@ struct ElsewhereHeading: View {
         .padding(.top, 8)
         .selectionDisabled()
         .help(open ? "Collapse" : "Expand")
-        .accessibilityLabel("On this Mac, \(count == 1 ? "1 agent" : "\(count) agents")")
+        .accessibilityLabel("On this Mac, \(count == 1 ? "1 agent" : "\(count) agents")" + (asking > 0 ? ", \(asking) need\(asking == 1 ? "s" : "") you" : ""))
         .accessibilityHint(open ? "Collapse" : "Expand")
         .accessibilityAddTraits(.isHeader)
     }
@@ -1813,15 +1670,15 @@ struct ElsewhereRow: View {
     let session: FoundSession
 
     var body: some View {
+        let title = session.title.isEmpty ? session.agentName : session.title
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    AgentBadge(agent: session.agent)
-                    // One that's still starting has no conversation, so no title, yet.
-                    Text(session.title.isEmpty ? session.agentName : session.title).lineLimit(1)
-                }
-                Text(whereText(session)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            // One line: where it runs, how it's doing and its folder are in its tooltip.
+            HStack(spacing: 5) {
+                AgentBadge(agent: session.agent)
+                // One that's still starting has no conversation, so no title, yet.
+                Text(title).lineLimit(1)
             }
+            .help("\(session.agentName) · \(whereText(session))")
             Spacer()
             if model.adopting.contains(session.id) {
                 // Waiting for its turn to end: only this row waits.
@@ -1848,6 +1705,8 @@ struct ElsewhereRow: View {
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title), \(session.agentName), \(whereText(session))")
         .contextMenu {
             if session.tmux != nil {
                 Button("Show in tmux") { model.showInTmux(session) }

@@ -222,13 +222,6 @@ extension AutomationTemplate {
             """
         },
     ]
-
-    /// Shown in the sidebar while there are no automations yet, in fewer words.
-    static let suggested: [(id: String, short: String)] = [
-        ("ci-fix", "Fix CI on my PRs"), ("tests", "Run tests on save, fix failures"), ("digest", "Summarize changes each morning"),
-    ]
-
-    static func named(_ id: String) -> AutomationTemplate? { all.first { $0.id == id } }
 }
 
 extension DinoModel {
