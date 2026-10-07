@@ -500,9 +500,12 @@ struct SessionMenu: View {
             .help("Show it under Needs you until you look at it again")
         Button("Rename…") { model.renaming = Renaming(id: session.id, place: .sidebar) }
         if session.agent != "shell" {
-            Button("Fork Session…") { model.forking = session }
+            Button("Fork Session") { model.forkNow(session) }
                 .disabled(!model.canFork(session))
-                .help(model.whyNoFork(session) ?? "Fork (⌥⌘B): start a new session with a copy of this conversation. The original doesn't change.")
+                .help(model.whyNoFork(session) ?? "Fork (⌥⌘B): a new tab with a copy of this conversation, ready for your next prompt. The original doesn't change.")
+            Button("Fork with Options…") { model.forking = session }
+                .disabled(!model.canFork(session))
+                .help(model.whyNoFork(session) ?? "Fork with a name, in a worktree of its own, or with a first prompt (⌃⌥⌘B)")
         }
         if model.canArchive(session.id) {
             Button("Archive") { model.archive(session.id) }
