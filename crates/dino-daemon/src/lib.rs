@@ -402,7 +402,8 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     subtoken::start();
     update::start(daemon.clone());
     tmux_mirror::start(daemon.clone());
-    // Turned off (or by the organization) while dinod wasn't running.
+    // Computer use as its switch says: added to agents installed since, or removed when it was
+    // turned off (or by the organization) while dinod wasn't running.
     std::thread::spawn(computer_use::reconcile);
     std::thread::spawn(build_cache::reconcile);
     {
@@ -1169,7 +1170,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     schedule::keep_awake(d);
                     sync_all_shell_agents(d);
                     sync::kick();
-                    // Turned off: what dino added to agents goes.
+                    // Computer use turned on or off: added to agents, or what dino added goes.
                     std::thread::spawn(computer_use::reconcile);
                     std::thread::spawn(build_cache::reconcile);
                     Response::Ok

@@ -45,6 +45,8 @@ struct DinoSettings: Codable, Equatable {
         var shell_features: String?
         /// One compiler cache for every session's builds; nil from an older dinod.
         var build_cache: BuildCache?
+        /// Agents can use the Mac's apps (open-computer-use); nil: not set here (`computerUse`).
+        var computer_use: Bool?
     }
     struct ClaudeTokenUse: Codable, Equatable {
         var ssh: Bool
@@ -80,6 +82,10 @@ struct DinoSettings: Codable, Equatable {
     /// Features being tried out, by name, each a switch; nil from an older dinod. A map, so one
     /// this app doesn't know yet goes back to dinod as it came.
     var experimental: [String: Bool]?
+
+    /// Agents get open-computer-use: on unless turned off, here or, from when it was being tried
+    /// out, in [experimental] (dinod's `Settings::computer_use`).
+    var computerUse: Bool { machine.computer_use ?? experimental?["computer_use"] ?? true }
     /// Where each agent goes when its route hits a limit, by agent id; nil from an older dinod.
     /// Kept as JSON, so what a newer dinod adds goes back as it came (see `FallbackSetting`).
     var fallbacks: [String: [String: JSONValue]]?
@@ -1189,11 +1195,6 @@ private struct ExperimentalFeature: Identifiable {
             summary: "Run agents on free NVIDIA models, with dino choosing a model for each turn. If you add a TypeSafe key, the first 8,000 characters of each turn's prompt are sent to api.typesafe.ai to choose the model. Nothing is sent while this is off."
         ),
         ExperimentalFeature(
-            id: "computer_use",
-            title: "Computer use for more agents",
-            summary: "Lets agents without built-in computer use see your screen and click and type in your apps, using the open-source open-computer-use. Only the agents you choose get it. Be careful: anything on screen, such as a web page or a message, could tell an agent to do something you didn't ask for. Turning this off removes everything dino added."
-        ),
-        ExperimentalFeature(
             id: "session_tools",
             title: "Cross-session communication",
             summary: "Lets Claude sessions list and read your other dino sessions, whatever agent they run. With your permission, they can also message an idle session or start a new one. Applies to new sessions. To give other agents the same ability, add “dino mcp” as an MCP server in their settings."
@@ -1239,9 +1240,6 @@ private struct ExperimentalPane: View {
                         Text(f.summary)
                     }
                     .orgLocked(f.path)
-                    if f.id == "computer_use", on(f).wrappedValue {
-                        ComputerUseOptions()
-                    }
                     if f.id == "free_models", on(f).wrappedValue {
                         LabeledContent("Models") {
                             Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (Models & Providers → API Keys)")
@@ -1352,6 +1350,7 @@ private struct ManagedPane: View {
         case ("routing", "proxy"): return make("Route agent traffic through dino", "Models & Providers → Providers", .models, .providers)
         case ("machine", "shell_integration"): return make("Shell integration", "Terminal", .terminal)
         case ("machine", "shell_agents"): return make("Show agents started in a shell in the sidebar", "Agents", .agents)
+        case ("machine", "computer_use"), ("experimental", "computer_use"): return make(ComputerUseCopy.title, "Agents", .agents)
         case ("machine", "keep_awake"): return make("Keep your Mac awake while automations are scheduled", "Power", .power)
         case ("machine", "awake_while_working"): return make("Keep your Mac awake while agents work", "Power", .power)
         case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", "Power", .power)
@@ -1588,11 +1587,24 @@ private struct AgentsPane: View {
                 Footnote("When you run `claude`, `codex` or another agent in a dino shell, it's a session like any dino starts: in the sidebar with its turns, questions and tasks, its mode and model in the toolbar, and back on its conversation when dino restarts. When it exits, the shell is a plain shell again. Requires Shell integration (Terminal). To keep a shell a plain terminal, choose Keep as Terminal from its menu.")
             }
             Section {
+                Toggle(isOn: Binding(
+                    get: { store.settings?.computerUse ?? true },
+                    set: { on in store.update { $0.machine.computer_use = on } }
+                )) {
+                    Text(ComputerUseCopy.title)
+                    Text(ComputerUseCopy.summary)
+                }
+                .orgLocked("machine.computer_use")
+                if store.settings?.computerUse == true {
+                    ComputerUseOptions()
+                }
                 Picker("Show when an agent uses your Mac", selection: $usingDisplay) {
                     ForEach(UsingDisplay.allCases) { Text($0.label).tag($0.rawValue) }
                 }
+            } header: {
+                Text("Computer Use")
             } footer: {
-                Footnote("Shows when an agent sees your screen, clicks or types in your apps, or controls a browser, whatever tool it uses. A banner you close stays hidden until the agent starts again. The session's menu always shows it and lets you stop the agent.")
+                Footnote("Turning it off removes only what dino added. Be careful: anything on screen, such as a web page or a message, could tell an agent to do something you didn't ask for. The banner shows whenever an agent uses your screen, apps or browser, with Stop.")
             }
             if store.setup?.contains(where: { $0.id == "claude" && $0.installed }) == true {
                 ClaudeAccountsSection(act: openShell)

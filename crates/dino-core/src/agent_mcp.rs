@@ -1,6 +1,7 @@
 //! How each agent keeps the MCP servers it starts: the agent's own command that adds or removes
 //! one, or, for an agent that has none, its own config file. dino adds a server to an agent only
-//! when the user asks (Settings → Experimental), always this way, and shows exactly what it runs.
+//! for computer use (Settings → Agents, on unless turned off), always this way, and shows exactly
+//! what it runs.
 //! What it reads back says whether a server by that name is there and what it runs, so dino
 //! removes only what it added.
 
