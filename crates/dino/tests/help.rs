@@ -3,6 +3,7 @@
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const COMMANDS: &[&str] = &[
@@ -45,8 +46,11 @@ struct DinoHome {
 
 impl DinoHome {
     fn new() -> Self {
+        // The clock counts microseconds on macOS, so two tests starting together need the count too.
+        static MADE: AtomicUsize = AtomicUsize::new(0);
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = PathBuf::from("/tmp").join(format!("dino-help-test-{}-{nonce}", std::process::id()));
+        let n = MADE.fetch_add(1, Ordering::Relaxed);
+        let root = PathBuf::from("/tmp").join(format!("dino-help-test-{}-{nonce}-{n}", std::process::id()));
         let config = root.join("dino");
         std::fs::create_dir_all(&config).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
