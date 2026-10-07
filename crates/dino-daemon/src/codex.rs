@@ -1,10 +1,11 @@
 //! Codex's own record of where it is, read without adding anything to Codex: the rollout it
-//! writes each turn to (`~/.codex/sessions/…/rollout-<time>-<id>.jsonl`), named exactly by the
-//! file its process has open, and the notices (OSC 9) it puts on its terminal when it waits on
-//! the user. Both hold with routing off, when no model call passes through dino. Codex 0.160.1
-//! runs its conversations in a background server its terminals share, and the process in the
-//! terminal has no rollout open: its rollout is then the one of the conversation dino knows it's on,
-//! else the one only it could have begun as it started (see `dino_core::agent::codex::attached`).
+//! writes each turn to (`~/.codex/sessions/…/rollout-<time>-<id>.jsonl`, in the Codex home it runs
+//! with: `$CODEX_HOME`), named exactly by the file its process has open, and the notices (OSC 9)
+//! it puts on its terminal when it waits on the user. Both hold with routing off, when no model
+//! call passes through dino. Codex 0.160.1 runs its conversations in a background server its
+//! terminals share, and the process in the terminal has no rollout open: its rollout is then the
+//! one of the conversation dino knows it's on, else the one only it could have begun as it
+//! started (see `dino_core::agent::codex::attached`).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -80,7 +81,7 @@ fn rollout_of(s: &Session, pid: u32, followed: bool, claimed: &[String]) -> Opti
     }
     let known = s.agent_session.lock().unwrap().clone();
     let id = known.or_else(|| dino_core::agent::codex::attached_to(pid, claimed))?;
-    dino_core::agent::codex::rollout_path(&id)
+    dino_core::agent::codex::rollout_path(&dino_core::agent::codex::home_of(pid)?, &id)
 }
 
 /// The conversation it was on and the one it's on now, when it has moved to another.

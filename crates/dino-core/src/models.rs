@@ -62,7 +62,8 @@ impl Catalog {
     }
 }
 
-fn codex_home() -> PathBuf {
+/// The Codex home the Codexes dino starts run with: dinod's `CODEX_HOME`, else `~/.codex`.
+pub(crate) fn codex_home() -> PathBuf {
     std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".codex"))
 }
 

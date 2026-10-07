@@ -1,6 +1,7 @@
 //! Codex CLI. It names its conversation only once it writes one: by the rollout file its process
-//! has open (`~/.codex/sessions/…/rollout-<time>-<id>.jsonl`); one its shared background server
-//! runs (Codex 0.160.1) has none open, and is told by what that server has loaded (see `attached`).
+//! has open (`~/.codex/sessions/…/rollout-<time>-<id>.jsonl`, under the Codex home it runs with:
+//! `$CODEX_HOME`); one its shared background server runs (Codex 0.160.1) has none open, and is
+//! told by what that server has loaded (see `attached`).
 
 pub mod attached;
 
@@ -61,13 +62,32 @@ pub fn open_rollout(pid: u32) -> Option<PathBuf> {
         .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())
 }
 
-/// Conversation `id`'s rollout, once it's written: looked for in the day's folder its id says it
-/// began on (Codex's ids are UUIDv7s), else everywhere.
-pub fn rollout_path(id: &str) -> Option<PathBuf> {
+/// Conversation `id`'s rollout in Codex home `home`, once it's written: looked for in the day's
+/// folder its id says it began on (Codex's ids are UUIDv7s), else everywhere.
+pub fn rollout_path(home: &Path, id: &str) -> Option<PathBuf> {
     match attached::begun_ms(id) {
-        Some(at) => rollout_in(&Path::new(&std::env::var_os("HOME")?).join(".codex/sessions"), id, at / 1000),
-        None => crate::transcript::codex_path(id),
+        Some(at) => rollout_in(&home.join("sessions"), id, at / 1000),
+        None => crate::transcript::codex_path_in(&home.join("sessions"), id),
     }
+}
+
+/// The Codex home process `pid` runs with (see [`home_in`]), as the kernel names its files.
+pub fn home_of(pid: u32) -> Option<PathBuf> {
+    let (_, env) = procinfo::args_and_env(pid)?;
+    Some(home_in(&env, || procinfo::cwd_of(pid).map(PathBuf::from)))
+}
+
+/// The Codex home of a process with environment `env` (`NAME=value`), as Codex finds it: its
+/// `CODEX_HOME` (one relative to its folder, `cwd`), else `.codex` in its home folder; links
+/// resolved, as the kernel names the files it has open.
+fn home_in(env: &[String], cwd: impl FnOnce() -> Option<PathBuf>) -> PathBuf {
+    let var = |name: &str| env.iter().find_map(|kv| kv.strip_prefix(name)?.strip_prefix('=')).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let home = match var("CODEX_HOME") {
+        Some(h) if h.is_relative() => cwd().unwrap_or_default().join(h),
+        Some(h) => h,
+        None => var("HOME").or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_default().join(".codex"),
+    };
+    attached::resolved(&home)
 }
 
 /// `rollout_path` of conversation `id`, begun at `at`, with Codex's rollouts kept in `root`.
@@ -109,6 +129,10 @@ fn in_terminals(procs: &procinfo::Procs, pids: &[u32]) -> (Vec<attached::Tui>, V
     held.retain(|pid, _| pids.contains(pid));
     for &pid in pids {
         let Some(p) = procs.get(&pid) else { continue };
+        let (args, env) = procinfo::args_and_env(pid).unwrap_or_default();
+        let args: Vec<String> = args.into_iter().skip(1).collect();
+        let home = home_in(&env, || procinfo::cwd_of(pid).map(PathBuf::from));
+        let sessions = attached::resolved(&home.join("sessions"));
         // The descriptor it had its conversation open as last time, if it still does: one look
         // instead of one per file it has open.
         let known = held.get(&pid).filter(|(at, fd, path)| *at == p.started_us && procinfo::open_file(pid, *fd).as_deref() == Some(path.as_str())).map(|(_, _, path)| path.clone());
@@ -117,7 +141,7 @@ fn in_terminals(procs: &procinfo::Procs, pids: &[u32]) -> (Vec<attached::Tui>, V
             None => {
                 held.remove(&pid);
                 let fds = procinfo::open_fds(pid);
-                let rollout = fds.iter().find(|(_, f)| f.contains("/.codex/sessions/") && f.ends_with(".jsonl"));
+                let rollout = fds.iter().find(|(_, f)| Path::new(f).starts_with(&sessions) && f.ends_with(".jsonl"));
                 if let Some((fd, path)) = rollout {
                     held.insert(pid, (p.started_us, *fd, path.clone()));
                 }
@@ -130,7 +154,6 @@ fn in_terminals(procs: &procinfo::Procs, pids: &[u32]) -> (Vec<attached::Tui>, V
         if let Some(r) = &rollout {
             open.push((pid, r.clone()));
         }
-        let args = found::args_of(pid);
         if !p.tty || Codex.headless(&args) {
             continue;
         }
@@ -143,6 +166,7 @@ fn in_terminals(procs: &procinfo::Procs, pids: &[u32]) -> (Vec<attached::Tui>, V
         };
         tuis.push(attached::Tui {
             pid,
+            home,
             started_ms: p.started_us / 1000,
             cwd: cwd.map(|c| attached::resolved(&c)),
             open: rollout.as_deref().and_then(history::rollout_id).or(lock),
@@ -153,14 +177,23 @@ fn in_terminals(procs: &procinfo::Procs, pids: &[u32]) -> (Vec<attached::Tui>, V
     (tuis, open)
 }
 
-/// The conversations Codex's shared server has loaded, and when it came up, when some of `tuis`
-/// has none of its own.
-fn loaded(tuis: &[attached::Tui]) -> (Vec<attached::Loaded>, Option<u64>) {
-    if tuis.iter().all(|t| t.open.is_some() || t.told.is_some()) {
-        return (vec![], None);
+/// What each of `tuis` is on (see `attached`): worked out among the Codexes of each Codex home,
+/// with what its server has loaded, when some of them has none of its own; `claimed` being others'.
+fn attach(tuis: &[attached::Tui], claimed: &[String]) -> std::collections::HashMap<u32, Attached> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let mut homes: std::collections::HashMap<&Path, Vec<attached::Tui>> = std::collections::HashMap::new();
+    for t in tuis {
+        homes.entry(&t.home).or_default().push(t.clone());
     }
-    let Some(home) = std::env::var_os("HOME") else { return (vec![], None) };
-    (attached::loaded_in(Path::new(&home)), attached::up_in(Path::new(&home)))
+    let mut out = std::collections::HashMap::new();
+    for (home, tuis) in homes {
+        let (loaded, up) = match tuis.iter().all(|t| t.open.is_some() || t.told.is_some()) {
+            true => (vec![], None),
+            false => (attached::loaded_in(home), attached::up_in(home)),
+        };
+        out.extend(attached::attach(&tuis, &loaded, up, claimed, now));
+    }
+    out
 }
 
 /// The conversation Codex process `pid`, in a terminal, is on, as sure as dino can be, when it has
@@ -171,9 +204,7 @@ pub fn attached_to(pid: u32, claimed: &[String]) -> Option<String> {
     let procs = procinfo::processes();
     let pids = procinfo::named_in(&procs, "codex");
     let (tuis, _) = in_terminals(&procs, &pids);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    let (loaded, up) = loaded(&tuis);
-    match attached::attach(&tuis, &loaded, up, claimed, now).remove(&pid) {
+    match attach(&tuis, claimed).remove(&pid) {
         Some(Attached::On(id)) => Some(id),
         _ => None,
     }
@@ -203,10 +234,9 @@ fn key_header() -> String {
     format!(r#"model_providers.dino.env_http_headers={{"{}"="{}"}}"#, super::KEY_HEADER, super::KEY_ENV)
 }
 
-/// `"chatgpt"` or `"apikey"`, from `~/.codex/auth.json`.
+/// `"chatgpt"` or `"apikey"`, from `auth.json` in the Codex home the Codexes dino starts run with.
 fn auth_mode() -> Option<String> {
-    let home = std::env::var_os("HOME")?;
-    let auth = std::fs::read_to_string(Path::new(&home).join(".codex/auth.json")).ok()?;
+    let auth = std::fs::read_to_string(models::codex_home().join("auth.json")).ok()?;
     // Avoid a JSON dependency for one field: find `"auth_mode": "<value>"`.
     let rest = &auth[auth.find("\"auth_mode\"")? + 11..];
     let start = rest.find('"')? + 1;
@@ -438,8 +468,11 @@ impl Agent for Codex {
     // --managed-daemon`); on its own it can't take a conversation that server has open: "This
     // conversation is open in another app", until the server lets it go, a minute after the last
     // Codex on it has gone (60 s by default).
+    // The server of whichever Codex home has it: the one the Codexes dino starts run with, or one
+    // a Codex running now runs with (one found running keeps its `CODEX_HOME` continued in dino).
     fn in_shared_server(&self, session: &str) -> bool {
-        std::env::var_os("HOME").is_some_and(|h| attached::in_server(Path::new(&h), session))
+        attached::in_server(&models::codex_home(), session)
+            || procinfo::pids_named("codex").into_iter().filter_map(home_of).any(|h| attached::in_server(&h, session))
     }
 
     // Without the notices dino asks of the sessions it starts: what a person types.
@@ -511,13 +544,12 @@ impl Agent for Codex {
         for (pid, rollout) in &open {
             out.extend(self.on(*pid, rollout, &titles));
         }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        let (loaded, up) = loaded(&tuis);
-        for (pid, a) in attached::attach(&tuis, &loaded, up, &[], now) {
+        let home: std::collections::HashMap<u32, &Path> = tuis.iter().map(|t| (t.pid, t.home.as_path())).collect();
+        for (pid, a) in attach(&tuis, &[]) {
             match a {
                 Attached::On(id) => {
                     // Its rollout is written with its first prompt: nothing to continue until then.
-                    if let Some(rollout) = attached::rollout(&id).or_else(|| rollout_path(&id)) {
+                    if let Some(rollout) = attached::rollout(&id).or_else(|| rollout_path(home[&pid], &id)) {
                         out.extend(self.on(pid, &rollout, &titles));
                     }
                 }
@@ -567,7 +599,8 @@ impl Agent for Codex {
         s.title = "Codex".into();
         let files = found::run("lsof", &["-p", &pid.to_string(), "-Fn"]).unwrap_or_default();
         let names: Vec<&str> = files.lines().filter_map(|l| l.strip_prefix('n')).collect();
-        if let Some(rollout) = names.iter().find(|f| f.contains("/.codex/sessions/") && f.ends_with(".jsonl")) {
+        let sessions = home_of(pid).map(|h| attached::resolved(&h.join("sessions")));
+        if let Some(rollout) = names.iter().find(|f| sessions.as_ref().is_some_and(|s| Path::new(f).starts_with(s)) && f.ends_with(".jsonl")) {
             s.session_id = history::rollout_id(Path::new(rollout)).unwrap_or_default();
             s.updated_at = history::modified(Path::new(rollout));
             if let Some(n) = history::codex_titles().remove(&s.session_id) {
@@ -696,7 +729,7 @@ mod tests {
             std::fs::write(locks.join(f), "").unwrap();
         }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        let mut loaded = attached::loaded_in(&home);
+        let mut loaded = attached::loaded_in(&home.join(".codex"));
         loaded.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(loaded.iter().map(|l| (l.id.as_str(), l.cwd.clone(), l.written)).collect::<Vec<_>>(), [(its.as_str(), Some(attached::resolved(&here)), true), (fresh.as_str(), None, false)]);
         assert!(loaded.iter().all(|l| l.at_ms.abs_diff(now) < 10_000), "loaded as its lock was made, not as it began");
@@ -706,6 +739,49 @@ mod tests {
         assert!(found.starts_with(day_dir(&sessions, since).unwrap()));
         assert_eq!(rollout_in(&sessions, &fresh, since), None, "not written yet");
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// Codexes run with two Codex homes (`CODEX_HOME`) have a server each: each is on the one its
+    /// own server loaded as it started, even two started together in one folder.
+    #[test]
+    fn each_codex_home_has_a_server_of_its_own() {
+        let root = std::env::temp_dir().join(format!("dino-codex-homes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let here = root.join("proj");
+        std::fs::create_dir_all(&here).unwrap();
+        let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 - 60_000;
+        let id = |at_ms: u64, tail: &str| format!("{:08x}-{:04x}-7{tail}", at_ms >> 16, at_ms & 0xffff);
+        let homes = [root.join("a"), root.join("b")];
+        let ids = [id(started + 300, "cd2-b4cb-000000000001"), id(started + 400, "cd2-b4cb-000000000002")];
+        for (home, id) in homes.iter().zip(&ids) {
+            std::fs::create_dir_all(home.join("thread-writer-locks")).unwrap();
+            let lock = std::fs::File::create(home.join(format!("thread-writer-locks/{id}.lock"))).unwrap();
+            // Loaded as it began (a file made earlier than its last change is said to be born then).
+            lock.set_modified(std::time::UNIX_EPOCH + Duration::from_millis(attached::begun_ms(id).unwrap())).unwrap();
+        }
+        let tui = |pid: u32, home: &Path, started_ms: u64| attached::Tui { pid, home: home.into(), started_ms, cwd: Some(attached::resolved(&here)), open: None, told: None, picks: false };
+        let apart = attach(&[tui(1, &homes[0], started), tui(2, &homes[1], started + 100)], &[]);
+        assert_eq!((apart[&1].clone(), apart[&2].clone()), (Attached::On(ids[0].clone()), Attached::On(ids[1].clone())));
+        // Of one home, they started together: either could be on the one there.
+        let one = attach(&[tui(1, &homes[0], started), tui(2, &homes[0], started + 100)], &[]);
+        assert!(matches!((&one[&1], &one[&2]), (Attached::Unsure { .. }, Attached::Unsure { .. })), "{one:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The Codex home a Codex runs with, as Codex finds it, named as the kernel names its files.
+    #[test]
+    fn the_codex_home_it_runs_with() {
+        let dir = std::env::temp_dir().join(format!("dino-codex-home-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("x")).unwrap();
+        std::fs::create_dir_all(dir.join(".codex")).unwrap();
+        let real = attached::resolved(&dir);
+        let env = |v: &[String]| v.to_vec();
+        assert_eq!(home_in(&env(&[format!("CODEX_HOME={}", dir.join("x").display())]), || None), real.join("x"), "its CODEX_HOME, links resolved");
+        assert_eq!(home_in(&env(&["CODEX_HOME=x".into()]), || Some(dir.clone())), real.join("x"), "one relative to its folder");
+        assert_eq!(home_in(&env(&["CODEX_HOME=".into(), format!("HOME={}", dir.display())]), || None), real.join(".codex"), "else .codex in its home folder");
+        let own = attached::resolved(&PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex"));
+        assert_eq!(home_in(&env(&["HOMEBREW_PREFIX=/opt/homebrew".into()]), || None), own, "dinod's home folder when it names none");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
