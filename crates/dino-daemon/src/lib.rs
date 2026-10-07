@@ -2915,7 +2915,7 @@ fn state(d: &Daemon) -> Response {
                 conversation,
                 running,
                 foreground,
-                password: s.host.is_none() && !s.pane.is_exited() && s.pane.shared.password.load(Ordering::Relaxed),
+                password: s.host.is_none() && !s.pane.is_exited() && *s.pane.shared.password.lock().unwrap(),
                 tmux,
                 shell_cwd,
                 last_exit,
