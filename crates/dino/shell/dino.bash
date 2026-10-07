@@ -3,7 +3,7 @@
 # The AI line: start a line with # and press Enter, and your own agent (the one Settings →
 # Terminal names, or Claude Code or Codex; run with no tools) answers with one command. On bash 4 or later ⌘I in Dino (Alt+I elsewhere,
 # $DINO_AI_KEY) puts it straight on the prompt; on the old bash macOS ships, ⌘I asks the same way
-# as the # line, and ↑ puts the answer on the prompt.
+# as the # line, and the answer is on the next prompt.
 # Nothing runs by itself. A command that could destroy something arrives commented out: delete
 # the # to run it. ⌘⏎ in Dino (Alt+Enter elsewhere) hands the line to the agent as a session.
 # Alt+R (Ctrl+R with DINO_SEARCH_CTRL_R=1) searches history and dino's sessions together.
@@ -16,7 +16,8 @@ _DINO_BASH=1
 _dino_suggest_for() {
   local line=$1 err out rc why nl=$'\n'
   # A private file of its own: a fixed name in a shared folder could be read, or planted.
-  err=$(command mktemp "${TMPDIR:-/tmp}/dino-ai.XXXXXX") || { printf '✗ dino: no temp file\n' >/dev/tty; return 1; }
+  # Its messages go over the line saying it asks.
+  err=$(command mktemp "${TMPDIR:-/tmp}/dino-ai.XXXXXX") || { printf '\r\e[K✗ dino: no temp file\n' >/dev/tty; return 1; }
   out=$(command "$_DINO_BIN" ai suggest --shell bash --cwd "$PWD" -- "$line" 2>"$err" </dev/null)
   rc=$?
   why=$(<"$err")
@@ -24,8 +25,8 @@ _dino_suggest_for() {
   case $rc in
     0) _DINO_OUT=$out ;;
     # Every line commented out: bash runs each line of a multi-line one on the one Enter.
-    10) _DINO_OUT="# ${out//$nl/$nl# }"; printf '\e[31m⚠ %s: delete the # to run it\e[0m\n' "$why" >/dev/tty ;;
-    *) _DINO_OUT=; printf '✗ %s\n' "${why:-dino ai failed}" >/dev/tty; return 1 ;;
+    10) _DINO_OUT="# ${out//$nl/$nl# }"; printf '\r\e[K\e[31m⚠ %s: delete the # to run it\e[0m\n' "$why" >/dev/tty ;;
+    *) _DINO_OUT=; printf '\r\e[K✗ %s\n' "${why:-dino ai failed}" >/dev/tty; return 1 ;;
   esac
 }
 
@@ -49,9 +50,12 @@ _dino_hand_off() {
 _dino_prompt_command() {
   local last
   last=$(HISTTIMEFORMAT= builtin history 1)
-  last=${last#*[0-9]  }
-  [[ $last == \#* && $last != \#!* && $last != "$_DINO_ASKED" ]] || return 0
+  # Each history entry once, told by its number: a prompt with no new one (Enter on an empty
+  # line, ^C) asks nothing again, and the same request entered again is asked again.
+  [[ $last != "$_DINO_ASKED" ]] || return 0
   _DINO_ASKED=$last
+  last=${last#*[0-9]  }
+  [[ $last == \#* && $last != \#!* ]] || return 0
   local line=$last
   # `#@ …` is ⌘⏎ on old bash: the line goes to an agent.
   if [[ $line == \#@* ]]; then
@@ -63,9 +67,19 @@ _dino_prompt_command() {
   fi
   while [[ $line == \#* ]]; do line=${line#\#}; line=${line# }; done
   [[ -n ${line// } ]] || return 0
-  _dino_suggest_for "$line" || return 0
+  printf '  … asking your agent\r' >/dev/tty
+  _dino_suggest_for "$line"
+  local rc=$?
+  printf '\r\e[K' >/dev/tty
+  (( rc == 0 )) || return 0
   builtin history -s -- "$_DINO_OUT"
-  printf '→ %s   (↑ puts it on the prompt)\n' "$_DINO_OUT"
+  # The answer isn't a request, even one commented out.
+  _DINO_ASKED=$(HISTTIMEFORMAT= builtin history 1)
+  # On old bash ⌘I's request ends in a space (see its keys below), and its answer comes up on the
+  # next prompt by itself.
+  if [[ $last != *' ' ]] || (( BASH_VERSINFO[0] >= 4 )); then
+    printf '→ %s   (↑ puts it on the prompt)\n' "$_DINO_OUT"
+  fi
 }
 PROMPT_COMMAND="_dino_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 
@@ -118,12 +132,16 @@ if (( BASH_VERSINFO[0] >= 4 )); then
   [[ -n $DINO_SEARCH_CTRL_R ]] && bind -x '"\C-r": _dino_search'
 else
   # Old bash can't change the line from a key, so ⌘I (Alt+I) makes it a # request and ⌘⏎
-  # (Alt+Enter) a #@ one, and enters it, through keys of its own for the start of the line and
-  # Enter, whatever the user bound.
+  # (Alt+Enter) a #@ one, and enters it, through keys of its own for the start and end of the
+  # line, Enter and ↑, whatever the user bound. ⌘I's request ends in a space, and its keys go on
+  # at the next prompt, once the request is answered: ↑ there puts the answer on the line (the
+  # request again, when it failed).
   bind '"\e[57397~": beginning-of-line'
   bind '"\e[57398~": accept-line'
-  bind '"\e[57300~": "\e[57397~# \e[57398~"'
-  bind "\"${DINO_AI_KEY:-\\ei}\": \"\\e[57397~# \\e[57398~\""
+  bind '"\e[57396~": end-of-line'
+  bind '"\e[57395~": previous-history'
+  bind '"\e[57300~": "\e[57397~# \e[57396~ \e[57398~\e[57395~"'
+  bind "\"${DINO_AI_KEY:-\\ei}\": \"\\e[57397~# \\e[57396~ \\e[57398~\\e[57395~\""
   bind '"\e[57301~": "\e[57397~#@ \e[57398~"'
   bind '"\e\C-m": "\e[57397~#@ \e[57398~"'
 fi
