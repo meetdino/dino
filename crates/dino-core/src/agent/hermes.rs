@@ -131,11 +131,13 @@ fn free_env(pid: u32) -> bool {
 
 /// Hermes on an OpenAI-compatible endpoint at `url` (ending `/v1`): its bare `custom` provider,
 /// which takes the endpoint from `CUSTOM_BASE_URL` and speaks Chat Completions to a host that isn't
-/// OpenAI's. Its `openai-api` provider (`OPENAI_BASE_URL`) speaks the Responses API, which neither
-/// dino's free tier nor a chat route answers. No key: Hermes sends a placeholder to a custom
-/// endpoint without one, and dino's proxy holds the real ones.
+/// OpenAI's. Its `openai-api` provider speaks the Responses API, which neither dino's free tier
+/// nor a chat route answers. `OPENAI_BASE_URL` and a placeholder `OPENAI_API_KEY` only let a
+/// Hermes nothing is set up in yet start (its first run asks for a provider otherwise); the key,
+/// bound to that URL, goes only there, and dino's proxy holds the real ones.
 fn on_endpoint(url: String, model: &str) -> Wiring {
-    (vec![("CUSTOM_BASE_URL".to_string(), url)], strings(&["--provider", "custom", "-m", model]))
+    let env = [("CUSTOM_BASE_URL", url.clone()), ("OPENAI_BASE_URL", url), ("OPENAI_API_KEY", "dino".to_string())];
+    (env.map(|(k, v)| (k.to_string(), v)).into(), strings(&["--provider", "custom", "-m", model]))
 }
 
 /// It, if process `pid` runs the `hermes` script.
@@ -519,11 +521,13 @@ mod tests {
     /// a chat route don't answer: its `custom` one speaks Chat Completions to them.
     #[test]
     fn it_reaches_dino_as_a_chat_endpoint() {
+        let var = |env: &[(String, String)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         let (env, args) = Hermes { free: true }.wiring(true, &|p| format!("http://127.0.0.1:9/s/4/{p}"), None);
-        assert_eq!(env, [("CUSTOM_BASE_URL".to_string(), "http://127.0.0.1:9/s/4/free/v1".to_string())]);
+        assert_eq!(var(&env, "CUSTOM_BASE_URL").as_deref(), Some("http://127.0.0.1:9/s/4/free/v1"));
+        assert_eq!(var(&env, "OPENAI_BASE_URL"), var(&env, "CUSTOM_BASE_URL"), "its placeholder key bound to dino");
         assert_eq!(args, ["--provider", "custom", "-m", "auto"]);
         let (env, args) = Hermes { free: false }.provider_wiring("http://127.0.0.1:9/s/4/or", Format::Chat, "qwen/qwen3").unwrap();
-        assert_eq!(env, [("CUSTOM_BASE_URL".to_string(), "http://127.0.0.1:9/s/4/or/v1".to_string())]);
+        assert_eq!(var(&env, "CUSTOM_BASE_URL").as_deref(), Some("http://127.0.0.1:9/s/4/or/v1"));
         assert_eq!(args, ["--provider", "custom", "-m", "qwen/qwen3"]);
     }
 
