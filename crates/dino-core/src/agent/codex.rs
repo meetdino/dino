@@ -153,12 +153,14 @@ fn in_terminals(procs: &procinfo::Procs, pids: &[u32]) -> (Vec<attached::Tui>, V
     (tuis, open)
 }
 
-/// The conversations Codex's shared server has loaded, when some of `tuis` has none of its own.
-fn loaded(tuis: &[attached::Tui]) -> Vec<attached::Loaded> {
+/// The conversations Codex's shared server has loaded, and when it came up, when some of `tuis`
+/// has none of its own.
+fn loaded(tuis: &[attached::Tui]) -> (Vec<attached::Loaded>, Option<u64>) {
     if tuis.iter().all(|t| t.open.is_some() || t.told.is_some()) {
-        return vec![];
+        return (vec![], None);
     }
-    std::env::var_os("HOME").map(|h| attached::loaded_in(Path::new(&h))).unwrap_or_default()
+    let Some(home) = std::env::var_os("HOME") else { return (vec![], None) };
+    (attached::loaded_in(Path::new(&home)), attached::up_in(Path::new(&home)))
 }
 
 /// The conversation Codex process `pid`, in a terminal, is on, as sure as dino can be, when it has
@@ -170,7 +172,8 @@ pub fn attached_to(pid: u32, claimed: &[String]) -> Option<String> {
     let pids = procinfo::named_in(&procs, "codex");
     let (tuis, _) = in_terminals(&procs, &pids);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    match attached::attach(&tuis, &loaded(&tuis), claimed, now).remove(&pid) {
+    let (loaded, up) = loaded(&tuis);
+    match attached::attach(&tuis, &loaded, up, claimed, now).remove(&pid) {
         Some(Attached::On(id)) => Some(id),
         _ => None,
     }
@@ -509,7 +512,8 @@ impl Agent for Codex {
             out.extend(self.on(*pid, rollout, &titles));
         }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        for (pid, a) in attached::attach(&tuis, &loaded(&tuis), &[], now) {
+        let (loaded, up) = loaded(&tuis);
+        for (pid, a) in attached::attach(&tuis, &loaded, up, &[], now) {
             match a {
                 Attached::On(id) => {
                     // Its rollout is written with its first prompt: nothing to continue until then.
