@@ -226,7 +226,9 @@ pub enum Request {
     Changes { id: String },
     /// Type `text` into a session, as a paste; `submit` presses Return after it.
     SendInput { id: String, text: String, submit: bool },
-    /// Write `text` to a session as typed keys, not a paste (the app's ⌘I to a shell's AI line).
+    /// Write `text` to a session as typed keys, not a paste (the app's ⌘I to a shell's AI line):
+    /// only while something reads keys in its terminal, a shell's line editor at its prompt among
+    /// them. Refused in line mode (a command running), where the terminal would print them.
     SendKeys { id: String, text: String },
     /// Interrupt the agent's turn the way its own key does (Esc in most), leaving the session
     /// running: what Stop does while it uses the Mac.
