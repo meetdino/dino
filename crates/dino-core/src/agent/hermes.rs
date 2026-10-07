@@ -1,9 +1,9 @@
 //! Hermes Agent (Nous Research's `hermes`), and Hermes on dino's free tier (`free`), which it
-//! reaches with its own `openai-api` provider pointed at dino by its environment
-//! (`OPENAI_BASE_URL`); its config is left alone. It keeps its sessions in a SQLite store,
-//! `~/.hermes/state.db` (tables `sessions` and `messages`), which dino only reads: which
-//! conversation a process started, where its turn is, and its turns for the preview. It runs as a
-//! Python script, found by its arguments.
+//! reaches with its own `custom` provider (an OpenAI-compatible endpoint, Chat Completions)
+//! pointed at dino by its environment (`CUSTOM_BASE_URL`); its config is left alone. It keeps its
+//! sessions in a SQLite store, `~/.hermes/state.db` (tables `sessions` and `messages`), which dino
+//! only reads: which conversation a process started, where its turn is, and its turns for the
+//! preview. It runs as a Python script, found by its arguments.
 
 use std::path::{Path, PathBuf};
 
@@ -126,7 +126,16 @@ fn same_dir(a: &str, b: &Path) -> bool {
 /// its process still shows before its first request is done.
 fn free_env(pid: u32) -> bool {
     found::run("ps", &["eww", "-o", "command=", "-p", &pid.to_string()])
-        .is_some_and(|e| e.split_whitespace().any(|w| w.starts_with("OPENAI_BASE_URL=http://127.0.0.1:") && w.contains("/free")))
+        .is_some_and(|e| e.split_whitespace().any(|w| w.starts_with("CUSTOM_BASE_URL=http://127.0.0.1:") && w.contains("/free")))
+}
+
+/// Hermes on an OpenAI-compatible endpoint at `url` (ending `/v1`): its bare `custom` provider,
+/// which takes the endpoint from `CUSTOM_BASE_URL` and speaks Chat Completions to a host that isn't
+/// OpenAI's. Its `openai-api` provider (`OPENAI_BASE_URL`) speaks the Responses API, which neither
+/// dino's free tier nor a chat route answers. No key: Hermes sends a placeholder to a custom
+/// endpoint without one, and dino's proxy holds the real ones.
+fn on_endpoint(url: String, model: &str) -> Wiring {
+    (vec![("CUSTOM_BASE_URL".to_string(), url)], strings(&["--provider", "custom", "-m", model]))
 }
 
 /// It, if process `pid` runs the `hermes` script.
@@ -188,8 +197,7 @@ impl Agent for Hermes {
         if self.free || format != Format::Chat {
             return None;
         }
-        let env = vec![("OPENAI_API_KEY".to_string(), "dino".to_string()), ("OPENAI_BASE_URL".to_string(), format!("{url}/v1"))];
-        Some((env, strings(&["--provider", "openai-api", "-m", model])))
+        Some(on_endpoint(format!("{url}/v1"), model))
     }
 
     fn model_args(&self, model: &str) -> Vec<String> {
@@ -216,14 +224,14 @@ impl Agent for Hermes {
         flags.last().map(|_| "bypass".into())
     }
 
-    // On its own, nothing: its provider is its own setting. On the free tier its `openai-api`
-    // provider, pointed at dino's OpenAI front by its environment; the key is a placeholder.
+    // On its own, nothing: its provider is its own setting. On the free tier its `custom`
+    // provider, pointed at dino's OpenAI chat front by its environment, on the free tier's one
+    // model, which picks the real one for each turn.
     fn wiring(&self, _route: bool, base: &dyn Fn(&str) -> String, _status_line: Option<String>) -> Wiring {
         if !self.free {
             return (vec![], vec![]);
         }
-        let env = vec![("OPENAI_API_KEY".to_string(), "dino-free".to_string()), ("OPENAI_BASE_URL".to_string(), format!("{}/v1", base("free")))];
-        (env, strings(&["--provider", "openai-api", "-m", "auto"]))
+        on_endpoint(format!("{}/v1", base("free")), "auto")
     }
 
     // Its terminal takes no prompt to start on (`-z` runs once and exits).
@@ -505,6 +513,18 @@ mod tests {
         let turns: Vec<(String, String)> = page.turns.into_iter().map(|t| (t.role, t.text)).collect();
         assert_eq!(turns, [("user".to_string(), "List the files here".to_string()), ("tool".into(), "terminal ls".into())]);
         assert_eq!(page.start, 0, "from its beginning");
+    }
+
+    /// Its `openai-api` provider speaks the Responses API (Hermes 0.21), which the free tier and
+    /// a chat route don't answer: its `custom` one speaks Chat Completions to them.
+    #[test]
+    fn it_reaches_dino_as_a_chat_endpoint() {
+        let (env, args) = Hermes { free: true }.wiring(true, &|p| format!("http://127.0.0.1:9/s/4/{p}"), None);
+        assert_eq!(env, [("CUSTOM_BASE_URL".to_string(), "http://127.0.0.1:9/s/4/free/v1".to_string())]);
+        assert_eq!(args, ["--provider", "custom", "-m", "auto"]);
+        let (env, args) = Hermes { free: false }.provider_wiring("http://127.0.0.1:9/s/4/or", Format::Chat, "qwen/qwen3").unwrap();
+        assert_eq!(env, [("CUSTOM_BASE_URL".to_string(), "http://127.0.0.1:9/s/4/or/v1".to_string())]);
+        assert_eq!(args, ["--provider", "custom", "-m", "qwen/qwen3"]);
     }
 
     #[test]
