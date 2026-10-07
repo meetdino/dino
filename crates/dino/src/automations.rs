@@ -142,7 +142,38 @@ fn quoted(name: &str) -> String {
     if name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) { name.to_string() } else { format!("'{}'", name.replace('\'', "'\\''")) }
 }
 
-/// "today 09:00", "Tue 09:00": local time, as `date` would say it.
+/// Format a local time relative to another broken-down local time.
+fn when_local(tm: &libc::tm, today: &libc::tm) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let day_number = |time: &libc::tm| {
+        let year = i64::from(time.tm_year) + 1900;
+        let previous = year - 1;
+        previous * 365 + previous / 4 - previous / 100 + previous / 400 + i64::from(time.tm_yday)
+    };
+    let days_from_today = day_number(tm) - day_number(today);
+    let clock = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+
+    match days_from_today {
+        0 => format!("today {clock}"),
+        1 => format!("tomorrow {clock}"),
+        -1 => format!("yesterday {clock}"),
+        -6..=6 => format!("{} {clock}", DAYS[tm.tm_wday.clamp(0, 6) as usize]),
+        _ => {
+            let month = MONTHS[tm.tm_mon.clamp(0, 11) as usize];
+            if tm.tm_year == today.tm_year {
+                format!("{month} {} {clock}", tm.tm_mday)
+            } else {
+                format!("{month} {} {} {clock}", tm.tm_mday, tm.tm_year + 1900)
+            }
+        }
+    }
+}
+
+/// "today 09:00", "Tue 09:00", or a date, in local time.
 pub(crate) fn when(secs: u64) -> String {
     let t = secs as libc::time_t;
     // SAFETY: localtime_r only writes the tm it's given.
@@ -151,23 +182,13 @@ pub(crate) fn when(secs: u64) -> String {
         libc::localtime_r(&t, &mut tm);
         tm
     };
-    let today = {
-        let n = out::now() as libc::time_t;
-        unsafe {
-            let mut now: libc::tm = std::mem::zeroed();
-            libc::localtime_r(&n, &mut now);
-            (now.tm_year, now.tm_yday)
-        }
+    let n = out::now() as libc::time_t;
+    let today = unsafe {
+        let mut today: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&n, &mut today);
+        today
     };
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    let day = if (tm.tm_year, tm.tm_yday) == today {
-        "today".to_string()
-    } else if (tm.tm_year, tm.tm_yday) == (today.0, today.1 + 1) {
-        "tomorrow".to_string()
-    } else {
-        DAYS[tm.tm_wday.clamp(0, 6) as usize].to_string()
-    };
-    format!("{day} {:02}:{:02}", tm.tm_hour, tm.tm_min)
+    when_local(&tm, &today)
 }
 
 /// A run in a few words, and its colour.
@@ -554,6 +575,18 @@ fn apply(t: &mut ScheduledTask, args: &[String]) -> anyhow::Result<Option<String
 mod tests {
     use super::*;
 
+    fn broken_down(year: i32, month: i32, day: i32, yday: i32, wday: i32) -> libc::tm {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_yday = yday;
+        tm.tm_wday = wday;
+        tm.tm_hour = 9;
+        tm.tm_min = 0;
+        tm
+    }
+
     fn parse(line: &str) -> (ScheduledTask, Option<String>) {
         let mut t = ScheduledTask::default();
         let args: Vec<String> = dino_core::schedule::split_args(line);
@@ -585,5 +618,43 @@ mod tests {
         let (t, _) = parse("--after nightly --outcome failure --continue s1");
         assert_eq!((t.trigger.on, t.trigger.after.as_str(), t.trigger.when.as_str()), (TriggerKind::After, "nightly", "failure"));
         assert_eq!(t.action.session, "s1");
+    }
+
+    #[test]
+    fn when_names_yesterday_and_tomorrow_across_months_and_years() {
+        let february_28 = broken_down(2026, 2, 28, 58, 6);
+        let march_1 = broken_down(2026, 3, 1, 59, 0);
+        assert_eq!(when_local(&march_1, &february_28), "tomorrow 09:00");
+        assert_eq!(when_local(&february_28, &march_1), "yesterday 09:00");
+
+        let december_31 = broken_down(2025, 12, 31, 364, 3);
+        let january_1 = broken_down(2026, 1, 1, 0, 4);
+        assert_eq!(when_local(&january_1, &december_31), "tomorrow 09:00");
+        assert_eq!(when_local(&december_31, &january_1), "yesterday 09:00");
+    }
+
+    #[test]
+    fn when_uses_weekdays_for_six_days_and_dates_beyond() {
+        let today = broken_down(2026, 9, 28, 270, 1);
+        assert_eq!(
+            when_local(&broken_down(2026, 9, 22, 264, 2), &today),
+            "Tue 09:00"
+        );
+        assert_eq!(
+            when_local(&broken_down(2026, 10, 4, 276, 0), &today),
+            "Sun 09:00"
+        );
+        assert_eq!(
+            when_local(&broken_down(2026, 9, 21, 263, 1), &today),
+            "Sep 21 09:00"
+        );
+        assert_eq!(
+            when_local(&broken_down(2026, 10, 5, 277, 1), &today),
+            "Oct 5 09:00"
+        );
+        assert_eq!(
+            when_local(&broken_down(2025, 9, 28, 270, 0), &today),
+            "Sep 28 2025 09:00"
+        );
     }
 }
