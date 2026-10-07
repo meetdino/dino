@@ -1486,6 +1486,7 @@ fn continue_target(sessions: &[dino_core::found::FoundSession], prefix: &str) ->
 /// Continue a session dino didn't start (see `dino found`).
 fn cmd_continue(prefix: &str) -> anyhow::Result<()> {
     validate_continue_prefix(prefix).map_err(anyhow::Error::msg)?;
+    // Hidden ones too: hiding only keeps a session out of the lists.
     let mut sessions = vec![];
     for hidden in [false, true] {
         let every = Request::Found { cloud: false, running_only: false, limit: None, query: None, hidden };
