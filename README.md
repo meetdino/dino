@@ -178,7 +178,8 @@ Mac and when.
 ## Building from source
 
 You need the Xcode Command Line Tools (`xcode-select --install`) and Rust
-([rustup](https://rustup.rs), 1.88 or later). No Apple developer account or signing keys.
+([rustup](https://rustup.rs), 1.91 or later: a dependency uses `str::floor_char_boundary`). No
+Apple developer account or signing keys.
 
 ```sh
 git clone https://github.com/meetdino/dino.git
