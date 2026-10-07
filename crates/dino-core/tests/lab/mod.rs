@@ -252,12 +252,15 @@ impl Lab {
 
     /// One scan, as dinod makes it with no sessions of its own: only this lab's processes.
     pub fn scan(&self) -> Vec<FoundSession> {
-        found::scan(&[], &|_| false).into_iter().filter(|f| f.pid.is_some_and(|p| self.owns(p))).collect()
+        let found = found::scan(&[], &|_| false);
+        // The processes listed once for all it found: once each made a scan take a second on a
+        // busy Mac, and fewer scans fit in the time a test gives them.
+        let procs = procinfo::processes();
+        found.into_iter().filter(|f| f.pid.is_some_and(|p| self.owns(&procs, p))).collect()
     }
 
     /// The lab started `pid`, or one of its processes did.
-    pub fn owns(&self, pid: u32) -> bool {
-        let procs = procinfo::processes();
+    pub fn owns(&self, procs: &procinfo::Procs, pid: u32) -> bool {
         let mut at = Some(pid);
         for _ in 0..16 {
             let Some(p) = at.filter(|&p| p > 1) else { return false };
