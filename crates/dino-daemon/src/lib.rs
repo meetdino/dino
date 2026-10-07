@@ -1521,11 +1521,15 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
             }
             Request::SendKeys { id, text } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
-                Some(s) if !s.pane.is_exited() => {
+                Some(s) if s.pane.is_exited() => Response::Error { message: format!("{id} has exited") },
+                // In line mode its terminal prints them (`^[[57300~`) for what runs to read as text:
+                // a command, or the shell itself before its next prompt (old bash asking for a #
+                // line). A line editor reads keys (a shell's, or one behind a tmux client or ssh).
+                Some(s) if !s.pane.reads_keys() => Response::Error { message: format!("{id} isn't at a prompt") },
+                Some(s) => {
                     s.pane.write(text.into_bytes());
                     Response::Ok
                 }
-                Some(_) => Response::Error { message: format!("{id} has exited") },
                 None => Response::Error { message: format!("no session {id}") },
             },
             Request::Interrupt { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
@@ -5634,6 +5638,41 @@ while (sysread(STDIN, my $c, 1)) {
         wait_for("the pane's size back", || s.pane.size() == (100, 30));
         assert_eq!(s.attached.load(Ordering::Relaxed), 1, "only the pane");
         assert!(!s.pane.shared.answer_queries.load(Ordering::Relaxed));
+        kill(&d, &id);
+    }
+
+    /// ⌘I's keys go to a shell only while something reads keys in its terminal: at its prompt, its
+    /// line editor. In line mode its terminal would print them under the line (`^[[57300~`) for
+    /// what runs to read: a command, or the shell itself before its next prompt (old bash asking
+    /// for a # line).
+    #[test]
+    fn keys_for_the_ai_line_wait_for_a_prompt() {
+        let home = test_home().to_path_buf();
+        let d = shell_daemon();
+        let id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        let send = |text: &str| {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let d2 = d.clone();
+            std::thread::spawn(move || serve(&d2, server));
+            ipc::write_json(&mut client, &Request::SendKeys { id: id.clone(), text: text.into() }).unwrap();
+            let (_, answer) = ipc::read_frame(&mut client).unwrap();
+            serde_json::from_slice::<Response>(&answer).unwrap()
+        };
+        wait_for("the prompt", || s.pane.reads_keys());
+        assert!(matches!(send("echo typed-$((6*7))\r"), Response::Ok));
+        wait_for("the keys to run", || s.pane.text(0).contains("typed-42"));
+
+        for (busy, what) in [("sleep 30", "a command"), ("read line", "the shell reading a line")] {
+            wait_for("the prompt", || s.pane.reads_keys());
+            s.pane.write(format!("{busy}\r").into_bytes());
+            wait_for(what, || !s.pane.reads_keys());
+            let answer = send("\x1b[57300~");
+            assert!(matches!(&answer, Response::Error { message } if message.contains("prompt")), "{what}: {answer:?}");
+            s.pane.write(b"\x03".to_vec());
+        }
+        wait_for("the prompt", || s.pane.reads_keys());
+        assert!(!s.pane.text(0).contains("57300"), "{}", s.pane.text(0));
         kill(&d, &id);
     }
 
