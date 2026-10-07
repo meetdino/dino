@@ -119,8 +119,8 @@ enum Notifier {
     /// What to say under the switch, when anything: why it can't notify as it is.
     var note: String? {
         switch status {
-        case .denied?: "Notifications are off for \(Permissions.appName) in System Settings"
-        case _ where allowed && quiet: "\(Permissions.appName)'s notifications go to Notification Center without a banner. Choose Banners or Alerts in System Settings to see them"
+        case .denied?: "Notifications are off for dino in System Settings."
+        case _ where allowed && quiet: "dino's banners are off in System Settings."
         default: nil
         }
     }
@@ -144,34 +144,7 @@ struct NeedsYouNotifyToggle: View {
 
     var body: some View {
         Group {
-            if form {
-                Toggle(isOn: isOn) {
-                    Text("Notify me when an agent needs me")
-                    Text(access.note ?? "A notification names the session and what it asks; click it to go there. None for the session you're looking at.")
-                }
-                if access.note != nil {
-                    HStack {
-                        Spacer()
-                        Button("Open System Settings") { access.openSettings() }
-                    }
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 3) {
-                    Toggle("Notify me when an agent needs me", isOn: isOn)
-                        .toggleStyle(.checkbox)
-                        .font(.callout)
-                        .help("A macOS notification names the session and what it asks; click it to go there")
-                    if let note = access.note {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                            Button("Open System Settings") { access.openSettings() }
-                                .buttonStyle(.link)
-                                .font(.caption)
-                        }
-                        .padding(.leading, 20)
-                    }
-                }
-            }
+            NeedsYouNotifyRow(isOn: isOn, note: access.note, openSettings: access.openSettings, form: form)
         }
         .onAppear { access.refresh() }
     }

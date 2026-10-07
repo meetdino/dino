@@ -1,11 +1,13 @@
-//! Settings → Experimental → computer use for agents that have none of their own (Kimi, Qwen, Pi,
-//! Hermes, CodeWhale, OpenCode, Codex outside its app, Claude Code without a Pro or Max plan).
-//! Off until turned on. On, dino installs a pinned release of open-computer-use (MIT,
-//! iFurySt/open-codex-computer-use) in its own folder, checked against npm's published hash and
-//! the developer's signature, and adds it to the agents the user picks with each agent's own MCP
-//! command. macOS's Accessibility and Screen Recording go to open-computer-use's own notarized
-//! app, through its `doctor`; dino asks macOS for nothing. Off again, dino removes every server it
-//! added (only those: it records what it added, and leaves one the user changed) and the install.
+//! Agents using the Mac's apps: open-computer-use for every agent here that takes MCP servers
+//! (Claude Code, Codex, Kimi, Qwen, Pi, Hermes, CodeWhale, OpenCode, Copilot). On unless turned
+//! off (Settings → Agents, or the Welcome card), and for one agent unless turned off for it. On,
+//! dino installs a pinned release of open-computer-use (MIT, iFurySt/open-codex-computer-use) in
+//! its own folder, checked against npm's published hash and the developer's signature, and adds it
+//! to each agent with the agent's own MCP command. An agent's own computer use (Claude Code's with
+//! a Pro or Max plan) is never touched. macOS's Accessibility and Screen Recording go to
+//! open-computer-use's own notarized app, through its `doctor`; dino asks macOS for nothing. Off,
+//! dino removes every server it added (only those: it records what it added, and leaves one the
+//! user changed) and the install.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -31,6 +33,9 @@ const APP: &str = "Open Computer Use.app";
 
 /// One change at a time: installs and agents' own commands don't overlap.
 static BUSY: Mutex<()> = Mutex::new(());
+/// Agents adding it to failed for since dinod started: tried again at its next start, not at
+/// every change of settings.
+static FAILED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// What its `doctor` last said: (Accessibility, Screen Recording).
 static GRANTED: Mutex<Option<(bool, bool)>> = Mutex::new(None);
 
@@ -51,13 +56,17 @@ fn installed() -> bool {
 }
 
 fn on() -> bool {
-    Settings::load().experimental.computer_use
+    Settings::load().computer_use()
 }
 
 /// What dino added, by agent: the server as it added it. This Mac's own (never synced).
 #[derive(Serialize, Deserialize, Default)]
 struct Record {
     added: std::collections::BTreeMap<String, Added>,
+    /// Agents it was turned off for (in Settings, or by removing it in the agent): never added
+    /// again by itself.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    declined: std::collections::BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -107,7 +116,7 @@ fn native(id: &str, bin: &Path) -> Option<String> {
     match id {
         "claude" => {
             let (_, account) = dino_core::discover::sign_in_status("claude", bin)?;
-            matches!(account.as_deref(), Some("Claude Pro" | "Claude Max")).then(|| "Has its own: in Claude, /mcp → computer-use → Enable".into())
+            matches!(account.as_deref(), Some("Claude Pro" | "Claude Max")).then(|| "Also has its own: in Claude, /mcp → computer-use → Enable".into())
         }
         _ => None,
     }
@@ -139,7 +148,7 @@ pub(crate) fn info() -> ComputerUseInfo {
 
 /// Download the pinned release, check it, and put its macOS app in dino's folder.
 pub(crate) fn install() -> anyhow::Result<()> {
-    anyhow::ensure!(on(), "Turn on computer use for more agents first");
+    anyhow::ensure!(on(), "Turn on computer use first");
     let _one = BUSY.lock().unwrap();
     if installed() {
         return Ok(());
@@ -199,29 +208,39 @@ fn parse_doctor(said: &str) -> Option<(bool, bool)> {
 /// Add open-computer-use to agent `id`, or remove what dino added.
 pub(crate) fn set(id: &str, want: bool) -> anyhow::Result<()> {
     if want {
-        anyhow::ensure!(on(), "Turn on computer use for more agents first");
+        anyhow::ensure!(on(), "Turn on computer use first");
         install()?;
     }
     let _one = BUSY.lock().unwrap();
     let (_, name, bin) = agents_here().into_iter().find(|a| a.0 == id).ok_or_else(|| anyhow::anyhow!("{id} isn't on this Mac"))?;
     let mut rec = record();
     if want {
-        let ours = server();
-        match agent_mcp::find(id, NAME) {
-            Some(s) if s == ours => {}
-            Some(_) => anyhow::bail!("{name} already has an MCP server named {NAME} that dino didn't add, so dino left it alone"),
-            None => {
-                let change = agent_mcp::adding(id, NAME, &ours).ok_or_else(|| anyhow::anyhow!("dino can't add MCP servers to {name}"))?;
-                agent_mcp::apply(id, &bin, NAME, &change, Some(&ours))?;
-                anyhow::ensure!(agent_mcp::find(id, NAME).as_ref() == Some(&ours), "{name} didn't keep the server dino added");
-            }
+        rec.declined.remove(id);
+        add(&mut rec, id, &name, &bin)?;
+    } else {
+        rec.declined.insert(id.into());
+        if let Some(added) = rec.added.get(id).cloned() {
+            remove(id, &bin, &added)?;
+            rec.added.remove(id);
         }
-        rec.added.insert(id.into(), Added { command: ours.command, args: ours.args });
-    } else if let Some(added) = rec.added.get(id).cloned() {
-        remove(id, &bin, &added)?;
-        rec.added.remove(id);
     }
     save(&rec)
+}
+
+/// Add it to agent `id`, unless the agent has a server by that name dino didn't add.
+fn add(rec: &mut Record, id: &str, name: &str, bin: &Path) -> anyhow::Result<()> {
+    let ours = server();
+    match agent_mcp::find(id, NAME) {
+        Some(s) if s == ours => {}
+        Some(_) => anyhow::bail!("{name} already has an MCP server named {NAME} that dino didn't add, so dino left it alone"),
+        None => {
+            let change = agent_mcp::adding(id, NAME, &ours).ok_or_else(|| anyhow::anyhow!("dino can't add MCP servers to {name}"))?;
+            agent_mcp::apply(id, bin, NAME, &change, Some(&ours))?;
+            anyhow::ensure!(agent_mcp::find(id, NAME).as_ref() == Some(&ours), "{name} didn't keep the server dino added");
+        }
+    }
+    rec.added.insert(id.into(), Added { command: ours.command, args: ours.args });
+    Ok(())
 }
 
 /// Remove what dino added to agent `id`, when it's still as dino left it.
@@ -234,10 +253,12 @@ fn remove(id: &str, bin: &Path, added: &Added) -> anyhow::Result<()> {
     agent_mcp::apply(id, bin, NAME, &change, None)
 }
 
-/// With the setting off (turned off, or by the organization): nothing dino added stays, nor its
-/// install. Run when dinod starts and when settings change.
+/// Run when dinod starts and when settings change. On: installed, and added to every agent here
+/// but those it was turned off for and those with their own server by that name. Off (turned off,
+/// or by the organization): nothing dino added stays, nor its install.
 pub(crate) fn reconcile() {
     if on() {
+        add_everywhere();
         return;
     }
     let mut rec = record();
@@ -269,6 +290,46 @@ pub(crate) fn reconcile() {
     }
 }
 
+fn add_everywhere() {
+    let here = agents_here();
+    let rec = record();
+    let failed = FAILED.lock().unwrap().clone();
+    let wanted = |rec: &Record, id: &str| !rec.declined.contains(id) && !rec.added.contains_key(id) && !failed.iter().any(|f| f == id);
+    // Removed in the agent since dino added it (`claude mcp remove`): turned off for it.
+    let removed: Vec<String> = rec.added.keys().filter(|id| here.iter().any(|a| &a.0 == *id) && agent_mcp::find(id, NAME).is_none()).cloned().collect();
+    if removed.is_empty() && !here.iter().any(|a| wanted(&rec, &a.0) && agent_mcp::find(&a.0, NAME).is_none_or(|s| s == server())) {
+        return;
+    }
+    if let Err(e) = install() {
+        eprintln!("dinod: couldn't install {NAME}: {e:#}");
+        return;
+    }
+    let _one = BUSY.lock().unwrap();
+    let mut rec = record();
+    for id in removed {
+        rec.added.remove(&id);
+        rec.declined.insert(id);
+    }
+    for (id, name, bin) in &here {
+        if !wanted(&rec, id) {
+            continue;
+        }
+        match agent_mcp::find(id, NAME) {
+            // Their own: left alone.
+            Some(s) if s != server() => {}
+            _ => {
+                if let Err(e) = add(&mut rec, id, name, bin) {
+                    eprintln!("dinod: couldn't add {NAME} to {name}: {e:#}");
+                    FAILED.lock().unwrap().push(id.clone());
+                }
+            }
+        }
+    }
+    if let Err(e) = save(&rec) {
+        eprintln!("dinod: couldn't save {}: {e:#}", record_path().display());
+    }
+}
+
 /// Something runs from dino's install of open-computer-use: its helper, or a server an agent
 /// started before it was removed.
 fn runs_from_install() -> bool {
@@ -289,5 +350,16 @@ mod tests {
         assert_eq!(parse_doctor("Permissions: accessibility=granted, screenRecording=granted\n"), Some((true, true)));
         assert_eq!(parse_doctor("Permissions: accessibility=missing, screenRecording=granted"), Some((false, true)));
         assert_eq!(parse_doctor("something else"), None);
+    }
+
+    #[test]
+    fn a_record_from_before_opting_out_reads() {
+        let old: Record = serde_json::from_str(r#"{"added":{"claude":{"command":"/x/OpenComputerUse","args":["mcp"]}}}"#).unwrap();
+        assert!(old.added.contains_key("claude") && old.declined.is_empty());
+        let mut r = old;
+        r.declined.insert("codex".into());
+        let back: Record = serde_json::from_slice(&serde_json::to_vec(&r).unwrap()).unwrap();
+        assert!(back.declined.contains("codex"));
+        assert!(!String::from_utf8(serde_json::to_vec(&Record::default()).unwrap()).unwrap().contains("declined"));
     }
 }

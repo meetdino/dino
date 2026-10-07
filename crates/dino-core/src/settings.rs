@@ -112,11 +112,10 @@ pub struct Experimental {
     /// each turn. With a TypeSafe key, picking sends the turn's text (up to 8,000 characters) to
     /// api.typesafe.ai. Off, the free tier isn't offered and its requests are refused unsent.
     pub free_models: bool,
-    /// Computer use for agents that have none of their own: dino installs open-computer-use (a
-    /// pinned, checked release) in its own folder and adds it to the agents the user picks, with
-    /// each agent's own MCP command. Off, dino removes every one it added (see dinod's
-    /// `computer_use`). Nothing leaves the Mac either way.
-    pub computer_use: bool,
+    /// Where computer use was switched while it was being tried out. Read only for a Mac whose
+    /// [machine] doesn't say ([`Settings::computer_use`]): a `false` here keeps it off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer_use: Option<bool>,
     /// Switches this dino doesn't know (a newer one's, or a feature since removed), kept as they are.
     #[serde(flatten)]
     pub extra: Extra,
@@ -337,6 +336,12 @@ pub struct Machine {
     /// Ghostty's `shell-integration-features` as Ghostty hands them to a shell
     /// (GHOSTTY_SHELL_FEATURES: `cursor:blink,path,title`), as the app last read them.
     pub shell_features: String,
+    /// Agents can use the Mac's apps: dino installs open-computer-use (a pinned, checked release)
+    /// in its own folder and adds it to every agent here that takes MCP servers, with each agent's
+    /// own command, but for one you turned it off for. Off, dino removes every one it added (see
+    /// dinod's `computer_use`). Nothing leaves the Mac either way. Unset: [`Settings::computer_use`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer_use: Option<bool>,
 }
 
 /// One compiler cache for the whole Mac: every agent dino starts, and every dino shell, builds Rust
@@ -401,6 +406,7 @@ impl Default for Machine {
             build_cache: BuildCache::default(),
             shell_integration_mode: "detect".into(),
             shell_features: "cursor,title".into(),
+            computer_use: None,
         }
     }
 }
@@ -440,7 +446,21 @@ impl Settings {
 
     /// What's in effect: the user's settings with the organization's (see [`Managed`]) over them.
     pub fn load() -> Self {
-        Self::load_user().managed_by(&Managed::load())
+        let m = Managed::load();
+        let mut s = Self::load_user().managed_by(&m);
+        // An organization that set computer use where it was (Experimental) still sets it.
+        if let Some(on) = m.doc.pointer("/experimental/computer_use").and_then(|v| v.as_bool()) {
+            if m.doc.pointer("/machine/computer_use").is_none() {
+                s.machine.computer_use = Some(on);
+            }
+        }
+        s
+    }
+
+    /// Whether agents get open-computer-use: on unless turned off, here or (before it left
+    /// Experimental, where saving wrote `false` until it was turned on) in [experimental].
+    pub fn computer_use(&self) -> bool {
+        self.machine.computer_use.or(self.experimental.computer_use).unwrap_or(true)
     }
 
     /// The user's own settings; on first use, what the old `config` file said. A file that doesn't
@@ -794,11 +814,35 @@ mod tests {
         // A switch for a feature since removed (fan out) loads, and stays in the file.
         std::fs::write(Settings::path(), "[experimental]\ncomputer_use = true\nfan_out = true\n").unwrap();
         let old = Settings::load();
-        assert!(old.experimental.computer_use);
+        assert!(old.computer_use());
         old.save().unwrap();
         let text = std::fs::read_to_string(Settings::path()).unwrap();
         assert!(text.contains("fan_out = true"), "{text}");
         assert_eq!(Settings::load(), old);
+
+        // Computer use: on for a new Mac; a `false` from when it was Experimental stays off, and
+        // the switch where it is now says last.
+        assert!(Settings::default().computer_use(), "on by default");
+        std::fs::write(Settings::path(), "[routing]\nproxy = true\n").unwrap();
+        assert!(Settings::load().computer_use(), "on where nothing says");
+        std::fs::write(Settings::path(), "[experimental]\ncomputer_use = false\n").unwrap();
+        let mut was_off = Settings::load();
+        assert!(!was_off.computer_use(), "off as it was");
+        was_off.save().unwrap();
+        assert!(!Settings::load().computer_use(), "still off once saved again");
+        was_off.machine.computer_use = Some(true);
+        was_off.save().unwrap();
+        assert!(Settings::load().computer_use(), "turned on where it is now");
+        let mut on = Settings::default();
+        on.machine.computer_use = Some(false);
+        on.save().unwrap();
+        let text = std::fs::read_to_string(Settings::path()).unwrap();
+        assert!(text.contains("computer_use = false") && !text.contains("[experimental]\ncomputer_use"), "{text}");
+        assert!(!Settings::load().computer_use());
+        std::fs::write(Settings::path(), "").unwrap();
+        Settings::default().save().unwrap();
+        let text = std::fs::read_to_string(Settings::path()).unwrap();
+        assert!(!text.contains("computer_use"), "a default isn't written, so it stays the default: {text}");
 
         let mut s4 = Settings::default();
         s4.agents.insert("claude".into(), Controls { model: Some("haiku".into()), ..Controls::default() });

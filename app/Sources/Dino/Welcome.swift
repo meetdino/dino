@@ -16,7 +16,11 @@ struct WelcomeCard: View {
     @State private var isDefault = Opening.isDefault
     @State private var asked = false
     @State private var showMissing = false
-    @State private var showComputerUse = false
+    /// open-computer-use here, as dinod says; nil until asked.
+    @State private var computerUse: ComputerUseInfo?
+    /// Installing it, or asking its doctor.
+    @State private var computerUseBusy: String?
+    @State private var computerUseError: String?
     @State private var rowsHeight: CGFloat = 0
     /// Out of the way while an install or sign-in runs in its tab (a sign-in asks you things there);
     /// back with the outcome when it ends.
@@ -145,18 +149,18 @@ struct WelcomeCard: View {
             }
             group("Optional") {
                 NeedsYouNotifyToggle()
-                computerUse
+                computerUseRow
                 // Not checked here: asking macOS whether dino may control the Mac lists dino in
                 // System Settings, which waits until you go to Permissions.
                 Button {
                     settingsPane = .general
                     openWindow(id: SettingsView.windowID)
                 } label: {
-                    Text("Let programs in dino's terminals record the screen and control apps").multilineTextAlignment(.leading)
+                    Text("Permissions for programs in dino's terminals, like screencapture").multilineTextAlignment(.leading)
                 }
                 .buttonStyle(.link)
                 .font(.callout)
-                .help("Settings → General → Permissions asks macOS for Screen Recording and \(Permission.accessibility.title)")
+                .help("Screen Recording, Accessibility and Full Disk Access for programs you run in dino's terminals, which use dino's own. Settings → General → Permissions asks macOS for them.")
                 if !isDefault {
                     Button("Make dino your default terminal") {
                         guard Opening.makeDefault() else { return NSSound.beep() }
@@ -263,79 +267,60 @@ struct WelcomeCard: View {
         .help(a.signed_in == nil ? (a.sign_in_hint.map { "Signs in with \($0) inside \(a.name)" } ?? a.name) : a.name)
     }
 
-    /// How each agent here turns on its own computer use; dino installs nothing for those. The
-    /// rest can get open-computer-use from Settings → Experimental.
-    @ViewBuilder private var computerUse: some View {
-        let here = Self.featured.filter(Self.computerUseAgents.contains).compactMap { id in store.setup?.first { $0.id == id && $0.installed } }
-        if !here.isEmpty {
-            DisclosureGroup(isExpanded: $showComputerUse) {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(here) { a in computerUseRow(a) }
-                    if here.contains(where: { !Self.hasOwnComputerUse($0) }) {
-                        Button("Set up computer use for other agents (Experimental)…") {
-                            settingsPane = .experimental
-                            openWindow(id: SettingsView.windowID)
-                        }
-                        .buttonStyle(.link)
-                        .font(.callout)
-                        .help("Adds open-computer-use to the agents you choose")
-                    }
+    /// On unless turned off: open-computer-use for every agent here, and where it is.
+    private var computerUseRow: some View {
+        ComputerUseRow(
+            isOn: Binding(
+                get: { store.settings?.computerUse ?? true },
+                set: { on in
+                    computerUseError = nil
+                    store.update { $0.machine.computer_use = on }
                 }
-                .padding(.top, 4)
-            } label: {
-                Button { showComputerUse.toggle() } label: {
-                    Text("Let agents use your Mac's apps").font(.callout)
-                }
-                .buttonStyle(.plain)
-            }
+            ),
+            status: computerUseStatus,
+            checking: computerUseBusy == "permissions",
+            check: { askComputerUse("permissions", ["type": "computer_use_permissions"]) }
+        )
+        .disabled(store.settings == nil || store.isLocked("machine.computer_use"))
+        // Just turned on: installed once dinod has the switch on (it adds it to agents itself).
+        .onChange(of: store.saves) { _, _ in
+            if store.settings?.computerUse == true, computerUse?.installed != true { askComputerUse("install", ["type": "computer_use_install"]) }
         }
     }
 
-    /// The agents this step speaks for: those the Experimental option can add open-computer-use to
-    /// (dino-core's `agent_mcp::AGENTS`), Claude Code and Codex with their own among them.
-    private static let computerUseAgents: Set = ["claude", "codex", "qwen", "kimi", "pi", "hermes", "codewhale", "opencode", "copilot"]
-
-    /// Claude Code with a Pro or Max plan, and Codex's app, have their own.
-    private static func hasOwnComputerUse(_ a: AgentSetupInfo) -> Bool {
-        a.id == "codex" || (a.id == "claude" && ["Claude Pro", "Claude Max"].contains(a.account ?? ""))
+    private var computerUseStatus: ComputerUseStatus {
+        guard store.settings?.computerUse ?? true else { return .off }
+        if let computerUseError { return .failed(computerUseError) }
+        guard let info = computerUse, info.installed else { return .installing }
+        guard let ax = info.accessibility, let sr = info.screen_recording else { return .permissions(missing: nil) }
+        if ax, sr { return .ready }
+        return .permissions(missing: [ax ? nil : "Accessibility", sr ? nil : "Screen Recording"].compactMap { $0 }.joined(separator: " and "))
     }
 
-    @ViewBuilder private func computerUseRow(_ a: AgentSetupInfo) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(a.name).font(.callout.weight(.medium))
-            Group {
-                switch a.id {
-                case "claude" where Self.hasOwnComputerUse(a):
-                    Text("In Claude, run /mcp, select computer-use and choose Enable (once per project). The first time, it asks for Accessibility and Screen Recording permission. To use your browser, install the Claude in Chrome extension, then run /chrome and choose Enabled by default.")
-                case "claude":
-                    Text("Claude Code's built-in computer use needs a Pro or Max plan\(a.account.map { " (you're signed in with \($0))" } ?? ""). The option below can add open-computer-use instead.")
-                case "codex":
-                    Text("In the Codex app: Plugins → Computer Use → Install plugin, then turn on its server and skill. OpenAI documents it only for the app, not for the Codex CLI.")
-                case "copilot":
-                    Text("No built-in computer use. The option below can add open-computer-use, if your organization's Copilot policy allows MCP servers.")
-                default:
-                    Text("No built-in computer use. The option below can add open-computer-use.")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 10) {
-                if let docs = Self.computerUseDocs[a.id] {
-                    Link("How it works", destination: docs).font(.caption)
-                }
-                if a.id == "claude", Self.hasOwnComputerUse(a), let chrome = Self.computerUseDocs["claude-chrome"] {
-                    Link("Claude in Chrome", destination: chrome).font(.caption)
+    /// What dinod says about open-computer-use, after doing `what` (nil: only asking).
+    private func askComputerUse(_ what: String?, _ body: [String: Any]) {
+        if what != nil {
+            guard computerUseBusy == nil else { return }
+            computerUseBusy = what
+        }
+        nonisolated(unsafe) let body = body
+        Task.detached {
+            let result = Result { try DinoConnection(path: DinoEnvironment.socketPath).computerUse(body) }
+            await MainActor.run {
+                if what != nil { computerUseBusy = nil }
+                switch result {
+                case .success(let info):
+                    if computerUse != info { computerUse = info }
+                    computerUseError = nil
+                    // On, and not there yet: dinod installs it as it starts; this says when it's done.
+                    if what == nil, !info.installed, store.settings?.computerUse ?? true { askComputerUse("install", ["type": "computer_use_install"]) }
+                case .failure(let error):
+                    // Asked before dinod saved the switch: it installs once it has (`saves`).
+                    if what != nil, !error.localizedDescription.hasPrefix("Turn on") { computerUseError = error.localizedDescription }
                 }
             }
         }
     }
-
-    private static let computerUseDocs: [String: URL] = [
-        "claude": URL(string: "https://code.claude.com/docs/en/computer-use")!,
-        "claude-chrome": URL(string: "https://code.claude.com/docs/en/chrome")!,
-        "codex": URL(string: "https://learn.chatgpt.com/docs/computer-use")!,
-    ]
 
     /// ⌘K: every agent already running in another terminal and every past conversation, to
     /// continue in dino.
@@ -416,6 +401,7 @@ struct WelcomeCard: View {
         asked = true
         isDefault = Opening.isDefault
         store.loadSetup()
+        askComputerUse(nil, ["type": "computer_use"])
         Task.detached {
             let providers = (try? DinoConnection(path: DinoEnvironment.socketPath).providers()) ?? []
             await MainActor.run { local = providers.filter { $0.local && $0.connected } }
