@@ -10,6 +10,10 @@ struct ContinueSheet: View {
     @State private var folder: String?
     @State private var selection: String?
     @State private var doneShown = 50
+    /// Showing what the user hid, to show some again.
+    @State private var showHidden = false
+
+    private var sessions: [FoundSession] { showHidden ? model.hiddenFound : model.found }
 
     private func matches(_ f: FoundSession) -> Bool {
         if agent != "all" && f.agent != agent { return false }
@@ -19,7 +23,7 @@ struct ContinueSheet: View {
     }
 
     private var groups: [Bucket] {
-        let all = model.found.filter(matches)
+        let all = sessions.filter(matches)
         return [
             Bucket(id: "running", title: "Running", note: "Working in another terminal. dino can continue one once its current turn ends.",
                   items: all.filter { $0.source == "running" && $0.isBusy }),
@@ -35,12 +39,12 @@ struct ContinueSheet: View {
         groups.flatMap { $0.id == "done" ? Array($0.items.prefix(doneShown)) : $0.items }
     }
 
-    private var selected: FoundSession? { model.found.first { $0.id == selection } }
+    private var selected: FoundSession? { sessions.first { $0.id == selection } }
 
     /// Folders with sessions, most recently used first.
     private var folders: [String] {
         var seen = Set<String>()
-        return model.found.sorted { $0.updated_at > $1.updated_at }.compactMap(\.cwd).filter { seen.insert($0).inserted }
+        return sessions.sorted { $0.updated_at > $1.updated_at }.compactMap(\.cwd).filter { seen.insert($0).inserted }
     }
 
     var body: some View {
@@ -102,7 +106,7 @@ struct ContinueSheet: View {
         List(selection: $selection) {
             ForEach(groups) { g in
                 let items = g.id == "done" ? Array(g.items.prefix(doneShown)) : g.items
-                let olderToo = g.id == "done" && (model.historyMore || model.loadingHistory)
+                let olderToo = g.id == "done" && !showHidden && (model.historyMore || model.loadingHistory)
                 if !items.isEmpty || (g.id == "cloud" && model.loadingCloud) || (g.id == "done" && !model.loadedHistory) || olderToo {
                     Section {
                         ForEach(items) { f in
@@ -135,7 +139,9 @@ struct ContinueSheet: View {
         }
         .listStyle(.sidebar)
         .overlay {
-            if visible.isEmpty && model.loadedHistory && !model.historyMore && !model.loadingHistory {
+            if showHidden && visible.isEmpty {
+                Text(query.isEmpty && folder == nil ? "Nothing is hidden" : "Nothing matches").foregroundStyle(.secondary)
+            } else if !showHidden && visible.isEmpty && model.loadedHistory && !model.historyMore && !model.loadingHistory {
                 Text(query.isEmpty && folder == nil ? "No sessions found" : "Nothing matches").foregroundStyle(.secondary)
             }
         }
@@ -158,6 +164,10 @@ struct ContinueSheet: View {
         if let cwd = f.cwd {
             Button("Only This Folder") { folder = cwd }
         }
+        if !f.session_id.isEmpty || f.source == "running", f.source != "cloud" {
+            Divider()
+            Button(showHidden ? "Unhide" : "Hide") { model.hide(f, !showHidden) }
+        }
     }
 
     private func continueIn(_ f: FoundSession) {
@@ -171,9 +181,16 @@ struct ContinueSheet: View {
 
     private var footer: some View {
         HStack {
-            Text("↑↓ to browse · ↩ to continue in dino · Esc to close")
+            Text(showHidden ? "Hidden sessions · Unhide one from its menu" : "↑↓ to browse · ↩ to continue in dino · Esc to close")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
+            if showHidden || model.hiddenCount > 0 {
+                Button(showHidden ? "Show All Sessions" : "Show Hidden (\(model.hiddenCount))") {
+                    showHidden.toggle()
+                    if showHidden { model.loadHidden() }
+                }
+                .help(showHidden ? "Back to the sessions you can continue" : "Sessions you hid, to show some again")
+            }
             Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
         }
         .padding(10)
