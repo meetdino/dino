@@ -90,7 +90,54 @@ Setup
   dino mcp [--read-only]            serve dino's sessions to agents over MCP (stdio)
   dino ping | stop | daemon | --version
 
-`dino <command> --help` says more about ls, rm, found, stats, login and automations.";
+Every command accepts `-h` or `--help` for its usage.";
+
+const COMMAND_USAGE: &[(&str, &str)] = &[
+    ("ls", "dino ls [--usage] [--json]"),
+    ("status", "dino status [--tmux]"),
+    ("new", "dino new [--worktree] [--stay] <agent> [--on <provider> <model>] [args...]"),
+    ("attach", "dino attach <id>"),
+    ("resume", "dino resume <id>"),
+    ("kill", "dino kill <id>"),
+    ("fork", "dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]"),
+    ("rm", "dino rm [--force] <id>"),
+    ("found", "dino found [--all] [--json]"),
+    ("continue", "dino continue <id>"),
+    ("stats", "dino stats [--range 7d|30d|all] [--json]"),
+    ("automations", "dino automations [show|add|edit|run|pause|resume|rm] …"),
+    ("automation", "dino automations [show|add|edit|run|pause|resume|rm] …"),
+    ("login", "dino login [--email|--device] | openrouter|chatgpt | <plan> [--base <url>]"),
+    ("logout", "dino logout [<provider>]"),
+    ("sync", "dino sync [status|now|resolve|undo]"),
+    ("claude-token", "dino claude-token [status|create|set|remove|add-account|remove-account <n>]"),
+    ("fallback", "dino fallback [<agent> [<provider>:<model>...|off] [--outages] [--new-sessions <agent>[:<model>]]"),
+    ("power", "dino power [status|setup|remove]"),
+    ("permissions", "dino permissions [--json]"),
+    ("build-cache", "dino build-cache [on|off|size <GB>|install]"),
+    ("init", "dino init zsh|bash|fish"),
+    ("shell", "dino shell install|uninstall [zsh|bash|fish]"),
+    ("ai", "dino ai suggest|agent -- <request> | search [--json|--pick]"),
+    ("mcp", "dino mcp [--read-only]"),
+    ("ping", "dino ping"),
+    ("stop", "dino stop"),
+    ("daemon", "dino daemon"),
+    ("search", "dino search [--json|--pick]"),
+    ("version", "dino version"),
+];
+
+/// Help is handled before dispatch: some commands start or stop dinod before looking at their args.
+fn command_help(cli: &[String]) -> Option<String> {
+    let command = cli.first()?.as_str();
+    let (_, usage) = COMMAND_USAGE.iter().find(|(name, _)| *name == command)?;
+    let args = &cli[1..];
+    let asks_for_help = if command == "new" {
+        // After the agent name, args belong to the agent (for example, `dino new codex --help`).
+        args.iter().take_while(|arg| arg.starts_with('-') && arg.as_str() != "--").any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    } else {
+        args.iter().take_while(|arg| arg.as_str() != "--").any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    };
+    asks_for_help.then(|| format!("Usage: {usage}\n\nRun `dino --help` to list all commands."))
+}
 
 /// The build this is: the commit app/build.sh and scripts/release.sh built it from. Read here, in
 /// the crate built last, so a new commit recompiles only this one.
@@ -119,6 +166,10 @@ fn main() {
 
 fn dino() -> anyhow::Result<()> {
     let cli: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(help) = command_help(&cli) {
+        println!("{help}");
+        return Ok(());
+    }
     match cli.first().map(String::as_str) {
         Some("daemon") => return dino_daemon::run(BUILD),
         Some("lid-watchdog") => {
@@ -1342,5 +1393,14 @@ mod tests {
         assert_eq!(status_line(true, 3, 2, 0), "dino: 2 need you");
         assert_eq!(status_line(false, 1, 0, 0), "1 agent, none working");
         assert_eq!(status_line(false, 4, 0, 1), "4 agents: 1 working");
+    }
+
+    #[test]
+    fn command_help_does_not_consume_agent_args_or_prompt_text() {
+        let cli = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert!(command_help(&cli(&["stop", "--help"])).is_some());
+        assert!(command_help(&cli(&["new", "--worktree", "-h"])).is_some());
+        assert!(command_help(&cli(&["new", "codex", "--help"])).is_none());
+        assert!(command_help(&cli(&["ai", "suggest", "--", "--help"])).is_none());
     }
 }
