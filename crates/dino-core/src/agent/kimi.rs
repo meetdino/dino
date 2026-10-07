@@ -320,9 +320,14 @@ impl Agent for Kimi {
         (env.map(|(k, v)| (k.to_string(), v)).into(), vec![])
     }
 
-    // It takes no prompt to start on (only `-p`, which runs once and exits).
+    // It takes no prompt to start on (only `-p`, which runs once and exits): dinod types it in.
     fn prompt_args(&self, _prompt: String) -> Vec<String> {
         vec![]
+    }
+
+    // Its folder trust, asked as it starts in a folder it hasn't seen, before it records anything.
+    fn asking(&self, screen: &str) -> Option<String> {
+        (screen.contains("Trust this folder?") && screen.contains("Don't trust")).then(|| "Trust this folder?".into())
     }
 
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>) {
@@ -587,6 +592,17 @@ mod tests {
     fn continuing_drops_what_picks_the_session() {
         let args: Vec<String> = ["-S", "session_x", "-m", "k3", "--plan", "-c"].iter().map(|s| s.to_string()).collect();
         assert_eq!(Kimi { free: false }.portable_flags(&args), ["-m", "k3", "--plan"]);
+    }
+
+    #[test]
+    fn its_first_message_is_typed_once_it_trusts_the_folder() {
+        let k = Kimi { free: true };
+        assert!(k.prompt_args("fix it".into()).is_empty(), "nothing on its command line: dinod types it in");
+        // Kimi Code 2.1.1, in a folder it hasn't seen.
+        let trust = "  Trust this folder?\n  ↑↓ navigate · Enter select · Esc exit\n   ❯ Trust this folder\n     Enable project MCP servers. Remembered for this folder.\n     Don't trust\n     Exit Kimi Code. Asked again next launch.";
+        assert_eq!(k.asking(trust).as_deref(), Some("Trust this folder?"));
+        let ready = "  No session yet — one will be created on your first message.\n ╭──╮\n │ > │\n ╰──╯";
+        assert_eq!(k.asking(ready), None);
     }
 
     #[test]

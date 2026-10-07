@@ -200,7 +200,8 @@ pub trait Agent: Sync {
     fn keyed_urls(&self) -> bool {
         false
     }
-    /// Arguments that give it `prompt` to start on, staying open for more.
+    /// Arguments that give it `prompt` to start on, staying open for more. Nothing for one that
+    /// takes no prompt on its command line: dinod types it in once it's ready for one.
     fn prompt_args(&self, prompt: String) -> Vec<String> {
         vec![prompt]
     }
