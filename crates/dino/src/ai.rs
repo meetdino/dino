@@ -18,7 +18,7 @@ pub const RISKY: i32 = 10;
 /// Exit status when the agent says it's not something a command can do; the reason is on stderr.
 pub const NOT_A_COMMAND: i32 = 3;
 
-const USAGE: &str = "usage: dino ai suggest [--agent AGENT] [--shell zsh] [--cwd DIR] [--last CMD --status N] -- <request>
+pub(crate) const USAGE: &str = "usage: dino ai suggest [--agent AGENT] [--shell zsh] [--cwd DIR] [--last CMD --status N] -- <request>
        dino ai agent [--agent AGENT] [--cwd DIR] [--last CMD --status N] -- <request>
        dino ai risky [--cwd DIR] -- <command>";
 

@@ -18,7 +18,7 @@ struct Item {
     command: String,
 }
 
-const USAGE: &str = "usage: dino search [--json | --pick] [--query TEXT] [--history FILE|-]
+pub(crate) const USAGE: &str = "usage: dino search [--json | --pick] [--query TEXT] [--history FILE|-]
   --history     the shell's history, newest first, from a file or stdin (the shell widget passes it);
                 without it, Atuin's when Atuin is installed";
 

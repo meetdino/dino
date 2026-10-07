@@ -90,7 +90,68 @@ Setup
   dino mcp [--read-only]            serve dino's sessions to agents over MCP (stdio)
   dino ping | stop | daemon | --version
 
-`dino <command> --help` says more about ls, rm, found, stats, login and automations.";
+Every command accepts `-h` or `--help` for its usage.";
+
+const COMMAND_USAGE: &[(&str, &str)] = &[
+    ("status", "dino status [--tmux]"),
+    ("new", "dino new [--worktree] [--stay] <agent> [--on <provider> <model>] [args...]"),
+    ("attach", "dino attach <id>"),
+    ("resume", "dino resume <id>"),
+    ("kill", "dino kill <id>"),
+    ("continue", "dino continue <id>"),
+    ("logout", "dino logout [<provider>]"),
+    ("sync", "dino sync [status|now|resolve|undo]"),
+    ("claude-token", "dino claude-token [status|create|set|remove|add-account|remove-account <n>]"),
+    ("power", "dino power [status|setup|remove]"),
+    ("permissions", "dino permissions [--json]"),
+    ("init", "dino init zsh|bash|fish"),
+    ("shell", "dino shell install|uninstall [zsh|bash|fish]"),
+    ("mcp", "dino mcp [--read-only]"),
+    ("ping", "dino ping"),
+    ("stop", "dino stop"),
+    ("daemon", "dino daemon"),
+    ("version", "dino version"),
+];
+
+/// Commands with help text maintained alongside their parser or implementation.
+fn detailed_command_help(command: &str) -> Option<&'static str> {
+    match command {
+        "ls" => Some(LS_HELP),
+        "rm" => Some(RM_HELP),
+        "found" => Some(FOUND_HELP),
+        "fallback" => Some(FALLBACK_USAGE),
+        "fork" => Some(FORK_HELP),
+        "stats" => Some(stats::HELP),
+        "automations" | "automation" => Some(automations::HELP),
+        "login" => Some(account::USAGE),
+        "ai" => Some(ai::USAGE),
+        "search" => Some(search::USAGE),
+        "build-cache" => Some(BUILD_CACHE_USAGE),
+        _ => None,
+    }
+}
+
+/// Help is handled before dispatch: some commands start or stop dinod before looking at their args.
+fn command_help(cli: &[String]) -> Option<String> {
+    let command = cli.first()?.as_str();
+    let detailed_help = detailed_command_help(command);
+    let usage = COMMAND_USAGE.iter().find(|(name, _)| *name == command).map(|(_, usage)| *usage);
+    if detailed_help.is_none() && usage.is_none() {
+        return None;
+    }
+    let args = &cli[1..];
+    let asks_for_help = if command == "new" {
+        // After the agent name, args belong to the agent (for example, `dino new codex --help`).
+        args.iter().take_while(|arg| arg.starts_with('-') && arg.as_str() != "--").any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    } else {
+        args.iter().take_while(|arg| arg.as_str() != "--").any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    };
+    asks_for_help.then(|| {
+        detailed_help
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Usage: {}\n\nRun `dino --help` to list all commands.", usage.unwrap()))
+    })
+}
 
 /// The build this is: the commit app/build.sh and scripts/release.sh built it from. Read here, in
 /// the crate built last, so a new commit recompiles only this one.
@@ -119,6 +180,10 @@ fn main() {
 
 fn dino() -> anyhow::Result<()> {
     let cli: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(help) = command_help(&cli) {
+        println!("{help}");
+        return Ok(());
+    }
     match cli.first().map(String::as_str) {
         Some("daemon") => return dino_daemon::run(BUILD),
         Some("lid-watchdog") => {
@@ -1009,13 +1074,14 @@ not). A shell's folder and your own checkouts are never removed. The agent's con
 
   -f, --force   delete even if the worktree has uncommitted changes (they are lost)";
 
+const FORK_HELP: &str = "usage: dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]
+Start a new session on a copy of session <id>'s conversation, made by its agent (Claude Code or
+Codex), with the same mode, model and account. The original session doesn't change. The new
+session gets its own git worktree unless you pass --no-worktree. Words after -- are its first prompt.";
+
 /// `dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]`: a new session on a copy of session
 /// `id`'s conversation, by the agent's own fork, in a new worktree unless told otherwise.
 fn cmd_fork(args: &[String]) -> anyhow::Result<()> {
-    const USAGE: &str = "usage: dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]\n\
-        Start a new session on a copy of session <id>'s conversation, made by its agent (Claude Code or\n\
-        Codex), with the same mode, model and account. The original session doesn't change. The new\n\
-        session gets its own git worktree unless you pass --no-worktree. Words after -- are its first prompt.";
     let (opts, prompt) = match args.iter().position(|a| a == "--") {
         Some(i) => (&args[..i], Some(args[i + 1..].join(" ")).filter(|p| !p.trim().is_empty())),
         None => (args, None),
@@ -1025,17 +1091,17 @@ fn cmd_fork(args: &[String]) -> anyhow::Result<()> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "-h" | "--help" => {
-                println!("{USAGE}");
+                println!("{FORK_HELP}");
                 return Ok(());
             }
             "--no-worktree" => worktree = false,
-            "--name" => name = Some(it.next().ok_or_else(|| anyhow::anyhow!("--name takes a name\n{USAGE}"))?.clone()),
-            other if other.starts_with('-') => anyhow::bail!("unknown option {}\n{USAGE}", printable(other)),
+            "--name" => name = Some(it.next().ok_or_else(|| anyhow::anyhow!("--name takes a name\n{FORK_HELP}"))?.clone()),
+            other if other.starts_with('-') => anyhow::bail!("unknown option {}\n{FORK_HELP}", printable(other)),
             other if id.is_none() => id = Some(other.to_string()),
-            _ => anyhow::bail!("{USAGE}"),
+            _ => anyhow::bail!("{FORK_HELP}"),
         }
     }
-    let id = id.ok_or_else(|| anyhow::anyhow!("{USAGE}\n`dino ls` lists the sessions."))?;
+    let id = id.ok_or_else(|| anyhow::anyhow!("{FORK_HELP}\n`dino ls` lists the sessions."))?;
     let new = created(client::request(&Request::Fork { id: id.clone(), name, worktree, prompt })?)?;
     if out::tty() {
         let place = if worktree { " in a new worktree" } else { "" };
@@ -1342,5 +1408,14 @@ mod tests {
         assert_eq!(status_line(true, 3, 2, 0), "dino: 2 need you");
         assert_eq!(status_line(false, 1, 0, 0), "1 agent, none working");
         assert_eq!(status_line(false, 4, 0, 1), "4 agents: 1 working");
+    }
+
+    #[test]
+    fn command_help_does_not_consume_agent_args_or_prompt_text() {
+        let cli = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert!(command_help(&cli(&["stop", "--help"])).is_some());
+        assert!(command_help(&cli(&["new", "--worktree", "-h"])).is_some());
+        assert!(command_help(&cli(&["new", "codex", "--help"])).is_none());
+        assert!(command_help(&cli(&["ai", "suggest", "--", "--help"])).is_none());
     }
 }
