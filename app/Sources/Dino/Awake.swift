@@ -6,7 +6,38 @@ import SwiftUI
 @MainActor
 final class PowerState: ObservableObject {
     static let shared = PowerState()
-    @Published var info: PowerInfo?
+    /// Everything, for the lists of what keeps the Mac awake (the popover, Settings → Power).
+    @Published var info: PowerInfo? {
+        didSet { AwakeSummary.shared.follow(info) }
+    }
+}
+
+/// What the sidebar's line says of `PowerState`: whether dino holds the Mac awake, and who else
+/// does, by process (and session). macOS's own assertions come and go every few seconds (a system
+/// service syncing, say), as do agents' `caffeinate` runs, each one more of a process the line
+/// already names. Watched apart, so those redraw the lists that show them while they're open,
+/// not the sidebar.
+@MainActor
+final class AwakeSummary: ObservableObject {
+    static let shared = AwakeSummary()
+    @Published private(set) var info: PowerInfo?
+
+    func follow(_ full: PowerInfo?) {
+        var shown = full
+        if let all = full?.awake {
+            var holders: [AwakeHolder] = []
+            for var h in all where !h.system {
+                h.pid = 0
+                h.since = nil
+                h.kind = ""
+                // dino's own is said by what it's for; another only by its process.
+                if !h.ours { h.name = "" }
+                if !holders.contains(h) { holders.append(h) }
+            }
+            shown?.awake = holders
+        }
+        if shown != info { info = shown }
+    }
 }
 
 /// What keeps the Mac awake, at the foot of the sidebar: one line saying what's true now
@@ -14,7 +45,7 @@ final class PowerState: ObservableObject {
 /// you'd care about keeps it awake.
 struct AwakeStatus: View {
     @EnvironmentObject var model: DinoModel
-    @ObservedObject private var state = PowerState.shared
+    @ObservedObject private var state = AwakeSummary.shared
     @State private var showing = false
 
     var body: some View {

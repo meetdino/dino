@@ -36,6 +36,33 @@ enum LiveSessions {
     }
 }
 
+/// The tokens the sidebar's sessions have worked through, for the usage panel's totals. They grow
+/// with every model call a working agent makes, which `DinoModel` doesn't announce (see
+/// `DinoModel.sessions`): a change redraws those totals, not the window.
+@MainActor
+final class SessionTokens: ObservableObject {
+    static let shared = SessionTokens()
+
+    struct Totals: Equatable {
+        /// In and out, not counting the context read again from the prompt cache.
+        var used: UInt64 = 0
+        /// That context read again: summed over a long session, billions that say little.
+        var cached: UInt64 = 0
+        /// Worked through on a free model (dino's free tier).
+        var free: UInt64 = 0
+    }
+
+    @Published private(set) var totals = Totals()
+
+    func follow(_ sessions: [SessionInfo]) {
+        let cached = sessions.reduce(UInt64(0)) { $0 + ($1.cache_read_tokens ?? 0) }
+        let used = sessions.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens } - cached
+        let free = sessions.filter { $0.tier != nil }.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens - ($1.cache_read_tokens ?? 0) }
+        let now = Totals(used: used, cached: cached, free: free)
+        if now != totals { totals = now }
+    }
+}
+
 /// `content` drawn from session `live` as it is now, and again each time it changes: for what shows
 /// a session but is drawn by a view that doesn't watch it (the toolbar, a menu, an automation's run).
 struct Live<Content: View>: View {
