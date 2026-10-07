@@ -61,7 +61,10 @@ final class DinoModel: ObservableObject {
     /// rest is announced by that session's `LiveSession`, to the views that show it.
     var sessions: [SessionInfo] = [] {
         willSet { if outline(newValue) != outline(sessions) { objectWillChange.send() } }
-        didSet { LiveSessions.follow(sessions) }
+        didSet {
+            LiveSessions.follow(sessions)
+            SessionTokens.shared.follow(sessions)
+        }
     }
     @Published var quotas: [QuotaInfo] = []
     /// Your Claude accounts with their windows, once Claude Code has more than one.
@@ -600,6 +603,15 @@ final class DinoModel: ObservableObject {
             o.last_exit = nil
             o.bells = 0
             o.password = nil
+            // What a working agent's every model call adds to: its row and the toolbar show these
+            // from its LiveSession, the usage panel's totals from SessionTokens. Announced here, a
+            // few agents at work redrew the whole window several times a second.
+            o.requests = 0
+            o.input_tokens = 0
+            o.output_tokens = 0
+            o.cache_read_tokens = nil
+            o.context_tokens = nil
+            o.usage_by_route = nil
             // The sidebar's filters count and list sessions by their group (a plain shell isn't
             // there, and its tab has no dot); whether it asks for something words the computer-use
             // banner.

@@ -1509,32 +1509,7 @@ struct UsagePanel: View {
                 if windows.isEmpty && accounts == nil {
                     Text("No quota data yet").font(.caption).foregroundStyle(.tertiary)
                 }
-                // Tokens worked through, not the context read again from the prompt cache on every
-                // call: summed over a long session, those re-reads are billions and say little.
-                let sessions = model.sessions
-                let cached = sessions.reduce(UInt64(0)) { $0 + ($1.cache_read_tokens ?? 0) }
-                let used = sessions.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens } - cached
-                if used > 0 {
-                    HStack {
-                        Text("Open sessions").foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(tokens(used)) tok")
-                    }
-                    .font(.caption.monospacedDigit())
-                    .help("Tokens in and out for the sessions in the sidebar, across their whole conversations"
-                        + (cached > 0 ? ", not counting the \(tokens(cached)) read again from the prompt cache (each call reads the conversation so far again)" : "")
-                        + ". Only traffic routed through dino is counted, so Copilot, Cursor and Amp aren't included.")
-                }
-                let free = sessions.filter { $0.tier != nil }.reduce(UInt64(0)) { $0 + $1.input_tokens + $1.output_tokens - ($1.cache_read_tokens ?? 0) }
-                if free > 0 {
-                    HStack {
-                        Text("Free models").foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(tokens(free)) tok")
-                        Text("$0.00").foregroundStyle(Brand.green)
-                    }
-                    .font(.caption.monospacedDigit())
-                }
+                SessionTokenLines()
                 Button { openWindow(id: StatsView.windowID) } label: {
                     Label("Usage Stats", systemImage: "chart.bar.xaxis")
                         .font(.caption)
@@ -1562,6 +1537,38 @@ struct UsagePanel: View {
         if let fullest { parts.append("\(fullest.label) \(Int((Double(fullest.window.utilization) * 100).rounded()))% used") }
         if accounts != nil, answering == nil { parts.append("Every Claude account is at its limit") }
         return parts.isEmpty ? "No data yet." : parts.joined(separator: ", ") + "."
+    }
+}
+
+/// The usage panel's token totals for the sessions in the sidebar. They tick with every model call,
+/// so they're observed on their own (SessionTokens), not through the model.
+struct SessionTokenLines: View {
+    @ObservedObject private var counts = SessionTokens.shared
+
+    var body: some View {
+        // Tokens worked through, not the context read again from the prompt cache on every
+        // call: summed over a long session, those re-reads are billions and say little.
+        let t = counts.totals
+        if t.used > 0 {
+            HStack {
+                Text("Open sessions").foregroundStyle(.secondary)
+                Spacer()
+                Text("\(tokens(t.used)) tok")
+            }
+            .font(.caption.monospacedDigit())
+            .help("Tokens in and out for the sessions in the sidebar, across their whole conversations"
+                + (t.cached > 0 ? ", not counting the \(tokens(t.cached)) read again from the prompt cache (each call reads the conversation so far again)" : "")
+                + ". Only traffic routed through dino is counted, so Copilot, Cursor and Amp aren't included.")
+        }
+        if t.free > 0 {
+            HStack {
+                Text("Free models").foregroundStyle(.secondary)
+                Spacer()
+                Text("\(tokens(t.free)) tok")
+                Text("$0.00").foregroundStyle(Brand.green)
+            }
+            .font(.caption.monospacedDigit())
+        }
     }
 }
 
