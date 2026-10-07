@@ -249,6 +249,27 @@ fn begin(dir: &Path, id: &str, cwd: &str, ms: u64) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// What Pi writes of a new conversation as it starts, before anything is said in it: the model and
+/// thinking level it starts with. Pi keeps them in memory until the first message, but writes them
+/// into a conversation that is already on disk, as one `begin` started is.
+const STARTUP: [&str; 2] = ["model_change", "thinking_level_change"];
+
+/// Conversation `id` in file `name` is one `begin` started that nothing was said in: its first
+/// line is the one `begin` wrote, and all after it is what Pi writes as it starts (`STARTUP`).
+/// Pi itself never leaves such a file: it writes a conversation only once it has a message.
+fn unused_in(jsonl: &str, name: &str, id: &str) -> bool {
+    let mut lines = jsonl.lines().filter(|l| !l.trim().is_empty());
+    let Some(header) = lines.next().and_then(|l| serde_json::from_str::<Value>(l).ok()) else { return false };
+    let keys: Vec<&str> = header.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+    let began = header["type"] == "session"
+        && header["version"] == 3
+        && header["id"] == id
+        && header["cwd"].is_string()
+        && keys.len() == 5
+        && header["timestamp"].as_str().is_some_and(|t| name == format!("{}_{id}.jsonl", t.replace([':', '.'], "-")));
+    began && lines.all(|l| serde_json::from_str::<Value>(l).is_ok_and(|v| v["type"].as_str().is_some_and(|t| STARTUP.contains(&t))))
+}
+
 /// When a file was created, in seconds.
 fn born(p: &Path) -> u64 {
     p.metadata().and_then(|m| m.created()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
@@ -403,7 +424,8 @@ impl Agent for Pi {
 
     // A conversation it hasn't written yet is started where Pi looks for it (the folder for its
     // working directory as its process sees it, links resolved), so `--session-id` opens it. Pi
-    // 1.0 creates one it doesn't find too, but warns, in yellow, that it found none.
+    // 1.0 creates one it doesn't find too, but warns, in yellow, that it found none. One nothing
+    // is said in goes again once its program ends (see `unused_record`).
     fn prepare_session(&self, session: &str, cwd: &Path) {
         if self.transcript(session).is_some() {
             return;
@@ -411,6 +433,13 @@ impl Agent for Pi {
         let Some(cwd) = std::fs::canonicalize(cwd).ok().and_then(|c| c.to_str().map(String::from)) else { return };
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let _ = begin(&folder_of(&cwd), session, &cwd, now);
+    }
+
+    // The conversation `prepare_session` began, if it was never used: Pi leaves no file for one.
+    fn unused_record(&self, session: &str) -> Option<PathBuf> {
+        let path = self.transcript(session)?;
+        let name = path.file_name()?.to_str()?;
+        unused_in(&std::fs::read_to_string(&path).ok()?, name, session).then_some(path)
     }
 
     fn status_source(&self) -> StatusSource {
@@ -692,6 +721,35 @@ mod tests {
         assert!(meta_in(&text).hidden, "nothing said in it yet");
         assert!(begin(&dir, id, "/private/tmp/w", 1_791_340_947_359).is_err(), "never over one that's there");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a conversation dino began holds after Pi 1.0.3 opened it and was closed with nothing
+    /// typed (#146): Pi wrote its model and thinking level into it as it started.
+    #[test]
+    fn a_conversation_nothing_was_said_in_is_unused() {
+        let id = "a691a65b-7ab4-4eb9-99be-c2ab396b43af";
+        let name = "2026-10-07T02-42-27-359Z_a691a65b-7ab4-4eb9-99be-c2ab396b43af.jsonl";
+        let header = "{\"type\":\"session\",\"version\":3,\"id\":\"a691a65b-7ab4-4eb9-99be-c2ab396b43af\",\"timestamp\":\"2026-10-07T02:42:27.359Z\",\"cwd\":\"/private/tmp/w\"}\n";
+        let started = format!(
+            "{header}{}\n{}\n",
+            r#"{"type":"model_change","id":"d63a8560","parentId":null,"timestamp":"2026-10-07T02:42:28.100Z","provider":"anthropic","modelId":"claude-opus-4-8"}"#,
+            r#"{"type":"thinking_level_change","id":"d63a8564","parentId":"d63a8560","timestamp":"2026-10-07T02:42:28.101Z","thinkingLevel":"off"}"#
+        );
+        assert!(unused_in(header, name, id), "as dino began it");
+        assert!(unused_in(&started, name, id), "as Pi started on it");
+        // Anything said in it, or anything else Pi or an extension wrote, keeps it.
+        let prompt = r#"{"type":"message","id":"a3","parentId":"d63a8564","timestamp":"2026-10-07T02:42:40.000Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        assert!(!unused_in(&format!("{started}{prompt}\n"), name, id));
+        let named = r#"{"type":"session_info","id":"a4","parentId":"d63a8564","timestamp":"2026-10-07T02:42:40.000Z","name":"later"}"#;
+        assert!(!unused_in(&format!("{started}{named}\n"), name, id));
+        assert!(!unused_in(&format!("{started}not json\n"), name, id));
+        assert!(!unused_in(SESSION, "2026-09-30T04-05-59-163Z_11111111-2222-4333-8444-555555555555.jsonl", "11111111-2222-4333-8444-555555555555"));
+        // Not the one dino began: another id, another name, a header with more in it (a fork's).
+        assert!(!unused_in(header, name, "11111111-2222-4333-8444-555555555555"));
+        assert!(!unused_in(header, "2026-10-07T02-42-27-360Z_a691a65b-7ab4-4eb9-99be-c2ab396b43af.jsonl", id));
+        let forked = header.replace("\"cwd\"", "\"parentSession\":\"/s/x.jsonl\",\"cwd\"");
+        assert!(!unused_in(&forked, name, id));
+        assert!(!unused_in("", name, id));
     }
 
     #[test]

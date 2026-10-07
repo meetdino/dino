@@ -230,6 +230,12 @@ pub trait Agent: Sync {
     /// Just before dino starts it on conversation `session` (see `session_args`) in `cwd`: what
     /// has to be there for it to start on it quietly. Nothing for most.
     fn prepare_session(&self, _session: &str, _cwd: &Path) {}
+    /// The record `prepare_session` began for conversation `session`, if nothing was said in it:
+    /// left there, the agent would offer it to continue as if it were a conversation, though on
+    /// its own it leaves no record of one never used. Removed once no program has it open.
+    fn unused_record(&self, _session: &str) -> Option<PathBuf> {
+        None
+    }
     /// Conversation `session` is open in the agent's shared server right now (Codex 0.160.1's):
     /// resumed, it's taken over there, which only an agent started without command-line
     /// configuration does (dino's routing, its notices); one with it runs on its own, and finds the

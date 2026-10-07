@@ -173,6 +173,8 @@ struct Session {
     /// Its agent has moved to another conversation, seen then, whose record isn't written yet:
     /// what kind of move it was waits a moment for it (see `fork::follow`).
     moving_to: Mutex<Option<(String, Instant)>>,
+    /// Since its program ended, its conversation's record was looked at (see `drop_unused`).
+    looked_unused: AtomicBool,
 }
 
 /// What a shell is running in the foreground, as last looked at.
@@ -328,6 +330,11 @@ struct Daemon {
     /// Builds found running for no session as dinod started (see `procs::settle`), each with
     /// when its top process started, until they end or are stopped.
     leftovers: Mutex<Vec<(ipc::Leftover, u64)>>,
+    /// Conversations an agent is being started on, until its session is in the list (see
+    /// `Starting`): their records stay meanwhile (see `drop_unused`).
+    starting: Mutex<HashSet<String>>,
+    /// Sessions ended for good whose program may still be stopping (see `end`), for `drop_unused`.
+    ending: Mutex<Vec<Arc<Session>>>,
 }
 
 /// `dino lid-watchdog <pid>`: see [`lid`].
@@ -415,6 +422,7 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
                 save(&d);
                 save_live_screens(&d, false);
                 stats::tick(&d);
+                drop_unused(&d, false);
                 {
                     let mut left = d.leftovers.lock().unwrap();
                     if !left.is_empty() {
@@ -791,6 +799,8 @@ fn new_daemon(home: PathBuf, proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<
         costs: cost::Costs::default(),
         moves: Mutex::default(),
         leftovers: Mutex::default(),
+        starting: Mutex::default(),
+        ending: Mutex::default(),
     });
     // Archived ids stay theirs, so a new session never takes one.
     let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
@@ -1801,6 +1811,8 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         None => d.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
     };
     let mut agent_session = restore.as_ref().and_then(|r| r.agent_session.clone());
+    // Its record stays while it starts on it, though the session ended there before.
+    let starting = agent_session.clone().map(|c| Starting::new(d, c));
     // Resuming its conversation, an agent may keep some of it as it was (CodeWhale its model):
     // the session shows what will run, not what was asked.
     let controls = match (&restore, agent(&l.agent_id), agent_session.as_deref()) {
@@ -1961,9 +1973,11 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         forked_from: Mutex::new(restore.as_ref().and_then(|r| r.forked_from.clone())),
         fork_pending: AtomicBool::new(restore.as_ref().is_some_and(|r| r.fork_pending)),
         moving_to: Mutex::default(),
+        looked_unused: AtomicBool::new(false),
     }));
     let session = sessions.last().cloned();
     drop(sessions);
+    drop(starting);
     if let Some(s) = session {
         // A shell's agent typed there, running as it was saved: started there again.
         let typed = restore.as_ref().and_then(|r| r.typed.clone()).filter(|_| s.agent_id == "shell" && s.host.is_none() && !s.pane.is_exited());
@@ -2992,6 +3006,10 @@ fn stop_all(d: &Daemon) {
     for h in stopping {
         let _ = h.join();
     }
+    // Every program is gone: the records of conversations nothing was said in go with them. The
+    // next dinod begins them again for the sessions it resumes.
+    d.ending.lock().unwrap().extend(sessions.into_iter().chain(closed));
+    drop_unused(d, true);
     let _ = std::fs::remove_file(ipc::socket_path());
 }
 
@@ -3941,7 +3959,7 @@ fn kill(d: &Daemon, id: &str) -> bool {
 }
 
 /// What ending session `s` takes, once it's out of every list.
-fn end(d: &Daemon, s: &Session) {
+fn end(d: &Daemon, s: &Arc<Session>) {
     let id = &s.id;
     // A tmux client in it: detach it first, so its server only sees a client leave. Asked
     // with no lock held, and given up on if its server doesn't answer.
@@ -3956,12 +3974,72 @@ fn end(d: &Daemon, s: &Session) {
     }
     dino_core::agent::qwen::forget(id);
     forget_session_files(id);
+    // Its conversation's record, if nothing was said in it, once its program is gone.
+    d.ending.lock().unwrap().push(s.clone());
     d.previews.lock().unwrap().retain(|p| {
         if p.session == *id {
             p.stop();
         }
         p.session != *id
     });
+}
+
+/// Conversation `conversation` while an agent is being started on it (see `spawn`), in
+/// `Daemon::starting` until this is dropped.
+struct Starting<'a> {
+    d: &'a Daemon,
+    conversation: String,
+}
+
+impl<'a> Starting<'a> {
+    fn new(d: &'a Daemon, conversation: String) -> Self {
+        d.starting.lock().unwrap().insert(conversation.clone());
+        Self { d, conversation }
+    }
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        self.d.starting.lock().unwrap().remove(&self.conversation);
+    }
+}
+
+/// A program runs on conversation `conversation`, in a session listed or closed.
+fn in_use(d: &Daemon, conversation: &str) -> bool {
+    let on = |s: &Session| !s.pane.is_exited() && s.agent_session.lock().unwrap().as_deref() == Some(conversation);
+    d.sessions.lock().unwrap().iter().any(|s| on(s)) || d.closed.lock().unwrap().iter().any(|c| on(&c.session))
+}
+
+/// Remove the record dino began a conversation with when nothing was said in it (see
+/// `Agent::unused_record`): Pi's, which its `-c` would otherwise continue over the user's last
+/// real conversation (#146). Once each session's program has ended: ended for good (`ending`;
+/// all of them when `stopped`, every program stopped), or on its own, kept to resume, which
+/// begins it again. Never while a program has it open or one is starting on it: Pi, having
+/// opened it, would write on where it was, without its first line.
+fn drop_unused(d: &Daemon, stopped: bool) {
+    let ended: Vec<Arc<Session>> = {
+        let mut ending = d.ending.lock().unwrap();
+        let (ended, left) = std::mem::take(&mut *ending).into_iter().partition(|s| stopped || s.pane.is_exited());
+        *ending = left;
+        ended
+    };
+    let kept: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| s.pane.is_exited() && !s.replaced.load(Ordering::Relaxed)).cloned().collect();
+    for s in ended.iter().chain(&kept) {
+        if s.host.is_some() || s.looked_unused.swap(true, Ordering::Relaxed) {
+            continue;
+        }
+        let (Some(a), Some(c)) = (agent(&s.agent_id), s.agent_session.lock().unwrap().clone()) else { continue };
+        // Held while it's removed: an agent starting on it meanwhile waits, and begins it again.
+        let starting = d.starting.lock().unwrap();
+        if starting.contains(&c) || in_use(d, &c) {
+            continue;
+        }
+        if let Some(record) = a.unused_record(&c)
+            && std::fs::remove_file(&record).is_ok()
+        {
+            eprintln!("{} dinod: removed {}, a conversation nothing was said in", stamp(), record.display());
+        }
+    }
 }
 
 /// A session closed with time to undo it.
