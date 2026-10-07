@@ -4291,9 +4291,11 @@ fn summary(d: &Daemon, path: &str, branch: Option<&str>, base: &str) -> Option<w
     s
 }
 
-/// Its task list and background work, for the Tasks pane. Nothing runs in a session that ended.
+/// Its task list and background work, for the Tasks pane, and the prompts it scheduled, for the
+/// sidebar. Nothing runs in a session that ended, and nothing it scheduled is left.
 fn session_tasks(st: &dino_proxy::SessionStats, cwd: &Path, exited: bool) -> ipc::SessionTasks {
     let here = real(cwd);
+    let now = dino_proxy::tasks::now();
     ipc::SessionTasks {
         todos: st
             .todos
@@ -4326,6 +4328,21 @@ fn session_tasks(st: &dino_proxy::SessionStats, cwd: &Path, exited: bool) -> ipc
                 finished: b.finished,
             })
             .collect(),
+        crons: if exited {
+            Vec::new()
+        } else {
+            st.crons
+                .iter()
+                .map(|c| ipc::CronInfo {
+                    id: c.id.clone(),
+                    schedule: c.schedule.clone(),
+                    recurring: c.recurring,
+                    prompt: c.prompt.clone(),
+                    human: c.human.clone(),
+                    next_due: schedule::cron_next(&c.schedule, now),
+                })
+                .collect()
+        },
     }
 }
 
