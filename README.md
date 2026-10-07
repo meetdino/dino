@@ -143,7 +143,8 @@ dino --help               # the rest
 ```
 
 Settings live in `~/.config/dino/settings.toml`, which `dinod` reads and writes. The app's
-Settings window edits the same file.
+Settings window edits the same file. See the [settings reference](docs/settings.md) for every
+table, key, default, and sync scope.
 
 ### Tab completion
 

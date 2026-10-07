@@ -774,6 +774,21 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn settings_reference_lists_every_top_level_table() {
+        let doc = include_str!("../../../docs/settings.md");
+        let settings = serde_json::to_value(Settings::default()).unwrap();
+        for table in settings.as_object().unwrap().keys() {
+            let plain = format!("`[{table}]`");
+            let nested = format!("`[{table}.<");
+            let path_keyed = format!("`[{table}.\"<");
+            assert!(
+                doc.contains(&plain) || doc.contains(&nested) || doc.contains(&path_keyed),
+                "missing [{table}] from docs/settings.md"
+            );
+        }
+    }
+
+    #[test]
     fn settings_and_keys() {
         let dir = std::env::temp_dir().join(format!("dino-settings-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
