@@ -379,14 +379,15 @@ impl Agent for Copilot {
         Some(s)
     }
 
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         let mut out = vec![];
         for e in std::fs::read_dir(sessions_dir()).into_iter().flatten().flatten() {
             let dir = e.path();
             let Some(id) = e.file_name().to_str().map(String::from) else { continue };
             let events = dir.join("events.jsonl");
             // A launch that was never sent a prompt leaves a folder and no record.
-            if !events.exists() || running(&id) {
+            let updated = history::modified(&events);
+            if updated == 0 || leave_out(&id, updated) {
                 continue;
             }
             let meta = meta_of(&dir);
@@ -394,7 +395,7 @@ impl Agent for Copilot {
                 continue;
             }
             let title = meta.title.unwrap_or_else(|| "Copilot session".into());
-            out.push(history::recent("copilot", id, title, meta.cwd, history::modified(&events)));
+            out.push(history::recent("copilot", id, title, meta.cwd, updated));
         }
         out
     }

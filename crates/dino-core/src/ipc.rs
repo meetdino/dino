@@ -198,6 +198,12 @@ pub enum Request {
         cloud: bool,
         #[serde(default)]
         running_only: bool,
+        /// At most this many finished conversations, the newest; all of them when absent.
+        #[serde(default)]
+        limit: Option<usize>,
+        /// Only finished conversations whose title, folder or id has this, however old.
+        #[serde(default)]
+        query: Option<String>,
     },
     /// Read a conversation, a found session's or a subagent's (see `history::conversation`).
     Conversation { agent: String, session_id: String, before: Option<u64> },
@@ -435,7 +441,12 @@ pub enum Response {
     Created { id: String },
     ShellOutput { output: Option<String>, exit: Option<i32> },
     SessionCost { cost: SessionCost },
-    Found { sessions: Vec<crate::found::FoundSession> },
+    /// `more`: older finished conversations were left out (past `limit`).
+    Found {
+        sessions: Vec<crate::found::FoundSession>,
+        #[serde(default)]
+        more: bool,
+    },
     /// Shown in the tmux client on `tty`; `session` is the dino tab that client runs in, if any.
     /// Neither when no client is attached.
     TmuxShown { tty: Option<String>, session: Option<String> },
@@ -1366,6 +1377,16 @@ pub struct ModelRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn found_asks_for_all_history_unless_told_otherwise() {
+        // An app or CLI from before the window asks as it did, and gets every conversation.
+        let Request::Found { cloud, running_only, limit, query } = serde_json::from_str(r#"{"type":"found","cloud":true}"#).unwrap() else { panic!() };
+        assert_eq!((cloud, running_only, limit, query), (true, false, None, None));
+        // And an answer from a dinod before it reads as nothing left out.
+        let Response::Found { sessions, more } = serde_json::from_str(r#"{"type":"found","sessions":[]}"#).unwrap() else { panic!() };
+        assert!(sessions.is_empty() && !more);
+    }
 
     #[test]
     fn awake_line_says_what_keeps_the_mac_awake() {

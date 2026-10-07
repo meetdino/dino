@@ -239,7 +239,7 @@ impl Agent for Amp {
         Some(s)
     }
 
-    fn recent(&self, _running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, _leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         vec![]
     }
 

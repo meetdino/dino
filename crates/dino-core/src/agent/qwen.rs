@@ -341,16 +341,20 @@ impl Agent for Qwen {
         Some(s)
     }
 
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         let mut out = vec![];
         for p in transcripts() {
             let Some(sid) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else { continue };
+            let updated = history::modified(&p);
+            if leave_out(&sid, updated) {
+                continue;
+            }
             let meta = meta(&p);
-            if meta.hidden || running(&sid) {
+            if meta.hidden {
                 continue;
             }
             let title = meta.title.unwrap_or_else(|| "Qwen Code session".into());
-            out.push(history::recent("qwen", sid, title, meta.cwd, history::modified(&p)));
+            out.push(history::recent("qwen", sid, title, meta.cwd, updated));
         }
         out
     }
