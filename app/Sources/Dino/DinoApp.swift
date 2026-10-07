@@ -144,8 +144,13 @@ struct DinoApp: App {
                 Button("Ask About This Session…") { model.askingAbout = model.selectedSession }
                     .keyboardShortcut(";", modifiers: [.command, .shift])
                     .disabled(model.selectedSession == nil)
-                Button("Fork Session…") { model.forking = model.selectedSession }
+                // One action, no questions: the fork opens in a tab beside it, waiting for a prompt.
+                Button("Fork Session") { if let s = model.selectedSession { model.forkNow(s) } }
                     .keyboardShortcut("b", modifiers: [.command, .option])
+                    .disabled(!(model.selectedSession.map(model.canFork) ?? false))
+                // A name, a worktree of its own, a first prompt.
+                Button("Fork with Options…") { model.forking = model.selectedSession }
+                    .keyboardShortcut("b", modifiers: [.command, .option, .control])
                     .disabled(!(model.selectedSession.map(model.canFork) ?? false))
                 Button("Create Pull Request…") { model.showCreatePR = true }
                     .disabled(model.selectedSession.map { $0.host != nil || model.pr(of: $0) != nil } ?? true)

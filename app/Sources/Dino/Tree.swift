@@ -73,11 +73,14 @@ struct RepoInfo: Codable, Equatable, Identifiable {
     var worktrees: [Worktree]
     /// The branch PRs go into; nil for a plain folder.
     var defaultBranch: String?
+    /// A git repo with no commits yet: it can't have worktrees until it has one.
+    var noCommits: Bool?
     var id: String { path }
 
     enum CodingKeys: String, CodingKey {
         case path, name, worktrees
         case defaultBranch = "default_branch"
+        case noCommits = "no_commits"
     }
 
     /// The main checkout's branch when it isn't the default one ("detached" without one); nil on

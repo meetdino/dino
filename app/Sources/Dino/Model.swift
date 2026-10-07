@@ -162,8 +162,10 @@ final class DinoModel: ObservableObject {
     @Published var showPalette = false
     /// The session the side chat is asking about.
     @Published var askingAbout: SessionInfo?
-    /// The session Fork Session… is forking.
+    /// The session Fork with Options… is forking.
     @Published var forking: SessionInfo?
+    /// Sessions a one-click fork is being made of: Fork again meanwhile (a double click) makes no second.
+    var forksStarting: Set<String> = []
     /// PRs dino just opened or merged, until dinod's poller reports them.
     @Published private var acted: [String: PrInfo] = [:]
 
@@ -708,7 +710,7 @@ final class DinoModel: ObservableObject {
     static let menuKeys = ((["d", "shift+d", "alt+c", "w", "k", "alt+k", "j", "o", "n", "t", "shift+n", "alt+n", "ctrl+n", "alt+shift+n",
                              "comma", ",", "shift+backspace", "s", "shift+o", "alt+p", "alt+t", "shift+p", "shift+bracket_left", "shift+[",
                              "shift+bracket_right", "shift+]", "shift+semicolon", "shift+;", "backslash", "\\", "shift+m", "shift+i",
-                             "shift+e", "alt+b"]
+                             "shift+e", "alt+b", "ctrl+alt+b"]
         + (1 ... 9).flatMap { ["\($0)", "digit_\($0)"] })
         .map { "super+\($0)" }
         // Ctrl+Tab cycles sessions, ⌃` swaps split panes, ⌘/ lists shortcuts, ⇧⌘A archives, ⇧⌘F

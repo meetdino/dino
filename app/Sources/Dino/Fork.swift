@@ -24,7 +24,24 @@ extension DinoModel {
             .max { $0.path.count < $1.path.count }
     }
 
-    /// Fork session `id`; throws dinod's reason. The fork is selected once it's there.
+    /// Fork (⌥⌘B): `s` forked at once, no questions: a new tab beside it on a copy of its
+    /// conversation, same agent, model, mode, account and folder, waiting for its next prompt.
+    /// Fork with Options… (`forking`) asks for a name, a worktree and a first prompt.
+    func forkNow(_ s: SessionInfo) {
+        guard canFork(s), !forksStarting.contains(s.id) else { return }
+        forksStarting.insert(s.id)
+        Task {
+            defer { forksStarting.remove(s.id) }
+            do {
+                try await fork(s.id, name: "\(s.display) (fork)", worktree: false, prompt: "")
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    /// Fork session `id`; throws dinod's reason. The fork is selected once it's there, its tab
+    /// right after the original's.
     func fork(_ id: String, name: String, worktree: Bool, prompt: String) async throws {
         var body: [String: Any] = ["type": "fork", "id": id, "worktree": worktree]
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -36,11 +53,13 @@ extension DinoModel {
             try DinoConnection(path: DinoEnvironment.socketPath).request(request).id
         }.value
         forking = nil
-        if let new { select(new) }
+        guard let new else { return }
+        if !tabs.contains(new), let at = tabs.firstIndex(of: id) { tabs.insert(new, at: at + 1) }
+        select(new)
     }
 }
 
-/// Fork Session…: what to call the fork, whether it gets a worktree of its own, and what to ask it first.
+/// Fork with Options…: what to call the fork, whether it gets a worktree of its own, and what to ask it first.
 struct ForkSheet: View {
     @EnvironmentObject var model: DinoModel
     @Environment(\.dismiss) private var dismiss
@@ -56,6 +75,8 @@ struct ForkSheet: View {
 
     var body: some View {
         let repo = model.gitRepo(of: session)
+        // No worktree to be had: not a git repo, or one with no commits yet. Shown off, not on.
+        let noWorktree = repo == nil || repo?.noCommits == true
         VStack(alignment: .leading, spacing: 14) {
             Label("Fork “\(session.display)”", systemImage: "arrow.triangle.branch")
                 .font(.title2.weight(.semibold))
@@ -69,10 +90,12 @@ struct ForkSheet: View {
                     .labelsHidden()
             }
             VStack(alignment: .leading, spacing: 3) {
-                Toggle("In a new worktree", isOn: $worktree)
-                    .disabled(repo == nil)
+                Toggle("In a new worktree", isOn: noWorktree ? .constant(false) : $worktree)
+                    .disabled(noWorktree)
                 Text(repo == nil
                     ? "Not in a git repository: the fork works in the same folder."
+                    : repo?.noCommits == true
+                    ? "A worktree needs a first commit: the fork works in the same folder."
                     : "Its own git worktree off this session's checkout, uncommitted changes included, so the two don't edit the same files.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -99,7 +122,7 @@ struct ForkSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button {
-                    start(worktree: worktree && repo != nil)
+                    start(worktree: worktree && !noWorktree)
                 } label: {
                     if starting { ProgressView().controlSize(.small).frame(width: 70) } else { Text("Fork").frame(width: 70) }
                 }

@@ -4188,14 +4188,16 @@ fn tree_until(d: &Daemon, folders: Vec<String>, until: Option<Instant>) -> Vec<i
                 }
                 let default_branch = default_branch(&w[0]);
                 let path = w[0].path.clone();
-                repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w, default_branch: Some(default_branch) });
+                // `git worktree list` gives a checkout with no commits a HEAD of all zeros.
+                let no_commits = w[0].head.as_deref().is_some_and(|h| h.bytes().all(|b| b == b'0'));
+                repos.push(ipc::RepoInfo { name: base_name(&path), path, worktrees: w, default_branch: Some(default_branch), no_commits });
             }
             // A plain folder stands for everything under it, except repos, which get their own node.
             _ if plain.iter().any(|p| inside(&dir, p)) => {}
             _ => plain.push(dir),
         }
     }
-    repos.extend(plain.into_iter().map(|path| ipc::RepoInfo { name: base_name(&path), path, worktrees: Vec::new(), default_branch: None }));
+    repos.extend(plain.into_iter().map(|path| ipc::RepoInfo { name: base_name(&path), path, worktrees: Vec::new(), default_branch: None, no_commits: false }));
     repos.sort_by_key(|r| r.name.to_lowercase());
     repos
 }

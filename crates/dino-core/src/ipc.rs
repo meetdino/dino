@@ -1186,6 +1186,9 @@ pub struct RepoInfo {
     /// The branch PRs go into (origin's HEAD, else main or master); None for a plain folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
+    /// A git repo with no commits yet: it can't have worktrees until it has one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_commits: bool,
 }
 
 pub use crate::worktree::{DiffLine, DiffStat, FileDiff};

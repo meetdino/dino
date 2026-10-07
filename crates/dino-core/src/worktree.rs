@@ -466,14 +466,36 @@ pub fn list(dir: &Path) -> anyhow::Result<Vec<Worktree>> {
         .collect())
 }
 
-/// A commit of the checkout as it is now, uncommitted edits included, without touching it:
-/// agents start from what the user sees, not from the last commit.
+/// A commit of the checkout as it is now, uncommitted edits and new files included (not ignored
+/// ones), without touching it: agents start from what the user sees, not from the last commit.
+/// Made through a copy of the index, so the user's staging area stays exactly as it was. New
+/// files past `INCLUDE_MAX_FILES` or `INCLUDE_MAX_BYTES` (a build's output nobody ignored) stay
+/// behind, as do repos inside it.
 pub fn snapshot(repo: &Path) -> anyhow::Result<String> {
+    let head = git(repo, &["rev-parse", "--verify", "HEAD"])?.trim().to_string();
     // A file rewritten as it was (`npm install` rewrites package-lock.json) looks changed to the
-    // index until it's looked at again, and `stash create` then fails without a word.
+    // index until it's looked at again.
     let _ = git(repo, &["update-index", "-q", "--refresh"]);
-    let stash = git(repo, &["stash", "create", "dino worktree base"])?;
-    let commit = if stash.trim().is_empty() { git(repo, &["rev-parse", "HEAD"])? } else { stash };
+    let new = git(repo, &["ls-files", "-z", "--others", "--exclude-standard"])?;
+    // A repo inside it is listed as its folder, "dir/": git would add it as a submodule.
+    let new: Vec<&str> = new.split('\0').filter(|p| !p.is_empty() && !p.ends_with('/')).collect();
+    let bytes: u64 = new.iter().filter_map(|p| std::fs::symlink_metadata(repo.join(p)).ok()).map(|m| m.len()).sum();
+    let carry = new.len() <= INCLUDE_MAX_FILES && bytes <= INCLUDE_MAX_BYTES;
+    if !carry {
+        eprintln!("dinod: {} new files ({} MB) in {}: a new worktree starts without them", new.len(), bytes >> 20, repo.display());
+    }
+    let tree = on_index_copy(repo, |run| {
+        run(&["add", "--update"], None)?;
+        if carry && !new.is_empty() {
+            run(&["--literal-pathspecs", "add", "--pathspec-from-file=-", "--pathspec-file-nul"], Some(new.join("\0").as_bytes()))?;
+        }
+        run(&["write-tree"], None)
+    })?;
+    let tree = tree.trim();
+    if git(repo, &["rev-parse", "HEAD^{tree}"])?.trim() == tree {
+        return Ok(head);
+    }
+    let commit = git(repo, &["-c", "user.name=dino", "-c", "user.email=dino@localhost", "commit-tree", "--no-gpg-sign", tree, "-p", &head, "-m", "dino worktree base"])?;
     Ok(commit.trim().to_string())
 }
 
@@ -714,6 +736,12 @@ pub fn slug(name: &str) -> Option<String> {
 /// worktrees), with the checkout's uncommitted edits carried over uncommitted: the new branch holds
 /// only what the agent commits. Returns the worktree and the commit its changes count from.
 pub fn start(checkout: &Path, name: &str, branch: &str) -> anyhow::Result<(PathBuf, String)> {
+    // git's own word for it ("You do not have the initial commit yet") says nothing of worktrees.
+    anyhow::ensure!(
+        git(checkout, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok(),
+        "{} has no commits yet: a worktree needs a first commit",
+        base_name(checkout)
+    );
     let base = snapshot(checkout)?;
     let head = git(checkout, &["rev-parse", "HEAD"])?.trim().to_string();
     // Worktrees all live in the main checkout, even when this one is a worktree itself.
@@ -835,6 +863,14 @@ pub fn changes_patch(dir: &Path, base: &str) -> anyhow::Result<String> {
 /// git `diff_args` in `dir` with new files in it too: marked intent-to-add in a copy of the index,
 /// so the checkout's own staging area, and so its `git status`, stays exactly as it was.
 fn diff_new_files_too(dir: &Path, diff_args: &[&str]) -> anyhow::Result<String> {
+    on_index_copy(dir, |run| {
+        run(&["add", "--all", "--intent-to-add"], None)?;
+        run(diff_args, None)
+    })
+}
+
+/// `f` given a git to run in `dir` on a copy of its index, removed after.
+fn on_index_copy<T>(dir: &Path, f: impl FnOnce(&dyn Fn(&[&str], Option<&[u8]>) -> anyhow::Result<String>) -> anyhow::Result<T>) -> anyhow::Result<T> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let index = PathBuf::from(git(dir, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?.trim());
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -842,14 +878,26 @@ fn diff_new_files_too(dir: &Path, diff_args: &[&str]) -> anyhow::Result<String> 
     if index.exists() {
         std::fs::copy(&index, &tmp)?;
     }
-    let run = |args: &[&str]| -> anyhow::Result<String> {
-        let out = Command::new("git").arg("-C").arg(dir).args(args).env("GIT_INDEX_FILE", &tmp).stdin(Stdio::null()).output()?;
+    let run = |args: &[&str], stdin: Option<&[u8]>| -> anyhow::Result<String> {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_INDEX_FILE", &tmp)
+            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(input) = stdin {
+            child.stdin.take().unwrap().write_all(input)?;
+        }
+        let out = child.wait_with_output()?;
         anyhow::ensure!(out.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let text = run(&["add", "--all", "--intent-to-add"]).and_then(|_| run(diff_args));
+    let out = f(&run);
     let _ = std::fs::remove_file(&tmp);
-    text
+    out
 }
 
 fn parse_diff(text: &str) -> Vec<FileDiff> {
@@ -1168,9 +1216,9 @@ mod tests {
         }
         assert_eq!(read(".env.test"), None);
         assert_eq!(read("debug.log"), None);
-        assert_eq!(read("untracked.txt"), None);
+        assert_eq!(read("untracked.txt").as_deref(), Some("listed, but not ignored: it's the user's new file, not a secret\n"), "a new file comes from git");
         assert_eq!(read("tracked.txt").as_deref(), Some("edited\n"), "tracked files come from git, edits and all");
-        assert_eq!(git(&wt, &["status", "--porcelain"]).unwrap(), " M tracked.txt\n", "copied files stay ignored");
+        assert_eq!(git(&wt, &["status", "--porcelain"]).unwrap(), " M tracked.txt\n?? untracked.txt\n", "copied files stay ignored");
 
         // No .worktreeinclude, nothing copied.
         std::fs::remove_file(repo.join(".worktreeinclude")).unwrap();
@@ -1303,6 +1351,51 @@ mod tests {
         std::fs::write(repo.join("package-lock.json"), "{}\n").unwrap();
         std::fs::File::options().write(true).open(repo.join("package-lock.json")).unwrap().set_modified(later).unwrap();
         assert_eq!(snapshot(repo).unwrap(), head);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_worktree_starts_from_the_checkout_as_it_is() {
+        let tmp = std::env::temp_dir().join(format!("dino-wt-dirty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("sub")).unwrap();
+        let repo = tmp.as_path();
+        git(repo, &["init", "-q", "-b", "main"]).unwrap();
+        let err = start(repo, "claude-0000", "dino/claude-0000").unwrap_err().to_string();
+        assert!(err.ends_with("has no commits yet: a worktree needs a first commit"), "{err}");
+        let w = |p: &str, s: &str| std::fs::write(repo.join(p), s).unwrap();
+        w(".gitignore", "*.log\n");
+        w("a.txt", "one\n");
+        w("staged.txt", "s\n");
+        w("gone.txt", "g\n");
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).unwrap();
+        // Edited, staged, deleted, new (one with a name git would read as a pattern), ignored, and
+        // a repo of its own inside it.
+        w("a.txt", "one\ntwo\n");
+        w("staged.txt", "s\nstaged\n");
+        git(repo, &["add", "staged.txt"]).unwrap();
+        std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        w("sub/new file.txt", "new\n");
+        w("star*.txt", "star\n");
+        w("debug.log", "ignored\n");
+        std::fs::create_dir_all(repo.join("inner")).unwrap();
+        git(&repo.join("inner"), &["init", "-q"]).unwrap();
+        std::fs::write(repo.join("inner/x.txt"), "x\n").unwrap();
+        let status = git(repo, &["status", "--porcelain"]).unwrap();
+
+        let (wt, base) = start(repo, "claude-dd11", "dino/claude-dd11").unwrap();
+        let read = |p: &str| std::fs::read_to_string(wt.join(p)).ok();
+        assert_eq!(read("a.txt").as_deref(), Some("one\ntwo\n"));
+        assert_eq!(read("staged.txt").as_deref(), Some("s\nstaged\n"));
+        assert_eq!(read("gone.txt"), None);
+        assert_eq!(read("sub/new file.txt").as_deref(), Some("new\n"));
+        assert_eq!(read("star*.txt").as_deref(), Some("star\n"));
+        assert_eq!(read("debug.log"), None, "ignored files stay behind");
+        assert!(!wt.join("inner").exists(), "so does a repo inside it");
+        assert_eq!(git(repo, &["status", "--porcelain"]).unwrap(), status, "the user's index is untouched");
+        assert_eq!(stat(&wt, &base).unwrap(), DiffStat::default(), "nothing the agent did yet");
+        remove(repo, &wt, "dino/claude-dd11");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
