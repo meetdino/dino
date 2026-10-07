@@ -168,10 +168,7 @@ fn start(st: &AppState, session: &str, tier: Tier) -> InFlight {
 /// the first byte are invisible to the agent. A model that refuses the output budget says how much
 /// it takes, and is asked again with that.
 async fn send(st: &AppState, session: &str, tier: Tier, mut oai: Value, stream: bool, key: &str) -> Option<(reqwest::Response, Model)> {
-    // Agents pass fields OpenAI-compatible servers reject.
-    if let Some(obj) = oai.as_object_mut() {
-        obj.retain(|k, _| OPENAI_PARAMS.contains(&k.as_str()));
-    }
+    shape(&mut oai);
     let headline = tier != Tier::Fast;
     let candidates = st.router.candidates(tier);
     if candidates.is_empty() {
@@ -230,6 +227,21 @@ async fn send(st: &AppState, session: &str, tier: Tier, mut oai: Value, stream: 
         }
     }
     None
+}
+
+/// Request `oai` as the models take it. Agents pass fields OpenAI-compatible servers reject, and
+/// an empty tools list (Claude Code's background requests carry one) that some refuse; the choice
+/// of tool goes with the tools.
+fn shape(oai: &mut Value) {
+    let Some(obj) = oai.as_object_mut() else { return };
+    obj.retain(|k, _| OPENAI_PARAMS.contains(&k.as_str()));
+    if obj.get("tools").and_then(Value::as_array).is_some_and(Vec::is_empty) {
+        obj.remove("tools");
+    }
+    if !obj.contains_key("tools") {
+        obj.remove("tool_choice");
+        obj.remove("parallel_tool_calls");
+    }
 }
 
 /// At most the first `max` bytes of `s`, cut where a character starts (a byte cut could panic).
@@ -505,6 +517,20 @@ mod tests {
         assert_eq!(clip(&s, 601), s);
         assert_eq!(clip("日本", 1), "");
         assert_eq!(clip("short", 600), "short");
+    }
+
+    #[test]
+    fn an_empty_tools_list_isnt_sent() {
+        let sent = |mut v: Value| {
+            shape(&mut v);
+            v
+        };
+        let chore = json!({"model": "auto-fast", "messages": [], "tools": [], "tool_choice": "auto", "parallel_tool_calls": false, "metadata": {"user_id": "u"}});
+        assert_eq!(sent(chore), json!({"model": "auto-fast", "messages": []}), "no tools, no choice of one, nothing models reject");
+        let turn = json!({"model": "auto", "messages": [], "tools": [{"type": "function", "function": {"name": "Bash"}}], "tool_choice": "auto"});
+        assert_eq!(sent(turn.clone()), turn, "tools kept as they are");
+        let no_tools = json!({"model": "auto", "messages": [], "tool_choice": "none"});
+        assert_eq!(sent(no_tools), json!({"model": "auto", "messages": []}));
     }
 
     #[test]
