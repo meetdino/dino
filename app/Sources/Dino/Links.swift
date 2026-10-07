@@ -184,7 +184,7 @@ final class LinkTerminalView: TerminalView {
     // MARK: Clear and reset (Edit menu, context menu)
 
     /// Ghostty's `clear_screen`, its ⌘K: the screen and scrollback cleared, the prompt kept.
-    /// dino's ⌘K is Continue a Session, so it's ⌥⌘K here (Edit › Clear).
+    /// dino's ⌘K is Continue a Session, so it's ⌥⌘K here (Edit › Clear Screen).
     @objc func clearScreen(_: Any?) {
         terminalState?.performBindingAction("clear_screen")
     }
@@ -293,7 +293,7 @@ final class LinkTerminalView: TerminalView {
         add("Select All", "selection.pin.in.out", #selector(selectAll(_:)))
         menu.addItem(.separator())
         add("Find…", "magnifyingglass", #selector(findFromMenu))
-        add("Clear", "eraser", #selector(clearScreen(_:)))
+        add("Clear Screen", "eraser", #selector(clearScreen(_:)))
         add("Reset Terminal", "arrow.trianglehead.2.clockwise", #selector(resetTerminal(_:)))
         // The session's own: splitting it, renaming it, asking about it. Not in the quick terminal.
         if let state {

@@ -272,7 +272,7 @@ struct TerminalEditItems: View {
 
     var body: some View {
         Divider()
-        Button("Clear") { LinkTerminalView.current(model)?.clearScreen(nil) }
+        Button("Clear Screen") { LinkTerminalView.current(model)?.clearScreen(nil) }
             .keyboardShortcut("k", modifiers: [.command, .option])
         Button("Reset Terminal") { LinkTerminalView.current(model)?.resetTerminal(nil) }
         Divider()

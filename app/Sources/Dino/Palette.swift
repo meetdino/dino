@@ -100,25 +100,30 @@ struct CommandPalette: View {
     /// Every enabled item in the menu bar, as "Title  Menu › Submenu  ⇧⌘K".
     static func menuActions() -> [Action] {
         guard let bar = NSApp.mainMenu else { return [] }
-        // Session first (what you come here for, and the one picked on Return), the app menu (About,
-        // Hide, Quit) last.
+        // File and Session first (what you come here for: File's New Session is the one picked on
+        // Return), the app menu (About, Hide, Quit) last.
         let menus = bar.items.dropFirst()
-        let ordered = menus.filter { $0.title == "Session" } + menus.filter { $0.title != "Session" } + bar.items.prefix(1)
+        let first = ["File", "Session"]
+        let ordered = first.flatMap { t in menus.filter { $0.title == t } } + menus.filter { !first.contains($0.title) } + bar.items.prefix(1)
         return ordered.flatMap { item -> [Action] in
-            guard let menu = item.submenu, menu !== NSApp.windowsMenu else { return [] }
-            return actions(in: menu, path: item.title)
+            guard let menu = item.submenu else { return [] }
+            // Window: dino's own (sessions, tabs, splits), not macOS's Minimize, Zoom and tiling.
+            return actions(in: menu, path: item.title, ownOnly: menu === NSApp.windowsMenu)
         }
     }
 
-    private static func actions(in menu: NSMenu, path: String) -> [Action] {
+    /// `ownOnly`: only what SwiftUI put there (an item with a target); AppKit's own go to the
+    /// first responder.
+    private static func actions(in menu: NSMenu, path: String, ownOnly: Bool = false) -> [Action] {
         // SwiftUI fills its menus when they're about to open, through the delegate: without this
         // the palette saw them as they were at launch (no agents yet, so no New Tab).
         menu.delegate?.menuNeedsUpdate?(menu)
         menu.update()
         return menu.items.flatMap { item -> [Action] in
+            if ownOnly, item.target == nil { return [] }
             if let sub = item.submenu {
                 guard sub !== NSApp.servicesMenu, item.isEnabled else { return [] }
-                return actions(in: sub, path: path + " › " + item.title)
+                return actions(in: sub, path: path + " › " + item.title, ownOnly: ownOnly)
             }
             guard !item.isHidden, !item.isSeparatorItem, item.isEnabled, !item.title.isEmpty, item.action != nil,
                   item.title != paletteTitle else { return [] }
