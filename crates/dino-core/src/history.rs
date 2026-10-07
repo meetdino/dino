@@ -74,10 +74,6 @@ pub fn keep_cache(file: &Path) -> std::io::Result<()> {
     std::fs::rename(tmp, file)
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
-}
-
 fn stat(p: &Path) -> Option<(u64, u64)> {
     let m = p.metadata().ok()?;
     let mtime = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs();
@@ -352,7 +348,7 @@ pub(crate) fn codex_usage_in(jsonl: &str, id: &str, model: &mut Option<String>, 
 
 pub(crate) fn codex_rollouts() -> Vec<PathBuf> {
     let mut out = vec![];
-    let mut stack = vec![home().join(".codex/sessions")];
+    let mut stack = vec![crate::transcript::codex_home().join("sessions")];
     while let Some(dir) = stack.pop() {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let p = e.path();
@@ -373,9 +369,9 @@ pub fn rollout_id(p: &Path) -> Option<String> {
     (id.len() == 36 && id.chars().filter(|&c| c == '-').count() == 4).then(|| id.to_string())
 }
 
-/// Thread names from `~/.codex/session_index.jsonl` (what Codex lists); later lines win.
+/// Thread names from `<CODEX_HOME>/session_index.jsonl` (what Codex lists); later lines win.
 pub fn codex_titles() -> HashMap<String, String> {
-    let text = std::fs::read_to_string(home().join(".codex/session_index.jsonl")).unwrap_or_default();
+    let text = std::fs::read_to_string(crate::transcript::codex_home().join("session_index.jsonl")).unwrap_or_default();
     codex_titles_in(&text)
 }
 

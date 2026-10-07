@@ -41,9 +41,14 @@ fn read_last(p: &Path, bytes: u64) -> Option<String> {
     Some(if len > bytes { text.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_string()) } else { text })
 }
 
-/// Codex's rollout for conversation `id`: `~/.codex/sessions/Y/M/D/rollout-<time>-<id>.jsonl`.
+/// Codex's data folder, from its environment, or `~/.codex` when `CODEX_HOME` isn't set.
+pub fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex"))).unwrap_or_default()
+}
+
+/// Codex's rollout for conversation `id`: `<CODEX_HOME>/sessions/Y/M/D/rollout-<time>-<id>.jsonl`.
 pub fn codex_path(id: &str) -> Option<PathBuf> {
-    codex_path_in(&std::env::var_os("HOME").map(PathBuf::from)?.join(".codex/sessions"), id)
+    codex_path_in(&codex_home().join("sessions"), id)
 }
 
 /// Codex's rollout for conversation `id` among those kept in `sessions` (a Codex home's).
