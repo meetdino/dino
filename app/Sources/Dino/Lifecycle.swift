@@ -570,8 +570,7 @@ struct ShortcutSheet: View {
 
     /// Claude desktop's keys for what the menus list under dino's own (see `AppDelegate.desktopKey`).
     private static let desktop = MenuGroup(menu: "Claude desktop shortcuts", entries: [
-        Entry(title: "Next Session", keys: "⇧⌘]"),
-        Entry(title: "Previous Session", keys: "⇧⌘["),
+        Entry(title: "Close Pane", keys: "⌘\\"),
         Entry(title: "Show or Hide Preview", keys: "⇧⌘B"),
         Entry(title: "Ask About This Session…", keys: "⌘;"),
     ])

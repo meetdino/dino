@@ -518,23 +518,18 @@ struct SessionMenu: View {
     }
 }
 
-/// The Split menu: in the Session menu, and in the toolbar without shortcuts (a toolbar menu
-/// answers its shortcuts too, and ⌘D would start two shells). Its keys are Ghostty's own macOS
-/// defaults: ⌘D and ⇧⌘D split right and down (handed to these items, see `menuKeys`); for the
-/// rest, Ghostty's keybinds (the user's, if rebound) take them first in a pane and come back to
-/// dino as the same actions.
-struct SplitMenuItems: View {
+/// File's splits: a shell beside the session, or another session. ⌘D and ⇧⌘D are Ghostty's own
+/// macOS defaults (handed to these items, see `menuKeys`).
+struct SplitNewItems: View {
     @EnvironmentObject var model: DinoModel
-    var shortcuts = true
 
     var body: some View {
         let session = model.selectedSession
-        let split = model.shownSplit
         Button("Split Right with Shell") { model.splitWithShell(.right) }
-            .keyboardShortcut(shortcuts ? KeyboardShortcut("d") : nil)
+            .keyboardShortcut("d")
             .disabled(session == nil)
         Button("Split Down with Shell") { model.splitWithShell(.down) }
-            .keyboardShortcut(shortcuts ? KeyboardShortcut("d", modifiers: [.command, .shift]) : nil)
+            .keyboardShortcut("d", modifiers: [.command, .shift])
             .disabled(session == nil)
         Button("Split Left with Shell") { model.splitWithShell(.left) }
             .disabled(session == nil)
@@ -549,45 +544,60 @@ struct SplitMenuItems: View {
             }
         }
         .disabled(session == nil || model.sessions.count < 2)
+    }
+}
+
+/// View's Show Terminal: the shell under the session (⌃`, Claude desktop's key).
+struct TerminalToggleItem: View {
+    @EnvironmentObject var model: DinoModel
+
+    var body: some View {
+        let split = model.shownSplit
         Button(split.map { t in t.isHelper(model.selected ?? "") || t.helpers.contains(where: t.contains) } == true ? "Hide Terminal" : "Show Terminal") { model.toggleTerminal() }
-            .keyboardShortcut(shortcuts ? KeyboardShortcut("`", modifiers: .control) : nil)
-            .disabled(session == nil)
-        Button("Close Pane") { model.closeFocusedPane() }
-            .keyboardShortcut(shortcuts ? KeyboardShortcut("\\") : nil)
-            .disabled(split == nil && model.sidePane == nil)
-        Divider()
+            .keyboardShortcut("`", modifiers: .control)
+            .disabled(model.selectedSession == nil)
+    }
+}
+
+/// Window's splits: zoom, move between them, resize them. Ghostty's keybinds (the user's, if
+/// rebound) take these keys first in a pane and come back to dino as the same actions.
+struct SplitWindowItems: View {
+    @EnvironmentObject var model: DinoModel
+
+    var body: some View {
+        let split = model.shownSplit
         Button(split?.zoomed == nil ? "Zoom Split" : "Unzoom Split") { model.toggleSplitZoom() }
-            .keyboardShortcut(shortcuts ? KeyboardShortcut(.return, modifiers: [.command, .shift]) : nil)
-            .disabled(split == nil)
-        Button("Select Previous Split") { model.gotoSplit(.previous) }
-            .keyboardShortcut(shortcuts ? KeyboardShortcut("[") : nil)
+            .keyboardShortcut(.return, modifiers: [.command, .shift])
             .disabled(split == nil)
         Button("Select Next Split") { model.gotoSplit(.next) }
-            .keyboardShortcut(shortcuts ? KeyboardShortcut("]") : nil)
+            .keyboardShortcut("]")
+            .disabled(split == nil)
+        Button("Select Previous Split") { model.gotoSplit(.previous) }
+            .keyboardShortcut("[")
             .disabled(split == nil)
         Menu("Select Split") {
             Button("Select Split Above") { model.gotoSplit(.spatial(.up)) }
-                .keyboardShortcut(shortcuts ? KeyboardShortcut(.upArrow, modifiers: [.command, .option]) : nil)
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
             Button("Select Split Below") { model.gotoSplit(.spatial(.down)) }
-                .keyboardShortcut(shortcuts ? KeyboardShortcut(.downArrow, modifiers: [.command, .option]) : nil)
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
             Button("Select Split Left") { model.gotoSplit(.spatial(.left)) }
-                .keyboardShortcut(shortcuts ? KeyboardShortcut(.leftArrow, modifiers: [.command, .option]) : nil)
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
             Button("Select Split Right") { model.gotoSplit(.spatial(.right)) }
-                .keyboardShortcut(shortcuts ? KeyboardShortcut(.rightArrow, modifiers: [.command, .option]) : nil)
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
         }
         .disabled(split == nil)
         Menu("Resize Split") {
             Button("Equalize Splits") { model.equalizeSplits() }
-                .keyboardShortcut(shortcuts ? KeyboardShortcut("=", modifiers: [.command, .control]) : nil)
+                .keyboardShortcut("=", modifiers: [.command, .control])
             Divider()
             Button("Move Divider Up") { model.resizeSplit(.up, by: 10) }
-                .keyboardShortcut(shortcuts ? KeyboardShortcut(.upArrow, modifiers: [.command, .control]) : nil)
+                .keyboardShortcut(.upArrow, modifiers: [.command, .control])
             Button("Move Divider Down") { model.resizeSplit(.down, by: 10) }
-                .keyboardShortcut(shortcuts ? KeyboardShortcut(.downArrow, modifiers: [.command, .control]) : nil)
+                .keyboardShortcut(.downArrow, modifiers: [.command, .control])
             Button("Move Divider Left") { model.resizeSplit(.left, by: 10) }
-                .keyboardShortcut(shortcuts ? KeyboardShortcut(.leftArrow, modifiers: [.command, .control]) : nil)
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .control])
             Button("Move Divider Right") { model.resizeSplit(.right, by: 10) }
-                .keyboardShortcut(shortcuts ? KeyboardShortcut(.rightArrow, modifiers: [.command, .control]) : nil)
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .control])
         }
         .disabled(split == nil)
     }
