@@ -163,8 +163,8 @@ pub struct Shared {
     /// The terminal reads a password: echo off in canonical mode, as `sudo`, `ssh` and `read -s`
     /// set it. Raw mode with echo off (full-screen programs, agents) isn't one. Looked at after
     /// short output and after input, never on a timer (see [`Pane::look_for_password`]).
-    pub password: AtomicBool,
-    /// Called when `password` changes.
+    pub password: Mutex<bool>,
+    /// Called when `password` changes, under its lock: whoever reads the change finds it told.
     pub on_password: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// A second look at `password` is waiting (see [`look_again_soon`]).
     looking_again: AtomicBool,
@@ -357,7 +357,7 @@ impl Pane {
             prompts: AtomicU64::new(0),
             last_output: Mutex::new(None),
             on_cwd: OnceLock::new(),
-            password: AtomicBool::new(false),
+            password: Mutex::new(false),
             on_password: OnceLock::new(),
             looking_again: AtomicBool::new(false),
             watch_password: AtomicBool::new(true),
@@ -697,8 +697,11 @@ impl Pane {
         if !self.shared.watch_password.load(Ordering::Relaxed) {
             return;
         }
+        // Read and noted under the lock: of two looks at once (output, input, the second look), the
+        // one that read the terminal first mustn't note what it saw last.
+        let mut password = self.shared.password.lock().unwrap();
         let Some(now) = self.shared.transport.get().and_then(|t| t.password()) else { return };
-        if self.shared.password.swap(now, Ordering::Relaxed) != now {
+        if std::mem::replace(&mut *password, now) != now {
             if let Some(f) = self.shared.on_password.get() {
                 f();
             }
@@ -1207,16 +1210,17 @@ mod tests {
 
     #[test]
     fn a_password_prompt_is_noticed_and_so_is_its_end() {
-        let pane = shell("stty -echo; printf 'Password: '; read p; stty echo; echo; echo done; sleep 2");
+        // The prompt waits for a line, so it can't be noticed before `on_password` is set.
+        let pane = shell("read go; stty -echo; printf 'Password: '; read p; stty echo; echo; echo done; sleep 2");
         let told = Arc::new(AtomicU64::new(0));
         let t = told.clone();
         let _ = pane.shared.on_password.set(Box::new(move || {
             t.fetch_add(1, Ordering::Relaxed);
         }));
-        wait_for("the prompt", || pane.shared.password.load(Ordering::Relaxed));
-        assert!(pane.text(0).contains("Password:"));
+        pane.write(b"\r".to_vec());
+        wait_for("the prompt", || pane.text(0).contains("Password:") && *pane.shared.password.lock().unwrap());
         pane.write(b"hunter2\r".to_vec());
-        wait_for("echo back on", || pane.text(0).contains("done") && !pane.shared.password.load(Ordering::Relaxed));
+        wait_for("echo back on", || pane.text(0).contains("done") && !*pane.shared.password.lock().unwrap());
         assert!(!pane.text(0).contains("hunter2"));
         assert_eq!(told.load(Ordering::Relaxed), 2, "told once on, once off");
         pane.kill();
@@ -1226,7 +1230,7 @@ mod tests {
     fn echo_turned_off_after_the_prompt_is_noticed_too() {
         // As zsh's `read -s` does: the prompt first, then echo off, nothing printed after it.
         let pane = shell("printf 'Password: '; stty -echo; sleep 2");
-        wait_for("the prompt", || pane.shared.password.load(Ordering::Relaxed));
+        wait_for("the prompt", || *pane.shared.password.lock().unwrap());
         pane.kill();
     }
 
@@ -1237,12 +1241,12 @@ mod tests {
         wait_for("the output", || pane.text(0).contains("ready"));
         // Looked at again on input too.
         pane.write(b"x".to_vec());
-        assert!(!pane.shared.password.load(Ordering::Relaxed));
+        assert!(!*pane.shared.password.lock().unwrap());
         pane.kill();
         // A prompt with echo on isn't one either.
         let pane = shell("printf 'Password: '; sleep 2");
         wait_for("the prompt", || pane.text(0).contains("Password:"));
-        assert!(!pane.shared.password.load(Ordering::Relaxed));
+        assert!(!*pane.shared.password.lock().unwrap());
         pane.kill();
     }
 
