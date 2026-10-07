@@ -161,7 +161,8 @@ impl Agent for Amp {
         (vec![], vec![])
     }
 
-    // Its terminal takes no prompt to start on (one given runs once and exits).
+    // Its terminal takes no prompt to start on (one given runs once and exits, and one piped in
+    // would take its stdin, which is its terminal here): dinod types it in.
     fn prompt_args(&self, _prompt: String) -> Vec<String> {
         vec![]
     }
@@ -189,6 +190,9 @@ impl Agent for Amp {
             Some("Amp asks for approval".into())
         } else if screen.contains("Would you like to log in to Amp?") {
             Some("Sign in to Amp".into())
+        } else if screen.lines().any(|l| matches!(l.trim(), "Space to continue" | "Enter to get started")) {
+            // Its welcome and tour, the first time it runs.
+            Some("Amp's welcome".into())
         } else {
             None
         }
@@ -360,6 +364,10 @@ mod tests {
         assert!(Amp.asking(" Approval Required\n Allow Once  Reject").is_some());
         assert_eq!(Amp.asking("Would you like to log in to Amp? [(y)es, (n)o]:").as_deref(), Some("Sign in to Amp"));
         assert_eq!(Amp.asking("> hello").as_deref(), None);
+        // Amp 0.0.1791331298's first run: its welcome, then a tour.
+        assert_eq!(Amp.asking("   Welcome to Amp\n  Space to continue").as_deref(), Some("Amp's welcome"));
+        assert_eq!(Amp.asking("  Customize Amp with Amp\n   Enter to get started").as_deref(), Some("Amp's welcome"));
+        assert_eq!(Amp.asking("Press Space to continue reading").as_deref(), None);
     }
 
     #[test]
