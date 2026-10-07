@@ -71,6 +71,7 @@ fn probes(listed: &[String], tried: &HashMap<String, Tried>, featured: &[(String
                 tools: t.is_some_and(|t| t.tools),
                 ms: t.map_or(f64::MAX, |t| t.ms),
                 rank,
+                tried: t.is_some(),
                 max_output: rank.and_then(|r| featured[r].1),
             }
         })
@@ -96,8 +97,16 @@ pub(crate) async fn keep_fresh(st: AppState, path: PathBuf) {
             Some(key) => refresh(&st, &key, &path).await,
             None => false,
         };
-        // Until a full look has gone through (no key yet, offline, rate limited), look again soon.
-        tokio::time::sleep(if done { Duration::from_secs(6 * 3600) } else { Duration::from_secs(60) }).await;
+        // Until a full look has gone through (no key yet, offline, rate limited), look again soon,
+        // and at once when the free tier is turned on or a key comes (`free_wake`).
+        if done {
+            tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+        } else {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                _ = st.free_wake.notified() => {}
+            }
+        }
     }
 }
 
