@@ -82,7 +82,8 @@ fn sessions() -> (Vec<Item>, Vec<Item>) {
             live.push(Item { kind: "session", text, detail: format!("{} · {}", s.agent_id, tilde(&s.cwd)), command: format!("dino attach {}", s.id) });
         }
     }
-    if let Ok(Response::Found { sessions }) = c.request(&Request::Found { cloud: false, running_only: false }) {
+    let newest = Request::Found { cloud: false, running_only: false, limit: Some(200), query: None };
+    if let Ok(Response::Found { sessions, .. }) = c.request(&newest) {
         for f in sessions.into_iter().filter(|f| !f.session_id.is_empty()).take(200) {
             let prefix: String = f.session_id.chars().take(8).collect();
             past.push(Item { kind: "session", text: f.title.clone(), detail: format!("{} · {}", f.agent, f.cwd.as_deref().map(tilde).unwrap_or_default()), command: format!("dino continue {prefix}") });

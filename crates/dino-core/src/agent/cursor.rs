@@ -390,15 +390,15 @@ impl Agent for Cursor {
         Some(s)
     }
 
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         let mut out = vec![];
         for (id, dir) in chats() {
             let meta = chat_meta(&dir);
-            if meta["hasConversation"] != true || meta["isSubagent"] == true || running(&id) {
+            let updated = meta["updatedAtMs"].as_u64().or(meta["createdAtMs"].as_u64()).unwrap_or(0) / 1000;
+            if meta["hasConversation"] != true || meta["isSubagent"] == true || leave_out(&id, updated) {
                 continue;
             }
             let Some(title) = title_of(&id, &meta) else { continue };
-            let updated = meta["updatedAtMs"].as_u64().or(meta["createdAtMs"].as_u64()).unwrap_or(0) / 1000;
             out.push(history::recent("cursor", id, title, meta["cwd"].as_str().map(String::from), updated));
         }
         out

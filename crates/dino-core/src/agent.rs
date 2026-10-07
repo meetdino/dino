@@ -423,8 +423,10 @@ pub trait Agent: Sync {
     fn headless(&self, _args: &[String]) -> bool {
         false
     }
-    /// Its conversations on disk, but those `running` says are running.
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession>;
+    /// Its conversations on disk, but those `leave_out` says to leave out, by id and when each
+    /// last changed (seconds since the epoch): running ones, and older ones than were asked for.
+    /// Asked before what's costly to read, where the time is known without it.
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession>;
     /// Its work in the provider's cloud, with `program` its CLI.
     fn cloud(&self, _program: &Path) -> Vec<FoundSession> {
         vec![]

@@ -522,16 +522,20 @@ impl Agent for CodeWhale {
         Some(s)
     }
 
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         let mut out = vec![];
         for p in documents() {
             let Some(id) = p.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
+            let updated = history::modified(&p);
+            if leave_out(&id, updated) {
+                continue;
+            }
             let meta = meta(&p);
-            if meta.hidden || running(&id) {
+            if meta.hidden {
                 continue;
             }
             let Some(title) = meta.title else { continue };
-            out.push(history::recent("codewhale", id, title, meta.cwd, history::modified(&p)));
+            out.push(history::recent("codewhale", id, title, meta.cwd, updated));
         }
         out
     }

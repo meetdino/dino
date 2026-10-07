@@ -91,6 +91,15 @@ final class DinoModel: ObservableObject {
     @Published var loadingCloud = false
     /// Finished conversations on disk are in `found` (the browser has loaded them once).
     @Published var loadedHistory = false
+    /// Which finished conversations the browser has: the newest `historyLimit`, a page more each
+    /// time it asks for older ones. A search (`historyQuery`) looks through every one, however old.
+    private var historyLimit = DinoModel.historyPage
+    private var historyQuery = ""
+    static let historyPage = 300
+    /// Older finished conversations were left out: the browser offers them.
+    @Published var historyMore = false
+    /// A search or "Show older" is being answered.
+    @Published var loadingHistory = false
     /// A handoff in progress: the session being moved, and whether we're waiting on its turn.
     /// Found sessions waiting to continue in dino, by `FoundSession.id`; see `adopt`.
     @Published var adopting: Set<String> = []
@@ -976,8 +985,11 @@ final class DinoModel: ObservableObject {
         }
     }
 
-    /// Everything on this Mac, then cloud sessions (slower); for the session browser.
+    /// What's running on this Mac and the newest conversations, then cloud sessions (slower); for
+    /// the session browser, which asks for older ones as it needs them.
     func loadFound() {
+        historyLimit = Self.historyPage
+        historyQuery = ""
         loadingCloud = true
         Task {
             await loadFound(cloud: false)
@@ -986,11 +998,40 @@ final class DinoModel: ObservableObject {
         }
     }
 
+    /// The next page of finished conversations: older ones, or more of a search's matches.
+    func showMoreHistory() {
+        historyLimit = max(historyLimit, found.filter { $0.source == "recent" }.count) + Self.historyPage
+        reloadHistory()
+    }
+
+    /// Finished conversations matching `query` (title, folder or id), however old; "" goes back to
+    /// what the browser showed before.
+    func searchHistory(_ query: String) {
+        guard query != historyQuery else { return }
+        historyQuery = query
+        historyLimit = Self.historyPage
+        reloadHistory()
+    }
+
+    private func reloadHistory() {
+        loadingHistory = true
+        Task {
+            await loadFound(cloud: false)
+            loadingHistory = false
+        }
+    }
+
     private func loadFound(cloud: Bool) async {
-        guard let list = await Task.detached(operation: { try? DinoConnection(path: DinoEnvironment.socketPath).found(cloud: cloud) }).value else { return }
+        let (limit, query) = (historyLimit, historyQuery)
+        guard let (list, more) = await Task.detached(operation: {
+            try? DinoConnection(path: DinoEnvironment.socketPath).found(cloud: cloud, limit: limit, query: query)
+        }).value else { return }
+        // Asked for something else since (typed on, or "Show older"): that answer is the one shown.
+        guard limit == historyLimit, query == historyQuery else { return }
         // Without cloud, keep the cloud entries already loaded.
         let merged = cloud ? list : list + found.filter { $0.source == "cloud" }
         if merged != found { found = merged }
+        if more != historyMore { historyMore = more }
         loadedHistory = true
     }
 

@@ -62,6 +62,11 @@ struct ContinueSheet: View {
         }
         .sheetSize(width: 1040, height: 660, minWidth: 640, minHeight: 400)
         .onAppear { if selection == nil { selection = visible.first?.id } }
+        // What's typed is looked for in every conversation, however old, once typing pauses.
+        .task(id: query) {
+            try? await Task.sleep(for: .milliseconds(250))
+            if !Task.isCancelled { model.searchHistory(query.trimmingCharacters(in: .whitespaces)) }
+        }
         .onChange(of: visible.map(\.id)) { _, ids in
             if selection.map({ !ids.contains($0) }) ?? true { selection = ids.first }
         }
@@ -97,7 +102,8 @@ struct ContinueSheet: View {
         List(selection: $selection) {
             ForEach(groups) { g in
                 let items = g.id == "done" ? Array(g.items.prefix(doneShown)) : g.items
-                if !items.isEmpty || (g.id == "cloud" && model.loadingCloud) || (g.id == "done" && !model.loadedHistory) {
+                let olderToo = g.id == "done" && (model.historyMore || model.loadingHistory)
+                if !items.isEmpty || (g.id == "cloud" && model.loadingCloud) || (g.id == "done" && !model.loadedHistory) || olderToo {
                     Section {
                         ForEach(items) { f in
                             FoundRow(session: f).tag(f.id).contextMenu { menu(f) }
@@ -108,6 +114,14 @@ struct ContinueSheet: View {
                         if g.items.count > items.count {
                             Button("Show \(min(100, g.items.count - items.count)) more of \(g.items.count - items.count)") { doneShown += 100 }
                                 .buttonStyle(.link).font(.caption)
+                        } else if g.id == "done" && model.loadingHistory {
+                            HStack(spacing: 6) { ProgressView().controlSize(.small); Text(query.isEmpty ? "Reading older conversations…" : "Searching every conversation…").foregroundStyle(.secondary) }
+                        } else if olderToo {
+                            Button(query.isEmpty ? "Show older conversations" : "Show more matches") {
+                                doneShown = max(doneShown, items.count + 100)
+                                model.showMoreHistory()
+                            }
+                            .buttonStyle(.link).font(.caption)
                         }
                     } header: {
                         HStack(spacing: 6) {
@@ -121,7 +135,7 @@ struct ContinueSheet: View {
         }
         .listStyle(.sidebar)
         .overlay {
-            if visible.isEmpty && model.loadedHistory {
+            if visible.isEmpty && model.loadedHistory && !model.historyMore && !model.loadingHistory {
                 Text(query.isEmpty && folder == nil ? "No sessions found" : "Nothing matches").foregroundStyle(.secondary)
             }
         }
@@ -157,8 +171,7 @@ struct ContinueSheet: View {
 
     private var footer: some View {
         HStack {
-            let local = model.found.filter { $0.source != "cloud" }.count
-            Text("\(local) on this Mac · ↑↓ to browse · ↩ to continue in dino · Esc to close")
+            Text("↑↓ to browse · ↩ to continue in dino · Esc to close")
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
             Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)

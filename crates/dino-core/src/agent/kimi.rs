@@ -420,17 +420,14 @@ impl Agent for Kimi {
         Some(s)
     }
 
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         if self.free {
             return vec![];
         }
         let mut out = vec![];
         for e in index() {
-            if running(&e.id) {
-                continue;
-            }
             let st = state(&e.dir);
-            if st["archived"] == true {
+            if st["archived"] == true || leave_out(&e.id, secs(&st["updatedAt"])) {
                 continue;
             }
             let Some(title) = title_of(&st) else { continue };

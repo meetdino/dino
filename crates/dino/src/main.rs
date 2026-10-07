@@ -1181,7 +1181,9 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("dino found doesn't take `{}`\n`dino found --help` lists its options.", printable(a));
     }
     // Through dinod, so its own sessions aren't listed as "elsewhere".
-    let Response::Found { sessions } = client::request(&Request::Found { cloud: true, running_only: false })? else { return Err(unexpected()) };
+    // The whole history: piped or `--all`, every conversation is listed.
+    let every = Request::Found { cloud: true, running_only: false, limit: None, query: None };
+    let Response::Found { sessions, .. } = client::request(&every)? else { return Err(unexpected()) };
     if json {
         println!("{}", serde_json::to_string_pretty(&sessions)?);
         return Ok(());
@@ -1364,7 +1366,8 @@ fn cmd_login_plan(args: &[String]) -> anyhow::Result<()> {
 
 /// Continue a session dino didn't start (see `dino found`).
 fn cmd_continue(prefix: &str) -> anyhow::Result<()> {
-    let Response::Found { sessions } = client::request(&Request::Found { cloud: false, running_only: false })? else { return Err(unexpected()) };
+    let every = Request::Found { cloud: false, running_only: false, limit: None, query: None };
+    let Response::Found { sessions, .. } = client::request(&every)? else { return Err(unexpected()) };
     let session = sessions
         .into_iter()
         .find(|f| !f.session_id.is_empty() && f.session_id.starts_with(prefix))

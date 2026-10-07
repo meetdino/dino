@@ -322,14 +322,14 @@ impl Agent for Hermes {
         Some(s)
     }
 
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         if self.free {
             return vec![];
         }
         let Some(c) = store() else { return vec![] };
         sessions(&c)
             .into_iter()
-            .filter(|r| r.first_prompt.is_some() && !running(&r.id))
+            .filter(|r| r.first_prompt.is_some() && !leave_out(&r.id, r.updated as u64))
             .map(|r| {
                 let title = r.title();
                 history::recent("hermes", r.id, title, r.cwd, r.updated as u64)

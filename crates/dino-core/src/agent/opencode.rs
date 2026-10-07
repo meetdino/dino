@@ -678,11 +678,11 @@ impl Agent for OpenCode {
         Some(self.found(store().as_ref(), pid, &args))
     }
 
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         let Some(c) = store() else { return vec![] };
         sessions(&c)
             .into_iter()
-            .filter(|r| !running(&r.id))
+            .filter(|r| !leave_out(&r.id, r.updated / 1000))
             .filter_map(|r| {
                 // One with nothing said in it yet isn't worth continuing.
                 let said = c.query_row("select 1 from message where session_id = ?1 limit 1", params![r.id], |_| Ok(())).is_ok();

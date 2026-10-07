@@ -1,10 +1,12 @@
 //! Every agent conversation on this Mac: Claude transcripts and Codex rollouts, titled the way
 //! the agent titles them, and readable as a conversation. Files can be hundreds of megabytes, so
-//! only their ends are read, and what's learned is kept until the file changes.
+//! only their ends are read, and what's learned is kept until the file changes (and, by dinod,
+//! from one run to the next: see `load_cache`).
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
 
@@ -19,7 +21,8 @@ const PEEK: u64 = 512 << 10;
 const PAGE: u64 = 2 << 20;
 
 /// What a conversation file says about itself.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Meta {
     pub title: Option<String>,
     pub cwd: Option<String>,
@@ -28,6 +31,7 @@ pub struct Meta {
     pub hidden: bool,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Cached {
     mtime: u64,
     size: u64,
@@ -35,6 +39,40 @@ struct Cached {
 }
 
 static CACHE: LazyLock<Mutex<HashMap<PathBuf, Cached>>> = LazyLock::new(Default::default);
+/// `CACHE` learned something since it was last kept (`keep_cache`).
+static LEARNED: AtomicBool = AtomicBool::new(false);
+
+/// What an earlier run learned and kept in `file` (`keep_cache`), for files that haven't changed
+/// since: a heavy history is read once, not once per run. Files read already win.
+pub fn load_cache(file: &Path) {
+    let Some(saved) = std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<HashMap<PathBuf, Cached>>(&b).ok()) else { return };
+    let mut cache = CACHE.lock().unwrap();
+    for (p, c) in saved {
+        cache.entry(p).or_insert(c);
+    }
+}
+
+/// Keep what's been learned in `file` for the next run, when there's anything new; files since
+/// deleted are dropped. Only the user can read it: it holds what they asked their agents.
+pub fn keep_cache(file: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if !LEARNED.swap(false, Ordering::Relaxed) {
+        return Ok(());
+    }
+    let paths: Vec<PathBuf> = CACHE.lock().unwrap().keys().cloned().collect();
+    let gone: Vec<PathBuf> = paths.into_iter().filter(|p| !p.exists()).collect();
+    let json = {
+        let mut cache = CACHE.lock().unwrap();
+        for p in &gone {
+            cache.remove(p);
+        }
+        serde_json::to_vec(&*cache)?
+    };
+    let tmp = file.with_extension("tmp");
+    std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?.write_all(&json)?;
+    std::fs::rename(tmp, file)
+}
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
@@ -54,6 +92,7 @@ pub(crate) fn cached(p: &Path, parse: fn(&Path) -> Meta) -> Meta {
     }
     let meta = parse(p);
     CACHE.lock().unwrap().insert(p.to_path_buf(), Cached { mtime, size, meta: meta.clone() });
+    LEARNED.store(true, Ordering::Relaxed);
     meta
 }
 
@@ -444,13 +483,51 @@ pub(crate) fn recent(agent: &str, session_id: String, title: String, cwd: Option
     }
 }
 
-/// Every conversation on disk that isn't running (those are in `running`), newest first.
-pub fn finished(running: &[FoundSession]) -> Vec<FoundSession> {
+/// The conversations on disk that aren't running (those are in `running`), newest first: the
+/// newest `limit` or so (all of them when `None`), or, given a `query`, every one whose title,
+/// folder or id has it (in any case), however old. Also whether older ones were left out. Only
+/// those that may be listed are read: a heavy history costs a look at its files' times.
+pub fn finished(running: &[FoundSession], limit: Option<usize>, query: &str) -> (Vec<FoundSession>, bool) {
     // One a running agent may be on, though dino can't tell which, isn't finished either.
     let is_running = |id: &str| running.iter().any(|r| r.session_id == id || r.unsure.as_ref().is_some_and(|u| u.maybe.iter().any(|m| m == id)));
-    let mut out: Vec<FoundSession> = crate::agent::all().into_iter().flat_map(|a| a.recent(&is_running)).collect();
+    let agents = crate::agent::all();
+    let query = query.trim().to_lowercase();
+    // How far back the newest `limit` go, from the times alone. Some turn out not to be listed
+    // (headless runs, subagents'): twice as many are read, so that seldom leaves fewer.
+    let since = match limit.filter(|_| query.is_empty()) {
+        Some(n) => {
+            let times = std::cell::RefCell::new(vec![]);
+            for a in &agents {
+                a.recent(&|id, updated| {
+                    if !is_running(id) {
+                        times.borrow_mut().push(updated);
+                    }
+                    true
+                });
+            }
+            let mut times = times.into_inner();
+            times.sort_unstable_by(|a, b| b.cmp(a));
+            times.get(n.saturating_mul(2)).map_or(0, |t| t + 1)
+        }
+        None => 0,
+    };
+    let older = std::cell::Cell::new(false);
+    let leave_out = |id: &str, updated: u64| {
+        if is_running(id) {
+            return true;
+        }
+        let old = updated < since;
+        if old {
+            older.set(true);
+        }
+        old
+    };
+    let mut out: Vec<FoundSession> = agents.iter().flat_map(|a| a.recent(&leave_out)).collect();
+    if !query.is_empty() {
+        out.retain(|f| [Some(&f.title), f.cwd.as_ref(), Some(&f.session_id)].into_iter().flatten().any(|s| s.to_lowercase().contains(&query)));
+    }
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    out
+    (out, older.get())
 }
 
 // ---- Reading ----
@@ -796,6 +873,36 @@ mod tests {
         assert_eq!(read_range(&p, 0, 15).as_deref(), Some("aaaa\nbbbb\ncccc\n"));
         assert_eq!(read_range(&p, 2, 15).as_deref(), Some("bbbb\ncccc\n"), "starts after the cut line");
         assert_eq!(read_range(&p, 0, 12).as_deref(), Some("aaaa\nbbbb\n"), "ends before the cut line");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_was_read_is_kept_for_the_next_run_until_the_file_changes() {
+        let dir = std::env::temp_dir().join(format!("dino-history-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (p, kept) = (dir.join("c.jsonl"), dir.join("kept.json"));
+        std::fs::write(&p, r#"{"type":"user","cwd":"/r","entrypoint":"cli","message":{"content":"fix the build"}}"#).unwrap();
+        let (mtime, size) = stat(&p).unwrap();
+        // An earlier run's: read from there, not from the file.
+        let earlier = Meta { title: Some("Kept".into()), cwd: Some("/kept".into()), hidden: false };
+        let saved = HashMap::from([(p.clone(), Cached { mtime, size, meta: earlier.clone() })]);
+        std::fs::write(&kept, serde_json::to_vec(&saved).unwrap()).unwrap();
+        load_cache(&kept);
+        assert_eq!(claude_meta(&p), earlier);
+        // Changed since: read again, and that's kept.
+        std::fs::write(&p, r#"{"type":"user","cwd":"/r","entrypoint":"cli","message":{"content":"fix the tests too"}}"#).unwrap();
+        assert_eq!(claude_meta(&p).title.as_deref(), Some("fix the tests too"));
+        keep_cache(&kept).unwrap();
+        let now: HashMap<PathBuf, Cached> = serde_json::from_slice(&std::fs::read(&kept).unwrap()).unwrap();
+        assert_eq!(now[&p].meta.title.as_deref(), Some("fix the tests too"));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777, 0o600, "holds what was asked");
+        // A file since deleted isn't kept.
+        std::fs::remove_file(&p).unwrap();
+        LEARNED.store(true, Ordering::Relaxed);
+        keep_cache(&kept).unwrap();
+        let now: HashMap<PathBuf, Cached> = serde_json::from_slice(&std::fs::read(&kept).unwrap()).unwrap();
+        assert!(!now.contains_key(&p));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

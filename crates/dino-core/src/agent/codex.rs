@@ -618,7 +618,7 @@ impl Agent for Codex {
         Some(s)
     }
 
-    fn recent(&self, running: &dyn Fn(&str) -> bool) -> Vec<FoundSession> {
+    fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         let titles = history::codex_titles();
         let mut rollouts: Vec<(u64, PathBuf)> = history::codex_rollouts().into_iter().map(|p| (history::modified(&p), p)).filter(|(t, _)| *t > 0).collect();
         rollouts.sort_by(|a, b| b.0.cmp(&a.0));
@@ -626,7 +626,7 @@ impl Agent for Codex {
         let mut out = vec![];
         for (updated, p) in rollouts {
             let Some(sid) = history::rollout_id(&p) else { continue };
-            if running(&sid) || !seen.insert(sid.clone()) {
+            if leave_out(&sid, updated) || !seen.insert(sid.clone()) {
                 continue;
             }
             let meta = history::codex_meta(&p);

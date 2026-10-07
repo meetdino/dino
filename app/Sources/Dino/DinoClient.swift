@@ -688,6 +688,8 @@ private struct TextResponse: Decodable {
 
 private struct FoundResponse: Decodable {
     var sessions: [FoundSession]
+    /// Finished conversations were left out: older than asked for, or past the limit.
+    var more: Bool?
 }
 
 private struct ConversationResponse: Decodable {
@@ -895,6 +897,15 @@ final class DinoConnection: @unchecked Sendable {
 
     func found(cloud: Bool, runningOnly: Bool = false) throws -> [FoundSession] {
         try JSONDecoder().decode(FoundResponse.self, from: send(["type": "found", "cloud": cloud, "running_only": runningOnly])).sessions
+    }
+
+    /// Found sessions with only the newest `limit` finished conversations on disk, or those
+    /// matching `query` however old. `more`: older ones were left out.
+    func found(cloud: Bool, limit: Int, query: String) throws -> (sessions: [FoundSession], more: Bool) {
+        var body: [String: Any] = ["type": "found", "cloud": cloud, "limit": limit]
+        if !query.isEmpty { body["query"] = query }
+        let r = try JSONDecoder().decode(FoundResponse.self, from: send(body))
+        return (r.sessions, r.more ?? false)
     }
 
     /// Part of a conversation (a found session's, or a Claude subagent's by its id), ending at byte
