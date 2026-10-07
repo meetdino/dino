@@ -211,7 +211,7 @@ impl Agent for Hermes {
     }
 
     fn value_flags(&self) -> &'static [&'static str] {
-        &["-m", "--model", "--provider", "-t", "--toolsets", "--resume", "-r", "--skills", "-s", "-z", "--oneshot", "--usage-file"]
+        &["-m", "--model", "--provider", "-t", "--toolsets", "--resume", "-r", "--skills", "-s", "-z", "--oneshot", "-q", "--query", "--usage-file"]
     }
 
     fn control_of(&self, name: &str, _value: Option<&str>) -> Option<ControlKind> {
@@ -236,9 +236,10 @@ impl Agent for Hermes {
         on_endpoint(format!("{}/v1", base("free")), "auto")
     }
 
-    // Its terminal takes no prompt to start on (`-z` runs once and exits).
-    fn prompt_args(&self, _prompt: String) -> Vec<String> {
-        vec![]
+    // On a terminal, `chat -q` starts its session on the prompt, as its first turn, and stays
+    // open (Hermes 2026.9.7 on; before, it answered and left, as `-z` does).
+    fn prompt_args(&self, prompt: String) -> Vec<String> {
+        vec!["chat".into(), "-q".into(), prompt]
     }
 
     fn session_args(&self, session: &mut Option<String>, restoring: bool) -> (Vec<String>, Vec<String>) {
@@ -278,7 +279,7 @@ impl Agent for Hermes {
     }
 
     fn portable_flags(&self, args: &[String]) -> Vec<String> {
-        found::drop_flags(args, &["--resume", "-r", "-z", "--oneshot", "--usage-file"], &["-c", "--continue", "--worktree", "-w"])
+        found::drop_flags(args, &["--resume", "-r", "-z", "--oneshot", "-q", "--query", "--usage-file"], &["-c", "--continue", "--worktree", "-w"])
     }
 
     // `-z` and `--oneshot` (`-q` alone keeps a session open on a terminal), its servers.
@@ -539,6 +540,11 @@ mod tests {
         assert!(!h.may_be("/opt/homebrew/bin/python3"), "a Python is it only by its arguments");
         let args: Vec<String> = ["--resume", "20260930_x", "-m", "auto", "--yolo", "-c"].iter().map(|s| s.to_string()).collect();
         assert_eq!(h.portable_flags(&args), ["-m", "auto", "--yolo"]);
+        // Its first prompt, given once: not again where it's continued.
+        assert_eq!(h.prompt_args("fix it".into()), ["chat", "-q", "fix it"]);
+        assert!(!h.headless(&h.prompt_args("fix it".into())), "it stays open on its terminal");
+        let started: Vec<String> = ["-m", "auto", "chat", "-q", "fix it"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(h.portable_flags(&started), ["-m", "auto"]);
         assert_eq!(h.read_mode(&[("--yolo", None)]).as_deref(), Some("bypass"));
     }
 
