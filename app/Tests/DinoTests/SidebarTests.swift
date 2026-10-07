@@ -163,3 +163,55 @@ final class SidebarSettingsTests: XCTestCase {
         XCTAssertEqual(PeerLinks.of(lead, among: [lead, child, other]).map(\.help), ["Its agent started Child", "Its agent last messaged Other"])
     }
 }
+
+/// An agent's own scheduled prompts under Automations: one line, the rest in the tooltip.
+final class AgentCronTests: XCTestCase {
+    func testDecodesTheAgentsScheduledPrompts() {
+        let s = session("s1", "deploy", ["tasks": ["todos": [], "subagents": [], "background": [], "crons": [
+            ["id": "efc5ae94", "schedule": "23 * * * *", "recurring": true, "prompt": "Post-merge production watch: follow up",
+             "human": "Every hour at :23", "next_due": 1_791_400_980],
+        ]]])
+        XCTAssertEqual(s.tasks?.crons?.first?.id, "efc5ae94")
+        XCTAssertEqual(s.tasks?.crons?.first?.next_due, 1_791_400_980)
+        // An older dinod says nothing of them.
+        let old = session("s2", "old", ["tasks": ["todos": [], "subagents": [], "background": []]])
+        XCTAssertNil(old.tasks?.crons)
+    }
+
+    func testRowSaysThePromptAndTheRestIsInTheTooltip() {
+        let f = CronFacts(prompt: "Post-merge production watch: follow the deploy\nthen report", agent: "Claude Code",
+                          session: "deploy", schedule: "23 * * * *", human: "Every hour at :23", recurring: true, next: "today 12:23 PM")
+        XCTAssertEqual(f.title, "Post-merge production watch: follow the deploy")
+        XCTAssertEqual(f.when, "Every hour at :23 (23 * * * *)")
+        XCTAssertEqual(f.tooltip, [
+            "Post-merge production watch: follow the deploy\nthen report",
+            "Scheduled by Claude Code in “deploy”",
+            "Every hour at :23 (23 * * * *)",
+            "Next due about today 12:23 PM",
+            "It's the session's own: it goes when Claude Code deletes it or the session ends.",
+        ])
+        XCTAssertEqual(f.accessibility,
+                       "Scheduled prompt: Post-merge production watch: follow the deploy, Claude Code in deploy, Every hour at :23 (23 * * * *), next due about today 12:23 PM")
+    }
+
+    func testOnlyWhatTheAgentSaidAndTheExpressionReads() {
+        // Listed at a turn's end: no wording of the agent's, and an expression dinod can't read.
+        var f = CronFacts(prompt: "", agent: "Claude Code", session: "s", schedule: "59 23 31 12 *", human: nil, recurring: false, next: nil)
+        XCTAssertEqual(f.title, "Scheduled prompt")
+        XCTAssertEqual(f.when, "Once, at 59 23 31 12 *")
+        XCTAssertFalse(f.tooltip.contains { $0.hasPrefix("Next due") })
+        // The agent's wording that's just the expression isn't said twice.
+        f.human = "59 23 31 12 *"
+        XCTAssertEqual(f.when, "Once, at 59 23 31 12 *")
+    }
+
+    func testNextDueSaysTheDateBeyondTheWeek() {
+        let now = Date(timeIntervalSince1970: 1_791_400_000)
+        let soon = UInt64(now.timeIntervalSince1970) + 3600
+        XCTAssertEqual(cronWhen(soon, now: now), whenText(soon))
+        let far = UInt64(now.timeIntervalSince1970) + 80 * 86400
+        let date = Date(timeIntervalSince1970: TimeInterval(far))
+        XCTAssertEqual(cronWhen(far, now: now),
+                       "\(date.formatted(.dateTime.month(.abbreviated).day())) \(date.formatted(date: .omitted, time: .shortened))")
+    }
+}

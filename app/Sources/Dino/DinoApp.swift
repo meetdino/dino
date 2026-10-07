@@ -920,6 +920,10 @@ struct Sidebar: View {
                 if !keys { DispatchQueue.main.async { model.toggleRuns(task) } }
             } else if tag.hasPrefix("run:") {
                 model.openRun(String(tag.dropFirst(4)), keepKeyboard: keys)
+            } else if tag.hasPrefix("cron:") {
+                // An agent's own scheduled prompt: a click goes to its session; arrowed onto, it
+                // waits for Return (primaryAction below).
+                if !keys, let c = model.agentCrons.first(where: { $0.id == tag }) { model.select(c.session.id) }
             } else {
                 model.select(tag, keepKeyboard: keys)
             }
@@ -1012,6 +1016,10 @@ struct Sidebar: View {
                             TaskRuns(task: t)
                         }
                     }
+                    // What agents scheduled for themselves, each with its session: theirs, not dino's.
+                    ForEach(model.agentCrons) { c in
+                        AgentCronRow(item: c).tag(c.id)
+                    }
                     if model.scheduled.isEmpty {
                         // One row: a new automation opens on the template gallery, which has them all.
                         Button { model.newTask() } label: {
@@ -1039,6 +1047,8 @@ struct Sidebar: View {
                 if returnKey { DispatchQueue.main.async { model.toggleRuns(task) } }
             } else if tags.count == 1, let tag = tags.first, tag.hasPrefix("run:") {
                 if returnKey { model.openRun(String(tag.dropFirst(4))) }
+            } else if tags.count == 1, let tag = tags.first, tag.hasPrefix("cron:") {
+                if returnKey, let c = model.agentCrons.first(where: { $0.id == tag }) { model.select(c.session.id) }
             } else if tags.count == 1, let tag = tags.first, !model.showsSomething(tag) {
                 // Return opens or closes it, as → and ← do; a click already did (see above).
                 if returnKey { DispatchQueue.main.async { setOpen(tag, nil) } }

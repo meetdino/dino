@@ -241,6 +241,8 @@ struct SessionTasks: Codable, Equatable {
     var todos: [TodoItem]
     var subagents: [SubagentItem]
     var background: [BackgroundItem]
+    /// Prompts the agent scheduled for itself (Claude's CronCreate); nil from an older dinod.
+    var crons: [CronItem]?
 
     var isEmpty: Bool { todos.isEmpty && subagents.isEmpty && background.isEmpty }
     /// Subagents and background commands still going.
@@ -277,6 +279,20 @@ struct BackgroundItem: Codable, Equatable, Identifiable {
     var running: Bool
     var started: UInt64
     var finished: UInt64?
+}
+
+/// A prompt an agent scheduled for itself. The agent's own: it runs it while it's open and drops it
+/// when it's deleted, has run (once), expires or the agent exits; dino only shows it.
+struct CronItem: Codable, Equatable, Identifiable {
+    var id: String
+    /// The 5-field cron expression it was given, local time.
+    var schedule: String
+    var recurring: Bool
+    var prompt: String
+    /// How the agent put the schedule ("Every hour at :23"), when dino saw it made.
+    var human: String?
+    /// When the expression next matches (Unix seconds), as dinod reads it.
+    var next_due: UInt64?
 }
 
 /// A GitHub pull request, as `gh pr view` sees it (see crates/dino-core/src/pr.rs).
