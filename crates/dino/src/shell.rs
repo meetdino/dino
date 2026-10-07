@@ -225,4 +225,19 @@ mod tests {
         assert!(crate::complete::script("bash").unwrap().contains("if ! complete -p dino &>/dev/null"));
         assert!(with_completions("fish", "").contains("test -f $d/dino.fish"));
     }
+
+    #[test]
+    fn every_shell_passes_the_last_command_and_status_to_ai() {
+        for (name, text) in [("zsh", ZSH), ("bash", BASH), ("fish", FISH)] {
+            assert!(text.contains("--last"), "{name} must include the last command");
+            assert!(text.contains("--status"), "{name} must include the last command's status");
+        }
+        assert!(FISH.contains("fish_postexec"), "fish must refresh context after a command");
+    }
+
+    #[test]
+    fn fish_uses_the_configured_ai_key_or_alt_i() {
+        assert!(FISH.contains("bind (string unescape -- \"$DINO_AI_KEY\") __dino_ai_line"));
+        assert!(FISH.contains("bind \\ei __dino_ai_line"));
+    }
 }
