@@ -3,8 +3,9 @@
 //! effort `--thinking`, both as Pi lists them. It takes its conversation id up front
 //! (`--session-id`, created if missing) and keeps each conversation at
 //! `~/.pi/agent/sessions/--<cwd>--/<time>_<id>.jsonl`, which dino follows for status. On the free
-//! tier dino gives it one extension for that session, which only moves Anthropic's address to dino
-//! (`registerProvider`, no tools), and a placeholder key; Pi keeps its own models.
+//! tier dino gives it one extension for that session, which only registers a provider, "dino", at
+//! dino's free tier (`registerProvider`, no tools), with one model, "auto": the free tier picks the
+//! real one for each turn.
 
 use std::path::{Path, PathBuf};
 
@@ -177,20 +178,6 @@ fn catalog_in(list: &str, levels: &[String], settings: &Value) -> Option<Catalog
     (!models.is_empty()).then_some(Catalog { models, default_model, ..Catalog::default() })
 }
 
-/// The extension that points Anthropic's API at dino for one free-tier session, written where
-/// dino keeps its own files.
-fn route_extension(base: &str) -> Option<PathBuf> {
-    let dir = crate::config_dir().join("pi");
-    std::fs::create_dir_all(&dir).ok()?;
-    let session = base.split("/s/").nth(1).and_then(|r| r.split('/').next()).unwrap_or("session");
-    let name: String = session.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let path = dir.join(format!("free-{name}.js"));
-    let url = serde_json::to_string(base).ok()?;
-    let text = format!("// Written by dino: this Pi session's Anthropic requests go to dino's free tier. No tools.\nexport default function (pi) {{\n  pi.registerProvider(\"anthropic\", {{ baseUrl: {url} }});\n}}\n");
-    std::fs::write(&path, text).ok()?;
-    Some(path)
-}
-
 /// What Pi itself takes for a model its `models.json` gives no context window or output limit
 /// (its `modelFromJson`). An extension's models get no such defaults, so dino gives these when the
 /// provider doesn't say: Pi's assumption, not a fact about the model.
@@ -217,7 +204,7 @@ fn pi_model(model: &str, info: Option<&ProviderModel>) -> Value {
 }
 
 /// An extension that gives this Pi session a provider, "dino", serving `model` at `url` (a dino
-/// proxy route) in `format`. Like the free tier's, it registers nothing else. The key is a
+/// proxy route, or the free tier) in `format`. It registers nothing else. The key is a
 /// placeholder: dino's proxy holds the real one.
 fn provider_extension(url: &str, format: Format, model: &str, info: Option<&ProviderModel>) -> Option<PathBuf> {
     let dir = crate::config_dir().join("pi");
@@ -234,6 +221,12 @@ fn provider_extension(url: &str, format: Format, model: &str, info: Option<&Prov
     let text = format!("// Written by dino: this Pi session's model, served through dino. No tools.\nexport default function (pi) {{\n  pi.registerProvider(\"dino\", {config});\n}}\n");
     std::fs::write(&path, text).ok()?;
     Some(path)
+}
+
+/// Pi on that provider and model.
+fn on_provider(url: &str, format: Format, model: &str, info: Option<&ProviderModel>) -> Option<Wiring> {
+    let ext = provider_extension(url, format, model, info)?;
+    Some((vec![], vec!["-e".into(), ext.display().to_string(), "--provider".into(), "dino".into(), "--model".into(), model.into()]))
 }
 
 /// When a file was created, in seconds.
@@ -320,8 +313,7 @@ impl Agent for Pi {
         if self.free {
             return None;
         }
-        let ext = provider_extension(url, format, model, info)?;
-        Some((vec![], vec!["-e".into(), ext.display().to_string(), "--provider".into(), "dino".into(), "--model".into(), model.into()]))
+        on_provider(url, format, model, info)
     }
 
     fn model_args(&self, model: &str) -> Vec<String> {
@@ -368,14 +360,14 @@ impl Agent for Pi {
     }
 
     // On its own, nothing: its providers are its own setting, and dino follows its record for
-    // status. On the free tier, Anthropic's address moved to dino for this session, and a
-    // placeholder key; the proxy holds the real ones.
+    // status. On the free tier, a provider of its own for this session, as for a provider's model,
+    // serving "auto" in Anthropic's API: the free tier picks the model for each turn. Pi 1.0 takes
+    // `--provider` only with `--model`, and before it ran its own default model without one.
     fn wiring(&self, _route: bool, base: &dyn Fn(&str) -> String, _status_line: Option<String>) -> Wiring {
         if !self.free {
             return (vec![], vec![]);
         }
-        let Some(ext) = route_extension(&base("free")) else { return (vec![], vec![]) };
-        (vec![("ANTHROPIC_API_KEY".into(), "dino-free".into())], vec!["--provider".into(), "anthropic".into(), "-e".into(), ext.display().to_string()])
+        on_provider(&base("free"), Format::Anthropic, "auto", None).unwrap_or_default()
     }
 
     // Its first messages go last on its command line.
@@ -623,6 +615,18 @@ mod tests {
         let m = pi_model("qwen3:4b", Some(&vision));
         assert_eq!(m["input"], serde_json::json!(["text", "image"]));
         assert_eq!((m["maxTokens"].as_u64(), m["cost"]["input"].as_f64()), (Some(8192), Some(1.5)));
+    }
+
+    /// Pi 1.0 refuses `--provider` without `--model`; dino's free tier picks the real model.
+    #[test]
+    fn the_free_tier_is_a_provider_with_its_one_model() {
+        let (env, args) = Pi { free: true }.wiring(true, &|p| format!("http://127.0.0.1:9/s/41/{p}"), None);
+        assert!(env.is_empty(), "{env:?}");
+        assert_eq!(args[2..], ["--provider", "dino", "--model", "auto"]);
+        let ext = std::fs::read_to_string(&args[1]).unwrap();
+        assert!(ext.contains(r#"pi.registerProvider("dino", "#) && ext.contains(r#""baseUrl":"http://127.0.0.1:9/s/41/free""#), "{ext}");
+        assert!(ext.contains(r#""api":"anthropic-messages""#) && ext.contains(r#""id":"auto""#), "{ext}");
+        assert!(Pi { free: true }.provider_wiring("http://127.0.0.1:9/s/41/or", Format::Chat, "m").is_none());
     }
 
     #[test]
