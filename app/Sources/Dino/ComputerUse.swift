@@ -181,10 +181,13 @@ struct UsingMark: View {
 struct UsingMenuItems: View {
     @EnvironmentObject var model: DinoModel
     let session: SessionInfo
+    /// Last in a group (the menu bar's Session › Agent): the divider goes before, not after.
+    var last = false
     @AppStorage(UsingDisplay.key) private var display = UsingDisplay.banner.rawValue
 
     var body: some View {
         if session.reach != nil, let sentence = session.usingSentence {
+            if last { Divider() }
             Button(sentence) {}.disabled(true)
             Button("Stop \(session.agentWord)'s Turn") { model.interrupt(session.id) }
                 .help("Interrupts the current turn. The session stays open.")
@@ -196,7 +199,7 @@ struct UsingMenuItems: View {
                         .help("Hides the banner until \(session.agentWord) next starts using \(session.reach?.object ?? "it")")
                 }
             }
-            Divider()
+            if !last { Divider() }
         }
     }
 }

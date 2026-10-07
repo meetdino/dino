@@ -52,87 +52,80 @@ struct DinoApp: App {
         .windowStyle(.hiddenTitleBar)
         // The first time; after that SwiftUI opens it as you left it (it saves the frame itself).
         .defaultSize(width: 1280, height: 800)
+        // The menu bar, by what you do: File starts, opens and closes; Edit has the terminal's text;
+        // View what's shown; Session acts on the session you're in; Window moves between sessions,
+        // tabs and splits. Every command is here, with or without a toolbar button too.
         .commands {
+            CommandGroup(after: .appInfo) {
+                UpdateMenuItem()
+            }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { openWindow(id: SettingsView.windowID) }
                     .keyboardShortcut(",")
-                SecureInputCommand()
-                Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
-                    .keyboardShortcut("u", modifiers: [.command, .shift])
-                UpdateMenuItem()
-                Button("Ask Before Quitting") { quitChoice = "" }
-                    .disabled(quitChoice.isEmpty)
-                    .help("Ask again whether to keep agents running when you quit dino")
                 Button("Install Command Line Tool…") { CommandLineTool.install() }
                     .disabled(DinoEnvironment.bundledDino == nil)
                     .help("Install the dino command so you can run it from any terminal")
+                SecureInputCommand()
+                // Here, not in Window: SwiftUI lists the Usage Stats window there itself.
+                Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
+                    .keyboardShortcut("u", modifiers: [.command, .shift])
+                Button("Ask Before Quitting") { quitChoice = "" }
+                    .disabled(quitChoice.isEmpty)
+                    .help("Ask again whether to keep agents running when you quit dino")
             }
             // One window: ⌘N starts a session rather than opening a second window.
-            CommandGroup(replacing: .newItem) {}
-            CommandGroup(replacing: .saveItem) {
-                CloseCommand().environmentObject(model)
-                SaveCommand().environmentObject(model)
-                Button("Open File…") { model.chooseFile() }
-                    .keyboardShortcut("o", modifiers: [.command, .shift])
-            }
-            // The terminal's own: Clear, Reset Terminal, Find.
-            CommandGroup(after: .pasteboard) {
-                TerminalEditItems(model: model)
-            }
-            CommandMenu("Session") {
-                Button(CommandPalette.paletteTitle) { model.showPalette = true }
-                    .keyboardShortcut("p", modifiers: [.command, .shift])
-                Divider()
-                Button("New Tab") { model.newShell() }
-                    .keyboardShortcut("t")
-                    .disabled(model.launchers.isEmpty)
-                Button("New Project…") { model.showNewProject = true }
-                    .keyboardShortcut("n", modifiers: [.command, .option, .shift])
-                    .disabled(model.launchers.isEmpty)
-                // Its shortcut works from any app (Settings → Terminal); a menu key would only work here.
-                Button("Quick Terminal") { QuickTerminal.shared.toggle() }
-                    .disabled(model.launchers.isEmpty)
+            CommandGroup(replacing: .newItem) {
                 // ⌘N: the default agent where you are, like a new tab; no questions.
                 Button("New Session") { model.newSessionHere() }
                     .keyboardShortcut("n")
-                    .disabled(model.launchers.isEmpty)
-                // Anywhere: where (here, recent, GitHub, a URL, a new project), then which agent.
-                Button("New Session…") { model.startSession() }
                     .disabled(model.launchers.isEmpty)
                 Button("New Session in Worktree…") { model.startSession(worktree: true) }
                     .keyboardShortcut("n", modifiers: [.command, .option])
                     .disabled(model.launchers.isEmpty)
                 Button("New Session with Options…") { model.showNewSession = true }
                     .keyboardShortcut("n", modifiers: [.command, .control])
+                // Anywhere: where (here, recent, GitHub, a URL, a new project), then which agent.
+                Button("New Session Elsewhere…") { model.startSession() }
+                    .disabled(model.launchers.isEmpty)
+                Button("New Project…") { model.showNewProject = true }
+                    .keyboardShortcut("n", modifiers: [.command, .option, .shift])
+                    .disabled(model.launchers.isEmpty)
                 Button("New Automation…") { model.newTask() }
+                Divider()
+                Button("New Tab") { model.newShell() }
+                    .keyboardShortcut("t")
+                    .disabled(model.launchers.isEmpty)
+                SplitNewItems().environmentObject(model)
+                Divider()
+                Button("Open Folder…") { model.openFolderToStart() }
+                    .keyboardShortcut("o")
+                Button("Open File…") { model.chooseFile() }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
                 Button("Continue a Session…") {
                     model.loadFound()
                     model.showContinue = true
                 }
                 .keyboardShortcut("k")
-                Button("Open Folder…") { model.openFolderToStart() }
-                    .keyboardShortcut("o")
+            }
+            // ⌘W closes the innermost thing (a pane, then a side pane, then the tab). ⌘\ (Claude
+            // desktop's Close Pane) is a key of its own: `AppDelegate.desktopKey`.
+            CommandGroup(replacing: .saveItem) {
+                CloseCommand().environmentObject(model)
+                SaveCommand().environmentObject(model)
+            }
+            // The terminal's own: Clear Screen, Reset Terminal, Find.
+            CommandGroup(after: .pasteboard) {
+                TerminalEditItems(model: model)
+            }
+            CommandGroup(before: .toolbar) {
+                Button(CommandPalette.paletteTitle) { model.showPalette = true }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                // Its shortcut works from any app (Settings → Terminal); a menu key would only work here.
+                Button("Quick Terminal") { QuickTerminal.shared.toggle() }
+                    .disabled(model.launchers.isEmpty)
                 Divider()
-                SplitMenuItems().environmentObject(model)
-                Divider()
-                Button("Find Sessions…") { model.findingSessions = true }
-                    .keyboardShortcut("f", modifiers: [.command, .shift])
-                Button("Jump to Session Needing You") { model.jumpToAttention() }
-                    .keyboardShortcut("j")
-                Button("Next Tab") { model.cycleTabs(by: 1) }
-                    .keyboardShortcut("]", modifiers: [.command, .shift])
-                    .disabled(model.shownTabs.count < 2)
-                Button("Previous Tab") { model.cycleTabs(by: -1) }
-                    .keyboardShortcut("[", modifiers: [.command, .shift])
-                    .disabled(model.shownTabs.count < 2)
-                Button("Next Session") { model.cycle(by: 1) }
-                    .keyboardShortcut(.tab, modifiers: .control)
-                    .disabled(model.sidebarSessions.count < 2)
-                Button("Previous Session") { model.cycle(by: -1) }
-                    .keyboardShortcut(.tab, modifiers: [.control, .shift])
-                    .disabled(model.sidebarSessions.count < 2)
-                // Beside Preview's ⌥⌘P and Tasks' ⌥⌘T; ⇧⌘D is Split Down, as in Ghostty.
-                Button(model.showReview ? "Hide Changes" : "Review Changes") { model.showReview.toggle() }
+                // The toolbar's panes, with its keys: ⌥⌘C, ⌥⌘P, ⌥⌘T. ⇧⌘D is Split Down, as in Ghostty.
+                Button(model.showReview ? "Hide Changes" : "Show Changes") { model.showReview.toggle() }
                     .keyboardShortcut("c", modifiers: [.command, .option])
                     .disabled(!model.showReview && model.selectedSession?.host != nil)
                 Button(model.sidePane == .preview ? "Hide Preview" : "Show Preview") { model.togglePreview() }
@@ -141,56 +134,98 @@ struct DinoApp: App {
                 Button(model.sidePane == .tasks ? "Hide Tasks" : "Show Tasks") { model.toggleTasks() }
                     .keyboardShortcut("t", modifiers: [.command, .option])
                     .disabled(model.sidePane != .tasks && !(model.selectedSession?.reportsTasks ?? false))
-                Button("Ask About This Session…") { model.askingAbout = model.selectedSession }
-                    .keyboardShortcut(";", modifiers: [.command, .shift])
-                    .disabled(model.selectedSession == nil)
-                // One action, no questions: the fork opens in a tab beside it, waiting for a prompt.
-                Button("Fork Session") { if let s = model.selectedSession { model.forkNow(s) } }
-                    .keyboardShortcut("b", modifiers: [.command, .option])
-                    .disabled(!(model.selectedSession.map(model.canFork) ?? false))
-                // A name, a worktree of its own, a first prompt.
-                Button("Fork with Options…") { model.forking = model.selectedSession }
-                    .keyboardShortcut("b", modifiers: [.command, .option, .control])
-                    .disabled(!(model.selectedSession.map(model.canFork) ?? false))
-                Button("Create Pull Request…") { model.showCreatePR = true }
-                    .disabled(model.selectedSession.map { $0.host != nil || model.pr(of: $0) != nil } ?? true)
-                OpenInMenuItems().environmentObject(model)
+                TerminalToggleItem().environmentObject(model)
                 Divider()
-                if let s = model.selectedSession { UsingMenuItems(session: s).environmentObject(model) }
-                ControlMenuItems().environmentObject(model)
-                Divider()
-                // ⌘1…⌘9: the tabs, as in Ghostty and browsers.
-                ForEach(Array(model.shownTabs.prefix(9).enumerated()), id: \.element) { i, id in
-                    if let s = model.sessions.first(where: { $0.id == id }) {
-                        Button("\(i + 1)  \(s.display)") { model.select(id) }
-                            .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
-                    }
-                }
-                Divider()
-                Button(model.selectedSession?.pinned == true ? "Unpin" : "Pin") {
-                    if let s = model.selectedSession { model.pin(s.id, s.pinned != true) }
-                }
-                .disabled(model.selectedSession == nil)
-                Button("Mark as Unread") { if let id = model.selectedSession?.id { model.markUnread(id) } }
-                    .disabled(model.selectedSession == nil || model.selectedSession?.exited == true)
-                Button("Rename…") { if let id = model.selectedSession?.id { model.renaming = Renaming(id: id, place: .tab) } }
-                    .disabled(model.selectedSession == nil)
-                Button("Archive") { if let id = model.selectedSession?.id { model.archive(id) } }
-                    .keyboardShortcut("a", modifiers: [.command, .shift])
-                    .disabled(!model.canArchive(model.selectedSession?.id ?? ""))
                 Button("Show Archived") { model.showArchived() }
-                Button("Close Session") { if let id = model.selected { model.closeSession(id) } }
-                    .keyboardShortcut(.delete, modifiers: [.command, .shift])
-                    .disabled(model.selected == nil)
-                // No key: ⌘⌫ is the terminal's (Ghostty deletes to the start of the line with it).
-                Button("Delete Session…") { if let id = model.selectedSession?.id { model.confirmDelete(id) } }
-                    .disabled(model.selectedSession == nil)
-            }
-            CommandGroup(after: .toolbar) {
+                Divider()
                 Picker("Appearance", selection: Binding(get: { appearance }, set: { (Appearance(rawValue: $0) ?? .system).choose() })) {
                     ForEach(Appearance.allCases) { Text($0.label).tag($0.rawValue) }
                 }
-                .pickerStyle(.inline)
+                .pickerStyle(.menu)
+            }
+            // What you do to the session you're in: the agent, review, organize. Divided by lines, not
+            // Sections: SwiftUI puts a separator before and after every Section, so two in a row
+            // draw two lines and a menu that starts with one starts with a line.
+            CommandMenu("Session") {
+                Group {
+                    Button("Ask About This Session…") { model.askingAbout = model.selectedSession }
+                        .keyboardShortcut(";", modifiers: [.command, .shift])
+                        .disabled(model.selectedSession == nil)
+                    // One action, no questions: the fork opens in a tab beside it, waiting for a prompt.
+                    Button("Fork Session") { if let s = model.selectedSession { model.forkNow(s) } }
+                        .keyboardShortcut("b", modifiers: [.command, .option])
+                        .disabled(!(model.selectedSession.map(model.canFork) ?? false))
+                    // A name, a worktree of its own, a first prompt.
+                    Button("Fork with Options…") { model.forking = model.selectedSession }
+                        .keyboardShortcut("b", modifiers: [.command, .option, .control])
+                        .disabled(!(model.selectedSession.map(model.canFork) ?? false))
+                    ControlMenuItems().environmentObject(model)
+                    if let s = model.selectedSession { UsingMenuItems(session: s, last: true).environmentObject(model) }
+                }
+                Divider()
+                Group {
+                    Button("Create Pull Request…") { model.showCreatePR = true }
+                        .disabled(model.selectedSession.map { $0.host != nil || model.pr(of: $0) != nil } ?? true)
+                    OpenInMenuItems().environmentObject(model)
+                }
+                Divider()
+                Group {
+                    Button(model.selectedSession?.pinned == true ? "Unpin" : "Pin") {
+                        if let s = model.selectedSession { model.pin(s.id, s.pinned != true) }
+                    }
+                    .disabled(model.selectedSession == nil)
+                    Button("Mark as Unread") { if let id = model.selectedSession?.id { model.markUnread(id) } }
+                        .disabled(model.selectedSession == nil || model.selectedSession?.exited == true)
+                    Button("Rename…") { if let id = model.selectedSession?.id { model.renaming = Renaming(id: id, place: .tab) } }
+                        .disabled(model.selectedSession == nil)
+                    Divider()
+                    Button("Archive") { if let id = model.selectedSession?.id { model.archive(id) } }
+                        .keyboardShortcut("a", modifiers: [.command, .shift])
+                        .disabled(!model.canArchive(model.selectedSession?.id ?? ""))
+                    Button("Close Session") { if let id = model.selected { model.closeSession(id) } }
+                        .keyboardShortcut(.delete, modifiers: [.command, .shift])
+                        .disabled(model.selected == nil)
+                    // No key: ⌘⌫ is the terminal's (Ghostty deletes to the start of the line with it).
+                    Button("Delete Session…") { if let id = model.selectedSession?.id { model.confirmDelete(id) } }
+                        .disabled(model.selectedSession == nil)
+                }
+            }
+            // Getting around the one window: its sessions, its tabs (the window list a one-window
+            // app has) and the splits in a tab, as in Ghostty's Window menu.
+            CommandGroup(after: .windowSize) {
+                Divider()
+                Group {
+                    Button("Find Sessions…") { model.findingSessions = true }
+                        .keyboardShortcut("f", modifiers: [.command, .shift])
+                    Button("Jump to Session Needing You") { model.jumpToAttention() }
+                        .keyboardShortcut("j")
+                    // Down the sidebar, wrapping.
+                    Button("Next Session") { model.cycle(by: 1) }
+                        .keyboardShortcut(.tab, modifiers: .control)
+                        .disabled(model.sidebarSessions.count < 2)
+                    Button("Previous Session") { model.cycle(by: -1) }
+                        .keyboardShortcut(.tab, modifiers: [.control, .shift])
+                        .disabled(model.sidebarSessions.count < 2)
+                }
+                Divider()
+                Group {
+                    // Along the tab bar, as in Ghostty, Safari and every terminal.
+                    Button("Show Next Tab") { model.cycleTabs(by: 1) }
+                        .keyboardShortcut("]", modifiers: [.command, .shift])
+                        .disabled(model.shownTabs.count < 2)
+                    Button("Show Previous Tab") { model.cycleTabs(by: -1) }
+                        .keyboardShortcut("[", modifiers: [.command, .shift])
+                        .disabled(model.shownTabs.count < 2)
+                    // ⌘1…⌘9: the tabs, as in Ghostty and browsers.
+                    ForEach(Array(model.shownTabs.prefix(9).enumerated()), id: \.element) { i, id in
+                        if let s = model.sessions.first(where: { $0.id == id }) {
+                            Button("\(i + 1)  \(s.display)") { model.select(id) }
+                                .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
+                        }
+                    }
+                }
+                Divider()
+                SplitWindowItems().environmentObject(model)
             }
             CommandGroup(replacing: .help) {
                 Button("Keyboard Shortcuts") { model.showShortcuts = true }
@@ -220,6 +255,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSAppleEventManager.shared().setEventHandler(
             self, andSelector: #selector(quitEvent(_:withReplyEvent:)),
             forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEQuitApplication))
+        // dino has tabs of its own (and one window): macOS's window tabs would only add Show Tab
+        // Bar, Show All Tabs, Merge All Windows and a second Show Next Tab on ⌃⇥, Next Session's key.
+        NSWindow.allowsAutomaticWindowTabbing = false
         // Before the first window draws: no flash of the Mac's look when dino is set otherwise.
         Appearance.current.apply()
         // Opening the app shows the sessions, even if it quit while looking at the archive.
@@ -279,9 +317,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Claude desktop's keys. Some are aliases for what the menus have under dino's own keys (a menu
-    /// item shows one); the rest are in the Split menu too, but handled here so they work even when
-    /// SwiftUI hasn't brought the menu's enabled state up to date. Seen before the terminal, which
-    /// would otherwise take ⇧⌘] and ⇧⌘[ for tabs.
+    /// item shows one); ⌃` is in View too, but handled here so it works even when SwiftUI hasn't
+    /// brought the menu's enabled state up to date; ⌘\ (Close Pane) is only here, as ⌘W shows what
+    /// it closes. ⇧⌘] and ⇧⌘[ aren't taken: they're Window › Show Next / Previous Tab, as in
+    /// Ghostty; ⌃⇥ and ⌃⇧⇥ go between sessions.
     private static func desktopKey(_ e: NSEvent, model: DinoModel) -> Bool {
         let mods = e.modifierFlags.intersection([.command, .shift, .option, .control])
         switch (mods, e.charactersIgnoringModifiers ?? "") {
@@ -291,12 +330,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case ([.command], "\\"):
             guard model.shownSplit != nil || model.sidePane != nil else { return false }
             model.closeFocusedPane()
-        case ([.command, .shift], "]"), ([.command, .shift], "}"):
-            guard model.sessions.count > 1 else { return false }
-            model.cycle(by: 1)
-        case ([.command, .shift], "["), ([.command, .shift], "{"):
-            guard model.sessions.count > 1 else { return false }
-            model.cycle(by: -1)
         case ([.command, .shift], "b"), ([.command, .shift], "B"):
             guard model.sidePane == .preview || model.selectedSession?.host == nil else { return false }
             model.togglePreview()
