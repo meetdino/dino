@@ -472,6 +472,7 @@ final class DinoModel: ObservableObject {
                 }
             }
             let looking = appActive && s.id == selected
+            if prev.needs != nil, s.needs == nil { Notifier.answered(key: "needs-\(s.id)") }
             // Working again: a bell it rang before isn't asking for you any more.
             let resumed = (s.activity == "working" && prev.activity != "working") || (s.inside?.status == "busy" && prev.inside?.status != "busy")
             if resumed, attention.contains(s.id) { attention.remove(s.id) }
@@ -488,7 +489,7 @@ final class DinoModel: ObservableObject {
                     }
                 }
                 if let needs = s.needs, prev.needs == nil {
-                    Notifier.post(session: s, title: "\(s.display) needs you", body: needs)
+                    Notifier.needsYou(key: "needs-\(s.id)", title: "\(s.display) needs you", body: needs, session: s.id)
                 }
                 // Not in front of you: say an agent started using the Mac or the browser.
                 if let sentence = s.usingSentence, prev.reach == nil, s.needs == nil, !appActive, UsingDisplay.current != .off {
@@ -956,8 +957,10 @@ final class DinoModel: ObservableObject {
                         // An agent in a tmux pane that just started asking: tell, once.
                         let asked = Set(self.elsewhere.filter(\.asking).map(\.id))
                         for f in running where f.asking && f.tmux != nil && !asked.contains(f.id) {
-                            Notifier.post(key: "tmux-\(f.id)", title: "\(f.agentName) needs you", body: "\(f.title) · in \(f.terminal ?? "tmux")")
+                            Notifier.needsYou(key: "tmux-\(f.id)", title: "\(f.agentName) needs you", body: "\(f.title) · in \(f.terminal ?? "tmux")")
                         }
+                        let asking = Set(running.filter(\.asking).map(\.id))
+                        for id in asked.subtracting(asking) { Notifier.answered(key: "tmux-\(id)") }
                         let rest = self.found.filter { $0.source != "running" && !now.contains($0.session_id) }
                         if running + rest != self.found { self.found = running + rest }
                         // One that stopped is a finished conversation now.
