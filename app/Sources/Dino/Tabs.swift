@@ -104,7 +104,6 @@ struct TabStrip: View {
 
     var body: some View {
         let current = model.tab(of: model.selected)
-        let newTabHelp = "New tab: a shell in \(shortPath(model.folder.path)) (⌘T)"
         HStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 1) {
@@ -120,8 +119,8 @@ struct TabStrip: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help(newTabHelp)
-            .accessibilityLabel(newTabHelp)
+            .help("New tab: a shell in \(shortPath(model.folder.path)) (⌘T)")
+            .accessibilityLabel("New Tab")
         }
         .frame(height: 22)
         .background {
@@ -149,8 +148,6 @@ private struct TabItem: View {
         // A split's tab names each of its panes.
         let panes = model.split(of: session.id).map { t in t.panes.compactMap { id in model.sessions.first { $0.id == id } } } ?? []
         let status = model.status(of: session)
-        let closeHelp = session.tmux != nil ? "Close this tab and detach from tmux (⌘W). The session keeps running in tmux."
-            : session.agent_id == "shell" ? "Close this tab (⌘W)" : "Close this tab (⌘W). \(session.display) stops and is archived, to resume from Archived."
         HStack(spacing: 5) {
             if !session.plainShell {
                 Circle().fill(status.color).frame(width: 5, height: 5)
@@ -181,8 +178,9 @@ private struct TabItem: View {
             }
             .buttonStyle(.plain)
             .opacity(hovering || selected ? 1 : 0)
-            .help(closeHelp)
-            .accessibilityLabel(closeHelp)
+            .help(session.tmux != nil ? "Close this tab and detach from tmux (⌘W). The session keeps running in tmux."
+                : session.agent_id == "shell" ? "Close this tab (⌘W)" : "Close this tab (⌘W). \(session.display) stops and is archived, to resume from Archived.")
+            .accessibilityLabel(session.tmux != nil ? "Detach" : "Close Tab")
         }
         .font(.subheadline)
         .foregroundStyle(selected ? .primary : .secondary)
