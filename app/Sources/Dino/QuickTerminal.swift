@@ -326,9 +326,9 @@ final class QuickTerminal: NSObject, NSWindowDelegate {
         guard mods.contains(.command), let id = sessionID else { return false }
         switch (mods, e.charactersIgnoringModifiers ?? "") {
         case ([.command], "i"):
-            model?.sendKeys(id, "\u{1b}[57300~")
+            model?.sendKeys(id, "\u{1b}[105;9u")
         case ([.command], "\r"):
-            model?.sendKeys(id, "\u{1b}[57301~")
+            model?.sendKeys(id, "\u{1b}[13;9u")
         case (_, let c) where "cvaxz=+-0q".contains(c) && !c.isEmpty:
             return false
         default:

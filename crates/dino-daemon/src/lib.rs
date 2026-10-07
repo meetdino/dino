@@ -1531,7 +1531,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             }
             Request::SendKeys { id, text } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
                 Some(s) if s.pane.is_exited() => Response::Error { message: format!("{id} has exited") },
-                // In line mode its terminal prints them (`^[[57300~`) for what runs to read as text:
+                // In line mode its terminal prints them (`^[[105;9u`) for what runs to read as text:
                 // a command, or the shell itself before its next prompt (old bash asking for a #
                 // line). A line editor reads keys (a shell's, or one behind a tmux client or ssh).
                 Some(s) if !s.pane.reads_keys() => Response::Error { message: format!("{id} isn't at a prompt") },
@@ -5701,7 +5701,7 @@ while (sysread(STDIN, my $c, 1)) {
     }
 
     /// ⌘I's keys go to a shell only while something reads keys in its terminal: at its prompt, its
-    /// line editor. In line mode its terminal would print them under the line (`^[[57300~`) for
+    /// line editor. In line mode its terminal would print them under the line (`^[[105;9u`) for
     /// what runs to read: a command, or the shell itself before its next prompt (old bash asking
     /// for a # line).
     #[test]
@@ -5726,12 +5726,12 @@ while (sysread(STDIN, my $c, 1)) {
             wait_for("the prompt", || s.pane.reads_keys());
             s.pane.write(format!("{busy}\r").into_bytes());
             wait_for(what, || !s.pane.reads_keys());
-            let answer = send("\x1b[57300~");
+            let answer = send("\x1b[105;9u");
             assert!(matches!(&answer, Response::Error { message } if message.contains("prompt")), "{what}: {answer:?}");
             s.pane.write(b"\x03".to_vec());
         }
         wait_for("the prompt", || s.pane.reads_keys());
-        assert!(!s.pane.text(0).contains("57300"), "{}", s.pane.text(0));
+        assert!(!s.pane.text(0).contains("105;9u"), "{}", s.pane.text(0));
         kill(&d, &id);
     }
 

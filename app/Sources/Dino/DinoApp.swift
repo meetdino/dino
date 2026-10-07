@@ -353,7 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // at its prompt gets them; an agent's own terminal keeps its keys.
         case ([.command], "i"), ([.command], "\r"):
             guard let shell = model.shellAtPrompt else { return false }
-            model.sendKeys(shell, e.charactersIgnoringModifiers == "i" ? "\u{1b}[57300~" : "\u{1b}[57301~")
+            model.sendKeys(shell, e.charactersIgnoringModifiers == "i" ? "\u{1b}[105;9u" : "\u{1b}[13;9u")
         default:
             return false
         }

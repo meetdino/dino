@@ -59,9 +59,16 @@ function __dino_search
     commandline -f repaint
 end
 
-bind \e\[57300~ __dino_ai_line
+# ⌘I and ⌘⏎ in Dino arrive as those keys, as kitty's keyboard protocol sends them (CSI u): fish 4
+# reads them as super-i and super-enter (from 4.0.2), fish 3 binds what they send.
+if string match -qr '^[0-3]\.' -- $version
+    bind \e\[105\;9u __dino_ai_line
+    bind \e\[13\;9u __dino_ai_agent
+else
+    bind super-i __dino_ai_line 2>/dev/null
+    bind super-enter __dino_ai_agent 2>/dev/null
+end
 bind \ei __dino_ai_line
-bind \e\[57301~ __dino_ai_agent
 bind \e\r __dino_ai_agent
 bind \er __dino_search
 set -q DINO_SEARCH_CTRL_R; and bind \cr __dino_search

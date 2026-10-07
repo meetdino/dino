@@ -141,7 +141,7 @@ _dino_ai_agent() {
   local line=$(_dino_request)
   if (( ! _DINO_AI )) && [[ $BUFFER != \#* ]]; then
     # Not an AI line: Alt+Enter does what it did.
-    [[ $KEYS == $'\e[57301~' ]] || zle _dino_meta_return_orig
+    [[ $KEYS == $'\e[13;9u' ]] || zle _dino_meta_return_orig
     return
   fi
   [[ -z ${line//[[:space:]]/} ]] && return
@@ -199,8 +199,8 @@ add-zle-hook-widget line-pre-redraw _dino_highlight
 add-zle-hook-widget line-finish _dino_finish
 
 for _dino_map in emacs viins; do
-  bindkey -M $_dino_map '\e[57300~' _dino_ai_toggle
-  bindkey -M $_dino_map '\e[57301~' _dino_ai_agent
+  bindkey -M $_dino_map '\e[105;9u' _dino_ai_toggle
+  bindkey -M $_dino_map '\e[13;9u' _dino_ai_agent
   bindkey -M $_dino_map ${DINO_AI_KEY:-'\ei'} _dino_ai_toggle
   bindkey -M $_dino_map '\e\r' _dino_ai_agent
   bindkey -M $_dino_map '\e' _dino_escape
