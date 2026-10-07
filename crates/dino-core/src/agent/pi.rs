@@ -1,11 +1,11 @@
 //! Pi (`@earendil-works/pi-coding-agent`), and Pi on dino's free tier (`free`). It never asks
 //! before running a tool, so it has no permission modes. Its model is `--model provider/id`, its
 //! effort `--thinking`, both as Pi lists them. It takes its conversation id up front
-//! (`--session-id`, created if missing) and keeps each conversation at
-//! `~/.pi/agent/sessions/--<cwd>--/<time>_<id>.jsonl`, which dino follows for status. On the free
-//! tier dino gives it one extension for that session, which only registers a provider, "dino", at
-//! dino's free tier (`registerProvider`, no tools), with one model, "auto": the free tier picks the
-//! real one for each turn.
+//! (`--session-id`; dino writes a new one's first line ahead, see `begin`) and keeps each
+//! conversation at `~/.pi/agent/sessions/--<cwd>--/<time>_<id>.jsonl`, which dino follows for
+//! status. On the free tier dino gives it one extension for that session, which only registers a
+//! provider, "dino", at dino's free tier (`registerProvider`, no tools), with one model, "auto":
+//! the free tier picks the real one for each turn.
 
 use std::path::{Path, PathBuf};
 
@@ -229,6 +229,26 @@ fn on_provider(url: &str, format: Format, model: &str, info: Option<&ProviderMod
     Some((vec![], vec!["-e".into(), ext.display().to_string(), "--provider".into(), "dino".into(), "--model".into(), model.into()]))
 }
 
+/// `ms` since the epoch as Pi writes a time: ISO 8601, UTC, to the millisecond.
+fn iso(ms: u64) -> String {
+    let (secs, ms) = (ms / 1000, ms % 1000);
+    let (y, m, d) = crate::usage::report::civil((secs / 86_400) as i64);
+    let s = secs % 86_400;
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{ms:03}Z", s / 3600, s / 60 % 60, s % 60)
+}
+
+/// Start conversation `id` for `cwd` in folder `dir`, at `ms`, as Pi would: its first line (the
+/// session header its docs give) in a file named as it names them. Never over one that's there.
+fn begin(dir: &Path, id: &str, cwd: &str, ms: u64) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let at = iso(ms);
+    let header = serde_json::json!({"type": "session", "version": 3, "id": id, "timestamp": at, "cwd": cwd});
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{}_{id}.jsonl", at.replace([':', '.'], "-")));
+    writeln!(std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?, "{header}")?;
+    Ok(path)
+}
+
 /// When a file was created, in seconds.
 fn born(p: &Path) -> u64 {
     p.metadata().and_then(|m| m.created()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
@@ -375,10 +395,22 @@ impl Agent for Pi {
         vec![prompt]
     }
 
-    // Its exact id, created if missing: the same flag starts it and continues it.
+    // Its exact id: the same flag starts it and continues it.
     fn session_args(&self, session: &mut Option<String>, _restoring: bool) -> (Vec<String>, Vec<String>) {
         let id = session.get_or_insert_with(crate::new_uuid).clone();
         (vec!["--session-id".into(), id], vec![])
+    }
+
+    // A conversation it hasn't written yet is started where Pi looks for it (the folder for its
+    // working directory as its process sees it, links resolved), so `--session-id` opens it. Pi
+    // 1.0 creates one it doesn't find too, but warns, in yellow, that it found none.
+    fn prepare_session(&self, session: &str, cwd: &Path) {
+        if self.transcript(session).is_some() {
+            return;
+        }
+        let Some(cwd) = std::fs::canonicalize(cwd).ok().and_then(|c| c.to_str().map(String::from)) else { return };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        let _ = begin(&folder_of(&cwd), session, &cwd, now);
     }
 
     fn status_source(&self) -> StatusSource {
@@ -639,6 +671,23 @@ mod tests {
         assert_eq!(before[0], "--session-id");
         assert_eq!(none.as_deref(), Some(before[1].as_str()), "picked up front");
         assert!(p.modes().is_empty(), "it never asks");
+    }
+
+    #[test]
+    fn a_new_conversation_starts_as_pi_starts_one() {
+        assert_eq!(iso(1_791_340_947_359), "2026-10-07T02:42:27.359Z");
+        assert_eq!(iso(0), "1970-01-01T00:00:00.000Z");
+        let dir = std::env::temp_dir().join(format!("dino-pi-begin-{}", std::process::id()));
+        let id = "a691a65b-7ab4-4eb9-99be-c2ab396b43af";
+        let path = begin(&dir, id, "/private/tmp/w", 1_791_340_947_359).unwrap();
+        // As Pi 1.0.3 named and began one.
+        assert_eq!(path.file_name().unwrap(), "2026-10-07T02-42-27-359Z_a691a65b-7ab4-4eb9-99be-c2ab396b43af.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "{\"type\":\"session\",\"version\":3,\"id\":\"a691a65b-7ab4-4eb9-99be-c2ab396b43af\",\"timestamp\":\"2026-10-07T02:42:27.359Z\",\"cwd\":\"/private/tmp/w\"}\n");
+        assert_eq!(id_of(&path).as_deref(), Some(id));
+        assert!(meta_in(&text).hidden, "nothing said in it yet");
+        assert!(begin(&dir, id, "/private/tmp/w", 1_791_340_947_359).is_err(), "never over one that's there");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
