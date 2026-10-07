@@ -3,6 +3,7 @@ name = "dino-sync"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "dino's settings sync: records, clocks and merge, shared by dinod and dino-cloud"
 
 [features]

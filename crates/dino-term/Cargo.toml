@@ -3,6 +3,7 @@ name = "dino-term"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 alacritty_terminal.workspace = true
