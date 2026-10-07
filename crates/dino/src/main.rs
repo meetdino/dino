@@ -20,14 +20,6 @@ use dino_core::providers::ProviderRoute;
 use dino_core::status::{self, Status as SessionStatus};
 use out::{Cell, Column, Paint};
 
-fn tokens(n: u64) -> String {
-    match n {
-        0..1_000 => n.to_string(),
-        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
-        _ => format!("{:.1}M", n as f64 / 1e6),
-    }
-}
-
 fn duration(secs: u64) -> String {
     match secs {
         0..3600 => format!("{}m", secs / 60),
@@ -601,8 +593,8 @@ fn ls_table(sessions: &[SessionInfo], usage: bool) -> (Vec<Column>, Vec<Vec<Cell
                 when.paint(Paint::Dim),
             ];
             if usage {
-                row.push(Cell::new(tokens(s.input_tokens)).raw(s.input_tokens.to_string()));
-                row.push(Cell::new(tokens(s.output_tokens)).raw(s.output_tokens.to_string()));
+                row.push(Cell::new(stats::tokens(s.input_tokens)).raw(s.input_tokens.to_string()));
+                row.push(Cell::new(stats::tokens(s.output_tokens)).raw(s.output_tokens.to_string()));
             }
             row
         })

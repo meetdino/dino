@@ -1674,8 +1674,8 @@ struct QuotaBar: View {
 func tokens(_ n: UInt64) -> String {
     switch n {
     case ..<1000: "\(n)"
-    case ..<1_000_000: String(format: "%.1fk", Double(n) / 1e3)
-    case ..<1_000_000_000: String(format: "%.1fM", Double(n) / 1e6)
+    case 1_000..<999_950: String(format: "%.1fk", Double(n) / 1e3)
+    case 999_950..<999_950_000: String(format: "%.1fM", Double(n) / 1e6)
     default: String(format: "%.2fB", Double(n) / 1e9)
     }
 }
