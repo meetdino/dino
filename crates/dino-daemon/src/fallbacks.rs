@@ -132,14 +132,20 @@ impl Seen {
 /// accounts answers), and what their new sessions start with meanwhile.
 /// Looked at with every state a client asks for: the settings are only read when one is.
 pub(crate) fn limits(d: &Daemon) -> Vec<AgentLimit> {
-    let spent: Vec<(String, dino_proxy::fallback::Limited)> = {
+    let spent = |switch: bool| -> Vec<(String, dino_proxy::fallback::Limited)> {
         let seen = d.fallback_seen.lock().unwrap();
-        seen.0.iter().filter_map(|(agent_id, keys)| Some((agent_id.clone(), keys.iter().filter_map(|k| d.proxy.spent(k)).find(|l| l.kind != Kind::Outage)?))).collect()
+        seen.0.iter().filter_map(|(agent_id, keys)| Some((agent_id.clone(), keys.iter().filter_map(|k| d.proxy.spent(k, switch)).find(|l| l.kind != Kind::Outage)?))).collect()
     };
-    if spent.is_empty() {
+    // As usual nothing is: settings unread. Another Claude account stands in only for sessions
+    // that talk through dino (see `dino_proxy::accounts`).
+    if spent(false).is_empty() {
         return vec![];
     }
     let settings = Settings::load();
+    let spent = spent(settings.routing.proxy);
+    if spent.is_empty() {
+        return vec![];
+    }
     let mut out: Vec<AgentLimit> = spent
         .into_iter()
         .map(|(agent_id, l)| {
