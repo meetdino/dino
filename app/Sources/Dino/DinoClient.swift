@@ -690,6 +690,8 @@ private struct FoundResponse: Decodable {
     var sessions: [FoundSession]
     /// Finished conversations were left out: older than asked for, or past the limit.
     var more: Bool?
+    /// How many the user hid.
+    var hidden: Int?
 }
 
 private struct ConversationResponse: Decodable {
@@ -900,12 +902,20 @@ final class DinoConnection: @unchecked Sendable {
     }
 
     /// Found sessions with only the newest `limit` finished conversations on disk, or those
-    /// matching `query` however old. `more`: older ones were left out.
-    func found(cloud: Bool, limit: Int, query: String) throws -> (sessions: [FoundSession], more: Bool) {
-        var body: [String: Any] = ["type": "found", "cloud": cloud, "limit": limit]
+    /// matching `query` however old; with `hidden`, only the ones the user hid. `more`: older ones
+    /// were left out. `hiddenCount`: how many are hidden.
+    func found(cloud: Bool, limit: Int, query: String, hidden: Bool = false) throws -> (sessions: [FoundSession], more: Bool, hiddenCount: Int) {
+        var body: [String: Any] = ["type": "found", "cloud": cloud, "limit": limit, "hidden": hidden]
         if !query.isEmpty { body["query"] = query }
         let r = try JSONDecoder().decode(FoundResponse.self, from: send(body))
-        return (r.sessions, r.more ?? false)
+        return (r.sessions, r.more ?? false, r.hidden ?? 0)
+    }
+
+    /// Hide a found session from "On this Mac" and the browser (a running one until it ends), or
+    /// show it again.
+    func hide(_ session: FoundSession, hidden: Bool) throws {
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(session))
+        _ = try send(["type": "hide", "session": encoded, "hidden": hidden])
     }
 
     /// Part of a conversation (a found session's, or a Claude subagent's by its id), ending at byte

@@ -1820,6 +1820,9 @@ struct ElsewhereRow: View {
                 Button("Show in tmux") { model.showInTmux(session) }
             }
             Button(session.unsure == nil ? "Continue in dino…" : "Why dino Can't Continue It…") { model.askToMove(session) }
+            Divider()
+            // Until it ends; the session browser's Show Hidden brings it back sooner.
+            Button("Hide") { model.hide(session) }
         }
     }
 }
