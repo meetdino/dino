@@ -23,6 +23,8 @@ struct WelcomeCard: View {
     @State private var away = false
     /// Taken down for a quit (DinoApplication), not closed: unseen, it's there at the next launch.
     @State private var quitting = false
+    /// ⌘K's sheet, once this one is down: two sheets can't show at once.
+    @State private var continueAfter = false
 
     /// The ones dino works with best, in this order.
     private static let featured = ["claude", "codex", "copilot", "cursor", "amp", "kimi", "qwen", "pi", "hermes", "codewhale", "opencode"]
@@ -49,7 +51,12 @@ struct WelcomeCard: View {
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
-            .sheet(isPresented: Binding(get: { shown && !away && !quitting }, set: { if !$0, shown, !away { close() } })) {
+            .sheet(isPresented: Binding(get: { shown && !away && !quitting }, set: { if !$0, shown, !away { close() } }), onDismiss: {
+                guard continueAfter else { return }
+                continueAfter = false
+                model.loadFound()
+                model.showContinue = true
+            }) {
                 card.onAppear(perform: look)
             }
             .onReceive(NotificationCenter.default.publisher(for: DinoApplication.quitting)) { _ in quitting = true }
@@ -128,6 +135,7 @@ struct WelcomeCard: View {
     private var rows: some View {
         VStack(alignment: .leading, spacing: 16) {
             group("Found on this Mac") {
+                continueRow
                 agents
                 found
             }
@@ -327,6 +335,19 @@ struct WelcomeCard: View {
         "claude-chrome": URL(string: "https://code.claude.com/docs/en/chrome")!,
         "codex": URL(string: "https://learn.chatgpt.com/docs/computer-use")!,
     ]
+
+    /// ⌘K: every agent already running in another terminal and every past conversation, to
+    /// continue in dino.
+    private var continueRow: some View {
+        HStack(alignment: .firstTextBaseline) {
+            row("arrow.uturn.forward", "Press ⌘K to continue any conversation in dino: agents running in your other terminals and every past one.")
+            Spacer(minLength: 8)
+            Button("Continue a Session…") {
+                continueAfter = true
+                close()
+            }
+        }
+    }
 
     @ViewBuilder private var found: some View {
         let keys = store.keys.filter { $0.source != nil }
