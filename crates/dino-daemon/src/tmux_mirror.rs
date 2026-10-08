@@ -68,11 +68,14 @@ fn modified() -> Option<SystemTime> {
     std::fs::metadata(Settings::path()).and_then(|m| m.modified()).ok()
 }
 
-/// A window dino wants: the session it shows and its name.
+/// A window dino wants: the session it shows, its name, and the folder its agent runs in.
 #[derive(Debug, Clone, PartialEq)]
 struct Want {
     id: String,
     name: String,
+    /// Where dinod started the agent; `None` for one on an SSH host (a path there, not here) or a
+    /// folder that's gone.
+    dir: Option<PathBuf>,
 }
 
 /// A window of dino's that tmux has.
@@ -161,24 +164,33 @@ impl Server {
 
     fn add(&self, target: &Target, w: &Want) {
         let command = attach_command(&w.id, std::env::var("DINO_HOME").ok().as_deref());
-        let exact;
-        let args: Vec<&str> = match target {
-            Target::Existing(s) => vec!["new-window", "-d", "-P", "-F", "#{window_id}", "-t", s, "-n", &w.name, &command],
-
-            // Its first window is this one; the session goes when its last window does. Nobody may
-            // be attached to it: a config's `destroy-unattached` would end it as this command
-            // returns (and it would be made again every look), so in the same command, it's off.
-            Target::New(s) => {
-                exact = format!("={s}:");
-                vec!["new-session", "-d", "-P", "-F", "#{window_id}", "-s", s, "-n", &w.name, &command, ";", "set-option", "-t", &exact, "destroy-unattached", "off"]
-            }
-        };
+        let args = window_args(target, w, &command);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let Some(window) = self.run(&args).map(|o| o.trim().to_string()).filter(|w| !w.is_empty()) else { return };
         self.run(&["set-option", "-w", "-t", &window, MARK, &w.id]);
         // Its name follows the agent, from dino: not from what runs in it, nor its title.
         self.run(&["set-option", "-w", "-t", &window, "automatic-rename", "off"]);
         self.run(&["set-option", "-w", "-t", &window, "allow-rename", "off"]);
     }
+}
+
+/// The tmux command that makes `w`'s window running `command` at `target`: in the agent's folder
+/// (`-c`), not dinod's, so what the pane shows and a dino shell attached to it follow the agent.
+fn window_args(target: &Target, w: &Want, command: &str) -> Vec<String> {
+    let dir: Vec<String> = w.dir.iter().flat_map(|d| ["-c".to_string(), d.display().to_string()]).collect();
+    let mut args: Vec<String> = match target {
+        Target::Existing(s) => ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", s].map(String::from).to_vec(),
+        // Its first window is this one; the session goes when its last window does.
+        Target::New(s) => ["new-session", "-d", "-P", "-F", "#{window_id}", "-s", s].map(String::from).to_vec(),
+    };
+    args.extend(dir);
+    args.extend(["-n".to_string(), w.name.clone(), command.to_string()]);
+    // Nobody may be attached to a new session: a config's `destroy-unattached` would end it as this
+    // command returns (and it would be made again every look), so in the same command, it's off.
+    if let Target::New(s) = target {
+        args.extend([";", "set-option", "-t", &format!("={s}:"), "destroy-unattached", "off"].map(String::from));
+    }
+    args
 }
 
 /// Where a new window goes: `session:` of one that exists (the next free index there), or a
@@ -217,7 +229,8 @@ fn wanted(d: &Daemon) -> Vec<Want> {
         .filter(|s| s.agent_id != "shell")
         .map(|s| {
             let label = s.label.lock().unwrap().clone();
-            Want { id: s.id.clone(), name: window_name(label.or_else(|| s.pane.title()).as_deref(), &s.name) }
+            let dir = Some(s.cwd.clone()).filter(|c| s.host.is_none() && c.is_dir());
+            Want { id: s.id.clone(), name: window_name(label.or_else(|| s.pane.title()).as_deref(), &s.name), dir }
         })
         .collect()
 }
@@ -269,7 +282,7 @@ mod tests {
     use super::*;
 
     fn want(id: &str, name: &str) -> Want {
-        Want { id: id.into(), name: name.into() }
+        Want { id: id.into(), name: name.into(), dir: None }
     }
 
     fn have(window: &str, id: &str, name: &str) -> Have {
@@ -310,6 +323,21 @@ mod tests {
         let exe = std::env::current_exe().unwrap().display().to_string();
         assert_eq!(attach_command("7", None), format!("'{exe}' attach --fresh 7"));
         assert_eq!(attach_command("7", Some("/tmp/it's here")), format!("env 'DINO_HOME=/tmp/it'\\''s here' '{exe}' attach --fresh 7"));
+    }
+
+    #[test]
+    fn windows_open_in_the_agents_folder() {
+        let w = Want { id: "7".into(), name: "fix tests".into(), dir: Some(PathBuf::from("/work/my app")) };
+        let existing = window_args(&Target::Existing("$1:".into()), &w, "dino attach 7");
+        assert_eq!(existing, ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", "$1:", "-c", "/work/my app", "-n", "fix tests", "dino attach 7"]);
+        let new = window_args(&Target::New("dino".into()), &w, "dino attach 7");
+        assert_eq!(
+            new,
+            ["new-session", "-d", "-P", "-F", "#{window_id}", "-s", "dino", "-c", "/work/my app", "-n", "fix tests", "dino attach 7", ";", "set-option", "-t", "=dino:", "destroy-unattached", "off"]
+        );
+        // No folder here (an SSH host's agent): tmux's own default.
+        let remote = Want { dir: None, ..w };
+        assert!(!window_args(&Target::Existing("$1:".into()), &remote, "x").contains(&"-c".to_string()));
     }
 
     #[test]
