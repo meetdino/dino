@@ -12,13 +12,15 @@
 [[ -n $_DINO_BASH ]] && return 0
 _DINO_BIN=${DINO_BIN:-__DINO_BIN__}
 _DINO_BASH=1
+_DINO_LAST=
+_DINO_STATUS=0
 
 _dino_suggest_for() {
   local line=$1 err out rc why nl=$'\n'
   # A private file of its own: a fixed name in a shared folder could be read, or planted.
   # Its messages go over the line saying it asks.
   err=$(command mktemp "${TMPDIR:-/tmp}/dino-ai.XXXXXX") || { printf '\r\e[K✗ dino: no temp file\n' >/dev/tty; return 1; }
-  out=$(command "$_DINO_BIN" ai suggest --shell bash --cwd "$PWD" -- "$line" 2>"$err" </dev/null)
+  out=$(command "$_DINO_BIN" ai suggest --shell bash --cwd "$PWD" --last "$_DINO_LAST" --status "$_DINO_STATUS" -- "$line" 2>"$err" </dev/null)
   rc=$?
   why=$(<"$err")
   command rm -f "$err"
@@ -34,7 +36,7 @@ _dino_suggest_for() {
 _dino_hand_off() {
   local out
   if [[ -n $DINO_SESSION ]]; then
-    if out=$(command "$_DINO_BIN" ai agent --cwd "$PWD" -- "$1" 2>&1 </dev/null); then
+    if out=$(command "$_DINO_BIN" ai agent --cwd "$PWD" --last "$_DINO_LAST" --status "$_DINO_STATUS" -- "$1" 2>&1 </dev/null); then
       printf 'handed to your agent, in session %s\n' "$out" >/dev/tty
     else
       printf '✗ %s\n' "$out" >/dev/tty
@@ -48,13 +50,17 @@ _dino_hand_off() {
 
 # Keyless, any bash: a line starting with # is a request, answered after it "runs".
 _dino_prompt_command() {
-  local last
+  local last_status=$? last
   last=$(HISTTIMEFORMAT= builtin history 1)
   # Each history entry once, told by its number: a prompt with no new one (Enter on an empty
   # line, ^C) asks nothing again, and the same request entered again is asked again.
   [[ $last != "$_DINO_ASKED" ]] || return 0
   _DINO_ASKED=$last
   last=${last#*[0-9]  }
+  if [[ -n $last && $last != \#* ]]; then
+    _DINO_LAST=$last
+    _DINO_STATUS=$last_status
+  fi
   [[ $last == \#* && $last != \#!* ]] || return 0
   local line=$last
   # `#@ …` is ⌘⏎ on old bash: the line goes to an agent.
@@ -75,11 +81,7 @@ _dino_prompt_command() {
   builtin history -s -- "$_DINO_OUT"
   # The answer isn't a request, even one commented out.
   _DINO_ASKED=$(HISTTIMEFORMAT= builtin history 1)
-  # On old bash ⌘I's request ends in a space (see its keys below), and its answer comes up on the
-  # next prompt by itself.
-  if [[ $last != *' ' ]] || (( BASH_VERSINFO[0] >= 4 )); then
-    printf '→ %s   (↑ puts it on the prompt)\n' "$_DINO_OUT"
-  fi
+  printf '→ %s   (↑ puts it on the prompt)\n' "$_DINO_OUT"
 }
 PROMPT_COMMAND="_dino_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 
@@ -101,7 +103,7 @@ if (( BASH_VERSINFO[0] >= 4 )); then
     line=${line# }
     [[ -n ${line// } ]] || return 0
     if [[ -n $DINO_SESSION ]]; then
-      if out=$(command "$_DINO_BIN" ai agent --cwd "$PWD" -- "$line" 2>&1 </dev/null); then
+      if out=$(command "$_DINO_BIN" ai agent --cwd "$PWD" --last "$_DINO_LAST" --status "$_DINO_STATUS" -- "$line" 2>&1 </dev/null); then
         READLINE_LINE=
         printf 'handed to your agent, in session %s\n' "$out" >/dev/tty
       else
@@ -124,24 +126,18 @@ if (( BASH_VERSINFO[0] >= 4 )); then
       READLINE_POINT=${#READLINE_LINE}
     fi
   }
-  bind -x '"\e[105;9u": _dino_ai_line'
+  bind -x '"\e[57300~": _dino_ai_line'
   bind -x "\"${DINO_AI_KEY:-\\ei}\": _dino_ai_line"
-  bind -x '"\e[13;9u": _dino_ai_agent'
+  bind -x '"\e[57301~": _dino_ai_agent'
   bind -x '"\e\C-m": _dino_ai_agent'
   bind -x '"\er": _dino_search'
   [[ -n $DINO_SEARCH_CTRL_R ]] && bind -x '"\C-r": _dino_search'
 else
-  # Old bash can't change the line from a key, so ⌘I (Alt+I) makes it a # request and ⌘⏎
-  # (Alt+Enter) a #@ one, and enters it, through keys of its own for the start and end of the
-  # line, Enter and ↑, whatever the user bound. ⌘I's request ends in a space, and its keys go on
-  # at the next prompt, once the request is answered: ↑ there puts the answer on the line (the
-  # request again, when it failed).
+  # Old bash uses dedicated keys to insert and submit the request.
   bind '"\e[57397~": beginning-of-line'
   bind '"\e[57398~": accept-line'
-  bind '"\e[57396~": end-of-line'
-  bind '"\e[57395~": previous-history'
-  bind '"\e[105;9u": "\e[57397~# \e[57396~ \e[57398~\e[57395~"'
-  bind "\"${DINO_AI_KEY:-\\ei}\": \"\\e[57397~# \\e[57396~ \\e[57398~\\e[57395~\""
-  bind '"\e[13;9u": "\e[57397~#@ \e[57398~"'
+  bind '"\e[57300~": "\e[57397~# \e[57398~"'
+  bind "\"${DINO_AI_KEY:-\\ei}\": \"\\e[57397~# \\e[57398~\""
+  bind '"\e[57301~": "\e[57397~#@ \e[57398~"'
   bind '"\e\C-m": "\e[57397~#@ \e[57398~"'
 fi

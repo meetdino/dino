@@ -236,6 +236,19 @@ mod tests {
     }
 
     #[test]
+    fn shell_context_preserves_history_and_handoffs() {
+        let bash_guard = BASH
+            .find("[[ $last != \"$_DINO_ASKED\" ]] || return 0")
+            .unwrap();
+        let bash_capture = BASH.find("_DINO_LAST=$last").unwrap();
+        assert!(bash_guard < bash_capture);
+        assert!(BASH.contains("if [[ -n $last && $last != \\#*"));
+        assert!(FISH.contains("string match -q -- '#*' (string trim -l -- $argv[1])"));
+        assert!(BASH.contains("ai agent -- $(printf '%q' \"$1\")"));
+        assert!(FISH.contains("ai agent -- \"(string escape -- $line)"));
+    }
+
+    #[test]
     fn fish_uses_the_configured_ai_key_or_alt_i() {
         assert!(FISH.contains("bind (string unescape -- \"$DINO_AI_KEY\") __dino_ai_line"));
         assert!(FISH.contains("bind \\ei __dino_ai_line"));
