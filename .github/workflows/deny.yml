@@ -41,7 +41,7 @@ jobs:
       # THIRD_PARTY_NOTICES.md, which ships in the app and the CLI tarball, names what Cargo.lock
       # and app/Package.swift say ships, with every license text: written by the cargo-about
       # version scripts/third-party.py names.
-      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-about@0.9.2
       - name: Third-party notices
