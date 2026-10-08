@@ -48,22 +48,63 @@ enum DinodAgent {
 
     /// The plist registered last, to register again when an update changes it.
     private static let registeredKey = "dinodAgentPlist"
+    /// The plist alone, as registered last (or as launchd was seen running it with this build).
+    /// Not set by a dino from before #157: there it's unknown, and the agent's plist hasn't changed
+    /// since it was first carried (0.1.6).
+    private static let registeredPlistKey = "dinodAgentPlistOnly"
 
-    /// The agent and the build carrying it: launchd won't start an agent registered by the build
-    /// an update replaced (its job fails to spawn), so every update registers it again, as does
-    /// every rebuild of the dino you use (its commit). The build on disk now: an app still running
-    /// when a rebuild replaced it registers the new one.
+    /// The agent and the build carrying it: an update registers it again when dinod is stopped
+    /// (`setUp(stopped: true)`), as does every rebuild of the dino you use (its commit). The build
+    /// on disk now: an app still running when a rebuild replaced it registers the new one.
     private static var digest: String? {
         let info = Updates.diskInfo
         let build = (info["CFBundleVersion"] as? String ?? "") + ((info["DinoBuild"] as? String).map { " \($0)" } ?? "")
-        return bundled.map { SHA256.hash(data: $0.data + Data(build.utf8)).map { String(format: "%02x", $0) }.joined() }
+        return bundled.map { hash($0.data + Data(build.utf8)) }
     }
 
-    /// An update changed the app or its agent, and launchd runs the old one until dinod is stopped
-    /// and the agent registered again (`setUp(stopped: true)`, when the app restarts dinod).
+    private static var plistDigest: String? { bundled.map { hash($0.data) } }
+
+    private static func hash(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Registered by another build. Whether launchd starts this build under it only dinod can say
+    /// (`needsRestart`): it does for a Developer ID signature, whose requirement (Team ID and bundle
+    /// id) is the same for every build, and needn't for an ad hoc one, whose requirement is its cdhash.
     static var stale: Bool {
         guard enabled, let registered = UserDefaults.standard.string(forKey: registeredKey) else { return false }
         return registered != digest
+    }
+
+    /// Whether dinod has to restart (and the agent be registered again) for it to run under this
+    /// app's agent (#157). dinod says which agent launchd started it under (`runningUnder`, from the
+    /// agent's plist) and whether it's this app's build (`thisBuild`). Both, and launchd has
+    /// already started this build under the registration it has, whichever build made that: an
+    /// update installed as dino quits (`Updates.quitForUpdate`) starts the new dinod through the
+    /// agent before the new app opens. A restart is needed for dinod outside the agent, under
+    /// another, or from another build, and for an agent whose plist changed since it was registered.
+    nonisolated static func needsRestart(label: String, runningUnder: String?, thisBuild: Bool, stale: Bool,
+                                         registeredPlist: String?, plist: String?) -> Bool {
+        if runningUnder != label { return true }
+        if let registeredPlist, registeredPlist != plist { return true }
+        return stale && !thisBuild
+    }
+
+    /// For `checkDaemonVersion`: false in a build without an agent, or with it off in Login Items.
+    /// dinod under this agent and from this build: the registration counts as this build's from now on.
+    static func needsRestart(runningUnder: String?, thisBuild: Bool) -> Bool {
+        guard enabled, let bundled else { return false }
+        let registeredPlist = UserDefaults.standard.string(forKey: registeredPlistKey)
+        let restart = needsRestart(label: bundled.label, runningUnder: runningUnder, thisBuild: thisBuild, stale: stale,
+                                   registeredPlist: registeredPlist, plist: plistDigest)
+        if !restart, stale { record() }
+        return restart
+    }
+
+    /// This build's agent, as launchd has it now.
+    private static func record() {
+        UserDefaults.standard.set(digest, forKey: registeredKey)
+        UserDefaults.standard.set(plistDigest, forKey: registeredPlistKey)
     }
 
     /// At launch (and with dinod stopped, before it starts again): registered, and its state
@@ -74,13 +115,14 @@ enum DinodAgent {
         let registered = UserDefaults.standard.string(forKey: registeredKey)
         switch service.status {
         case .notRegistered, .notFound:
-            register(service, digest)
+            register(service)
         case .enabled where registered != nil && registered != digest && stopped:
-            // An update: launchd keeps the old agent, and won't start it, until it's registered again.
+            // An update: launchd keeps the agent as the old build registered it, which it may not
+            // start for this one (an ad hoc signature), until it's registered again.
             try? service.unregister()
-            register(service, digest)
+            register(service)
         case .enabled where registered == nil:
-            UserDefaults.standard.set(digest, forKey: registeredKey)
+            record()
         default:
             break
         }
@@ -98,10 +140,10 @@ enum DinodAgent {
         if old.status == .enabled || old.status == .requiresApproval { try? old.unregister() }
     }
 
-    private static func register(_ service: SMAppService, _ digest: String) {
+    private static func register(_ service: SMAppService) {
         do {
             try service.register()
-            UserDefaults.standard.set(digest, forKey: registeredKey)
+            record()
         } catch {
             // Turned off in Login Items: `status` says so, and Settings → General shows the way back.
             NSLog("dino: couldn't register dinod's launch agent: \(error.localizedDescription)")
