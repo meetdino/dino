@@ -21,7 +21,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/screenshot-dark.png">
-    <img src="docs/images/screenshot-light.png" width="900" alt="The dino window split into three panes: on the left, Claude Code on Opus 5.5 in Bypass permissions mode, ready at its prompt; on the right, Codex ready at its prompt above a shell showing git log. The sidebar groups sessions by project, each marked Working, Needs you, Done or Idle.">
+    <img src="docs/images/screenshot-light.png" width="900" alt="The dino window split into two panes: on the left, Claude Code on Opus 5.5 has finished adding retries with backoff, its diff and passing tests above the prompt; on the right, Pi has shrunk a Docker image with a multi-stage Dockerfile. The sidebar groups sessions by project: one working, one done, and one that needs you, asking to edit ci.yml.">
   </picture>
 </p>
 
@@ -226,8 +226,9 @@ checks a pull request runs, and the performance budget.
 
 Issues and pull requests are welcome; [good first issues](https://github.com/meetdino/dino/labels/good%20first%20issue)
 are a place to start. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, testing, and signing off
-your commits (DCO). Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md). Please
-report security issues privately, as [SECURITY.md](SECURITY.md) describes.
+your commits (DCO). Questions go to [Discussions](https://github.com/meetdino/dino/discussions)
+([SUPPORT.md](SUPPORT.md)). Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+Please report security issues privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 
