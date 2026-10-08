@@ -5,7 +5,7 @@ import AppKit
 /// go up a level (⌘↑, the path menu, Back) and the folder you came out of is. So Open in your home
 /// folder, coming up from ~/Movies, opened ~/Movies. The button names the folder it takes, as the
 /// panel's selection and folder change (what its delegate is told, as Apple's "Getting the Current
-/// Selection" has it): `Open “Movies”` there, `Open “talian”` with nothing highlighted.
+/// Selection" has it): `Open “Movies”` there, `Open “<your home folder>”` with nothing highlighted.
 @MainActor
 enum FolderPanel {
     /// The folder chosen; nil when cancelled. `verb`: the button, before the folder's name.
