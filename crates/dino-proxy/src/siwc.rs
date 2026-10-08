@@ -76,8 +76,7 @@ pub(crate) fn collect(sse: &[u8]) -> Option<Vec<u8>> {
         .lines()
         .filter_map(|l| l.strip_prefix("data:"))
         .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
-        .filter(|v| matches!(v["type"].as_str(), Some("response.completed" | "response.incomplete" | "response.failed")))
-        .last()?;
+        .rfind(|v| matches!(v["type"].as_str(), Some("response.completed" | "response.incomplete" | "response.failed")))?;
     serde_json::to_vec(&done["response"]).ok()
 }
 

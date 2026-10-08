@@ -79,6 +79,17 @@ say "dino $VERSION ($BUILD) for $ARCHS"
 # What ships has its licenses in THIRD_PARTY_NOTICES.md, as Cargo.lock and app/Package.swift have it.
 scripts/third-party.py --check
 
+# The Rust CI builds with is rust-toolchain.toml's, which rustup picks here. A cargo without rustup
+# (Homebrew's) ignores that file: the release then ships a Rust CI never tested, so say so. The
+# versions go in dist/toolchain, which publish.sh puts in the release notes.
+RUSTC="$(rustc --version)"
+PINNED="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+case "$RUSTC" in
+    "rustc $PINNED "*) ;;
+    *) say "warning: $RUSTC, not rust-toolchain.toml's $PINNED (install rustup to build with it)" ;;
+esac
+{ echo "$RUSTC"; swift --version 2>/dev/null | head -n 1; } > "$DIST/toolchain"
+
 # The CLI and dinod: one binary, one per architecture, joined with lipo.
 bins=()
 for a in "${arch_list[@]}"; do
@@ -87,7 +98,7 @@ for a in "${arch_list[@]}"; do
     # dinod checks the updates it installs with the release key's public half, and only with it.
     DINO_UPDATE_PUBLIC_KEY="$PUBKEY" DINO_UPDATE_FEED_URL="$FEED_URL" DINO_BUILD="$BUILD_ID" \
     RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME/.cargo=cargo --remap-path-prefix=$PWD=dino" \
-        cargo build --release -q -p dino --target "$t"
+        cargo build --release --locked -q -p dino --target "$t"
     bins+=("target/$t/release/dino")
 done
 if [ "${#bins[@]}" -gt 1 ]; then

@@ -172,10 +172,10 @@ fn create(d: &Arc<Daemon>) -> anyhow::Result<()> {
 /// screen. `state` says meanwhile which shell it is, and after, what went wrong.
 pub(crate) fn setup_token_shell(d: &Arc<Daemon>, label: &str, state: &'static Mutex<State>, keep: impl FnOnce(&str) -> anyhow::Result<()> + Send + 'static) -> anyhow::Result<()> {
     anyhow::ensure!(dino_core::which("claude").is_some(), "Claude Code isn't installed: install it first (Settings → Agents)");
-    if let Some(open) = state.lock().unwrap().creating.clone() {
-        if d.sessions.lock().unwrap().iter().any(|s| s.id == open && !s.pane.is_exited()) {
-            return Ok(());
-        }
+    if let Some(open) = state.lock().unwrap().creating.clone()
+        && d.sessions.lock().unwrap().iter().any(|s| s.id == open && !s.pane.is_exited())
+    {
+        return Ok(());
     }
     let id = crate::spawn(d, Launch::new("shell", vec![], Some(crate::home().display().to_string())))?;
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("the shell has closed"))?;

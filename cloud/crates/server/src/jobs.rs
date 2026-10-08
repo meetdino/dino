@@ -16,10 +16,10 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
         loop {
             tick.tick().await;
             state.limits.retain_recent();
-            if n % 10 == 0 {
-                if let Err(e) = cleanup(&state).await {
-                    tracing::warn!(error = %e, "cleanup failed");
-                }
+            if n.is_multiple_of(10)
+                && let Err(e) = cleanup(&state).await
+            {
+                tracing::warn!(error = %e, "cleanup failed");
             }
             n += 1;
         }

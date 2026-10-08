@@ -598,6 +598,10 @@ impl Stats {
     }
 }
 
+/// A Claude account as calls find it: its number, whether it's spent until when, and its windows
+/// (`Proxy::claude_accounts_now`).
+pub type AccountNow = (u32, Option<fallback::Limited>, Option<Quota>);
+
 pub struct Proxy {
     pub port: u16,
     /// Where agents reach the proxy, `http://127.0.0.1:<port>/k/<secret>`: without the secret
@@ -728,7 +732,7 @@ impl Proxy {
     /// Claude Code's own sign-in), whether it's spent until when, and its windows as Anthropic last
     /// reported them on a call it signed. `None` with no other account. From what the proxy holds
     /// already: no key store read, as the state is looked at many times a second.
-    pub fn claude_accounts_now(&self) -> Option<Vec<(u32, Option<fallback::Limited>, Option<Quota>)>> {
+    pub fn claude_accounts_now(&self) -> Option<Vec<AccountNow>> {
         let others = accounts::others(&self.keys.read().unwrap());
         if others.is_empty() {
             return None;

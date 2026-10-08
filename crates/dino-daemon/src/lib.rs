@@ -90,6 +90,9 @@ const REPLAY_HISTORY: usize = 2000;
 /// screen is saved with that many.
 static REPLAY: AtomicUsize = AtomicUsize::new(REPLAY_HISTORY);
 
+/// Who's reading a session's output, each with its id.
+type Subscribers = Arc<Mutex<Vec<(u64, Sender<Vec<u8>>)>>>;
+
 struct Session {
     id: String,
     name: String,
@@ -102,7 +105,7 @@ struct Session {
     /// The agent's own conversation id (Claude's session UUID, Codex's rollout id), for resume.
     agent_session: Mutex<Option<String>>,
     pane: Arc<Pane>,
-    subscribers: Arc<Mutex<Vec<(u64, Sender<Vec<u8>>)>>>,
+    subscribers: Subscribers,
     /// When the agent last wrote something the user didn't just cause (see `USER_ECHO`).
     last_output: Arc<Mutex<Option<Instant>>>,
     /// When the agent last wrote anything at all.
@@ -1286,11 +1289,20 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     "login" => sync::login(value).map(Some),
                     "login_device" => sync::login_device(value).map(|()| None),
                     "login_email" => sync::login_email(value.as_deref().unwrap_or("")).map(|()| None),
-                    "cancel_login" => Ok(sync::cancel_login()).map(|()| None),
+                    "cancel_login" => {
+                        sync::cancel_login();
+                        Ok(None)
+                    }
                     "resolve" => sync::resolve(value.as_deref().unwrap_or("")).map(|()| None),
-                    "now" => Ok(sync::now()).map(|()| None),
+                    "now" => {
+                        sync::now();
+                        Ok(None)
+                    }
                     "undo" => sync::undo().map(|()| None),
-                    "logout" => Ok(sync::logout()).map(|()| None),
+                    "logout" => {
+                        sync::logout();
+                        Ok(None)
+                    }
                     other => Err(anyhow::anyhow!("no sync action {other}")),
                 };
                 match done {
@@ -1921,7 +1933,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         }
     };
 
-    let subscribers: Arc<Mutex<Vec<(u64, Sender<Vec<u8>>)>>> = Arc::default();
+    let subscribers: Subscribers = Arc::default();
     let last_output: Arc<Mutex<Option<Instant>>> = Arc::default();
     let poked: Arc<Mutex<Option<Instant>>> = Arc::default();
     let last_write: Arc<Mutex<Option<Instant>>> = Arc::default();
@@ -1967,13 +1979,14 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         None => Pane::ended(&load_screen(&d.home, &id), cols.max(20), rows.max(5), ended.and_then(|r| r.exit_code)),
     };
     // Resumed after dinod stopped or crashed: what its pane showed then, above the agent's resume.
-    if restore.is_some() && !pane.is_exited() {
-        if let Some(before) = std::fs::read(live_screens_dir(&d.home).join(&id)).ok().filter(|b| !b.is_empty()) {
-            pane.feed(&without_restart_marks(&before));
-            // Back on the normal screen (it may have been saved with a full-screen program up),
-            // and a line between then and now.
-            pane.feed(RESTART_MARK);
-        }
+    if restore.is_some()
+        && !pane.is_exited()
+        && let Some(before) = std::fs::read(live_screens_dir(&d.home).join(&id)).ok().filter(|b| !b.is_empty())
+    {
+        pane.feed(&without_restart_marks(&before));
+        // Back on the normal screen (it may have been saved with a full-screen program up),
+        // and a line between then and now.
+        pane.feed(RESTART_MARK);
     }
     // A shell's `cd` shows at once rather than at the next look (the sidebar files it by folder).
     let asked = d.asked.clone();
@@ -2274,12 +2287,12 @@ fn local_spec(
     private_settings(id, &mut wired_args);
     // Its program's own folder on its PATH, last: a Node CLI's `#!/usr/bin/env node` finds the
     // node installed next to it (nvm, fnm, Volta), when the PATH dino has doesn't.
-    if l.agent_id != "shell" {
-        if let Some(dir) = Path::new(&l.program).parent().filter(|d| d.is_absolute()) {
-            let path = env.get("PATH").cloned().or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
-            if !std::env::split_paths(&path).any(|p| p == dir) {
-                env.insert("PATH".into(), if path.is_empty() { dir.display().to_string() } else { format!("{path}:{}", dir.display()) });
-            }
+    if l.agent_id != "shell"
+        && let Some(dir) = Path::new(&l.program).parent().filter(|d| d.is_absolute())
+    {
+        let path = env.get("PATH").cloned().or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
+        if !std::env::split_paths(&path).any(|p| p == dir) {
+            env.insert("PATH".into(), if path.is_empty() { dir.display().to_string() } else { format!("{path}:{}", dir.display()) });
         }
     }
     (SpawnSpec { program: l.program.clone(), args: wired_args, cwd: Some(cwd.clone()), env }, cwd, server, reach)
@@ -2837,7 +2850,7 @@ pub(crate) fn question_answered(s: &Session, agent: &str, what: &str, nth: u64, 
     let last = *s.last_write.lock().unwrap();
     // Not drawn yet (the hook comes just before the dialog), unless it was missed: answered
     // between two looks.
-    if !a.shown && (a.at.elapsed() < std::time::Duration::from_secs(1) || !last.is_some_and(|t| t > a.at)) {
+    if !a.shown && (a.at.elapsed() < std::time::Duration::from_secs(1) || last.is_none_or(|t| t <= a.at)) {
         return Answer::Waiting;
     }
     let gone = *a.gone.get_or_insert_with(Instant::now);
@@ -3853,10 +3866,10 @@ fn watch_shells(d: &Daemon) {
         // named for the shell until it execs the command, which keeps its pid. Another name is
         // another program, looked at again then, not at the next recheck.
         let fg_name = fg.and_then(dino_core::procinfo::name);
-        if let Some(fg) = fg {
-            if follow_tmux(&s, fg, &fg_name) {
-                continue;
-            }
+        if let Some(fg) = fg
+            && follow_tmux(&s, fg, &fg_name)
+        {
+            continue;
         }
         // At its prompt in another folder: what an agent typed next gets is that folder's.
         if fg.is_none() && SHELL_FOLDERS.lock().unwrap().as_ref().and_then(|f| f.get(&s.id)) != Some(&shell_folder(&s)) {
@@ -3900,20 +3913,20 @@ fn watch_shells(d: &Daemon) {
         // Settings → Agents and Keep as Terminal can leave it a plain program.
         let mut found = if typed::followed(&settings, &s.id) { found::inside(fg) } else { None };
         // Asking the user (a permission or trust dialog): its own status only says busy.
-        if let Some(f) = found.as_mut().filter(|f| ["claude", "codex"].contains(&f.agent.as_str()) || agent(&f.agent).is_some_and(|a| a.asks_on_screen())) {
-            if found::asking(&f.agent, &s.pane.text(0)) {
-                f.status = Some("needs".into());
-            }
+        if let Some(f) = found.as_mut().filter(|f| ["claude", "codex"].contains(&f.agent.as_str()) || agent(&f.agent).is_some_and(|a| a.asks_on_screen()))
+            && found::asking(&f.agent, &s.pane.text(0))
+        {
+            f.status = Some("needs".into());
         }
         let mut i = s.inside.lock().unwrap();
         let before = i.before.take();
         let resuming = i.resuming.filter(|(until, _)| Instant::now() < *until);
         // While dino starts it again, the process quitting, or what the shell runs before the line
         // is typed, isn't it.
-        if let Some((_, quitting)) = resuming {
-            if found.as_ref().is_none_or(|f| f.pid == quitting) {
-                found = i.found.clone();
-            }
+        if let Some((_, quitting)) = resuming
+            && found.as_ref().is_none_or(|f| f.pid == quitting)
+        {
+            found = i.found.clone();
         }
         let back = found.as_ref().is_some_and(|f| f.pid.is_some());
         // Not the agent it had: that one exited, and another program started between two looks.
@@ -4462,10 +4475,10 @@ fn default_branch(main: &worktree::Worktree) -> String {
 
 /// A worktree's git summary, read again when older than a few seconds.
 fn summary(d: &Daemon, path: &str, branch: Option<&str>, base: &str) -> Option<worktree::Summary> {
-    if let Some(k) = d.summaries.lock().unwrap().get(path) {
-        if k.at.elapsed() < gitstate::FRESH {
-            return k.summary.clone();
-        }
+    if let Some(k) = d.summaries.lock().unwrap().get(path)
+        && k.at.elapsed() < gitstate::FRESH
+    {
+        return k.summary.clone();
     }
     let s = worktree::summary(Path::new(path), branch, base).ok();
     d.summaries.lock().unwrap().insert(path.to_string(), gitstate::Known::unstamped(s.clone()));
@@ -4646,7 +4659,9 @@ fn changes(d: &Daemon, id: &str) -> anyhow::Result<Response> {
 
 /// Where `id`'s changes are and what they're compared with: (checkout, base, base in words).
 /// Not in a repo: its cwd and why.
-fn changes_base(d: &Daemon, id: &str) -> anyhow::Result<Result<(PathBuf, String, String), (PathBuf, String)>> {
+type ChangesBase = Result<(PathBuf, String, String), (PathBuf, String)>;
+
+fn changes_base(d: &Daemon, id: &str) -> anyhow::Result<ChangesBase> {
     let cwd = local_session(d, id)?.cwd.clone();
     Ok(match session_worktree(d, &cwd) {
         Some(w) => Ok((w.path, w.base, "where the worktree started".to_string())),

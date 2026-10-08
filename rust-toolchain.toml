@@ -1,0 +1,8 @@
+# The toolchain CI builds, tests and lints with, which rustup picks in this checkout. Dependabot
+# moves it to each new stable. The oldest Rust dino builds with is Cargo.toml's rust-version, which
+# CI's msrv job checks. cloud/rust-toolchain.toml and cloud/crates/server/rust-toolchain.toml name
+# the same version.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

@@ -22,12 +22,16 @@ updates:
       cloud-cargo:
         update-types: [minor, patch]
 
+  # The three rust-toolchain.toml files name one version, so they move in one pull request.
   - package-ecosystem: rust-toolchain
-    directory: /cloud
+    directories: [/, /cloud, /cloud/crates/server]
     schedule:
       interval: weekly
     cooldown:
       default-days: 7
+    groups:
+      rust-toolchain:
+        patterns: ["*"]
 
   - package-ecosystem: docker
     directory: /cloud

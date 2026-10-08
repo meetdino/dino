@@ -81,7 +81,9 @@ enum Env {
 
 /// Environments read so far, by pid, start time and name: an environment never changes, and a
 /// process that execs another program has a new name, and maybe one that can be read.
-static READ: Mutex<Option<HashMap<(u32, u64, String), Env>>> = Mutex::new(None);
+static READ: Mutex<Option<HashMap<EnvKey, Env>>> = Mutex::new(None);
+/// A process's pid, start time and name.
+type EnvKey = (u32, u64, String);
 
 /// Every process this user can see, and what each one's environment says, for the dino whose
 /// folder is `home`: its sessions are those whose tags name it.
@@ -124,9 +126,9 @@ impl Look {
     }
 
     fn sid(&mut self, pid: u32) -> Option<u32> {
-        if !self.sids.contains_key(&pid) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.sids.entry(pid) {
             let sid = procinfo::session_of(pid)?;
-            self.sids.insert(pid, sid);
+            e.insert(sid);
         }
         self.sids.get(&pid).copied()
     }
@@ -427,7 +429,7 @@ fn leftovers(look: &Look, known: &[PathBuf]) -> Vec<(Leftover, u64)> {
 /// found, which started at `started_us`: that process and everything under it.
 pub(crate) fn stop_leftover(home: &Path, pid: u32, started_us: u64) -> Option<std::thread::JoinHandle<()>> {
     let look = look(home);
-    if !look.procs.get(&pid).is_some_and(|p| p.started_us == started_us) {
+    if look.procs.get(&pid).is_none_or(|p| p.started_us != started_us) {
         return None;
     }
     let under = |l: &Look, top: u32| {

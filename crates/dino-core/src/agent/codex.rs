@@ -218,7 +218,8 @@ fn is_id(a: &str) -> bool {
 }
 
 /// Each Codex process's open conversation: when it started, the descriptor, the file.
-static HELD: std::sync::Mutex<Option<std::collections::HashMap<u32, (u64, i32, String)>>> = std::sync::Mutex::new(None);
+static HELD: std::sync::Mutex<Option<std::collections::HashMap<u32, Held>>> = std::sync::Mutex::new(None);
+type Held = (u64, i32, String);
 
 /// The provider's header that carries the proxy's secret, from the environment (`keyed_urls`).
 fn key_header() -> String {
@@ -704,7 +705,7 @@ impl Agent for Codex {
     fn recent(&self, leave_out: &dyn Fn(&str, u64) -> bool) -> Vec<FoundSession> {
         let titles = history::codex_titles();
         let mut rollouts: Vec<(u64, PathBuf)> = history::codex_rollouts().into_iter().map(|p| (history::modified(&p), p)).filter(|(t, _)| *t > 0).collect();
-        rollouts.sort_by(|a, b| b.0.cmp(&a.0));
+        rollouts.sort_by_key(|r| std::cmp::Reverse(r.0));
         let mut seen = std::collections::HashSet::new();
         let mut out = vec![];
         for (updated, p) in rollouts {

@@ -1,3 +1,5 @@
+# Vercel builds the server from this directory (cloud/vercel.json's root), so it reads this file,
+# not cloud/rust-toolchain.toml. Keep the two, and the root rust-toolchain.toml, on one version.
 [toolchain]
-channel = "1.94.0"
+channel = "1.99.0"
 profile = "minimal"

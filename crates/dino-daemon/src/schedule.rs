@@ -56,6 +56,12 @@ const COMMENT_KEEP: usize = 6000;
 /// switch) is one run.
 pub(crate) const SETTLE: Duration = Duration::from_secs(3);
 
+/// A session followed for triggers: whether it was busy, since when it has looked done, and its
+/// model calls when its last turn ended.
+type Turn = (bool, Option<Instant>, u64);
+/// A command's exit code and output, once it's in.
+type CommandResult = Arc<Mutex<Option<(Option<i32>, String)>>>;
+
 #[derive(Default)]
 pub(crate) struct Scheduler {
     tasks: Mutex<Vec<ScheduledTask>>,
@@ -67,7 +73,7 @@ pub(crate) struct Scheduler {
     live: Mutex<HashMap<String, Live>>,
     /// Sessions followed for "after a session finishes" triggers: whether it was busy, since when
     /// it has looked done, and its model calls when its last turn ended.
-    turns: Mutex<HashMap<String, (bool, Option<Instant>, u64)>>,
+    turns: Mutex<HashMap<String, Turn>>,
     pub(crate) triggers: triggers::Triggers,
 }
 
@@ -84,7 +90,7 @@ struct Live {
     /// Followed again after dinod restarted: the call counts started over.
     restored: bool,
     /// A command's result, once it's in.
-    command: Option<Arc<Mutex<Option<(Option<i32>, String)>>>>,
+    command: Option<CommandResult>,
     event: Option<Event>,
 }
 
@@ -685,7 +691,7 @@ fn still_going(d: &Daemon, t: &ScheduledTask) -> Option<String> {
 struct Started {
     sessions: Vec<String>,
     deliver: Option<String>,
-    command: Option<Arc<Mutex<Option<(Option<i32>, String)>>>>,
+    command: Option<CommandResult>,
 }
 
 /// The placeholders a run fills: its event's, and a few of its own.

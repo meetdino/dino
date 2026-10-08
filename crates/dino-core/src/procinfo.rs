@@ -124,7 +124,7 @@ pub fn process(pid: u32) -> Option<Proc> {
 /// not a zombie waiting for its parent.
 #[cfg(target_os = "macos")]
 pub fn alive(pid: u32, started_us: u64) -> bool {
-    bsdinfo(pid).is_some_and(|i| i.pbi_start_tvsec * 1_000_000 + i.pbi_start_tvusec == started_us && i.pbi_status != libc::SZOMB as u32)
+    bsdinfo(pid).is_some_and(|i| i.pbi_start_tvsec * 1_000_000 + i.pbi_start_tvusec == started_us && i.pbi_status != libc::SZOMB)
 }
 
 /// Processes by pid, as [`processes`] lists them.
