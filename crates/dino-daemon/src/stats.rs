@@ -46,12 +46,13 @@ pub(crate) fn seed(d: &Daemon, id: &str, before: Option<&str>, started_at: u64, 
     let guard = store().lock().unwrap();
     let Some(store) = guard.as_ref() else { return };
     let since_ms = (started_at as i64).saturating_mul(1000);
-    match store.session_routes(id, before, since_ms, conversation.filter(|c| !c.is_empty())) {
-        Ok(routes) => {
-            let routes: Vec<(String, dino_proxy::Usage)> =
-                routes.into_iter().map(|(route, [input, cache_read, cache_write, output])| (route, dino_proxy::Usage { input, cache_read, cache_write, output })).collect();
+    let conversation = conversation.filter(|c| !c.is_empty());
+    let usage = |[input, cache_read, cache_write, output]: [u64; 4]| dino_proxy::Usage { input, cache_read, cache_write, output };
+    match store.session_routes(id, before, since_ms, conversation).and_then(|r| Ok((r, store.session_subagents(id, before, since_ms, conversation)?))) {
+        Ok((routes, subagents)) => {
+            let routes: Vec<(String, dino_proxy::Usage)> = routes.into_iter().map(|(route, t)| (route, usage(t))).collect();
             if !routes.is_empty() {
-                d.proxy.stats.seed(id, &routes);
+                d.proxy.stats.seed(id, &routes, &usage(subagents));
             }
         }
         Err(e) => eprintln!("dinod: couldn't read {id}'s usage so far: {e}"),
@@ -82,7 +83,9 @@ pub(crate) fn flush(d: &Daemon) {
                 at_ms: c.at_ms,
                 session: c.session,
                 agent,
-                conversation,
+                // The call's own when it says (a background job or a `claude -p` in the session
+                // is another conversation), else the session's.
+                conversation: c.conversation.or(conversation),
                 cwd,
                 route: c.route,
                 model: c.model,
@@ -99,6 +102,8 @@ pub(crate) fn flush(d: &Daemon) {
                 },
                 fallback: c.fallback,
                 cost: c.cost,
+                subagent: c.subagent.is_some(),
+                answer: c.answer,
             }
         })
         .collect();

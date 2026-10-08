@@ -3012,6 +3012,8 @@ fn state(d: &Daemon) -> Response {
                 input_tokens: st.usage.total_input(),
                 output_tokens: st.usage.output,
                 cache_read_tokens: st.usage.cache_read,
+                subagent_input_tokens: st.subagent_usage.total_input(),
+                subagent_output_tokens: st.subagent_usage.output,
                 last_model: st.last_model,
                 tier: st.tier,
                 activity,

@@ -2,8 +2,12 @@
 //! which route, and how fast. Two sources feed it. dino's proxy records every call it carries
 //! (`Call`, written by dinod in batches); agents' own records (`Used`, read from their
 //! transcripts by each `Agent::usage`) cover what didn't go through the proxy: agents dino doesn't
-//! route, agents run outside dino, and everything from before dino. A conversation the proxy
-//! carried isn't counted again from its transcript (see `report`).
+//! route, agents run outside dino, and everything from before dino. An answer the proxy carried
+//! isn't counted again from its transcript (see `report`): Claude Code's calls say their answer's
+//! id, which its transcript keeps too; for other agents, answers in the time the proxy carried
+//! their conversation are taken as its. Claude Code's calls also say their conversation and their
+//! subagent, so a report splits tokens into the conversation's own, its subagents', and the side
+//! requests its transcript doesn't keep (titles, compaction, auto mode's checks).
 //!
 //! It lives in `stats.db` in dino's config folder, is never synced, and can be cleared.
 
@@ -81,6 +85,12 @@ pub struct Call {
     pub fallback: Option<String>,
     /// What the route itself said the call cost (OpenRouter's `usage.cost`), in its currency (USD).
     pub cost: Option<f64>,
+    /// Made by one of the conversation's subagents (Claude's Agent tool), as the call said.
+    #[serde(default)]
+    pub subagent: bool,
+    /// The answer's id as the agent's own record keeps it (`Used::answer`): Claude Code's calls.
+    #[serde(default)]
+    pub answer: Option<String>,
 }
 
 /// One model answer as an agent's own record has it.
@@ -101,6 +111,11 @@ pub struct Used {
     /// The record keeps no time per answer, so `at_ms` is when the conversation was last saved: a
     /// guess. It counts toward totals, never toward a day or an hour (Cursor, CodeWhale).
     pub undated: bool,
+    /// The answer's id as dino's proxy also sees it (`Call::answer`), for agents whose record
+    /// keeps it (Claude): with it, an answer the proxy carried is known to be this one exactly.
+    pub answer: Option<String>,
+    /// A subagent's answer (Claude's Agent tool), in its parent conversation.
+    pub subagent: bool,
 }
 
 /// What has been read of agents' records already, so each look reads only what's new: byte

@@ -501,6 +501,7 @@ fn usage_in(text: &str, from: u64, file: &str, conversation: &str, cwd: &str, mo
             cache_read: history::count(&u["inputCacheRead"]),
             cache_write: history::count(&u["inputCacheCreation"]),
             output: history::count(&u["output"]),
+            ..Default::default()
         });
     }
     out

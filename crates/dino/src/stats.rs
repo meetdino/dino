@@ -29,7 +29,7 @@ times ISO dates or ms.
 JSON (schema 1). Tokens are objects {input, cache_read, cache_write, output, total}. Times in ms
 since the epoch, durations in ms, dates local (YYYY-MM-DD). Absent or null: not known.
   schema, range (\"7d\"|\"30d\"|\"all\"), from_ms, to_ms, utc_offset (s)
-  totals    {tokens, requests, errors, limit_hits, sessions, active_days, days, favorite_model,
+  totals    {tokens, parts, requests, errors, limit_hits, sessions, active_days, days, favorite_model,
              longest_session {agent, conversation, cwd, ms, started_ms}, peak_hour (0-23),
              most_active_day {date, tokens, requests}, cost, priced_requests}
   streaks   {current, longest, longest_from}
@@ -38,8 +38,12 @@ since the epoch, durations in ms, dates local (YYYY-MM-DD). Absent or null: not 
   hours     [{hour, requests, tokens}] x 24
   models    [{model, tokens, requests, share (0-1), agents}]
   daily_models [{date, model, tokens}]: the top 5 models and \"Other\", every day of the range
-  agents    [{agent, tokens, requests, sessions, active_days, proxied, recorded, last_ms, top_model,
-             undated}]: undated answers (Cursor, CodeWhale keep no time per answer) are in the
+  parts     {main, subagents, side}, each {tokens, requests}, adding up to the whole: subagents are
+             Claude's Agent tool's; side requests are calls an agent makes that its own record
+             doesn't keep (Claude Code's titles, compaction, auto mode checks), seen only by
+             dino's proxy, so only for sessions it carried
+  agents    [{agent, tokens, parts, requests, sessions, active_days, proxied, recorded, last_ms,
+             top_model, undated}]: undated answers (Cursor, CodeWhale keep no time per answer) are in the
              totals but on no day or hour: not in heatmap, days, streaks, hours, daily_models
   projects  [{name, path, tokens, requests, sessions, agents, last_ms}]
   routes    [{route, label, kind, tokens, requests, errors, limit_hits, last_limit_ms, cost,
@@ -47,6 +51,8 @@ since the epoch, durations in ms, dates local (YYYY-MM-DD). Absent or null: not 
              account_limit}]
   speed     [{route, label, model, requests, ttft_p50_ms, ttft_p90_ms, tps_p50, tps_p90}]
   sources   {proxied, recorded, deduplicated}
+  sessions  the 50 with the most tokens: [{agent, conversation, session, cwd, first_ms, last_ms,
+             tokens, requests, parts}]
 Cost is only what a route itself reported (OpenRouter's usage.cost and key spend); dino keeps no
 price list, so elsewhere it's null.";
 
@@ -236,6 +242,17 @@ fn overview(p: &mut Printer, r: &Report) {
         ("Active days", format!("{} of {}", t.active_days, t.days), t.active_days.to_string()),
         ("Streak", format!("{} days now, {} at most", r.streaks.current, r.streaks.longest), r.streaks.current.to_string()),
     ];
+    // Of the tokens: what subagents used, and the calls agents make that their records don't keep.
+    let share = |part: &dino_core::usage::report::Part| {
+        format!("{}  {}", tokens(part.tokens.total), out::paint(&format!("{} requests, {:.0}% of the tokens", part.requests, part.tokens.total as f64 * 100.0 / k.total.max(1) as f64), Paint::Dim))
+    };
+    if t.parts.subagents.requests > 0 {
+        rows.insert(1, ("Subagents", share(&t.parts.subagents), t.parts.subagents.tokens.total.to_string()));
+    }
+    if t.parts.side.requests > 0 {
+        let at = if t.parts.subagents.requests > 0 { 2 } else { 1 };
+        rows.insert(at, ("Side requests", share(&t.parts.side), t.parts.side.tokens.total.to_string()));
+    }
     if let Some(m) = &t.favorite_model {
         rows.push(("Favorite model", m.clone(), m.clone()));
     }

@@ -99,6 +99,9 @@ struct RowFacts: Equatable {
         var contextLimit: UInt64?
         var tokensIn: UInt64 = 0
         var tokensOut: UInt64 = 0
+        /// Of those, its subagents'.
+        var subagentIn: UInt64 = 0
+        var subagentOut: UInt64 = 0
         var requests: UInt64 = 0
         var routes: [RouteUsage] = []
         var fallback: String?
@@ -138,6 +141,9 @@ struct RowFacts: Equatable {
             use.append("\(i.requests) request\(i.requests == 1 ? "" : "s")")
         }
         if !use.isEmpty { lines.append(use.joined(separator: " · ")) }
+        if i.subagentIn + i.subagentOut > 0 {
+            lines.append("Subagents: ↑\(tokens(i.subagentIn)) in · ↓\(tokens(i.subagentOut)) out, of that")
+        }
         if i.routes.count > 1 {
             lines += i.routes.map { "\($0.name): ↑\(tokens($0.input_tokens)) in · ↓\(tokens($0.output_tokens)) out" }
         }
@@ -358,6 +364,8 @@ extension DinoModel {
         }
         input.tokensIn = s.input_tokens
         input.tokensOut = s.output_tokens
+        input.subagentIn = s.subagent_input_tokens ?? 0
+        input.subagentOut = s.subagent_output_tokens ?? 0
         input.requests = s.requests
         input.routes = s.usage_by_route ?? []
         input.fallback = fallback
