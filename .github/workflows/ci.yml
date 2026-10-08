@@ -61,7 +61,13 @@ jobs:
           changed "^app/$ci" app
           # cloud/ builds crates/dino-sync, which takes its version from the root Cargo.toml.
           changed "^cloud/|^crates/dino-sync/|^Cargo\.toml\$$ci" cloud
+      # lint.sh checks the Rust formatting too, cloud/'s included. Stable's rustfmt formats as
+      # cloud/rust-toolchain.toml's does (rustfmt keeps a style edition's output stable), so this
+      # job doesn't install that toolchain.
+      - run: rustup toolchain install stable --profile minimal --component rustfmt --no-self-update
       - name: Tree checks
+        env:
+          RUSTUP_TOOLCHAIN: stable
         run: scripts/lint.sh
 
   rust:

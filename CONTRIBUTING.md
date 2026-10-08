@@ -84,15 +84,15 @@ scripts/check.sh           # builds and tests the workspace and the app
 ```
 
 It runs `cargo build`, `cargo test --workspace` and the app's `swift build` (the dev profile, quick
-to build; releases build the shipping one), refuses code marked `TEST-ONLY` (`scripts/lint.sh`),
-and checks that `cloud/Cargo.lock` is current.
+to build; releases build the shipping one), refuses code marked `TEST-ONLY` and Rust code
+`cargo fmt` would change (`scripts/lint.sh`), and checks that `cloud/Cargo.lock` is current.
 
 CI runs on every pull request, from a fork too (a first-time contributor's waits for a
 maintainer to approve the run). Each of these has to pass before it merges:
 
 | Check | What it runs |
 | --- | --- |
-| `changes` | `scripts/lint.sh`, and which of the checks below the change needs |
+| `changes` | `scripts/lint.sh`, `cargo fmt --check` among it, and which of the checks below the change needs |
 | `rust` | `cargo build` and `cargo test` of the workspace, on macOS |
 | `clippy` | `cargo clippy` of the workspace: its errors fail, its warnings don't |
 | `app` | the app's `swift build -c release`, on macOS |
@@ -102,8 +102,16 @@ maintainer to approve the run). Each of these has to pass before it merges:
 
 A check the change doesn't need is skipped, which counts as passed: a change to `app/` alone
 doesn't build `cloud/`. CodeQL scans the Rust and the workflows of every pull request, and the
-Swift on main. The code isn't formatted with `cargo fmt`, so don't run it over files you change:
-it would bury your change in reformatting.
+Swift on main.
+
+Format the Rust code with `cargo fmt --all` (and in `cloud/`, a workspace of its own) before you
+commit; `rustfmt.toml` holds the style, and CI fails code it would change. The whole tree was
+reformatted once, when it took up rustfmt; to have `git blame` look past that commit to the change
+that wrote a line, run once in your clone:
+
+```sh
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
 
 dino is a terminal first, so speed is a feature. If your change touches the app or `dinod`, also
 run the performance budget once:
