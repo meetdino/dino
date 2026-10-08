@@ -1,10 +1,20 @@
 //! What `pgrep` and `lsof` would say about local processes, asked of the kernel directly: each of
 //! those takes ~50 ms to start, and discovery asks every few seconds.
 
+#[cfg(target_os = "macos")]
 use std::ffi::{c_void, CStr};
+#[cfg(target_os = "macos")]
 use std::mem::{size_of, size_of_val};
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux::{all_pids, name_of};
+#[cfg(target_os = "linux")]
+pub use linux::{alive, args_and_env, children_of, cwd_of, exe_of, now_ns, open_fds, open_file, parent_of, process, rusage, started};
+
 /// Every pid on the system, like `ps -A`.
+#[cfg(target_os = "macos")]
 fn all_pids() -> Vec<libc::c_int> {
     let mut pids = vec![0 as libc::c_int; 4096];
     loop {
@@ -24,6 +34,7 @@ fn all_pids() -> Vec<libc::c_int> {
     pids
 }
 
+#[cfg(target_os = "macos")]
 fn name_of(pid: libc::c_int, buf: &mut [u8; 64]) -> Option<&[u8]> {
     let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
     (n > 0).then(|| &buf[..n as usize])
@@ -82,6 +93,7 @@ pub struct Proc {
     pub name: String,
 }
 
+#[cfg(target_os = "macos")]
 fn bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
@@ -90,9 +102,11 @@ fn bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
 }
 
 /// `PROC_FLAG_CONTROLT` from sys/proc_info.h: the process has a controlling terminal.
+#[cfg(target_os = "macos")]
 const PROC_FLAG_CONTROLT: u32 = 0x80;
 
 /// One process, as [`processes`] lists it; `None` once it's gone.
+#[cfg(target_os = "macos")]
 pub fn process(pid: u32) -> Option<Proc> {
     let info = bsdinfo(pid)?;
     let name = unsafe { CStr::from_ptr(info.pbi_name.as_ptr()) }.to_string_lossy();
@@ -108,6 +122,7 @@ pub fn process(pid: u32) -> Option<Proc> {
 
 /// Process `pid` is still the one that started at `started_us` (see [`Proc`]), and hasn't ended:
 /// not a zombie waiting for its parent.
+#[cfg(target_os = "macos")]
 pub fn alive(pid: u32, started_us: u64) -> bool {
     bsdinfo(pid).is_some_and(|i| i.pbi_start_tvsec * 1_000_000 + i.pbi_start_tvusec == started_us && i.pbi_status != libc::SZOMB as u32)
 }
@@ -121,6 +136,7 @@ pub fn processes() -> Procs {
 }
 
 /// When a process started, in seconds since the epoch, like `ps -o lstart`.
+#[cfg(target_os = "macos")]
 pub fn started(pid: u32) -> Option<u64> {
     bsdinfo(pid).map(|i| i.pbi_start_tvsec)
 }
@@ -134,6 +150,7 @@ pub fn session_of(pid: u32) -> Option<u32> {
 
 /// A process's parent, like `ps -o ppid`. Another user's process (the root-owned `login` that
 /// Terminal, iTerm2 and Ghostty put above the shell) gives no full BSD info, only the short one.
+#[cfg(target_os = "macos")]
 pub fn parent_of(pid: u32) -> Option<u32> {
     bsdinfo(pid).map(|i| i.pbi_ppid).or_else(|| {
         let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
@@ -144,6 +161,7 @@ pub fn parent_of(pid: u32) -> Option<u32> {
 }
 
 /// The program a process runs, by its full path (`node` for a Node CLI), like lsof's `txt` entry.
+#[cfg(target_os = "macos")]
 pub fn exe_of(pid: u32) -> Option<String> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let n = unsafe { libc::proc_pidpath(pid as libc::c_int, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
@@ -153,6 +171,7 @@ pub fn exe_of(pid: u32) -> Option<String> {
 /// A process's arguments (its own name first) and environment, as the kernel keeps them, like
 /// `ps -o args` and `ps -E`. A program that renames itself (a Node CLI setting its title) has
 /// written over its arguments; its environment stays as it started.
+#[cfg(target_os = "macos")]
 pub fn args_and_env(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut size: libc::size_t = 0;
@@ -168,6 +187,7 @@ pub fn args_and_env(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
 }
 
 /// `KERN_PROCARGS2`'s layout: argc, the executable's path, padding, argv, then the environment.
+#[cfg(target_os = "macos")]
 fn procargs(buf: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
     let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?).max(0) as usize;
     let rest = &buf[4..];
@@ -217,6 +237,7 @@ pub struct Rusage {
 }
 
 /// A process's cost now; none once it's gone (or it isn't this user's).
+#[cfg(target_os = "macos")]
 pub fn rusage(pid: u32) -> Option<Rusage> {
     let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
     let got = unsafe { libc::proc_pid_rusage(pid as libc::c_int, libc::RUSAGE_INFO_V4, &mut info as *mut _ as *mut libc::rusage_info_t) };
@@ -230,6 +251,7 @@ pub fn rusage(pid: u32) -> Option<Rusage> {
 
 /// The kernel's clock (`mach_absolute_time`, stopped while the Mac sleeps) in nanoseconds: what
 /// `Rusage::started_ns` is on.
+#[cfg(target_os = "macos")]
 pub fn now_ns() -> u64 {
     unsafe extern "C" {
         fn mach_absolute_time() -> u64;
@@ -238,6 +260,7 @@ pub fn now_ns() -> u64 {
 }
 
 /// `proc_pid_rusage` counts time in the kernel's ticks: nanoseconds on Intel, 1/24 µs on Apple silicon.
+#[cfg(target_os = "macos")]
 fn ticks_to_ns(ticks: u64) -> u64 {
     static TIMEBASE: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
     /// `mach_timebase_info_data_t`; libc's is deprecated in favour of a crate dino doesn't use.
@@ -260,6 +283,7 @@ fn ticks_to_ns(ticks: u64) -> u64 {
 }
 
 /// A process's children, by their parent: like `pgrep -P`.
+#[cfg(target_os = "macos")]
 pub fn children_of(pid: u32) -> Vec<u32> {
     let mut kids = vec![0 as libc::c_int; 64];
     loop {
@@ -298,6 +322,7 @@ pub fn tree(root: u32) -> Vec<(u32, u32)> {
 }
 
 /// A process's working directory, like lsof's `cwd` entry.
+#[cfg(target_os = "macos")]
 pub fn cwd_of(pid: u32) -> Option<String> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
     let size = size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
@@ -306,12 +331,14 @@ pub fn cwd_of(pid: u32) -> Option<String> {
 }
 
 /// `struct vnode_fdinfowithpath` from sys/proc_info.h; libc has only the path half.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct VnodeFdInfoWithPath {
     pfi: [u64; 3],
     pvip: libc::vnode_info_path,
 }
 
+#[cfg(target_os = "macos")]
 const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
 
 /// Paths of the files a process has open, like lsof's `n` entries for its descriptors.
@@ -320,6 +347,7 @@ pub fn open_files(pid: u32) -> Vec<String> {
 }
 
 /// The path of the file open as descriptor `fd` of process `pid`, if that's a file.
+#[cfg(target_os = "macos")]
 pub fn open_file(pid: u32, fd: i32) -> Option<String> {
     let mut info: VnodeFdInfoWithPath = unsafe { std::mem::zeroed() };
     let size = size_of::<VnodeFdInfoWithPath>() as libc::c_int;
@@ -328,6 +356,7 @@ pub fn open_file(pid: u32, fd: i32) -> Option<String> {
 }
 
 /// The files a process has open, with their descriptors.
+#[cfg(target_os = "macos")]
 pub fn open_fds(pid: u32) -> Vec<(i32, String)> {
     let pid = pid as libc::c_int;
     let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
@@ -342,6 +371,7 @@ pub fn open_fds(pid: u32) -> Vec<(i32, String)> {
     fds.iter().filter(|f| f.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32).filter_map(|f| Some((f.proc_fd, open_file(pid as u32, f.proc_fd)?))).collect()
 }
 
+#[cfg(target_os = "macos")]
 fn path(v: &libc::vnode_info_path) -> Option<String> {
     let bytes = unsafe { std::slice::from_raw_parts(v.vip_path.as_ptr() as *const u8, size_of_val(&v.vip_path)) };
     let s = CStr::from_bytes_until_nul(bytes).ok()?.to_str().ok()?;
@@ -432,6 +462,11 @@ mod tests {
         assert!(procs[&child.id()].started_us >= me.started_us);
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_procargs() {
         // As the kernel lays out `dino daemon`'s arguments.
         let mut buf = 2i32.to_ne_bytes().to_vec();
         buf.extend(b"/x/dino\0\0\0\0/x/dino\0daemon\0HOME=/h\0DINO_HOME=/tmp/d\0\0\0");

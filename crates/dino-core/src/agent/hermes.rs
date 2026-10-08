@@ -125,6 +125,9 @@ fn same_dir(a: &str, b: &Path) -> bool {
 /// Process `pid` was pointed at dino's free tier by its environment, which (unlike a Node agent's)
 /// its process still shows before its first request is done.
 fn free_env(pid: u32) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    return crate::procinfo::args_and_env(pid).is_some_and(|(_, env)| env.iter().any(|w| w.starts_with("CUSTOM_BASE_URL=http://127.0.0.1:") && w.contains("/free")));
+    #[cfg(target_os = "macos")]
     found::run("ps", &["eww", "-o", "command=", "-p", &pid.to_string()])
         .is_some_and(|e| e.split_whitespace().any(|w| w.starts_with("CUSTOM_BASE_URL=http://127.0.0.1:") && w.contains("/free")))
 }

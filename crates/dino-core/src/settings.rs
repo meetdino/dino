@@ -585,12 +585,18 @@ pub struct Managed {
     pub from: std::collections::BTreeMap<String, PathBuf>,
 }
 
+/// Where an admin puts dino's managed settings.
+#[cfg(target_os = "macos")]
+const MANAGED_PATH: &str = "/Library/Application Support/Dino/managed-settings.json";
+#[cfg(not(target_os = "macos"))]
+const MANAGED_PATH: &str = "/etc/dino/managed-settings.json";
+
 impl Managed {
     /// Only an admin can write it. `DINO_MANAGED_SETTINGS` names another file (for tests).
     pub fn path() -> PathBuf {
         std::env::var_os("DINO_MANAGED_SETTINGS")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/Library/Application Support/Dino/managed-settings.json"))
+            .unwrap_or_else(|| PathBuf::from(MANAGED_PATH))
     }
 
     pub fn load() -> Self {

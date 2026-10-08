@@ -67,7 +67,6 @@ jobs:
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    # dino-core calls proc_pidinfo, so the workspace only builds on macOS.
     runs-on: macos-26
     timeout-minutes: 45
     permissions:
@@ -81,6 +80,31 @@ jobs:
         with:
           # Pull requests read main's cache and don't write their own: the cache stays small and
           # what a fork builds never lands in what main uses.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
+
+  # The headless dinod and CLI on Linux (crates/ only; the app is macOS's). x86_64 and arm64.
+  linux:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rusqlite links the system SQLite; the tests run git and tmux.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libsqlite3-dev tmux
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --workspace --all-targets --locked
       - run: cargo test --workspace --locked

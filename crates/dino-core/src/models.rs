@@ -84,7 +84,11 @@ pub fn claude_sources() -> Vec<PathBuf> {
     v
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) const CLAUDE_MANAGED: &str = "/Library/Application Support/ClaudeCode/managed-settings.json";
+/// Claude Code's managed settings on Linux.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const CLAUDE_MANAGED: &str = "/etc/claude-code/managed-settings.json";
 
 // ---- Codex ----
 

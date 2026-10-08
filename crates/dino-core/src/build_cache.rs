@@ -29,7 +29,11 @@ pub fn cache_dir() -> PathBuf {
         return config_dir().join("build-cache/sccache");
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    home.join("Library/Caches/dino/sccache")
+    #[cfg(target_os = "macos")]
+    return home.join("Library/Caches/dino/sccache");
+    // `$XDG_CACHE_HOME`, else ~/.cache.
+    #[cfg(not(target_os = "macos"))]
+    return crate::xdg_dir("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache")).join("dino/sccache");
 }
 
 /// The socket dino's sccache server listens on: in `run/` beside dinod's own socket, which

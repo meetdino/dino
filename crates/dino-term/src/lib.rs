@@ -27,6 +27,7 @@ const TERM_GRACE: Duration = Duration::from_secs(2);
 /// The live processes of terminal session `session` (its program runs as the session's leader,
 /// so the session's id is its pid): the program, whatever it started, in any process group,
 /// including those that outlived it. Zombies are left to whoever reaps them.
+#[cfg(target_os = "macos")]
 fn session_members(session: u32) -> Vec<libc::pid_t> {
     let mut pids = vec![0 as libc::pid_t; 4096];
     let n = loop {
@@ -49,6 +50,21 @@ fn session_members(session: u32) -> Vec<libc::pid_t> {
     };
     // A session's id stays taken while any process is in it, so its id names only these.
     pids.into_iter().filter(|&p| p > 0 && unsafe { libc::getsid(p) } == session as libc::pid_t && !zombie(p)).collect()
+}
+
+/// `session_members` on Linux: `/proc`'s processes in the session, zombies (`Z` in their stat) left
+/// out.
+#[cfg(target_os = "linux")]
+fn session_members(session: u32) -> Vec<libc::pid_t> {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return vec![] };
+    let zombie = |pid: libc::pid_t| {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        // `pid (comm) state …`: the state follows the last `)`.
+        stat.rfind(')').and_then(|i| stat[i + 1..].split_whitespace().next()).is_none_or(|s| s == "Z" || s == "X")
+    };
+    dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<libc::pid_t>().ok())
+        .filter(|&p| p > 0 && unsafe { libc::getsid(p) } == session as libc::pid_t && !zombie(p))
+        .collect()
 }
 
 /// Hangup, then SIGTERM, then SIGKILL, each to every process left in the session, waiting up to

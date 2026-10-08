@@ -600,6 +600,11 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
+        // Read once it has run the program: until then (Linux) it shows this test's environment.
+        let since = std::time::Instant::now();
+        while claude_config::of_process(pid).is_none() && since.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert_eq!(claude_config::of_process(pid), Some(config.clone()));
         let uuid = crate::new_uuid();
         std::fs::write(config.join(format!("sessions/{pid}.json")), format!(r#"{{"pid":{pid},"sessionId":"{uuid}","cwd":"/r","kind":"interactive"}}"#)).unwrap();

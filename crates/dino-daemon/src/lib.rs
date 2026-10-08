@@ -26,6 +26,7 @@ use dino_term::{Pane, SpawnSpec};
 
 mod agentlog;
 mod agentserver;
+#[cfg_attr(target_os = "linux", path = "awake_linux.rs")]
 mod awake;
 mod build_cache;
 mod chatgpt;
@@ -37,10 +38,12 @@ mod computer_use;
 mod cost;
 mod fallbacks;
 mod fork;
+#[cfg_attr(target_os = "linux", path = "inotify.rs")]
 mod fsevents;
 mod gitstate;
 mod github;
 mod hidden;
+#[cfg_attr(target_os = "linux", path = "lid_linux.rs")]
 mod lid;
 mod lifecycle;
 mod mode;
@@ -535,7 +538,8 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
         });
     }
     log_exits();
-    let by = LAUNCHD_LABEL.get().map(|l| format!(", launchd's {l}")).unwrap_or_default();
+    let manager = if cfg!(target_os = "macos") { "launchd" } else { "systemd" };
+    let by = LAUNCHD_LABEL.get().map(|l| format!(", {manager}'s {l}")).unwrap_or_default();
     let build = BUILD.get().cloned().flatten().map(|b| format!(" ({b})")).unwrap_or_default();
     eprintln!("{} dinod {}{build} listening on {} (pid {}{by})", stamp(), env!("CARGO_PKG_VERSION"), path.display(), std::process::id());
     for stream in listener.incoming().flatten() {
@@ -711,10 +715,22 @@ fn peer(stream: &UnixStream) -> String {
 
 fn same_user(stream: &UnixStream) -> bool {
     use std::os::fd::AsRawFd;
+    #[cfg(target_os = "macos")]
     let mut uid: libc::uid_t = 0;
+    #[cfg(target_os = "macos")]
     let mut gid: libc::gid_t = 0;
     // SAFETY: a live socket, and two locals to fill in.
+    #[cfg(target_os = "macos")]
     let known = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0;
+    // Linux has no getpeereid: the peer's credentials from SO_PEERCRED.
+    #[cfg(target_os = "linux")]
+    let (known, uid) = {
+        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: a live socket, and a local of the size given.
+        let ok = unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut libc::c_void, &mut len) } == 0;
+        (ok, cred.uid)
+    };
     // SAFETY: no arguments; it can't fail.
     known && uid == unsafe { libc::geteuid() }
 }
@@ -3896,6 +3912,14 @@ fn follow_tmux(s: &Session, fg: u32, fg_name: &Option<String>) -> bool {
     true
 }
 
+/// Linux: the terminal its standard input is, from `/proc` (no `ps` needed).
+#[cfg(target_os = "linux")]
+fn tty_of(pid: u32) -> Option<String> {
+    let t = std::fs::read_link(format!("/proc/{pid}/fd/0")).ok()?.to_str()?.to_string();
+    (t.starts_with("/dev/pts/") || t.starts_with("/dev/tty")).then_some(t)
+}
+
+#[cfg(target_os = "macos")]
 fn tty_of(pid: u32) -> Option<String> {
     let out = std::process::Command::new("ps").args(["-o", "tty=", "-p", &pid.to_string()]).output().ok()?;
     let tty = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -5101,7 +5125,9 @@ mod tests {
     }
 
     fn shell() -> LauncherInfo {
-        LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false }
+        // A shell with a line editor, as macOS's /bin/sh (bash) is; Linux's is often dash, which has none.
+        let program = if cfg!(target_os = "macos") { "/bin/sh" } else { "/bin/bash" };
+        LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: program.into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false }
     }
 
     fn shell_daemon() -> Arc<Daemon> {
@@ -6780,7 +6806,8 @@ while (sysread(STDIN, my $c, 1)) {
         // Another user's directory (root's) is refused, and left as it is.
         // SAFETY: no arguments; it can't fail.
         if unsafe { libc::geteuid() } != 0 {
-            let err = claim_socket(Path::new("/private/tmp/dinod.sock")).unwrap_err();
+            let theirs = if cfg!(target_os = "macos") { "/private/tmp/dinod.sock" } else { "/tmp/dinod.sock" };
+            let err = claim_socket(Path::new(theirs)).unwrap_err();
             assert!(err.to_string().contains("another user"), "{err}");
         }
     }

@@ -22,7 +22,7 @@ impl Layers {
     /// Claude Code's own order: managed settings win, then the project's local and shared
     /// settings, then the user's, in Claude's config folder `config` (see `claude_config`).
     fn for_project(project: &Path, config: &Path) -> Self {
-        Self::new(project, config, Path::new("/Library/Application Support/ClaudeCode"))
+        Self::new(project, config, Path::new(crate::models::CLAUDE_MANAGED).parent().unwrap_or(Path::new("/")))
     }
 
     fn new(project: &Path, config: &Path, managed_dir: &Path) -> Self {

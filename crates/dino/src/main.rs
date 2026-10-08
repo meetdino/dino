@@ -3,13 +3,17 @@ mod ai;
 mod automations;
 mod client;
 mod complete;
+#[cfg(target_os = "macos")]
 mod launchd;
 mod mcp;
 mod out;
+#[cfg(target_os = "macos")]
 mod permissions;
 mod search;
 mod shell;
 mod stats;
+#[cfg(target_os = "linux")]
+mod systemd;
 
 use std::time::Instant;
 
@@ -85,6 +89,20 @@ Setup
   dino ping | stop | daemon | --version
 
 Every command accepts `-h` or `--help` for its usage.";
+
+/// `USAGE` on Linux: macOS's `power` and `permissions` out, the systemd service in.
+#[cfg(target_os = "linux")]
+fn linux_usage() -> String {
+    let mut out = String::new();
+    for l in USAGE.lines().filter(|l| !l.starts_with("  dino power") && !l.starts_with("  dino permissions")) {
+        if l.starts_with("  dino ping") {
+            out.push_str("  dino service install|uninstall|status\n                                    run dinod as a systemd user service\n");
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
 
 const COMMAND_USAGE: &[(&str, &str)] = &[
     ("status", "dino status [--tmux]"),
@@ -186,8 +204,18 @@ fn dino() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("build-cache") => return cmd_build_cache(&cli[1..]),
+        #[cfg(target_os = "macos")]
         Some("permissions") => return permissions::run(&cli[1..]),
+        #[cfg(target_os = "macos")]
         Some("power") => return cmd_power(cli.get(1).map(String::as_str).unwrap_or("status")),
+        // macOS's privacy permissions and `pmset` sleep have no counterpart here yet.
+        #[cfg(not(target_os = "macos"))]
+        Some("permissions" | "power") => {
+            println!("dino {} is macOS-only for now: on Linux there's nothing to check or set up.", cli[0]);
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        Some("service") => return systemd::run(&cli[1..]),
         Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status"), cli.get(2).map(String::as_str)),
         Some("fallback") => return cmd_fallback(&cli[1..]),
         Some("attach") => {
@@ -292,6 +320,9 @@ fn dino() -> anyhow::Result<()> {
         }
         Some(arg) if is_folder(arg) => return cmd_open(arg, &cli[1..]),
         Some("-h" | "--help" | "help") => {
+            #[cfg(target_os = "linux")]
+            println!("{INTRO}\n{}", linux_usage());
+            #[cfg(not(target_os = "linux"))]
             println!("{INTRO}\n{USAGE}");
             return Ok(());
         }
@@ -337,6 +368,17 @@ const HOME_COMMANDS: &[(&str, &str)] = &[
     ("dino status", "show which agents are working and which need you"),
     ("dino found", "list agent sessions started outside dino"),
 ];
+
+/// Open `url` in the browser: `open` on macOS; on Linux `xdg-open`, when there's a desktop to open
+/// it on. Headless, the URL printed beside it is the way.
+pub(crate) fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).status();
+    #[cfg(not(target_os = "macos"))]
+    if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let _ = std::process::Command::new("xdg-open").arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    }
+}
 
 /// Bring the dino app to the front, opening it if it isn't running. False without one installed.
 fn open_app() -> bool {
@@ -675,6 +717,7 @@ fn ls_table(sessions: &[SessionInfo], usage: bool) -> (Vec<Column>, Vec<Vec<Cell
 
 /// `dino power [status|setup|remove]`: what keeps the Mac awake, and keeping agents running with
 /// the lid closed.
+#[cfg(target_os = "macos")]
 fn cmd_power(action: &str) -> anyhow::Result<()> {
     if !matches!(action, "status" | "setup" | "remove") {
         println!("usage: dino power [status|setup|remove]\n\n  status   show what's keeping your Mac awake now: dino, an agent, or another app\n  setup    let dino keep your Mac awake with the lid closed while agents work\n           (asks for an administrator password once; same as Settings → Power)\n  remove   take that permission back");
@@ -1323,7 +1366,7 @@ fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
     }
     let Response::Connect { url } = client::request(&Request::ConnectProvider { provider: provider.into() })? else { return Err(unexpected()) };
     println!("Opening your browser to connect {provider}. If it doesn't open, go to:\n\n  {url}\n");
-    let _ = std::process::Command::new("open").arg(&url).status();
+    open_url(&url);
     let until = Instant::now() + std::time::Duration::from_secs(10 * 60);
     while Instant::now() < until {
         std::thread::sleep(std::time::Duration::from_secs(1));
