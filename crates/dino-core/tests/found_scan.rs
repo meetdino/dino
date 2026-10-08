@@ -20,6 +20,11 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
     let mut lab = Lab::new("matrix");
     // Codex's conversations.
     let [u1, u2, u3, u4, u5, u6] = [1, 2, 3, 4, 5, 6].map(|n| lab.uuid(n));
+    // Node paged in before the clock starts: from a cold disk it takes seconds to start, and every
+    // process started before it would age past MIN_AGE meanwhile.
+    if let Some(node) = &lab.node {
+        std::process::Command::new(node).args(["-e", "0"]).status().unwrap();
+    }
     let t0 = Instant::now();
     let work = lab.dir("any");
     // (pid, agent, conversation): what must be listed.
@@ -83,7 +88,8 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
     let (pi_node, qwen_node) = if let Some(node) = lab.node.clone() {
         let keep = "process.title='pi';setTimeout(()=>{},600000)".to_string();
         let p = lab.spawn(Fake { cwd: Some(dp.clone()), exec: Some((node.clone(), vec!["node".into(), "-e".into(), keep])), ..tty("zsh") });
-        lab.wait_named(p, "node");
+        // Once it runs and has titled itself: only then is it Pi (and on Linux no longer "node").
+        lab.wait_titled(p, "pi");
         want.push((p, "pi", "pi-1".into()));
         let keep = "setTimeout(()=>{},600000)".to_string();
         let q = lab.spawn(Fake { exec: Some((node.clone(), vec!["node".into(), "-e".into(), keep.clone()])), ..tty("zsh") });
@@ -164,8 +170,12 @@ fn lists_exactly_the_agents_a_person_could_take_over() {
     // Younger than MIN_AGE: nothing yet.
     let first = lab.scan();
     // On a loaded Mac the first scan can end after MIN_AGE, having seen some old enough already:
-    // the next one may then list them, as it should.
-    let young = t0.elapsed() < MIN_AGE - Duration::from_millis(300);
+    // the next one may then list them, as it should. Their age as the scan reckons it, from their
+    // start times: on Linux those are up to a second early (the boot time is in whole seconds).
+    let procs = procinfo::processes();
+    let oldest = lab.pids.iter().filter_map(|p| procs.get(p)).map(|p| p.started_us).min().unwrap();
+    let now_us = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as u64;
+    let young = Duration::from_micros(now_us.saturating_sub(oldest)) < MIN_AGE - Duration::from_millis(300);
     if young {
         assert_eq!(lab::ids(&first), vec![], "listed before {MIN_AGE:?}");
     }

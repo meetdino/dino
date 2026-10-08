@@ -180,6 +180,20 @@ impl Lab {
         panic!("{pid} never became {name}");
     }
 
+    /// Waits until `pid` has given itself the title `title` (`process.title`), as a Node program
+    /// does once it runs: until then it's only `node`, nothing says which program it is, and no
+    /// scan could know it. Becoming `node` (exec) is long before that when the disk is slow: Node
+    /// takes seconds to page itself in when it isn't cached and the disk is busy, as after a build.
+    pub fn wait_titled(&self, pid: u32, title: &str) {
+        for _ in 0..3000 {
+            if procinfo::args_and_env(pid).is_some_and(|(args, _)| args.first().is_some_and(|a| a.trim_end() == title)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("{pid} never titled itself {title}");
+    }
+
     pub fn write(&self, path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
