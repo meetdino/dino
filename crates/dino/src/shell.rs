@@ -35,8 +35,23 @@ fn this_dino() -> String {
 pub fn init(shell: Option<&str>) -> anyhow::Result<()> {
     let shell = shell.map(String::from).or_else(current).ok_or_else(|| anyhow::anyhow!("usage: dino init zsh|bash|fish"))?;
     let text = script(&shell).ok_or_else(|| anyhow::anyhow!("dino's shell integration supports zsh, bash and fish, not {shell}"))?;
-    print!("{}", text.replace("__DINO_BIN__", &this_dino()));
+    print!("{}", with_completions(&shell, text).replace("__DINO_BIN__", &this_dino()));
     Ok(())
+}
+
+/// The integration with dino's Tab completion after it. fish's only when no completions folder of
+/// fish's has a dino.fish (Homebrew's, the user's own): fish would load that one too.
+fn with_completions(shell: &str, text: &str) -> String {
+    let completion = crate::complete::script(shell).unwrap_or_default();
+    match shell {
+        "fish" => format!(
+            "{text}\n# Tab completion, unless a completions folder has dino's already.\n\
+             set -l _dino_has_completions\n\
+             for d in $fish_complete_path\n    test -f $d/dino.fish; and set _dino_has_completions 1; and break\nend\n\
+             if not set -q _dino_has_completions[1]\n{completion}end\n"
+        ),
+        _ => format!("{text}\n{completion}"),
+    }
 }
 
 fn rc_file(shell: &str) -> anyhow::Result<PathBuf> {
@@ -192,6 +207,22 @@ mod tests {
     fn every_script_names_this_dino() {
         for s in ["zsh", "bash", "fish"] {
             assert!(script(s).unwrap().contains("__DINO_BIN__"), "{s}");
+            assert!(crate::complete::script(s).unwrap().contains("__DINO_BIN__"), "{s}");
         }
+    }
+
+    #[test]
+    fn every_script_registers_its_completion() {
+        let registers = [("zsh", "compdef _dino_complete dino"), ("bash", "complete -F _dino_complete dino"), ("fish", "complete -c dino -f -a '(__dino_complete)'")];
+        for (shell, line) in registers {
+            let init = with_completions(shell, script(shell).unwrap());
+            assert!(init.starts_with(script(shell).unwrap()), "{shell}");
+            assert!(init.contains(line), "{shell}: dino init registers it");
+            assert!(crate::complete::script(shell).unwrap().contains(line), "{shell}: so does the standalone script");
+        }
+        // Each leaves completions someone else registered alone.
+        assert!(crate::complete::script("zsh").unwrap().contains("[[ -n ${_comps[dino]-} ]] ||"));
+        assert!(crate::complete::script("bash").unwrap().contains("if ! complete -p dino &>/dev/null"));
+        assert!(with_completions("fish", "").contains("test -f $d/dino.fish"));
     }
 }

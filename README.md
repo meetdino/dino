@@ -145,6 +145,21 @@ dino --help               # the rest
 Settings live in `~/.config/dino/settings.toml`, which `dinod` reads and writes. The app's
 Settings window edits the same file.
 
+### Tab completion
+
+Tab completes dino's commands and flags, session ids for `attach`, `kill`, `resume`, `rm` and
+`fork`, and agents for `dino new` and `dino <folder>`. It's on in the app's shells. In another
+terminal, `dino shell install` turns it on with the rest of dino's shell integration, and the
+Homebrew formula (`dino-cli`) installs it where bash, zsh and fish look. To add it yourself:
+
+```sh
+eval "$(dino completions zsh)"     # in .zshrc; zsh completes once compinit has run
+eval "$(dino completions bash)"    # in .bashrc
+dino completions fish > ~/.config/fish/completions/dino.fish
+```
+
+Completing never starts `dinod`: with it stopped, there are no session ids to offer.
+
 ### Inside tmux
 
 A tmux you start in dino runs as in any terminal: its panes load only your own startup files, and

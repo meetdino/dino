@@ -29,6 +29,7 @@ const COMMANDS: &[&str] = &[
     "permissions",
     "build-cache",
     "init",
+    "completions",
     "shell",
     "ai",
     "mcp",
@@ -132,4 +133,39 @@ fn stop_help_does_not_connect_to_an_existing_service() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("dino stop"));
     assert!(listener.accept().is_err(), "`dino stop --help` connected to the existing service");
+}
+
+#[test]
+fn completing_never_starts_dinod() {
+    let home = DinoHome::new();
+    let complete = |words: &[&str]| {
+        let output = run_dino(&[&["__complete", "--", "dino"], words].concat(), &home);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let first = complete(&[""]);
+    assert!(first.contains("attach\topen a session here\n") && first.contains(":dirs\n"), "{first}");
+    assert!(complete(&["new", ""]).contains("shell\t"), "without dinod, the agents on this Mac and a shell");
+    assert_eq!(complete(&["attach", ""]), "", "without dinod, no sessions");
+    assert!(complete(&["ls", "-"]).contains("--json\t"));
+    assert!(!home.config.join(dino_core::ipc::SOCKET_NAME).exists(), "completing started dinod");
+    assert!(!home.config.join("dinod.log").exists(), "completing started dinod");
+
+    for shell in ["zsh", "bash", "fish"] {
+        let output = run_dino(&["completions", shell], &home);
+        let script = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && script.contains("_complete") && !script.contains("__DINO_BIN__"), "{shell}: {script}");
+    }
+}
+
+#[test]
+fn completing_gives_up_on_a_service_that_does_not_answer() {
+    let home = DinoHome::new();
+    let socket = home.config.join(dino_core::ipc::SOCKET_NAME);
+    // Takes the connection and never answers; run_dino fails the test if dino doesn't exit.
+    let _listener = UnixListener::bind(&socket).unwrap();
+    let output = run_dino(&["__complete", "--", "dino", "kill", ""], &home);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stdout.is_empty());
+    std::fs::remove_file(&socket).unwrap();
 }

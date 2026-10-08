@@ -50,11 +50,13 @@ pub fn terminfo() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
-/// The AI line (`dino init`), loaded after the user's own startup files. `__DINO_BIN__` becomes
-/// this dino, as `dino init` does it.
-const AI: [(&str, &str); 2] = [
-    ("zsh/dino-ai.zsh", include_str!("../../dino/shell/dino.zsh")),
-    ("bash/dino-ai.bash", include_str!("../../dino/shell/dino.bash")),
+/// The AI line and Tab completion for `dino` (`dino init`), loaded after the user's own startup
+/// files; fish finds its completion through XDG_DATA_DIRS, behind the user's own. `__DINO_BIN__`
+/// becomes this dino, as `dino init` does it.
+const AI: [(&str, &str); 3] = [
+    ("zsh/dino-ai.zsh", concat!(include_str!("../../dino/shell/dino.zsh"), "\n", include_str!("../../dino/shell/completions/dino.zsh"))),
+    ("bash/dino-ai.bash", concat!(include_str!("../../dino/shell/dino.bash"), "\n", include_str!("../../dino/shell/completions/dino.bash"))),
+    ("fish/vendor_completions.d/dino.fish", include_str!("../../dino/shell/completions/dino.fish")),
 ];
 
 /// What dino turns on when the app hasn't said what the user's Ghostty config does: a bar cursor
@@ -227,6 +229,13 @@ mod tests {
         assert_eq!(env["GHOSTTY_SHELL_INTEGRATION_XDG_DIR"], dir.display().to_string());
         assert_eq!(env["GHOSTTY_SHELL_FEATURES"], "cursor:blink,path,title");
         assert!(dir.join("fish/vendor_conf.d/ghostty-shell-integration.fish").exists());
+        // dino's Tab completion, naming this dino; zsh's and bash's come with the AI line.
+        let fish = std::fs::read_to_string(dir.join("fish/vendor_completions.d/dino.fish")).unwrap();
+        assert!(fish.contains("complete -c dino") && !fish.contains("__DINO_BIN__"));
+        for ai in ["zsh/dino-ai.zsh", "bash/dino-ai.bash"] {
+            let text = std::fs::read_to_string(dir.join(ai)).unwrap();
+            assert!(text.contains("_dino_complete") && !text.contains("__DINO_BIN__"), "{ai}");
+        }
         let (mut env, mut args) = (HashMap::new(), vec![]);
         wire_from(&dir, "/usr/local/bin/elvish", &mut env, &mut args, "detect", FEATURES);
         assert!(args.is_empty());

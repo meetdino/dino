@@ -21,6 +21,8 @@ class DinoCli < Formula
 
   def install
     bin.install "dino"
+    # Tab completion, in the folders bash, zsh and fish load completions from.
+    generate_completions_from_executable(bin/"dino", "completions")
   end
 
   test do
