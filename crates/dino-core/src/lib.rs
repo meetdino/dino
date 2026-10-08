@@ -288,7 +288,19 @@ pub fn config_dir() -> PathBuf {
     #[cfg(test)]
     return std::env::temp_dir().join(format!("dino-core-test-{}", std::process::id()));
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    // `$XDG_CONFIG_HOME/dino` on Linux when it's set; ~/.config/dino is its default anyway.
+    #[cfg(not(target_os = "macos"))]
+    if let Some(dir) = xdg_dir("XDG_CONFIG_HOME") {
+        return dir.join("dino");
+    }
     home.join(".config/dino")
+}
+
+/// An XDG base directory variable, when it's set to an absolute path (the spec says to ignore a
+/// relative one).
+#[cfg(not(target_os = "macos"))]
+pub fn xdg_dir(var: &str) -> Option<PathBuf> {
+    std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
 /// dino's own key store, `~/.config/dino/keys` (`VAR=value` lines, mode 600).

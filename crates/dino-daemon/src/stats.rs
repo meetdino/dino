@@ -151,6 +151,7 @@ fn scan() {
     give_back();
 }
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     /// macOS: hand memory malloc keeps free back to the system (`zone` null: every zone).
     fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: usize) -> usize;
@@ -160,7 +161,16 @@ unsafe extern "C" {
 /// it): what it freed goes back to the system rather than stay with dinod, which runs all day.
 fn give_back() {
     // SAFETY: takes no pointers of ours; null means every malloc zone.
-    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    #[cfg(target_os = "macos")]
+    unsafe {
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0)
+    };
+    // glibc's equivalent: free heap memory back to the system.
+    // SAFETY: no arguments of ours.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0)
+    };
 }
 
 /// A session's agent finished: read its record while it's fresh, in the background.

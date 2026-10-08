@@ -82,7 +82,43 @@ fn serving(tree: &HashMap<u32, (u32, String)>, agent: u32, running: &[(String, S
         .collect()
 }
 
+/// TCP ports any of `pids` listens on: on Linux, the LISTEN sockets in `/proc/net/tcp{,6}` whose
+/// inodes the processes hold open (`socket:[inode]` in their `fd/`), as `lsof` finds them.
+#[cfg(target_os = "linux")]
+fn listening(pids: &[u32]) -> Vec<u16> {
+    let mut held = std::collections::HashSet::new();
+    for pid in pids {
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
+        for fd in fds.flatten() {
+            if let Some(inode) = std::fs::read_link(fd.path()).ok().and_then(|l| l.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?.parse::<u64>().ok()) {
+                held.insert(inode);
+            }
+        }
+    }
+    if held.is_empty() {
+        return vec![];
+    }
+    let mut ports: Vec<u16> = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .flat_map(|t| std::fs::read_to_string(t).unwrap_or_default().lines().skip(1).map(str::to_string).collect::<Vec<_>>())
+        .filter_map(|row| listen_row(&row).filter(|(_, inode)| held.contains(inode)).map(|(port, _)| port))
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// A row of `/proc/net/tcp`: its local port and socket inode, if it's listening (state 0A).
+#[cfg(target_os = "linux")]
+fn listen_row(row: &str) -> Option<(u16, u64)> {
+    let f: Vec<&str> = row.split_whitespace().collect();
+    let port = u16::from_str_radix(f.get(1)?.rsplit(':').next()?, 16).ok()?;
+    (*f.get(3)? == "0A").then_some(())?;
+    Some((port, f.get(9)?.parse().ok()?))
+}
+
 /// TCP ports any of `pids` listens on.
+#[cfg(target_os = "macos")]
 fn listening(pids: &[u32]) -> Vec<u16> {
     let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
     let out = std::process::Command::new("lsof").args(["-a", "-p", &list, "-iTCP", "-sTCP:LISTEN", "-nP", "-Fn"]).output();
@@ -133,6 +169,15 @@ fn signal(pids: &[u32], sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reads_listening_rows() {
+        let listen = "   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 123456 1 0000000000000000 100 0 0 10 0";
+        assert_eq!(listen_row(listen), Some((8080, 123456)));
+        let established = "   1: 0100007F:1F90 0100007F:D2F0 01 00000000:00000000 00:00000000 00000000  1000        0 654321 1 0000000000000000 20 4 30 10 -1";
+        assert_eq!(listen_row(established), None);
+    }
 
     #[test]
     fn finds_the_agents_shell_for_a_command() {

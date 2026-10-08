@@ -429,10 +429,17 @@ mod tests {
     #[test]
     fn reads_a_process_command_line() {
         let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-        let got = command_of(child.id());
+        // Read once it has run its program: just after the fork it's still this test.
+        let since = std::time::Instant::now();
+        let mut got = command_of(child.id());
+        while got.as_ref().is_none_or(|(_, a)| a.is_empty()) && since.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+            got = command_of(child.id());
+        }
         let _ = child.kill();
         let _ = child.wait();
-        assert_eq!(got, Some((PathBuf::from("/bin/sleep"), vec!["30".to_string()])));
+        // Its program as the kernel resolved it (/bin is /usr/bin on most Linux systems).
+        assert_eq!(got, Some((std::fs::canonicalize("/bin/sleep").unwrap(), vec!["30".to_string()])));
         assert!(!is_tmux_process(std::process::id()));
     }
 

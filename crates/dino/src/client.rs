@@ -28,7 +28,12 @@ pub fn connect() -> io::Result<UnixStream> {
     let _ = log.set_permissions(std::fs::Permissions::from_mode(0o600));
     // Through launchd when there's a launch agent for it, so what dinod runs has the app's
     // permissions (see launchd.rs). launchd may wait up to 2 s to start it again (ThrottleInterval).
-    if crate::launchd::start() {
+    #[cfg(target_os = "macos")]
+    let asked = crate::launchd::start();
+    // Through systemd when `dino service install` put a unit in.
+    #[cfg(target_os = "linux")]
+    let asked = crate::systemd::start();
+    if asked {
         if let Some(s) = wait_for(&path, Duration::from_secs(15)) {
             return Ok(s);
         }

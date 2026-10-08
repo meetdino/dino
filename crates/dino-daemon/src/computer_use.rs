@@ -56,7 +56,8 @@ fn installed() -> bool {
 }
 
 fn on() -> bool {
-    Settings::load().computer_use()
+    // open-computer-use drives macOS apps: on Linux it's off, and dino adds nothing to agents.
+    cfg!(target_os = "macos") && Settings::load().computer_use()
 }
 
 /// What dino added, by agent: the server as it added it. This Mac's own (never synced).
@@ -207,6 +208,8 @@ fn parse_doctor(said: &str) -> Option<(bool, bool)> {
 
 /// Add open-computer-use to agent `id`, or remove what dino added.
 pub(crate) fn set(id: &str, want: bool) -> anyhow::Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    anyhow::ensure!(!want, "computer use is macOS-only for now");
     if want {
         anyhow::ensure!(on(), "Turn on computer use first");
         install()?;
@@ -334,6 +337,9 @@ fn add_everywhere() {
 /// started before it was removed.
 fn runs_from_install() -> bool {
     let Ok(ours) = std::fs::canonicalize(dir()) else { return false };
+    #[cfg(not(target_os = "macos"))]
+    return dino_core::procinfo::pids_named("OpenComputerUse").into_iter().any(|pid| dino_core::procinfo::exe_of(pid).is_some_and(|e| Path::new(&e).starts_with(&ours)));
+    #[cfg(target_os = "macos")]
     dino_core::procinfo::pids_named("OpenComputerUse").into_iter().any(|pid| {
         let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
         let n = unsafe { libc::proc_pidpath(pid as i32, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };

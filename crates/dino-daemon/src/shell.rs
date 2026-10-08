@@ -31,9 +31,16 @@ const FILES: [(&str, &str); 16] = [
 
 /// Ghostty's terminfo entries (from libghostty-spm, which draws dino's panes), as ncurses keeps
 /// them: by the first letter's hex code.
+#[cfg(target_os = "macos")]
 const TERMINFO: [(&str, &[u8]); 2] = [
     ("78/xterm-ghostty", include_bytes!("../terminfo/78/xterm-ghostty")),
     ("67/ghostty", include_bytes!("../terminfo/67/ghostty")),
+];
+/// Linux's ncurses keeps them by the first letter itself, and doesn't look in the hex folders.
+#[cfg(not(target_os = "macos"))]
+const TERMINFO: [(&str, &[u8]); 2] = [
+    ("x/xterm-ghostty", include_bytes!("../terminfo/78/xterm-ghostty")),
+    ("g/ghostty", include_bytes!("../terminfo/67/ghostty")),
 ];
 
 /// The folder with Ghostty's terminfo, written when missing or from another dino; `None` when it
