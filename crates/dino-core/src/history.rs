@@ -74,10 +74,6 @@ pub fn keep_cache(file: &Path) -> std::io::Result<()> {
     std::fs::rename(tmp, file)
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
-}
-
 fn stat(p: &Path) -> Option<(u64, u64)> {
     let m = p.metadata().ok()?;
     let mtime = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs();
@@ -350,9 +346,14 @@ pub(crate) fn codex_usage_in(jsonl: &str, id: &str, model: &mut Option<String>, 
 
 // ---- Codex ----
 
+/// Codex's rollouts in the Codex home the Codexes dino starts run with (`models::codex_home`).
 pub(crate) fn codex_rollouts() -> Vec<PathBuf> {
+    codex_rollouts_in(&crate::models::codex_home())
+}
+
+fn codex_rollouts_in(codex_home: &Path) -> Vec<PathBuf> {
     let mut out = vec![];
-    let mut stack = vec![home().join(".codex/sessions")];
+    let mut stack = vec![codex_home.join("sessions")];
     while let Some(dir) = stack.pop() {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let p = e.path();
@@ -373,9 +374,10 @@ pub fn rollout_id(p: &Path) -> Option<String> {
     (id.len() == 36 && id.chars().filter(|&c| c == '-').count() == 4).then(|| id.to_string())
 }
 
-/// Thread names from `~/.codex/session_index.jsonl` (what Codex lists); later lines win.
+/// Thread names from `session_index.jsonl` (what Codex lists) in the Codex home the Codexes dino
+/// starts run with (`models::codex_home`); later lines win.
 pub fn codex_titles() -> HashMap<String, String> {
-    let text = std::fs::read_to_string(home().join(".codex/session_index.jsonl")).unwrap_or_default();
+    let text = std::fs::read_to_string(crate::models::codex_home().join("session_index.jsonl")).unwrap_or_default();
     codex_titles_in(&text)
 }
 
@@ -756,6 +758,18 @@ mod tests {
     fn rollout_ids() {
         let p = Path::new("/x/rollout-2026-09-28T14-16-05-01a0e93b-2fcf-7a20-8efb-916be31ad524.jsonl");
         assert_eq!(rollout_id(p).as_deref(), Some("01a0e93b-2fcf-7a20-8efb-916be31ad524"));
+    }
+
+    #[test]
+    fn codex_rollouts_are_those_in_its_home() {
+        let home = std::env::temp_dir().join(format!("dino-codex-home-{}", std::process::id()));
+        let day = home.join("sessions/2026/10/07");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join("rollout-2026-10-07T00-00-00-01a112e2-c11f-7cd2-b4cb-58e3cc582ab7.jsonl");
+        std::fs::write(&rollout, "").unwrap();
+        std::fs::write(day.join("notes.jsonl"), "").unwrap();
+        assert_eq!(codex_rollouts_in(&home), [rollout]);
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

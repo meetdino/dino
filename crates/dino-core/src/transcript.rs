@@ -41,9 +41,10 @@ fn read_last(p: &Path, bytes: u64) -> Option<String> {
     Some(if len > bytes { text.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_string()) } else { text })
 }
 
-/// Codex's rollout for conversation `id`: `~/.codex/sessions/Y/M/D/rollout-<time>-<id>.jsonl`.
+/// Codex's rollout for conversation `id`: `sessions/Y/M/D/rollout-<time>-<id>.jsonl` in the Codex
+/// home the Codexes dino starts run with (`models::codex_home`).
 pub fn codex_path(id: &str) -> Option<PathBuf> {
-    codex_path_in(&std::env::var_os("HOME").map(PathBuf::from)?.join(".codex/sessions"), id)
+    codex_path_in(&crate::models::codex_home().join("sessions"), id)
 }
 
 /// Codex's rollout for conversation `id` among those kept in `sessions` (a Codex home's).
