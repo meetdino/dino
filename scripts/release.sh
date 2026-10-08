@@ -76,6 +76,9 @@ mkdir -p "$DIST"
 
 say "dino $VERSION ($BUILD) for $ARCHS"
 
+# What ships has its licenses in THIRD_PARTY_NOTICES.md, as Cargo.lock and app/Package.swift have it.
+scripts/third-party.py --check
+
 # The CLI and dinod: one binary, one per architecture, joined with lipo.
 bins=()
 for a in "${arch_list[@]}"; do
@@ -109,12 +112,17 @@ for r in $(otool -l "$APP/Contents/MacOS/Dino" | awk '/LC_RPATH/{getline; getlin
 done
 cp -R "$SWIFT_BIN"/*.bundle "$APP/Contents/Resources/" 2>/dev/null || true
 cp app/AppIcon.icns "$APP/Contents/Resources/"
+# The licenses of what ships (scripts/third-party.py), which the About window shows.
+cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/"
 cp "$DIST/dino" "$APP/Contents/Helpers/dino"
 cp app/Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :SUFeedURL $FEED_URL" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :DinoBuild string $BUILD_ID" "$APP/Contents/Info.plist"
+
+# Every library the app links has its license in THIRD_PARTY_NOTICES.md.
+scripts/third-party.py --binary "$APP"
 
 # dinod as the app's launch agent (scripts/bundle.sh).
 dino_agent "$APP" "$BUNDLE_ID" "${DINO_AGENT_HOME:-}"
@@ -160,8 +168,8 @@ TAR="dino-$VERSION-darwin-$LABEL.tar.gz"
 CLI="$DIST/cli"
 mkdir -p "$CLI"
 cp "$APP/Contents/Helpers/dino" "$CLI/dino"
-cp LICENSE "$CLI/"
-tar -C "$CLI" -czf "$DIST/$TAR" dino LICENSE
+cp LICENSE THIRD_PARTY_NOTICES.md "$CLI/"
+tar -C "$CLI" -czf "$DIST/$TAR" dino LICENSE THIRD_PARTY_NOTICES.md
 rm -rf "$CLI"
 
 (cd "$DIST" && shasum -a 256 "$(basename "$DMG")" "$TAR" > SHA256SUMS)

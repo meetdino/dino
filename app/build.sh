@@ -54,6 +54,8 @@ cp -R "$BIN"/*.bundle "$APP/Contents/Resources/"
 cp -R "$BIN/Sparkle.framework" "$APP/Contents/Frameworks/"
 cp Info.plist "$APP/Contents/Info.plist"
 [ -f AppIcon.icns ] && cp AppIcon.icns "$APP/Contents/Resources/"
+# The licenses of what ships (scripts/third-party.py), which the About window shows.
+cp ../THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/"
 PLIST="$APP/Contents/Info.plist"
 VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' ../Cargo.toml)"
 # Numbered as a release from the same commit is: a dino installed from a release made earlier on

@@ -57,7 +57,9 @@ struct DinoApp: App {
         // View what's shown; Session acts on the session you're in; Window moves between sessions,
         // tabs and splits. Every command is here, with or without a toolbar button too.
         .commands {
-            CommandGroup(after: .appInfo) {
+            // About dino as the standard one, but with the third-party notices as its credits.
+            CommandGroup(replacing: .appInfo) {
+                Button(About.title) { About.show() }
                 UpdateMenuItem()
             }
             CommandGroup(replacing: .appSettings) {
