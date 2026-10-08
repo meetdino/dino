@@ -366,6 +366,12 @@ fn leftovers(look: &Look, known: &[PathBuf]) -> Vec<(Leftover, u64)> {
             if q.parent == 1 {
                 break true;
             }
+            // Linux: orphans go to the nearest subreaper, which for a user's processes is their
+            // `systemd --user`, not pid 1.
+            #[cfg(target_os = "linux")]
+            if look.procs.get(&q.parent).is_some_and(|r| r.name == "systemd") {
+                break true;
+            }
             if q.parent == 0 || chain.len() > 64 {
                 break false;
             }

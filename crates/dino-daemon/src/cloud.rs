@@ -110,8 +110,18 @@ fn tokens(v: &Value) -> anyhow::Result<Tokens> {
 
 /// What the server shows for this Mac on its devices page.
 fn device_fields() -> Vec<(&'static str, String)> {
+    #[cfg(target_os = "macos")]
     let name = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Mac".into());
+    #[cfg(target_os = "macos")]
     let os = std::process::Command::new("sw_vers").arg("-productVersion").output().ok().map(|o| format!("macOS {}", String::from_utf8_lossy(&o.stdout).trim())).unwrap_or_else(|| "macOS".into());
+    // Linux: the host name, and the distribution as os-release names it.
+    #[cfg(not(target_os = "macos"))]
+    let name = std::fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Linux".into());
+    #[cfg(not(target_os = "macos"))]
+    let os = ["/etc/os-release", "/usr/lib/os-release"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok()?.lines().find_map(|l| Some(l.strip_prefix("PRETTY_NAME=")?.trim_matches('"').to_string())))
+        .unwrap_or_else(|| "Linux".into());
     vec![("device_name", std::env::var("DINO_DEVICE_NAME").unwrap_or(name)), ("device_os", os), ("dino_version", env!("CARGO_PKG_VERSION").into())]
 }
 

@@ -36,6 +36,10 @@ pub(crate) fn installed() -> Option<String> {
 
 /// Look now and then; restart into what was installed once nothing is busy.
 pub(crate) fn start(d: Arc<Daemon>) {
+    // The feed has only macOS builds so far: a Linux dino updates the way it was installed.
+    if !cfg!(target_os = "macos") {
+        return;
+    }
     let Some(exe) = std::env::current_exe().ok().filter(|e| updates_itself(e)) else { return };
     let key = PUBLIC_KEY.and_then(|k| base64::engine::general_purpose::STANDARD.decode(k.trim()).ok());
     let Some(key) = key.filter(|k| k.len() == 32) else { return };

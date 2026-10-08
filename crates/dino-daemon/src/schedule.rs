@@ -624,12 +624,31 @@ pub(crate) fn clock(t: u64) -> String {
 }
 
 /// The Mac is running on its battery (`pmset -g batt`).
+#[cfg(target_os = "macos")]
 fn on_battery() -> bool {
     let out = Command::new(dino_core::power::PMSET).args(["-g", "batt"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
     out.is_ok_and(|o| dino_core::power::battery(&String::from_utf8_lossy(&o.stdout)).0 == Some(false))
 }
 
+/// Linux: on battery when the machine has a power adapter (a `Mains` supply in sysfs) and none is
+/// online. A server or a container has none, so it's never on battery.
+#[cfg(target_os = "linux")]
+fn on_battery() -> bool {
+    let Ok(dir) = std::fs::read_dir("/sys/class/power_supply") else { return false };
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap_or_default().trim().to_string();
+    let adapters: Vec<String> = dir.flatten().map(|e| e.path()).filter(|p| read(p.join("type")) == "Mains").map(|p| read(p.join("online"))).collect();
+    !adapters.is_empty() && adapters.iter().all(|o| o == "0")
+}
+
+/// Linux: the lid is closed, as ACPI reports it (`/proc/acpi/button/lid/*/state`). No lid, no.
+#[cfg(target_os = "linux")]
+fn lid_closed() -> bool {
+    let Ok(dir) = std::fs::read_dir("/proc/acpi/button/lid") else { return false };
+    dir.flatten().any(|e| std::fs::read_to_string(e.path().join("state")).is_ok_and(|s| s.contains("closed")))
+}
+
 /// The lid is closed (its clamshell state in the I/O registry).
+#[cfg(target_os = "macos")]
 fn lid_closed() -> bool {
     let out = Command::new("/usr/sbin/ioreg").args(["-r", "-k", "AppleClamshellState", "-d", "1"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
     out.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("\"AppleClamshellState\" = Yes"))

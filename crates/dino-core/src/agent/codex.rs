@@ -597,8 +597,14 @@ impl Agent for Codex {
         }
         let mut s = found::by_hand("codex", pid);
         s.title = "Codex".into();
+        #[cfg(target_os = "macos")]
         let files = found::run("lsof", &["-p", &pid.to_string(), "-Fn"]).unwrap_or_default();
+        #[cfg(target_os = "macos")]
         let names: Vec<&str> = files.lines().filter_map(|l| l.strip_prefix('n')).collect();
+        #[cfg(not(target_os = "macos"))]
+        let files = crate::procinfo::open_files(pid);
+        #[cfg(not(target_os = "macos"))]
+        let names: Vec<&str> = files.iter().map(String::as_str).collect();
         let sessions = home_of(pid).map(|h| attached::resolved(&h.join("sessions")));
         if let Some(rollout) = names.iter().find(|f| sessions.as_ref().is_some_and(|s| Path::new(f).starts_with(s)) && f.ends_with(".jsonl")) {
             s.session_id = history::rollout_id(Path::new(rollout)).unwrap_or_default();
@@ -607,7 +613,14 @@ impl Agent for Codex {
                 s.title = n;
             }
         }
-        s.cwd = found::run("lsof", &["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]).and_then(|t| t.lines().find_map(|l| l.strip_prefix('n').map(String::from)));
+        #[cfg(target_os = "macos")]
+        {
+            s.cwd = found::run("lsof", &["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]).and_then(|t| t.lines().find_map(|l| l.strip_prefix('n').map(String::from)));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            s.cwd = crate::procinfo::cwd_of(pid);
+        }
         let args = args();
         // Its conversations in Codex's shared server (0.160.1), it has no rollout open: one it
         // resumes is the one it was told.
@@ -744,6 +757,10 @@ mod tests {
     /// Codexes run with two Codex homes (`CODEX_HOME`) have a server each: each is on the one its
     /// own server loaded as it started, even two started together in one folder.
     #[test]
+    // Backdates each lock's birth time through its modification time, which APFS allows; Linux's
+    // birth time (statx) is when the file was made and can't be moved. `attached`'s own tests
+    // cover the matching on every system.
+    #[cfg(target_os = "macos")]
     fn each_codex_home_has_a_server_of_its_own() {
         let root = std::env::temp_dir().join(format!("dino-codex-homes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

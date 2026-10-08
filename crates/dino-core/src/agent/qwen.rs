@@ -23,7 +23,10 @@ fn qwen_home() -> PathBuf {
 }
 
 /// The system defaults layer Qwen reads when nothing points it elsewhere.
+#[cfg(target_os = "macos")]
 const SYSTEM_DEFAULTS: &str = "/Library/Application Support/QwenCode/system-defaults.json";
+#[cfg(not(target_os = "macos"))]
+const SYSTEM_DEFAULTS: &str = "/etc/qwen-code/system-defaults.json";
 
 /// `hooks` added to the system defaults layer the user may have: dino's go after theirs, event by
 /// event, and everything else in it is kept.

@@ -65,7 +65,7 @@ pub fn login(args: &[String]) -> anyhow::Result<()> {
         let Response::Connect { url } = ask("login", rest.next())? else { return Err(crate::unexpected()) };
         println!("Opening your browser to sign in with GitHub. If it doesn't open, go to:\n\n  {url}\n");
         if std::env::var_os("DINO_NO_BROWSER").is_none() {
-            let _ = std::process::Command::new("open").arg(&url).status();
+            crate::open_url(&url);
         }
     }
     let until = Instant::now() + Duration::from_secs(16 * 60);
