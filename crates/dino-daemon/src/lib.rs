@@ -800,8 +800,9 @@ fn new_daemon(home: PathBuf, proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<
         summaries: Mutex::default(),
         git: gitstate::State::default(),
         schedule: schedule::Scheduler::load(),
-        lid: lid::Lid::default(),
-        awake: awake::Awake::default(),
+        // A unit struct on Linux, where neither holds anything.
+        lid: Default::default(),
+        awake: Default::default(),
         sizes: Mutex::default(),
         pushed: Mutex::default(),
         measuring: AtomicBool::new(false),

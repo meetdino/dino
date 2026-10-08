@@ -95,7 +95,8 @@ maintainer to approve the run). Each of these has to pass before it merges:
 | --- | --- |
 | `changes` | `scripts/lint.sh`, `cargo fmt --check` among it, and which of the checks below the change needs |
 | `rust` | `cargo build` and `cargo test` of the workspace, on macOS |
-| `clippy` | `cargo clippy` of the workspace, failing on any warning |
+| `clippy` | `cargo clippy` of the workspace, failing on any warning, on macOS |
+| `linux` | `cargo build`, `cargo test` and `cargo clippy` (failing on any warning) of the workspace, on Linux x86_64 and arm64 |
 | `msrv` | `cargo check` of the workspace with the oldest Rust it supports (`rust-version` in `Cargo.toml`), on macOS |
 | `app` | the app's `swift build -c release`, on macOS |
 | `cloud` | `cloud/`'s build, clippy and tests, against Postgres |
