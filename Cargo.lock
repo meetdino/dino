@@ -44,9 +44,9 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "anyllm_translate"
-version = "0.16.1"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a71573165a9e8376ffff249acb829770b251d56f28ff6128b28c606623ca1e7"
+checksum = "2db43480af30a8747ba8db70a2ee4c93b73bea352e051f4a680bf9bb680f72a8"
 dependencies = [
  "serde",
  "serde_json",
