@@ -9,6 +9,8 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.0.1</string>
     <key>CFBundleVersion</key><string>1</string>
+    <!-- The About window's line under the version; the third-party notices are its credits (About.swift). -->
+    <key>NSHumanReadableCopyright</key><string>Copyright © 2026 The dino authors. MIT License.</string>
     <!-- Updates: Sparkle looks here once a day (Settings → General). Release builds add SUPublicEDKey
          (scripts/release.sh); without it, as in development builds, there are no updates. -->
     <key>SUFeedURL</key><string>https://github.com/meetdino/dino/releases/latest/download/appcast.xml</string>
