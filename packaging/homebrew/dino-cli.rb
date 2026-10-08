@@ -21,6 +21,8 @@ class DinoCli < Formula
 
   def install
     bin.install "dino"
+    # The licenses of the code in it, beside LICENSE (which Homebrew keeps on its own).
+    prefix.install "THIRD_PARTY_NOTICES.md"
     # Tab completion, in the folders bash, zsh and fish load completions from.
     generate_completions_from_executable(bin/"dino", "completions")
   end

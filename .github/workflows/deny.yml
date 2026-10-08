@@ -1,9 +1,9 @@
 name: Dependencies
 
-# cargo-deny on both workspaces, with deny.toml. Licenses, bans and sources only change when a pull
-# request changes the dependencies: `deny` is a required check. Advisories are published any day,
-# so `advisories` runs daily as well, and isn't required: a new advisory against main shouldn't
-# block every pull request, it gets its own fix.
+# cargo-deny on both workspaces, with deny.toml, and the check of THIRD_PARTY_NOTICES.md. Licenses,
+# bans, sources and notices only change when a pull request changes the dependencies: `deny` is a
+# required check. Advisories are published any day, so `advisories` runs daily as well, and isn't
+# required: a new advisory against main shouldn't block every pull request, it gets its own fix.
 on:
   pull_request:
   push:
@@ -38,6 +38,14 @@ jobs:
         with:
           manifest-path: cloud/Cargo.toml
           command: check licenses bans sources
+      # THIRD_PARTY_NOTICES.md, which ships in the app and the CLI tarball, names what Cargo.lock
+      # and app/Package.swift say ships, with every license text: written by the cargo-about
+      # version scripts/third-party.py names.
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+        with:
+          tool: cargo-about@0.9.2
+      - name: Third-party notices
+        run: scripts/third-party.py --check
 
   advisories:
     runs-on: ubuntu-latest
