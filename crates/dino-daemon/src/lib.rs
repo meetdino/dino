@@ -3755,8 +3755,12 @@ fn watch_shells(d: &Daemon) {
     let settings = Settings::load();
     for s in shells {
         let fg = s.pane.foreground().filter(|fg| Some(*fg) != s.pane.pid());
+        // Asked before anything is looked at, and at each look: a child the shell has forked is
+        // named for the shell until it execs the command, which keeps its pid. Another name is
+        // another program, looked at again then, not at the next recheck.
+        let fg_name = fg.and_then(dino_core::procinfo::name);
         if let Some(fg) = fg {
-            if follow_tmux(&s, fg) {
+            if follow_tmux(&s, fg, &fg_name) {
                 continue;
             }
         }
@@ -3793,7 +3797,7 @@ fn watch_shells(d: &Daemon) {
             } else if i.before.is_none() {
                 i.before = Some(s.pane.title());
             }
-            (fg.is_some() && (i.fg != fg || i.checked.is_none_or(|t| t.elapsed() >= INSIDE_RECHECK)), gone)
+            (fg.is_some() && (i.fg != fg || i.fg_name != fg_name || i.checked.is_none_or(|t| t.elapsed() >= INSIDE_RECHECK)), gone)
         };
         if gone {
             typed::left(d, &s);
@@ -3809,9 +3813,6 @@ fn watch_shells(d: &Daemon) {
         }
         let mut i = s.inside.lock().unwrap();
         let before = i.before.take();
-        // Asked again at each look: a child the shell has forked is named for the shell until it
-        // execs the command.
-        let fg_name = dino_core::procinfo::name(fg);
         let resuming = i.resuming.filter(|(until, _)| Instant::now() < *until);
         // While dino starts it again, the process quitting, or what the shell runs before the line
         // is typed, isn't it.
@@ -3837,15 +3838,17 @@ fn watch_shells(d: &Daemon) {
 /// When shell `s`'s foreground `fg` is a tmux client: follow what it shows, asked of its own
 /// server each look (read-only). The tab takes the active pane's folder and the window's name;
 /// the shell's own come back at its next prompt. False when `fg` isn't a tmux client.
-fn follow_tmux(s: &Session, fg: u32) -> bool {
+fn follow_tmux(s: &Session, fg: u32, fg_name: &Option<String>) -> bool {
+    // The same foreground: the same process, still the same program (see `watch_shells`).
+    let same = |i: &Inside| i.fg == Some(fg) && i.fg_name == *fg_name;
     let known = {
         let i = s.inside.lock().unwrap();
-        (i.fg == Some(fg)).then(|| i.tmux.as_ref().map(|t| t.0.clone())).flatten()
+        same(&i).then(|| i.tmux.as_ref().map(|t| t.0.clone())).flatten()
     };
     // A new foreground is looked at once; one that isn't tmux is left to the agent check.
     let client = match known {
         Some(c) => c,
-        None if s.inside.lock().unwrap().fg == Some(fg) => return false,
+        None if same(&s.inside.lock().unwrap()) => return false,
         None => match tmux::client(fg) {
             Some(c) => c,
             None => return false,
@@ -3863,15 +3866,15 @@ fn follow_tmux(s: &Session, fg: u32) -> bool {
     // Which windows rang, asked before the session's state is locked: tmux may be slow to answer.
     let rang = {
         let i = s.inside.lock().unwrap();
-        let counted = if i.fg == Some(fg) { i.alerts.bells } else { bells };
+        let counted = if same(&i) { i.alerts.bells } else { bells };
         view.as_ref().filter(|_| bells > counted).map(tmux::rang)
     };
     let mut i = s.inside.lock().unwrap();
-    if i.fg != Some(fg) {
+    if !same(&i) {
         let before = i.before.take().or_else(|| Some(s.pane.title()));
         // From here on: what rang before the client started isn't tmux's.
         let alerts = TmuxAlerts { bells, notices, ..TmuxAlerts::default() };
-        *i = Inside { fg: Some(fg), fg_name: dino_core::procinfo::name(fg), checked: Some(Instant::now()), found: None, resuming: None, before, tmux: None, alerts };
+        *i = Inside { fg: Some(fg), fg_name: fg_name.clone(), checked: Some(Instant::now()), found: None, resuming: None, before, tmux: None, alerts };
     }
     if let Some(v) = &view {
         // A bell: tmux says which windows rang. A notification only comes through from the pane
@@ -6635,6 +6638,36 @@ while (sysread(STDIN, my $c, 1)) {
         assert!(s.typed().is_none(), "kept as a terminal: a plain program");
         let Response::State { sessions, .. } = state(&d) else { unreachable!() };
         assert!(sessions.iter().find(|x| x.id == id).unwrap().inside.is_none());
+        kill(&d, &id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A command looked at before it has become itself (the shell's child before it execs, a
+    /// script before it execs its program, all one pid) is looked at again once it has, at the
+    /// next look, not at the next recheck.
+    #[test]
+    fn an_agent_seen_before_it_execs_is_found_once_it_has() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_home().join("typed-exec");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        // A Codex that takes its time to start: a script until `go` is there, then itself.
+        let script = format!("#!/bin/bash\necho \"$@\" >> '{runs}'\nuntil [ -e '{go}' ]; do /bin/sleep 0.02; done\nexec -a codex /bin/sleep 600\n", runs = dir.join("runs").display(), go = dir.join("go").display());
+        std::fs::write(dir.join("bin/codex"), script).unwrap();
+        std::fs::set_permissions(dir.join("bin/codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let d = shell_daemon();
+        let id = own_shell(&d, "9605", &dir);
+        let s = session(&d, &id);
+        s.pane.write(format!("'{}'\r", dir.join("bin/codex").display()).into_bytes());
+        wait_for("it started, not yet itself", || std::fs::read_to_string(dir.join("runs")).is_ok());
+        let fg = s.pane.foreground().unwrap();
+        watch_shells(&d);
+        assert!(s.typed().is_none(), "a script, not an agent yet");
+        std::fs::write(dir.join("go"), "").unwrap();
+        wait_for("it itself", || dino_core::procinfo::name(fg).as_deref() == Some("sleep"));
+        assert_eq!(s.pane.foreground(), Some(fg), "the same process");
+        watch_shells(&d);
+        assert_eq!(s.typed().map(|f| (f.agent, f.pid)), Some(("codex".to_string(), Some(fg))), "found at the next look");
         kill(&d, &id);
         let _ = std::fs::remove_dir_all(&dir);
     }

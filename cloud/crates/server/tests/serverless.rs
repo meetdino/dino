@@ -60,11 +60,23 @@ async fn sync_works_by_request_alone() {
     assert_eq!(counted, 1, "sync writes counted in Postgres");
 }
 
+/// Wait, when `window`'s current window (as the database's clock, which the shared limits count
+/// by, places it) has under `room` seconds left, until the next one starts: attempts made from
+/// here on are all counted in one window, not reset partway by a new one.
+async fn fresh_window(s: &Server, window: f64, room: f64) {
+    let left: f64 = sqlx::query_scalar("SELECT $1 - (extract(epoch FROM now())::float8 - floor(extract(epoch FROM now())::float8 / $1) * $1)").bind(window).fetch_one(&s.state.db).await.unwrap();
+    if left < room {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(left + 0.05)).await;
+    }
+}
+
 #[tokio::test]
 async fn sign_in_attempts_are_limited_across_instances() {
     let s = start_serverless().await;
     // Two instances on one database: the limit is shared, not per instance.
     let other = s.second_node().await;
+    // Sign-in attempts are counted in minute windows; the tries below take about a second.
+    fresh_window(&s, 60.0, 15.0).await;
     let mut limited = None;
     for i in 0..100 {
         let node = if i % 2 == 0 { &s } else { &other };
