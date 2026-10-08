@@ -1,4 +1,6 @@
+# The root rust-toolchain.toml's version: cloud/ is a workspace of its own, so rustup reads this
+# file here. cloud/crates/server/rust-toolchain.toml (for Vercel) names it too.
 [toolchain]
-channel = "1.94.0"
+channel = "1.99.0"
 profile = "minimal"
-components = ["rustfmt"]
+components = ["clippy", "rustfmt"]

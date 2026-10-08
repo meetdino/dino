@@ -344,7 +344,7 @@ pub fn offer(words: &[String], src: &dyn Source) -> Offer {
         return o;
     }
     // `dino login <plan>` takes `--base`; plain `dino login`, the rest.
-    let flags: Vec<&Flag> = cmd.flags.iter().filter(|f| name != "login" || (f.0 == "--base") == !args.is_empty() || f.0 == "--help").collect();
+    let flags: Vec<&Flag> = cmd.flags.iter().filter(|f| name != "login" || (f.0 == "--base") != args.is_empty() || f.0 == "--help").collect();
     // Only `show`, `edit`, `run`, `pause`, `resume` and `rm` take an automation, and only
     // `add` and `edit` the options.
     let kind = match (name, args.first().copied()) {

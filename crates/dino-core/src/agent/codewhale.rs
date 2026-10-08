@@ -240,7 +240,9 @@ fn tools_in(text: &str) -> Vec<String> {
 
 /// `tools_in` of the turn's copy, read again only when it changes: it's looked at twice a second.
 fn tools_out(id: &str) -> Vec<String> {
-    static LAST: std::sync::Mutex<Option<(PathBuf, std::time::SystemTime, u64, Vec<String>)>> = std::sync::Mutex::new(None);
+    /// The copy last read: its path, modified time and length, and its tools.
+    type Read = (PathBuf, std::time::SystemTime, u64, Vec<String>);
+    static LAST: std::sync::Mutex<Option<Read>> = std::sync::Mutex::new(None);
     let Some(p) = checkpoint(id) else { return vec![] };
     let Some((modified, len)) = p.metadata().ok().and_then(|m| Some((m.modified().ok()?, m.len()))) else { return vec![] };
     let mut last = LAST.lock().unwrap();

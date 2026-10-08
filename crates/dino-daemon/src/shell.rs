@@ -60,10 +60,6 @@ const AI: [(&str, &str); 3] = [
     ("fish/vendor_completions.d/dino.fish", include_str!("../../dino/shell/completions/dino.fish")),
 ];
 
-/// What dino turns on when the app hasn't said what the user's Ghostty config does: a bar cursor
-/// while editing, and the folder (at a prompt) or the command (while it runs) as the title.
-pub const FEATURES: &str = "cursor,title";
-
 /// The shells with an integration, as Ghostty's `shell-integration` names them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Shell {
@@ -133,11 +129,11 @@ fn wire_from(dir: &Path, program: &str, env: &mut HashMap<String, String>, args:
             }
             env.insert("ENV".into(), dir.join("bash/dino-posix.bash").display().to_string());
             // POSIX mode would keep history in ~/.sh_history.
-            if var(env, "HISTFILE").is_none() {
-                if let Some(home) = var(env, "HOME") {
-                    env.insert("HISTFILE".into(), format!("{home}/.bash_history"));
-                    env.insert("GHOSTTY_BASH_UNEXPORT_HISTFILE".into(), "1".into());
-                }
+            if var(env, "HISTFILE").is_none()
+                && let Some(home) = var(env, "HOME")
+            {
+                env.insert("HISTFILE".into(), format!("{home}/.bash_history"));
+                env.insert("GHOSTTY_BASH_UNEXPORT_HISTFILE".into(), "1".into());
             }
             vec!["--posix".into(), "-l".into()]
         }
@@ -200,6 +196,10 @@ fn bash_major(program: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default `shell_features` (dino_core::settings): a bar cursor while editing, and the
+    /// folder (at a prompt) or the command (while it runs) as the title.
+    const FEATURES: &str = "cursor,title";
 
     #[test]
     fn each_shell_gets_its_way_in() {

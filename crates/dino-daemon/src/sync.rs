@@ -285,11 +285,11 @@ fn run() {
         if changed {
             record_local();
         }
-        if has_pending() {
-            if let Err(e) = push() {
-                note_error(e);
-                std::thread::sleep(Duration::from_secs(2));
-            }
+        if has_pending()
+            && let Err(e) = push()
+        {
+            note_error(e);
+            std::thread::sleep(Duration::from_secs(2));
         }
         if due {
             last_pull = Some(Instant::now());

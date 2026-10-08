@@ -86,8 +86,15 @@ STABLE="$WORK/Dino.dmg"
 FILES=("$DMG" "$TAR" "$DIST/SHA256SUMS" ${UPDATES[@]+"${UPDATES[@]}"} "$STABLE")
 # --latest, always: the feed and the download link are this release's only while it's the latest.
 # gh publishes it once every file is up, so neither is ever missing from the latest.
+NOTES="dino $VERSION. Install with \`brew install meetdino/tap/dino\`, or the command line alone with \`curl -fsSL https://meetdino.com/install.sh | sh\`."
+# The compilers it was built with (release.sh's dist/toolchain).
+if [ -s "$DIST/toolchain" ]; then
+    NOTES="$NOTES
+
+Built with $(paste -sd ';' "$DIST/toolchain" | sed 's/;/, /g')."
+fi
 run gh release create "$TAG" --repo "$RELEASES_REPO" --target "$COMMIT" --latest --title "dino $VERSION" \
-    --notes "dino $VERSION. Install with \`brew install meetdino/tap/dino\`, or the command line alone with \`curl -fsSL https://meetdino.com/install.sh | sh\`." \
+    --notes "$NOTES" \
     "${FILES[@]}"
 
 # TEMPORARY, the bridge (see BRIDGE_REPO above).

@@ -32,15 +32,16 @@ fn run(d: &Daemon) {
     // As if it was on: a dinod that starts with it off clears what an earlier one left, once.
     let mut was_on = true;
     loop {
-        if was_on && !cfg.show_agents {
-            if let Some(t) = Server::find() {
-                t.remove_all();
-            }
+        if was_on
+            && !cfg.show_agents
+            && let Some(t) = Server::find()
+        {
+            t.remove_all();
         }
-        if cfg.show_agents {
-            if let Some(t) = Server::find() {
-                t.sync(d, &cfg);
-            }
+        if cfg.show_agents
+            && let Some(t) = Server::find()
+        {
+            t.sync(d, &cfg);
         }
         was_on = cfg.show_agents;
         wait(d, if cfg.show_agents { LOOK_ON } else { LOOK_OFF });

@@ -33,13 +33,11 @@ pub fn connect() -> io::Result<UnixStream> {
     // Through systemd when `dino service install` put a unit in.
     #[cfg(target_os = "linux")]
     let asked = crate::systemd::start();
-    if asked {
-        if let Some(s) = wait_for(&path, Duration::from_secs(15)) {
-            return Ok(s);
-        }
-        // launchd couldn't run it (an app since deleted, say): as below, and the lock keeps a
-        // late one from launchd from being a second dinod.
+    if asked && let Some(s) = wait_for(&path, Duration::from_secs(15)) {
+        return Ok(s);
     }
+    // launchd couldn't run it (an app since deleted, say): as below, and the lock keeps a
+    // late one from launchd from being a second dinod.
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("daemon").stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
     // Own session, so it outlives this terminal.
@@ -248,12 +246,12 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
         let mut last = (cols, rows);
         let mut sent = Instant::now().checked_sub(SETTLE).unwrap_or_else(Instant::now);
         loop {
-            if let Ok(size) = crossterm::terminal::size() {
-                if size != last {
-                    last = size;
-                    sent = Instant::now();
-                    let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::RESIZE, &ipc::resize_payload(size.0, size.1));
-                }
+            if let Ok(size) = crossterm::terminal::size()
+                && size != last
+            {
+                last = size;
+                sent = Instant::now();
+                let _ = ipc::write_frame(&mut *w.lock().unwrap(), ipc::RESIZE, &ipc::resize_payload(size.0, size.1));
             }
             let mut sig = 0;
             unsafe { libc::sigwait(&winch, &mut sig) };

@@ -80,10 +80,11 @@ fn local(path: &str) -> Option<String> {
 /// Forms must come from this server's own pages: a matching CSRF token, and an Origin (when the
 /// browser sends one) that is ours.
 fn check_form(s: &AppState, session: &Session, headers: &HeaderMap, token: &str) -> Result<()> {
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        if origin != "null" && origin.trim_end_matches('/') != s.cfg.public_url.as_str().trim_end_matches('/') {
-            return Err(Error::Forbidden("Cross-site request refused.".into()));
-        }
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
+        && origin != "null"
+        && origin.trim_end_matches('/') != s.cfg.public_url.as_str().trim_end_matches('/')
+    {
+        return Err(Error::Forbidden("Cross-site request refused.".into()));
     }
     if !session.check_csrf(s, token) {
         return Err(Error::Forbidden("The form expired. Go back and try again.".into()));
