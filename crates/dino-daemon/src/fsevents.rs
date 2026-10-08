@@ -308,7 +308,7 @@ mod tests {
                 while !stop.load(Ordering::Relaxed) {
                     let f = roots[i % 2].join(format!("{}.txt", i % 40));
                     std::fs::write(&f, format!("{i}")).unwrap();
-                    if i % 7 == 0 {
+                    if i.is_multiple_of(7) {
                         let _ = std::fs::remove_file(&f);
                     }
                     i += 1;

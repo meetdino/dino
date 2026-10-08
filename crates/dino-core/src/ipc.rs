@@ -66,6 +66,9 @@ pub fn parse_resize(p: &[u8]) -> Option<(u16, u16)> {
     (p.len() == 4).then(|| (u16::from_be_bytes([p[0], p[1]]), u16::from_be_bytes([p[2], p[3]])))
 }
 
+// One message per call, read off the socket or written to it and then dropped: never stored or
+// moved in bulk, so its size costs nothing, and boxing the big variants would only add allocations.
+#[allow(clippy::large_enum_variant, reason = "a message lives for one call")]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -568,6 +571,9 @@ pub enum Request {
     },
 }
 
+// One message per call, read off the socket or written to it and then dropped: never stored or
+// moved in bulk, so its size costs nothing, and boxing the big variants would only add allocations.
+#[allow(clippy::large_enum_variant, reason = "a message lives for one call")]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {

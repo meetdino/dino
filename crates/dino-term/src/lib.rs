@@ -46,7 +46,7 @@ fn session_members(session: u32) -> Vec<libc::pid_t> {
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
         let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size) };
-        got != size || info.pbi_status == libc::SZOMB as u32
+        got != size || info.pbi_status == libc::SZOMB
     };
     // A session's id stays taken while any process is in it, so its id names only these.
     pids.into_iter().filter(|&p| p > 0 && unsafe { libc::getsid(p) } == session as libc::pid_t && !zombie(p)).collect()
@@ -197,7 +197,8 @@ const LOOK_AGAIN: Duration = Duration::from_millis(80);
 /// Look at pane `p`'s terminal again shortly (see [`LOOK_AGAIN`]). One thread does it for every
 /// pane, blocked while nothing is written; a pane is queued once until it's been looked at.
 fn look_again_soon(p: &Arc<Pane>) {
-    static QUEUE: OnceLock<Mutex<std::sync::mpsc::Sender<(Weak<Pane>, Instant)>>> = OnceLock::new();
+    type Queue = Mutex<std::sync::mpsc::Sender<(Weak<Pane>, Instant)>>;
+    static QUEUE: OnceLock<Queue> = OnceLock::new();
     if p.shared.looking_again.swap(true, Ordering::Relaxed) {
         return;
     }
@@ -499,10 +500,8 @@ impl Pane {
                         let path = std::fs::canonicalize(&path).map_or(path, |p| p.display().to_string());
                         // Every prompt says where it is; only a move is news.
                         let moved = s.cwd.lock().unwrap().replace(path.clone()).as_deref() != Some(&path);
-                        if moved {
-                            if let Some(f) = s.on_cwd.get() {
-                                f();
-                            }
+                        if moved && let Some(f) = s.on_cwd.get() {
+                            f();
                         }
                     }
                 }
@@ -519,10 +518,10 @@ impl Pane {
                         ["B" | "I", ..] => {
                             // Its end again with no new start: the shell drew its prompt again (a
                             // resize, a redraw), over the line, while the mark said input.
-                            if feed.mark.as_deref() == Some("B") {
-                                if let Some(prompt) = &feed.prompt {
-                                    Self::remark_prompt(term, prompt);
-                                }
+                            if feed.mark.as_deref() == Some("B")
+                                && let Some(prompt) = &feed.prompt
+                            {
+                                Self::remark_prompt(term, prompt);
                             }
                             feed.mark = Some("B".into());
                         }
@@ -717,10 +716,10 @@ impl Pane {
         // one that read the terminal first mustn't note what it saw last.
         let mut password = self.shared.password.lock().unwrap();
         let Some(now) = self.shared.transport.get().and_then(|t| t.password()) else { return };
-        if std::mem::replace(&mut *password, now) != now {
-            if let Some(f) = self.shared.on_password.get() {
-                f();
-            }
+        if std::mem::replace(&mut *password, now) != now
+            && let Some(f) = self.shared.on_password.get()
+        {
+            f();
         }
     }
 
@@ -937,7 +936,7 @@ fn file_url_path(url: &str) -> Option<String> {
         return Some(rest[rest.find('/')?..].to_string());
     }
     let rest = url.strip_prefix("file://")?;
-    let path = rest[rest.find('/')?..].as_bytes();
+    let path = &rest.as_bytes()[rest.find('/')?..];
     let mut out = Vec::with_capacity(path.len());
     let mut i = 0;
     while i < path.len() {

@@ -502,7 +502,7 @@ pub fn finished(running: &[FoundSession], limit: Option<usize>, query: &str) -> 
     if !query.is_empty() {
         out.retain(|f| [Some(&f.title), f.cwd.as_ref(), Some(&f.session_id)].into_iter().flatten().any(|s| s.to_lowercase().contains(&query)));
     }
-    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    out.sort_by_key(|f| std::cmp::Reverse(f.updated_at));
     (out, older.get())
 }
 

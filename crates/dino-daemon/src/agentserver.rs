@@ -92,7 +92,7 @@ fn run(a: &'static dyn Agent, stats: &Stats, s: &Session, addr: &Address) {
                     // The model that answered, as `-m` takes it: one picked in it shows from then.
                     stats.report_model(&s.id, model.clone());
                     let window = *st.windows.entry(model.clone()).or_insert_with(|| {
-                        let providers = a.server_providers().and_then(|p| get(p)).and_then(|r| r.json::<serde_json::Value>().ok())?;
+                        let providers = a.server_providers().and_then(get).and_then(|r| r.json::<serde_json::Value>().ok())?;
                         a.server_context_window(&providers, &model)
                     });
                     if let Some(window) = window.filter(|_| !s.pane.is_exited()) {

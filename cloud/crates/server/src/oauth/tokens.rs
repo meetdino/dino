@@ -123,7 +123,8 @@ pub async fn refresh(state: &AppState, client: &Client, presented: &str) -> Resu
     let invalid = || Error::oauth("invalid_grant", "The refresh token isn't valid. Sign in again.");
     let mut tx = state.db.begin().await?;
     // Lock the row so two refreshes of the same token can't both rotate it.
-    let row: Option<(Uuid, Uuid, DateTime<Utc>, Option<DateTime<Utc>>, String, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
+    type Row = (Uuid, Uuid, DateTime<Utc>, Option<DateTime<Utc>>, String, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+    let row: Option<Row> = sqlx::query_as(
         "SELECT r.device_id, r.account_id, r.expires_at, r.rotated_at, d.client_id, d.scope, d.revoked_at, a.deleted_at
          FROM refresh_tokens r JOIN devices d ON d.id = r.device_id JOIN accounts a ON a.id = r.account_id
          WHERE r.hash = $1 FOR UPDATE OF r",
@@ -182,7 +183,8 @@ pub struct Bearer {
 }
 
 pub async fn lookup_access(state: &AppState, token: &str) -> Result<Option<Bearer>> {
-    let row: Option<(Uuid, Option<Uuid>, String, String, String, DateTime<Utc>, DateTime<Utc>, bool)> = sqlx::query_as(
+    type Row = (Uuid, Option<Uuid>, String, String, String, DateTime<Utc>, DateTime<Utc>, bool);
+    let row: Option<Row> = sqlx::query_as(
         "SELECT t.account_id, t.device_id, t.client_id, t.aud, t.scope, t.expires_at, t.created_at, coalesce(d.last_seen_at < now() - interval '5 minutes', false)
          FROM access_tokens t JOIN accounts a ON a.id = t.account_id LEFT JOIN devices d ON d.id = t.device_id
          WHERE t.hash = $1 AND t.expires_at > now() AND a.deleted_at IS NULL AND d.revoked_at IS NULL",

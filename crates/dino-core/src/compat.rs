@@ -150,10 +150,10 @@ impl Compat {
         out.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| order.iter().position(|x| *x == a.agent).cmp(&order.iter().position(|x| *x == b.agent))));
         if let Some(first) = out.first_mut().filter(|v| v.status != Status::No) {
             first.recommended = true;
-            if let Some(n) = self.notes(m).find(|n| n.recommend.first() == Some(&first.agent)) {
-                if let Some(why) = &n.why {
-                    first.reasons.insert(0, Reason { text: why.clone(), source: n.source.clone() });
-                }
+            if let Some(n) = self.notes(m).find(|n| n.recommend.first() == Some(&first.agent))
+                && let Some(why) = &n.why
+            {
+                first.reasons.insert(0, Reason { text: why.clone(), source: n.source.clone() });
             }
         }
         out
@@ -241,7 +241,7 @@ fn older(a: &str, b: &str) -> bool {
 }
 
 fn tokens(n: u64) -> String {
-    if n >= 1_000_000 && n % 1_000_000 == 0 { format!("{}M", n / 1_000_000) } else { format!("{}k", (n + 512) / 1024) }
+    if n >= 1_000_000 && n.is_multiple_of(1_000_000) { format!("{}M", n / 1_000_000) } else { format!("{}k", (n + 512) / 1024) }
 }
 
 #[cfg(test)]

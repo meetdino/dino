@@ -70,7 +70,7 @@ impl Sample {
     /// since, only if it's the same one.
     fn under(&self, top: u32, started_ns: u64) -> HashMap<u32, Proc> {
         let mut out = HashMap::new();
-        if !self.procs.get(&top).is_some_and(|p| p.usage.started_ns == started_ns) {
+        if self.procs.get(&top).is_none_or(|p| p.usage.started_ns != started_ns) {
             return out;
         }
         for (&pid, p) in &self.procs {

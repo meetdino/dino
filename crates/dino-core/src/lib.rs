@@ -280,8 +280,9 @@ pub fn config_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     // Tests never write the user's own dino: a session's files there belong to a running dinod.
-    #[cfg(test)]
-    return std::env::temp_dir().join(format!("dino-core-test-{}", std::process::id()));
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("dino-core-test-{}", std::process::id()));
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     // `$XDG_CONFIG_HOME/dino` on Linux when it's set; ~/.config/dino is its default anyway.
     #[cfg(not(target_os = "macos"))]

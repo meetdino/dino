@@ -337,7 +337,7 @@ fn dino() -> anyhow::Result<()> {
     let agent = agent.to_lowercase();
     let launcher = launchers.iter().find(|l| l.short == agent).or_else(|| launchers.iter().find(|l| l.label.to_lowercase().starts_with(&agent)));
     let Some(launcher) = launcher else { return Err(unknown_agent(&agent, true)) };
-    cmd_open(".", &[&[launcher.short.clone()], args].concat())
+    cmd_open(".", &[std::slice::from_ref(&launcher.short), args].concat())
 }
 
 /// `dino` on its own opens the app, as `code` and `zed` open theirs. Inside a dino session (the app

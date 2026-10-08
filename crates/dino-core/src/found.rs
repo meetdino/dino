@@ -89,14 +89,16 @@ pub(crate) fn started_before(p: Option<&crate::procinfo::Proc>, started_ms: &Val
 
 /// A process's terminal and launch flags never change: read once per process (its pid and
 /// start), kept while it lives.
-static PROCS: Mutex<Option<HashMap<u32, (Option<u64>, Option<String>, Vec<String>)>>> = Mutex::new(None);
+static PROCS: Mutex<Option<HashMap<u32, Proc>>> = Mutex::new(None);
+/// A process's start, terminal and launch flags.
+type Proc = (Option<u64>, Option<String>, Vec<String>);
 
 pub(crate) fn terminal_and_flags(agent: &dyn Agent, pid: u32) -> (Option<String>, Vec<String>) {
     let started = crate::procinfo::process(pid).map(|p| p.started_us);
-    if let Some((at, terminal, flags)) = PROCS.lock().unwrap().get_or_insert_default().get(&pid) {
-        if *at == started {
-            return (terminal.clone(), flags.clone());
-        }
+    if let Some((at, terminal, flags)) = PROCS.lock().unwrap().get_or_insert_default().get(&pid)
+        && *at == started
+    {
+        return (terminal.clone(), flags.clone());
     }
     let found = (terminal_of(pid), agent.portable_flags(&args_of(pid)));
     PROCS.lock().unwrap().get_or_insert_default().insert(pid, (started, found.0.clone(), found.1.clone()));

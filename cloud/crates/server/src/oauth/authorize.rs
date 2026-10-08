@@ -213,7 +213,8 @@ async fn issue(s: &AppState, account: Uuid, p: &Params, client: &'static Client)
 pub async fn exchange(s: &AppState, client: &Client, code: &str, redirect: &str, verifier: &str) -> Result<TokenResponse> {
     let invalid = || Error::oauth("invalid_grant", "The code isn't valid.");
     let mut tx = s.db.begin().await?;
-    let row: Option<(String, String, String, Uuid, String, String, String, String, DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query_as(
+    type Row = (String, String, String, Uuid, String, String, String, String, DateTime<Utc>, Option<DateTime<Utc>>);
+    let row: Option<Row> = sqlx::query_as(
         "SELECT client_id, redirect_uri, code_challenge, account_id, scope, device_name, device_os, dino_version, expires_at, used_at
          FROM auth_codes WHERE hash = $1 FOR UPDATE",
     )

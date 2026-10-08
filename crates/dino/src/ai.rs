@@ -332,7 +332,7 @@ fn run_for(mut cmd: Command, limit: Duration, name: &str) -> anyhow::Result<Stri
     };
     let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
     if !status.success() {
-        let why = err.lines().chain(out.lines()).map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("no output");
+        let why = err.lines().chain(out.lines()).map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("no output");
         anyhow::bail!("{name} failed: {why}");
     }
     Ok(out)
@@ -426,7 +426,7 @@ fn program<'a>(words: &'a [&'a str]) -> &'a [&'a str] {
 /// pipeline stage it's in: find's actions can come after a `\( … \)`.
 fn risk_of(words: &[&str], part: &[&str], cwd: &Path) -> Option<&'static str> {
     let (&first, args) = words.split_first()?;
-    let has = |flag: &str| args.iter().any(|w| *w == flag);
+    let has = |flag: &str| args.contains(&flag);
     // Short flags, bundled or not: `-rf` has r.
     let short = |c: char| args.iter().any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains(c));
     match name(first) {
@@ -463,7 +463,7 @@ fn git_risk(args: &[&str]) -> Option<&'static str> {
         i += if matches!(w, "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env") { 2 } else { 1 };
     }
     let (&sub, rest) = args.get(i..)?.split_first()?;
-    let has = |flag: &str| rest.iter().any(|w| *w == flag);
+    let has = |flag: &str| rest.contains(&flag);
     let short = |c: char| rest.iter().any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains(c));
     match sub {
         "push" if short('f') || has("--mirror") || rest.iter().any(|w| w.starts_with("--force") || w.starts_with('+')) => Some("rewrites the remote's history"),

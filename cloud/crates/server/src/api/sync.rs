@@ -59,6 +59,8 @@ fn check_version(headers: &HeaderMap) -> Option<Response> {
     (v < PROTOCOL).then(|| refuse(StatusCode::UPGRADE_REQUIRED, SyncError::UpgradeRequired { min: PROTOCOL }))
 }
 
+// The Err is the handler's own answer, returned right away: boxing it would gain nothing.
+#[allow(clippy::result_large_err, reason = "the Err is the response the handler returns")]
 fn device(a: &Authed) -> std::result::Result<Uuid, Response> {
     a.device_id.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED, SyncError::UnknownDevice))
 }
@@ -137,10 +139,10 @@ async fn push_records(State(s): State<AppState>, a: Authed, headers: HeaderMap, 
     if let Err(e) = check_push(&req) {
         return Ok(refuse(StatusCode::PAYLOAD_TOO_LARGE, e));
     }
-    if let Some(n) = NonZeroU32::new(req.records.len() as u32) {
-        if let Err(retry) = crate::limits::sync_writes(&s, device, n).await? {
-            return Ok(refuse(StatusCode::TOO_MANY_REQUESTS, SyncError::RateLimited { retry_after_s: retry }));
-        }
+    if let Some(n) = NonZeroU32::new(req.records.len() as u32)
+        && let Err(retry) = crate::limits::sync_writes(&s, device, n).await?
+    {
+        return Ok(refuse(StatusCode::TOO_MANY_REQUESTS, SyncError::RateLimited { retry_after_s: retry }));
     }
     let now_ms = Utc::now().timestamp_millis().max(0) as u64;
     let mut tx = s.db.begin().await?;
@@ -230,11 +232,14 @@ async fn notify(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, account: Uuid, n
     Ok(())
 }
 
+/// A connected device's socket: its id on this node, and where its nudges go.
+type Conn = (u64, mpsc::Sender<String>);
+
 /// Connected devices on this node, by account. Nudges are hints (a device also pulls on wake and
 /// every few minutes), so a slow socket just misses some rather than holding anything up.
 #[derive(Default)]
 pub struct Hub {
-    conns: Mutex<HashMap<Uuid, Vec<(u64, mpsc::Sender<String>)>>>,
+    conns: Mutex<HashMap<Uuid, Vec<Conn>>>,
     next: AtomicU64,
 }
 
@@ -282,10 +287,10 @@ pub fn listen(state: AppState) -> tokio::task::JoinHandle<()> {
                     if l.listen(CHANNEL).await.is_ok() {
                         backoff = Duration::from_millis(250);
                         while let Ok(n) = l.recv().await {
-                            if let Some((account, msg)) = n.payload().split_once(' ') {
-                                if let Ok(account) = account.parse() {
-                                    state.hub.publish(account, msg);
-                                }
+                            if let Some((account, msg)) = n.payload().split_once(' ')
+                                && let Ok(account) = account.parse()
+                            {
+                                state.hub.publish(account, msg);
                             }
                         }
                     }

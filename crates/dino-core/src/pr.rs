@@ -104,10 +104,10 @@ pub fn pushed(dir: &Path, branch: &str) -> Option<String> {
 
 /// The branch PRs go into by default: origin's HEAD, else main or master if there is one.
 pub fn default_branch(dir: &Path) -> String {
-    if let Ok(r) = git(dir, &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"]) {
-        if let Some(b) = r.trim().strip_prefix("refs/remotes/origin/") {
-            return b.to_string();
-        }
+    if let Ok(r) = git(dir, &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])
+        && let Some(b) = r.trim().strip_prefix("refs/remotes/origin/")
+    {
+        return b.to_string();
     }
     ["main", "master"].into_iter().find(|b| has_ref(dir, &format!("refs/remotes/origin/{b}")) || has_ref(dir, &format!("refs/heads/{b}"))).unwrap_or("main").to_string()
 }
@@ -190,10 +190,10 @@ pub fn create(dir: &Path, title: &str, body: &str, base: &str, draft: bool) -> a
         git(&root, &["commit", "-q", "-m", title])?;
     }
     git(&root, &["push", "-q", "-u", "origin", "HEAD"])?;
-    if let Ok(pr) = view(&root, &branch) {
-        if pr.state == "open" {
-            return Ok(pr);
-        }
+    if let Ok(pr) = view(&root, &branch)
+        && pr.state == "open"
+    {
+        return Ok(pr);
     }
     let mut args = vec!["pr", "create", "--base", base, "--head", &branch, "--title", title, "--body", body];
     if draft {
@@ -314,8 +314,11 @@ impl Check {
     }
 }
 
+/// A failed check's name and link.
+type Failed = (String, Option<String>);
+
 /// The PR, and its failed checks with their links.
-fn parse_view(json: &str) -> anyhow::Result<(PrInfo, Vec<(String, Option<String>)>)> {
+fn parse_view(json: &str) -> anyhow::Result<(PrInfo, Vec<Failed>)> {
     let v: View = serde_json::from_str(json)?;
     let mut checks = Checks::default();
     let mut failed = vec![];

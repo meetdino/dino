@@ -179,7 +179,9 @@ struct History {
 
 /// By worktree, branch and base. Most looks find nothing committed since the last one, and every
 /// git call is a process.
-static HISTORY: Mutex<Option<HashMap<(PathBuf, Option<String>, String), History>>> = Mutex::new(None);
+static HISTORY: Mutex<Option<HashMap<HistoryKey, History>>> = Mutex::new(None);
+/// A worktree, its branch and its base.
+type HistoryKey = (PathBuf, Option<String>, String);
 
 /// `dir` at a glance next to `base` (a branch of its repo). Only reads: it may be another agent's
 /// worktree, so its index is left alone.
@@ -246,10 +248,10 @@ fn reach_counts(dir: &Path, heads: &[&str], not: &[&str]) -> anyhow::Result<Hash
             let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
             let mut todo = vec![h];
             while let Some(c) = todo.pop() {
-                if let Some(parents) = graph.get(c) {
-                    if seen.insert(c) {
-                        todo.extend(parents);
-                    }
+                if let Some(parents) = graph.get(c)
+                    && seen.insert(c)
+                {
+                    todo.extend(parents);
                 }
             }
             (h.to_string(), seen.len() as u32)

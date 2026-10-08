@@ -4,7 +4,7 @@
 #
 #   docker build -f cloud/Dockerfile -t dino-cloud .
 
-FROM rust:1.94-bookworm AS build
+FROM rust:1.99-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml ./
 COPY crates/dino-sync crates/dino-sync

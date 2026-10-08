@@ -6,8 +6,9 @@ you use, and get it merged.
 ## Setup
 
 - macOS 14 or later, the Xcode Command Line Tools (`xcode-select --install`), and Rust through
-  [rustup](https://rustup.rs) (stable, 1.91 or later: a dependency, anyllm_translate, uses
-  `str::floor_char_boundary`, stable since 1.91).
+  [rustup](https://rustup.rs). rustup picks the version CI uses, from `rust-toolchain.toml`; dino
+  builds with 1.91 or later (a dependency, anyllm_translate, uses `str::floor_char_boundary`, stable
+  since 1.91).
 - Optional, for the end-to-end checks: [Claude Code](https://claude.com/claude-code) signed in, and
   Python 3 (macOS has it).
 
@@ -94,7 +95,8 @@ maintainer to approve the run). Each of these has to pass before it merges:
 | --- | --- |
 | `changes` | `scripts/lint.sh`, `cargo fmt --check` among it, and which of the checks below the change needs |
 | `rust` | `cargo build` and `cargo test` of the workspace, on macOS |
-| `clippy` | `cargo clippy` of the workspace: its errors fail, its warnings don't |
+| `clippy` | `cargo clippy` of the workspace, failing on any warning |
+| `msrv` | `cargo check` of the workspace with the oldest Rust it supports (`rust-version` in `Cargo.toml`), on macOS |
 | `app` | the app's `swift build -c release`, on macOS |
 | `cloud` | `cloud/`'s build, clippy and tests, against Postgres |
 | `dco` | every commit is signed off (below) |

@@ -66,10 +66,12 @@ pub(crate) fn list(d: &Daemon, dir: &str) -> anyhow::Result<(Vec<worktree::Workt
         w.get(main).map(|w| (w.id, w.marks.listed.load(Ordering::Relaxed)))
     };
     let mut lists = d.git.lists.lock().unwrap();
-    if let Some(l) = lists.get(dir) {
-        if l.at.elapsed() < RELIST && l.stamp.is_some() && l.stamp == watch_now(&l.main) {
-            return Ok((l.worktrees.clone(), l.paths.clone()));
-        }
+    if let Some(l) = lists.get(dir)
+        && l.at.elapsed() < RELIST
+        && l.stamp.is_some()
+        && l.stamp == watch_now(&l.main)
+    {
+        return Ok((l.worktrees.clone(), l.paths.clone()));
     }
     let known = lists.get(dir).map(|l| l.main.clone());
     lists.retain(|_, l| l.at.elapsed() < RELIST);
@@ -418,12 +420,11 @@ pub(crate) fn summaries(d: &Daemon, w: &[worktree::Worktree], paths: &[String], 
             match job {
                 Some(j) => jobs.push((i, j, stamp)),
                 None => {
-                    if let Some(k) = k {
-                        if let (Some(was), Some(now)) = (&mut k.stamp, stamp) {
-                            if was.seen == now.seen {
-                                *was = now;
-                            }
-                        }
+                    if let Some(k) = k
+                        && let (Some(was), Some(now)) = (&mut k.stamp, stamp)
+                        && was.seen == now.seen
+                    {
+                        *was = now;
                     }
                 }
             }
@@ -442,7 +443,8 @@ pub(crate) fn summaries(d: &Daemon, w: &[worktree::Worktree], paths: &[String], 
     let unpushed = if pushes.is_empty() { HashMap::new() } else { worktree::unpushed_all(Path::new(&paths[0]), &pushes, base) };
     // Read side by side, a few at a time.
     let next = AtomicUsize::new(0);
-    let read: Mutex<Vec<(usize, Option<worktree::Summary>, Option<Stamp>)>> = Mutex::default();
+    type Read = (usize, Option<worktree::Summary>, Option<Stamp>);
+    let read: Mutex<Vec<Read>> = Mutex::default();
     let threads = workers().min(jobs.len());
     std::thread::scope(|sc| {
         for _ in 0..threads {

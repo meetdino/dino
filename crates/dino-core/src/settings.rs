@@ -436,10 +436,10 @@ impl Settings {
         let m = Managed::load();
         let mut s = Self::load_user().managed_by(&m);
         // An organization that set computer use where it was (Experimental) still sets it.
-        if let Some(on) = m.doc.pointer("/experimental/computer_use").and_then(|v| v.as_bool()) {
-            if m.doc.pointer("/machine/computer_use").is_none() {
-                s.machine.computer_use = Some(on);
-            }
+        if let Some(on) = m.doc.pointer("/experimental/computer_use").and_then(|v| v.as_bool())
+            && m.doc.pointer("/machine/computer_use").is_none()
+        {
+            s.machine.computer_use = Some(on);
         }
         s
     }
@@ -792,8 +792,7 @@ mod tests {
         assert!(!Settings::load().policies.close_merged, "closing merged sessions off by default");
         let p = Policies { allowed_agents: vec!["codex".into()], ..Policies::default() };
         assert!(p.allows("codex") && p.allows("shell") && !p.allows("claude"));
-        let mut s3 = Settings::default();
-        s3.policies = Policies { default_agent: Some("codex".into()), session_token_budget: 5, ..p };
+        let s3 = Settings { policies: Policies { default_agent: Some("codex".into()), session_token_budget: 5, ..p }, ..Settings::default() };
         s3.save().unwrap();
         assert_eq!(Settings::load(), s3);
         assert!(Settings::default().policies.allow_bypass, "bypass offered by default");

@@ -100,7 +100,8 @@ pub async fn authorization(State(s): State<AppState>, ClientIp(ip): ClientIp, Fo
 pub async fn poll(s: &AppState, client: &Client, device_code: &str) -> Result<TokenResponse> {
     let hash = crypto::hash(device_code);
     let mut tx = s.db.begin().await?;
-    let row: Option<(String, String, String, String, String, String, DateTime<Utc>, i32, Option<DateTime<Utc>>, Option<Uuid>)> = sqlx::query_as(
+    type Row = (String, String, String, String, String, String, DateTime<Utc>, i32, Option<DateTime<Utc>>, Option<Uuid>);
+    let row: Option<Row> = sqlx::query_as(
         "SELECT client_id, scope, device_name, device_os, dino_version, status, expires_at, interval_s, last_poll_at, account_id
          FROM device_codes WHERE hash = $1 FOR UPDATE",
     )

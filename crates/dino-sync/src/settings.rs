@@ -25,7 +25,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 use dino_core::controls::Controls;
-use dino_core::settings::{Fallback, Machine, Policies, Repo, Routing, Settings, SshHost, Terminal, Tmux, Worktrees};
+use dino_core::settings::{Fallback, Machine, Policies, Routing, Settings, SshHost, Terminal, Tmux, Worktrees};
 
 use crate::record::RecordId;
 
@@ -129,7 +129,7 @@ pub fn unflatten(local: &Settings, entries: &Entries, path_of: &dyn Fn(&str) -> 
         }
         match path_of(remote) {
             Some(path) => {
-                s.repos.entry(path).or_insert_with(Repo::default).env.insert(var.to_string(), v.clone());
+                s.repos.entry(path).or_default().env.insert(var.to_string(), v.clone());
             }
             None => pending.push((remote.to_string(), var.to_string(), v.clone())),
         }
