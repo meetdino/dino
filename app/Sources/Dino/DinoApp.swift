@@ -237,6 +237,9 @@ struct DinoApp: App {
                 Button("Keyboard Shortcuts") { model.showShortcuts = true }
                     .keyboardShortcut("/")
                 Button("Show Welcome") { model.showWelcome = true }
+                Divider()
+                Button("Report a Bug…") { BugReport.open() }
+                Button("Show dinod Log") { DinodLog.reveal(model) }
             }
         }
         Window("Settings", id: SettingsView.windowID) {
