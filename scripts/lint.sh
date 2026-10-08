@@ -13,3 +13,14 @@ if git grep -n 'DisclosureGroup(' -- app/Sources/Dino/Tree.swift app/Sources/Din
     echo "the sidebar lists rows that open with OpeningRows, not DisclosureGroup" >&2
     exit 1
 fi
+# The Rust code is formatted with cargo fmt, per rustfmt.toml; cloud/ is a workspace of its own.
+if ! cargo fmt --all --check || ! (cd cloud && cargo fmt --all --check); then
+    echo "the Rust code isn't formatted: run cargo fmt --all, and in cloud/ too" >&2
+    exit 1
+fi
+# Commits git blame skips: full commit ids only. Anything else, a placeholder left in, fails every
+# git blame that reads the file.
+if grep -vE '^([0-9a-f]{40})?$|^#' .git-blame-ignore-revs; then
+    echo ".git-blame-ignore-revs lists something other than full commit ids" >&2
+    exit 1
+fi
