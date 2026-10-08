@@ -133,13 +133,6 @@ const COMMANDS: &[Command] = &[
         args: &[Kind::KnownAgents, Kind::Words(&[("off", "no fallbacks")])],
     },
     Command {
-        name: "power",
-        about: "see what keeps your Mac awake",
-        flags: &[HELP],
-        args: &[Kind::Words(&[("status", "what keeps it awake now"), ("setup", "keep agents running with the lid closed"), ("remove", "take that permission back")])],
-    },
-    Command { name: "permissions", about: "see what macOS lets programs here do", flags: &[("--json", "print JSON", None), HELP], args: &[] },
-    Command {
         name: "build-cache",
         about: "share one Rust build cache across sessions",
         flags: &[HELP],
@@ -177,6 +170,33 @@ const COMMANDS: &[Command] = &[
     Command { name: "stop", about: "stop dino's background service", flags: &[], args: &[] },
     Command { name: "version", about: "print dino's version", flags: &[], args: &[] },
 ];
+
+/// The commands only this OS has, as `main` runs them: macOS's sleep and privacy permissions,
+/// Linux's systemd service.
+#[cfg(target_os = "macos")]
+const OS_COMMANDS: &[Command] = &[
+    Command {
+        name: "power",
+        about: "see what keeps your Mac awake",
+        flags: &[HELP],
+        args: &[Kind::Words(&[("status", "what keeps it awake now"), ("setup", "keep agents running with the lid closed"), ("remove", "take that permission back")])],
+    },
+    Command { name: "permissions", about: "see what macOS lets programs here do", flags: &[("--json", "print JSON", None), HELP], args: &[] },
+];
+#[cfg(target_os = "linux")]
+const OS_COMMANDS: &[Command] = &[Command {
+    name: "service",
+    about: "run dinod as a systemd user service",
+    flags: &[HELP],
+    args: &[Kind::Words(&[("install", "install and start it"), ("uninstall", "stop and remove it"), ("status", "whether it's running")])],
+}];
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const OS_COMMANDS: &[Command] = &[];
+
+/// Every command dino runs here.
+fn commands() -> impl Iterator<Item = &'static Command> {
+    COMMANDS.iter().chain(OS_COMMANDS)
+}
 
 const AUTOMATION_ACTIONS: Kind = Kind::Words(&[
     ("show", "one, with its runs"),
@@ -275,15 +295,15 @@ pub fn offer(words: &[String], src: &dyn Source) -> Offer {
         if current.starts_with('-') {
             o.words(&[("--help", "list every command"), ("--version", "print dino's version")]);
         } else {
-            o.values.extend(COMMANDS.iter().map(|c| (c.name.to_string(), c.about.to_string())));
+            o.values.extend(commands().map(|c| (c.name.to_string(), c.about.to_string())));
             // `dino shell` is the command: the agent called that starts as `dino . shell`.
-            o.values.extend(src.agents().into_iter().filter(|(a, _)| !COMMANDS.iter().any(|c| c.name == a)));
+            o.values.extend(src.agents().into_iter().filter(|(a, _)| !commands().any(|c| c.name == a)));
             o.dirs = true;
         }
         return o;
     };
     let name = if first == "automation" { "automations" } else { first.as_str() };
-    let Some(cmd) = COMMANDS.iter().find(|c| c.name == name) else {
+    let Some(cmd) = commands().find(|c| c.name == name) else {
         // `dino <folder> [<agent> [args…]]`, `dino <agent> [args…]`: the agent's own args are files.
         let folder = first.starts_with(['.', '~', '/']) || first.contains('/') || std::path::Path::new(first).is_dir();
         if folder && rest.is_empty() {
@@ -519,7 +539,6 @@ mod tests {
         has("dino completions ", &["zsh", "bash", "fish"]);
         has("dino shell ", &["install", "uninstall"]);
         has("dino shell install ", &["zsh", "bash", "fish"]);
-        has("dino power ", &["status", "setup", "remove"]);
         has("dino fallback ", &["claude", "codex"]);
         has("dino fallback claude ", &["off"]);
         has("dino fallback claude --new-sessions ", &["codex"]);
@@ -547,8 +566,12 @@ mod tests {
 
     #[test]
     fn every_command_dino_runs_is_offered() {
-        // The ones `dino --help` lists.
-        for name in [
+        #[cfg(target_os = "linux")]
+        let usage = crate::linux_usage();
+        #[cfg(not(target_os = "linux"))]
+        let usage = crate::USAGE.to_string();
+        // The ones `dino --help` lists here.
+        let mut names = vec![
             "ls",
             "status",
             "new",
@@ -566,8 +589,6 @@ mod tests {
             "sync",
             "claude-token",
             "fallback",
-            "power",
-            "permissions",
             "build-cache",
             "init",
             "shell",
@@ -577,9 +598,36 @@ mod tests {
             "ping",
             "stop",
             "completions",
-        ] {
-            assert!(COMMANDS.iter().any(|c| c.name == name), "{name}");
-            assert!(crate::USAGE.contains(&format!("dino {name}")) || crate::USAGE.contains(&format!("| {name}")), "--help lists {name}");
+        ];
+        if cfg!(target_os = "macos") {
+            names.extend(["power", "permissions"]);
+        }
+        if cfg!(target_os = "linux") {
+            names.push("service");
+        }
+        for name in names {
+            assert!(commands().any(|c| c.name == name), "{name}");
+            assert!(usage.contains(&format!("dino {name}")) || usage.contains(&format!("| {name}")), "--help lists {name}");
+        }
+    }
+
+    /// macOS's commands on a Mac only, Linux's on Linux only, as `main` runs them.
+    #[test]
+    fn os_commands_only_where_they_run() {
+        if cfg!(target_os = "macos") {
+            has("dino ", &["power", "permissions"]);
+            has("dino power ", &["status", "setup", "remove"]);
+            has("dino permissions -", &["--json"]);
+        } else {
+            lacks("dino ", &["power", "permissions"]);
+            lacks("dino power ", &["status", "setup", "remove"]);
+        }
+        if cfg!(target_os = "linux") {
+            has("dino ", &["service"]);
+            has("dino service ", &["install", "uninstall", "status"]);
+        } else {
+            lacks("dino ", &["service"]);
+            lacks("dino service ", &["install", "uninstall"]);
         }
     }
 }
