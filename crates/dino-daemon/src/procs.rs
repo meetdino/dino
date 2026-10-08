@@ -311,13 +311,12 @@ pub(crate) fn stop_session(home: &Path, id: &str, builds_only: bool) -> Option<s
     }
     eprintln!("{} dinod: session {id}: stopping {} {}", crate::stamp(), describe(&look, &pids), if builds_only { "its agent left building" } else { "it left running" });
     let id = id.to_string();
-    if builds_only {
-        // Only what's in those terminal sessions: the agent taking its place carries the tag too.
-        let sids: HashSet<u32> = pids.iter().filter_map(|&p| look.sid(p)).collect();
-        stop(pids, &look, move |l| l.in_sessions(&sids, &id))
-    } else {
-        stop(pids, &look, move |l| l.sessions().remove(&id).unwrap_or_default())
-    }
+    // What starts later (a script's next command) is looked for only in those terminal sessions:
+    // what carries the tag elsewhere is another's, the agent taking its place when its process is
+    // replaced, or a session started again under the same id before the last of the old one is
+    // gone.
+    let sids: HashSet<u32> = pids.iter().filter_map(|&p| look.sid(p)).filter(|&s| s > 1 && Some(s) != procinfo::session_of(std::process::id())).collect();
+    stop(pids, &look, move |l| l.in_sessions(&sids, &id))
 }
 
 /// Session `id`'s processes apart from its terminal, now: of the dino whose folder is `home`.
@@ -516,6 +515,41 @@ pub(crate) mod tests {
         let _ = sh.wait();
         assert!(found.iter().all(|&p| procinfo::process(p).is_none() || procinfo::name(p).as_deref() == Some("sh")), "all stopped");
         assert!(of_session(&home(), &id).is_empty());
+    }
+
+    /// A session started again under the same id while what the old one left is still being
+    /// stopped isn't stopped with it.
+    #[test]
+    fn a_session_started_again_under_its_id_is_not_stopped_with_the_old_one() {
+        let Some(py) = python() else { return };
+        let id = format!("r{}", std::process::id());
+        let tagged = |code: &str| {
+            let mut cmd = std::process::Command::new(py);
+            cmd.args(["-c", code]).env(TAG, tag(&home(), &id)).stdout(std::process::Stdio::piped());
+            // SAFETY: setsid in the child before exec: each in a terminal session of its own, as
+            // each session's terminal is.
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+            cmd.spawn().unwrap()
+        };
+        // The old one outlasts the hangup, so its stop goes on to SIGTERM a second later.
+        let mut old = tagged("import signal, time; signal.signal(signal.SIGHUP, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)");
+        let mut ready = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(old.stdout.take().unwrap()), &mut ready).unwrap();
+        assert_eq!(ready.trim(), "ready");
+        wait_for("the old one", || of_session(&home(), &id).contains(&old.id()));
+        let stopping = stop_session(&home(), &id, false).unwrap();
+        let mut new = tagged("import time; time.sleep(60)");
+        wait_for("the new one", || of_session(&home(), &id).contains(&new.id()));
+        stopping.join().unwrap();
+        assert!(old.try_wait().unwrap().is_some(), "the old one stopped");
+        assert!(new.try_wait().unwrap().is_none(), "the one started again runs on");
+        let _ = new.kill();
+        let _ = new.wait();
     }
 
     #[test]
