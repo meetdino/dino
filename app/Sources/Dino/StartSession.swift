@@ -8,7 +8,7 @@ struct StartRequest: Identifiable, Equatable {
     var worktree = false
     /// An agent already chosen (⌘N with nowhere to start it): it starts once a folder is picked.
     var agent: String?
-    /// On a provider's model (Settings → Models & Providers), with that agent.
+    /// On a provider's model (Settings → Providers), with that agent.
     var route: ProviderRoute?
 }
 

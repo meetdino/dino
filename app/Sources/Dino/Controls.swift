@@ -743,7 +743,7 @@ struct NewSessionSheet: View {
     @State private var hosts: [String: DinoSettings.SshHost] = [:]
     @State private var host = ""
     @State private var remoteFolder = ""
-    /// Settings → Models & Providers' providers that can serve now; `provider` empty is the agent's own account.
+    /// Settings → Providers' providers that can serve now; `provider` empty is the agent's own account.
     @State private var providers: [ProviderInfo] = []
     @State private var provider = ""
     @State private var providerModels: [ProviderModel] = []
@@ -876,7 +876,7 @@ struct NewSessionSheet: View {
                         }
                     } footer: {
                         Text(provider.isEmpty
-                            ? "You can also run the agent on a model from a provider in Settings → Models & Providers."
+                            ? "You can also run the agent on a model from a provider in Settings → Providers."
                             : "The agent runs on this model through dino. Its own sign-in and settings don't change.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -958,7 +958,7 @@ struct NewSessionSheet: View {
     /// "Add SSH Host…" opens Settings → Workspaces → SSH Hosts instead of choosing.
     private func pickHost(_ picked: String) {
         guard picked != Self.addHost else {
-            SettingsPart.ssh.select()
+            SettingsPane.ssh.select()
             openWindow(id: SettingsView.windowID)
             dismiss()
             return
