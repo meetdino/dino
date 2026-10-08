@@ -102,9 +102,28 @@ pub fn alive(pid: u32, started_us: u64) -> bool {
     Stat::read(pid).is_some_and(|s| started_us_of(&s) == started_us && s.state != b'Z' && s.state != b'X')
 }
 
-/// When a process started, in seconds since the epoch, like `ps -o lstart`.
+/// When a process started, in seconds since the epoch, like `ps -o lstart`: rounded down once,
+/// as macOS gives it, to be compared with a file's times. `btime` is itself rounded down, so
+/// adding the start's whole seconds to it ran up to two seconds early, and a file made a second
+/// before an agent started read as made after it (a resumed Codex's rollout as one it began).
 pub fn started(pid: u32) -> Option<u64> {
-    Stat::read(pid).map(|s| boot_secs() + s.starttime / ticks_per_sec())
+    let stat = Stat::read(pid)?;
+    let since_boot = stat.starttime as u128 * 1_000_000_000 / ticks_per_sec() as u128;
+    Some(((booted_ns()? + since_boot) / 1_000_000_000) as u64)
+}
+
+/// When the system booted, in nanoseconds since the epoch: the clock now less the time since
+/// boot, by the clock a process's start time counts on (suspend included).
+fn booted_ns() -> Option<u128> {
+    let ns = |clock| {
+        let mut t: libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { libc::clock_gettime(clock, &mut t) } != 0 {
+            return None;
+        }
+        Some(t.tv_sec as u128 * 1_000_000_000 + t.tv_nsec as u128)
+    };
+    let since_boot = ns(libc::CLOCK_BOOTTIME)?;
+    ns(libc::CLOCK_REALTIME)?.checked_sub(since_boot)
 }
 
 /// A process's parent, like `ps -o ppid`.
@@ -214,6 +233,23 @@ mod tests {
         let s = Stat::parse("42 (a (b) c) S 7 42 42 34816 42 4194304 1 2 3 4 15 6 17 8 20 0 1 0 1234 0 0").unwrap();
         assert_eq!((s.comm.as_str(), s.state, s.ppid, s.tty_nr), ("a (b) c", b'S', 7, 34816));
         assert_eq!((s.utime, s.stime, s.cutime, s.cstime, s.starttime), (15, 6, 17, 8, 1234));
+    }
+
+    /// Within the clock tick it's counted in, never `btime`'s rounding (up to two seconds) early.
+    #[test]
+    fn a_process_started_when_it_did() {
+        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        for _ in 0..20 {
+            let before = now() - std::time::Duration::from_millis(1000 / ticks_per_sec() + 1);
+            let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+            let after = now();
+            let started = started(child.id());
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let started = started.unwrap();
+            assert!(started >= before.as_secs() && started <= after.as_secs(), "{started} not in {before:?}..{after:?}");
+            std::thread::sleep(std::time::Duration::from_millis(37));
+        }
     }
 
     #[test]
