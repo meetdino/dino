@@ -871,7 +871,7 @@ final class DinoModel: ObservableObject {
     /// `host`: over SSH on that host, in `remoteFolder` there (empty: the host's default folder).
     /// `dir`: where on this Mac, instead of the current folder.
     /// `line`: for a shell, a line typed at its prompt once it's up; `label`: its name in the sidebar.
-    /// `route`: on a provider's model (Settings → Models & Providers) instead of the agent's own account.
+    /// `route`: on a provider's model (Settings → Providers) instead of the agent's own account.
     /// `tmux`: for a shell, the tmux session it attaches to at its prompt (dinod types it, and keeps
     /// a plain shell when tmux doesn't answer); `line` is that for a dinod that doesn't know it.
     /// `stay`: start this agent even while it's at its limit, not the one Settings → Agents names.

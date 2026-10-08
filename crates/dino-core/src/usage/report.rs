@@ -163,6 +163,12 @@ pub struct SessionUse {
     pub tokens: Tokens,
     pub requests: u64,
     pub parts: Parts,
+    /// The model that answered the most of its tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// How many subagents it ran: the distinct ones its calls and record name.
+    #[serde(default)]
+    pub subagents: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -553,6 +559,9 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
         tokens: Tokens,
         requests: u64,
         parts: Parts,
+        /// Tokens by model.
+        models: HashMap<String, u64>,
+        subagents: HashSet<String>,
     }
     let mut sessions: HashMap<String, Sess> = HashMap::new();
     let mut day_model: BTreeMap<(i64, String), u64> = BTreeMap::new();
@@ -716,7 +725,17 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
             tokens: Tokens::default(),
             requests: 0,
             parts: Parts::default(),
+            models: HashMap::new(),
+            subagents: HashSet::new(),
         });
+        if let Some(m) = r.model.as_deref().filter(|m| !m.is_empty()) {
+            *s.models.entry(m.to_string()).or_default() += tokens;
+        }
+        if let Some(id) = &r.subagent_id
+            && !s.subagents.contains(id)
+        {
+            s.subagents.insert(id.clone());
+        }
         s.tokens.add(&r);
         s.parts.add(&r);
         s.requests += 1;
@@ -791,6 +810,9 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
             tokens: s.tokens,
             requests: s.requests,
             parts: s.parts,
+            // Most tokens, then the name, so the same rows always give the same one.
+            model: s.models.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|(m, _)| m),
+            subagents: s.subagents.len() as u64,
         })
         .collect();
 
@@ -999,6 +1021,44 @@ mod tests {
         assert_eq!(r.projects[0].path, "/src/app");
         assert_eq!(r.speed[0].ttft_p50_ms, Some(400));
         assert_eq!(r.speed[0].tps_p50, None, "too few tokens to say");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A session's model is the one that answered most of its tokens, and its subagents are the
+    /// distinct ones its calls and its transcript name: the same subagent seen by both counts once,
+    /// and one seen only in the transcript (it went direct) counts too.
+    #[test]
+    fn a_session_names_its_model_and_counts_its_subagents() {
+        let (mut s, dir) = store();
+        let now = noon(1_791_115_200_000, 0) + 3_600_000;
+        let t = noon(now, 0);
+        let sub = |at: i64, model: &str, id: &str, answer: &str, tokens: u64| Call { subagent_id: Some(id.into()), answer: Some(answer.into()), ..call(at, "7", Some("c1"), model, tokens) };
+        s.add_calls(&[
+            Call { answer: Some("m1".into()), ..call(t, "7", Some("c1"), "big", 300) },
+            sub(t + 1_000, "small", "a1", "m2", 400),
+            sub(t + 2_000, "small", "a1", "m3", 400),
+            sub(t + 3_000, "small", "a2", "m4", 10),
+            // Another conversation's subagent, with the same id: not this session's.
+            Call { subagent_id: Some("a1".into()), ..call(t + 4_000, "8", Some("c2"), "big", 5) },
+        ])
+        .unwrap();
+        s.add_used(&[
+            // The proxy's a1 again, as the transcript has it: one subagent, counted once.
+            ("claude", Used { answer: Some("m2".into()), subagent: true, subagent_id: Some("a1".into()), model: Some("small".into()), ..used("m2", t + 1_000, "c1", 400) }),
+            // One only the transcript saw.
+            ("claude", Used { answer: Some("m9".into()), subagent: true, subagent_id: Some("a3".into()), model: Some("small".into()), ..used("m9", t + 5_000, "c1", 20) }),
+        ])
+        .unwrap();
+        let r = report(&s, Range::Week, now).unwrap();
+        let c1 = r.sessions.iter().find(|x| x.conversation.as_deref() == Some("c1")).unwrap();
+        assert_eq!(c1.model.as_deref(), Some("small"), "830 tokens on small against 300 on big");
+        assert_eq!(c1.subagents, 3, "a1, a2 and a3");
+        assert!(c1.parts.subagents.tokens.total > 0);
+        let c2 = r.sessions.iter().find(|x| x.conversation.as_deref() == Some("c2")).unwrap();
+        assert_eq!((c2.model.as_deref(), c2.subagents), (Some("big"), 1));
+        // In JSON as the app reads it.
+        let json = serde_json::to_value(c1).unwrap();
+        assert_eq!((json["model"].as_str(), json["subagents"].as_u64()), (Some("small"), Some(3)));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

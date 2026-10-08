@@ -636,6 +636,7 @@ struct UpdatesSection: View {
                 }
             ))
             .disabled(store.settings == nil)
+            .settingAnchor("check-updates")
             // A build that isn't a release says which commit it is.
             // The app's version, which app/build.sh and scripts/release.sh set to its dino's: not
             // `bundledVersion`, which runs `dino` and has no place in a view's body.
@@ -644,14 +645,14 @@ struct UpdatesSection: View {
                 Button("Check Now") { updates.checkNow() }
                     .disabled(!updates.available || !updates.canCheck)
             }
+            .settingAnchor("check-now")
             if model.daemonOutdated {
                 LabeledContent("Background service is still on \(model.daemonVersion ?? "an older version")") {
                     Button("Restart Now") { confirming = true }
                         .disabled(model.restartingDaemon)
                 }
+                .settingAnchor("restart-service")
             }
-        } header: {
-            Text("Updates")
         } footer: {
             Footnote(updates.available
                 ? "dino checks once a day. Updates include the dino command-line tool. Installing an update restarts your sessions: agents resume their conversations, and shells start fresh. If anything is working, dino asks first."

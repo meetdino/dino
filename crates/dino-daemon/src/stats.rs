@@ -103,6 +103,7 @@ pub(crate) fn flush(d: &Daemon) {
                 fallback: c.fallback,
                 cost: c.cost,
                 subagent: c.subagent.is_some(),
+                subagent_id: c.subagent,
                 answer: c.answer,
             }
         })

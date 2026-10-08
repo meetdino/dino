@@ -203,7 +203,7 @@ struct DinodAgentSection: View {
                     }
                 }
             } header: {
-                Text("Running in the Background")
+                Text("Running in the Background").settingAnchor("background-service")
             } footer: {
                 Footnote(needsApproval
                     ? "Allow dino in Login Items so programs in your terminals get the permissions you give dino in Privacy & Security, such as Screen Recording. Your agents and shells still run without it, but without those permissions."

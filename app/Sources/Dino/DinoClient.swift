@@ -395,7 +395,7 @@ struct LauncherInfo: Codable, Identifiable, Equatable {
 
 /// A session's permission mode, model and effort (see crates/dino-core/src/controls.rs).
 /// Nil is the agent's own default.
-/// A session on a provider's model (Settings → Models & Providers) instead of its agent's own account.
+/// A session on a provider's model (Settings → Providers) instead of its agent's own account.
 struct ProviderRoute: Codable, Equatable, Hashable {
     var provider: String
     var model: String

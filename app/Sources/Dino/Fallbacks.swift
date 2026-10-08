@@ -102,7 +102,7 @@ extension DinoSettings {
 struct FallbackSection: View {
     @EnvironmentObject var store: SettingsStore
     let launcher: LauncherInfo
-    /// Settings → Models & Providers' providers, as last asked.
+    /// Settings → Providers' providers, as last asked.
     let providers: [ProviderInfo]
 
     @State private var newProvider = ""

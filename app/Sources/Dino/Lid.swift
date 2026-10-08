@@ -55,6 +55,7 @@ struct LidSection: View {
             ))
             .disabled(store.settings == nil || busy)
             .orgLocked("machine.lid")
+            .settingAnchor("lid")
             if lid.enabled {
                 Picker("While", selection: Binding(get: { lid.when }, set: { w in set { $0.when = w } })) {
                     Text("An agent is working").tag("working")

@@ -248,7 +248,8 @@ struct DinoApp: App {
             SettingsView()
                 .environmentObject(model)
         }
-        .windowResizability(.contentSize)
+        // From a minimum only: `.contentSize` asked the whole page's size on every change.
+        .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
         Window("Usage Stats", id: StatsView.windowID) {
             StatsView()
