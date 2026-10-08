@@ -209,7 +209,9 @@ check on every pull request looks for it. Forgot? `git commit --amend -s` for th
 ## Reporting bugs and ideas
 
 Open an issue with what you did, what you expected and what happened, plus your macOS version, the
-dino version (`dino --version`) and the agent involved. `~/.config/dino/dinod.log` often says why.
-For security issues, don't open an issue: see [SECURITY.md](SECURITY.md).
+dino version (`dino --version`) and the agent involved; Help → Report a Bug… fills in the versions.
+`~/.config/dino/dinod.log` often says why. Questions go to
+[Discussions](https://github.com/meetdino/dino/discussions), as [SUPPORT.md](SUPPORT.md) says. For
+security issues, don't open an issue: see [SECURITY.md](SECURITY.md).
 
 Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
