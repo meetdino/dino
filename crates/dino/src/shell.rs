@@ -225,4 +225,65 @@ mod tests {
         assert!(crate::complete::script("bash").unwrap().contains("if ! complete -p dino &>/dev/null"));
         assert!(with_completions("fish", "").contains("test -f $d/dino.fish"));
     }
+
+    #[test]
+    fn every_shell_passes_the_last_command_and_status_to_ai() {
+        for (name, text) in [("zsh", ZSH), ("bash", BASH), ("fish", FISH)] {
+            assert!(text.contains("--last"), "{name} must include the last command");
+            assert!(text.contains("--status"), "{name} must include the last command's status");
+        }
+        assert!(FISH.contains("fish_postexec"), "fish must refresh context after a command");
+    }
+
+    #[test]
+    fn shell_context_preserves_history_and_handoffs() {
+        let bash_guard = BASH.find("[[ $last != \"$_DINO_ASKED\" ]] || return 0").unwrap();
+        let bash_capture = BASH.find("_DINO_LAST=$last").unwrap();
+        assert!(bash_guard < bash_capture);
+        assert!(BASH.contains("if [[ -n $last && $last != \\#*"));
+        assert!(FISH.contains("string match -q -- '#*' (string trim -l -- $argv[1])"));
+        assert!(BASH.contains("ai agent -- $(printf '%q' \"$1\")"));
+        assert!(FISH.contains("ai agent -- \"(string escape -- $line)"));
+    }
+
+    /// bash's # line, as an interactive bash runs it: each line goes into history, runs, and the
+    /// prompt command follows. What the stand-in dino is asked shows the context it got.
+    #[test]
+    fn bash_asks_with_the_last_command_entered_and_its_status() {
+        let dir = std::env::temp_dir().join(format!("dino-bash-context-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (stub, log, script) = (dir.join("dino"), dir.join("asked"), dir.join("dino.bash"));
+        std::fs::write(&stub, "#!/bin/sh\nprintf '%s|' \"$@\" >> \"$STUBLOG\"; echo >> \"$STUBLOG\"\n[ \"$2\" = suggest ] && echo 'echo fake-answer'\nexit 0\n").unwrap();
+        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(&script, BASH).unwrap();
+        // A failed command, a # request, an empty Enter (no new history entry: the answer pushed
+        // into history never ran), another request; then a comment that isn't one, and a request.
+        let lines = ["sh -c 'exit 7'", "# list files", "", "# again", "true", "#! not a request", "# third"];
+        let run = format!(
+            "source {}; for l in {}; do [[ -n $l ]] && history -s -- \"$l\"; eval \"$l\"; _dino_prompt_command; done",
+            script.display(),
+            lines.iter().map(|l| format!("'{}'", l.replace('\'', r"'\''"))).collect::<Vec<_>>().join(" ")
+        );
+        let ok = std::process::Command::new("bash")
+            .args(["--norc", "-i", "-c", &run])
+            .env("DINO_BIN", &stub)
+            .env("STUBLOG", &log)
+            .env("HISTFILE", dir.join("history"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let asked = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let context: Vec<_> = asked.lines().map(|l| l.split("--last|").nth(1).and_then(|r| r.split("|--|").next()).unwrap_or(l)).collect();
+        assert_eq!(context, ["sh -c 'exit 7'|--status|7", "sh -c 'exit 7'|--status|7", "true|--status|0"], "{asked}");
+    }
+
+    #[test]
+    fn fish_uses_the_configured_ai_key_or_alt_i() {
+        assert!(FISH.contains("bind (string unescape -- \"$DINO_AI_KEY\") __dino_ai_line"));
+        assert!(FISH.contains("bind \\ei __dino_ai_line"));
+    }
 }
