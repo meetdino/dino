@@ -12,13 +12,16 @@
 [[ -n $_DINO_BASH ]] && return 0
 _DINO_BIN=${DINO_BIN:-__DINO_BIN__}
 _DINO_BASH=1
+# The last command entered and how it ended, for the agent asked about the next one.
+_DINO_LAST=
+_DINO_STATUS=0
 
 _dino_suggest_for() {
   local line=$1 err out rc why nl=$'\n'
   # A private file of its own: a fixed name in a shared folder could be read, or planted.
   # Its messages go over the line saying it asks.
   err=$(command mktemp "${TMPDIR:-/tmp}/dino-ai.XXXXXX") || { printf '\r\e[K✗ dino: no temp file\n' >/dev/tty; return 1; }
-  out=$(command "$_DINO_BIN" ai suggest --shell bash --cwd "$PWD" -- "$line" 2>"$err" </dev/null)
+  out=$(command "$_DINO_BIN" ai suggest --shell bash --cwd "$PWD" --last "$_DINO_LAST" --status "$_DINO_STATUS" -- "$line" 2>"$err" </dev/null)
   rc=$?
   why=$(<"$err")
   command rm -f "$err"
@@ -34,7 +37,7 @@ _dino_suggest_for() {
 _dino_hand_off() {
   local out
   if [[ -n $DINO_SESSION ]]; then
-    if out=$(command "$_DINO_BIN" ai agent --cwd "$PWD" -- "$1" 2>&1 </dev/null); then
+    if out=$(command "$_DINO_BIN" ai agent --cwd "$PWD" --last "$_DINO_LAST" --status "$_DINO_STATUS" -- "$1" 2>&1 </dev/null); then
       printf 'handed to your agent, in session %s\n' "$out" >/dev/tty
     else
       printf '✗ %s\n' "$out" >/dev/tty
@@ -48,13 +51,17 @@ _dino_hand_off() {
 
 # Keyless, any bash: a line starting with # is a request, answered after it "runs".
 _dino_prompt_command() {
-  local last
+  local last_status=$? last
   last=$(HISTTIMEFORMAT= builtin history 1)
   # Each history entry once, told by its number: a prompt with no new one (Enter on an empty
   # line, ^C) asks nothing again, and the same request entered again is asked again.
   [[ $last != "$_DINO_ASKED" ]] || return 0
   _DINO_ASKED=$last
   last=${last#*[0-9]  }
+  if [[ -n $last && $last != \#* ]]; then
+    _DINO_LAST=$last
+    _DINO_STATUS=$last_status
+  fi
   [[ $last == \#* && $last != \#!* ]] || return 0
   local line=$last
   # `#@ …` is ⌘⏎ on old bash: the line goes to an agent.
@@ -101,7 +108,7 @@ if (( BASH_VERSINFO[0] >= 4 )); then
     line=${line# }
     [[ -n ${line// } ]] || return 0
     if [[ -n $DINO_SESSION ]]; then
-      if out=$(command "$_DINO_BIN" ai agent --cwd "$PWD" -- "$line" 2>&1 </dev/null); then
+      if out=$(command "$_DINO_BIN" ai agent --cwd "$PWD" --last "$_DINO_LAST" --status "$_DINO_STATUS" -- "$line" 2>&1 </dev/null); then
         READLINE_LINE=
         printf 'handed to your agent, in session %s\n' "$out" >/dev/tty
       else
