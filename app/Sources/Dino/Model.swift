@@ -621,6 +621,8 @@ final class DinoModel: ObservableObject {
             o.input_tokens = 0
             o.output_tokens = 0
             o.cache_read_tokens = nil
+            o.subagent_input_tokens = nil
+            o.subagent_output_tokens = nil
             o.context_tokens = nil
             o.usage_by_route = nil
             // The sidebar's filters count and list sessions by their group (a plain shell isn't

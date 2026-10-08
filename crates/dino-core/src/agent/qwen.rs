@@ -405,6 +405,7 @@ fn usage_in(jsonl: &str) -> Vec<crate::usage::Used> {
             cache_read: cached,
             cache_write: 0,
             output: history::count(&u["candidatesTokenCount"]) + history::count(&u["thoughtsTokenCount"]),
+            ..Default::default()
         });
     }
     out

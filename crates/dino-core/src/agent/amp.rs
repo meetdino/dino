@@ -337,6 +337,7 @@ fn usage_in(text: &str) -> Vec<crate::usage::Used> {
             cache_read: crate::history::count(&u["cacheReadInputTokens"]),
             cache_write: crate::history::count(&u["cacheCreationInputTokens"]),
             output: crate::history::count(&u["outputTokens"]),
+            ..Default::default()
         });
     }
     out

@@ -786,6 +786,7 @@ fn usage_from(c: &Connection, since: i64) -> (Vec<crate::usage::Used>, i64) {
             cache_write: history::count(&t["cache"]["write"]),
             // It counts reasoning apart; the API counts it as output.
             output: history::count(&t["output"]) + history::count(&t["reasoning"]),
+            ..Default::default()
         };
         if used.input + used.cache_read + used.cache_write + used.output > 0 {
             out.push(used);

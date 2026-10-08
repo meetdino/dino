@@ -1074,6 +1074,11 @@ pub struct SessionInfo {
     /// conversation so far again, so over a long session this is most of it.
     #[serde(default)]
     pub cache_read_tokens: u64,
+    /// Of `input_tokens` and `output_tokens`, what its subagents used (Claude's Agent tool).
+    #[serde(default)]
+    pub subagent_input_tokens: u64,
+    #[serde(default)]
+    pub subagent_output_tokens: u64,
     pub last_model: Option<String>,
     pub tier: Option<String>,
     /// "working", "done", "needs:<what>", or "waiting:<what>" when the turn ended on background

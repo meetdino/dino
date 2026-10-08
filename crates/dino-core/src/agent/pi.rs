@@ -622,6 +622,7 @@ fn usage_in(jsonl: &str, id: &str) -> Vec<crate::usage::Used> {
             cache_read: history::count(&u["cacheRead"]),
             cache_write: history::count(&u["cacheWrite"]),
             output: history::count(&u["output"]),
+            ..Default::default()
         });
     }
     out
