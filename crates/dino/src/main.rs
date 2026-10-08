@@ -2,6 +2,7 @@ mod account;
 mod ai;
 mod automations;
 mod client;
+mod complete;
 mod launchd;
 mod mcp;
 mod out;
@@ -77,6 +78,7 @@ Setup
   dino build-cache [on|off|size <GB>|install]
                                     share one Rust build cache across sessions
   dino init zsh|bash|fish | shell install|uninstall [zsh|bash|fish]
+  dino completions zsh|bash|fish    Tab completion, also in what `dino init` loads
   dino ai suggest|agent -- <request> | search [--json|--pick]
                                     the shell's AI line and history search
   dino mcp [--read-only]            serve dino's sessions to agents over MCP (stdio)
@@ -98,6 +100,7 @@ const COMMAND_USAGE: &[(&str, &str)] = &[
     ("permissions", "dino permissions [--json]"),
     ("init", "dino init zsh|bash|fish"),
     ("shell", "dino shell install|uninstall [zsh|bash|fish]"),
+    ("completions", "dino completions zsh|bash|fish"),
     ("mcp", "dino mcp [--read-only]"),
     ("ping", "dino ping"),
     ("stop", "dino stop"),
@@ -210,6 +213,9 @@ fn dino() -> anyhow::Result<()> {
         Some("search") => return search::run(&cli[1..]),
         Some("init") => return shell::init(cli.get(1).map(String::as_str)),
         Some("shell") => return shell::run(&cli[1..]),
+        Some("completions") => return complete::completions(cli.get(1).map(String::as_str)),
+        // What the completion scripts ask: never starts dinod.
+        Some("__complete") => return complete::run(&cli[1..]),
         Some("login") if matches!(cli.get(1).map(String::as_str), Some("openrouter" | "chatgpt")) => return cmd_login(cli.get(1).map(String::as_str)),
         Some("login") if cli.get(1).is_some_and(|p| plan_id(p).is_some()) => return cmd_login_plan(&cli[1..]),
         Some("login") => return account::login(&cli[1..]),
