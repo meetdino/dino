@@ -120,6 +120,7 @@ struct TabStrip: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .help("New tab: a shell in \(shortPath(model.folder.path)) (⌘T)")
+            .accessibilityLabel("New Tab")
         }
         .frame(height: 22)
         .background {
@@ -150,6 +151,8 @@ private struct TabItem: View {
         HStack(spacing: 5) {
             if !session.plainShell {
                 Circle().fill(status.color).frame(width: 5, height: 5)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(status.label)
             }
             BellTitleMark(signal: PaneSignals.of(session.id))
             if panes.count > 1 {
@@ -177,6 +180,7 @@ private struct TabItem: View {
             .opacity(hovering || selected ? 1 : 0)
             .help(session.tmux != nil ? "Close this tab and detach from tmux (⌘W). The session keeps running in tmux."
                 : session.agent_id == "shell" ? "Close this tab (⌘W)" : "Close this tab (⌘W). \(session.display) stops and is archived, to resume from Archived.")
+            .accessibilityLabel(session.tmux != nil ? "Detach" : "Close Tab")
         }
         .font(.subheadline)
         .foregroundStyle(selected ? .primary : .secondary)

@@ -167,6 +167,14 @@ private struct FinishedGroup<Content: View>: View {
 private struct TodoRow: View {
     let todo: TodoItem
 
+    private var accessibilityStatus: String {
+        switch todo.status {
+        case "completed": "Done"
+        case "in_progress": "In progress"
+        default: "Pending"
+        }
+    }
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             switch todo.status {
@@ -183,6 +191,8 @@ private struct TodoRow: View {
         }
         .padding(.vertical, 1)
         .help(todo.subject)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(todo.subject), \(accessibilityStatus)")
     }
 }
 
