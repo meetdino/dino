@@ -269,7 +269,7 @@ These variables are useful when you choose to set them in the environment. They 
   `https://cloud.meetdino.com`; useful with a self-hosted server. Only `dinod` reads this variable,
   so set it in the daemon's environment, for example `DINO_CLOUD_URL=https://cloud.example dino daemon`.
   An explicit URL passed to `dino login` takes precedence.
-- `DINO_AI_KEY`: choose the key sequence for the AI line in the installed zsh or bash shell
+- `DINO_AI_KEY`: choose the key sequence for the AI line in the installed zsh, bash or fish shell
   integration. The default is `Alt+I` (`\ei`).
 - `DINO_MANAGED_SETTINGS`: test override for the path to the organization's managed-settings JSON
   file. In normal installations dino reads
