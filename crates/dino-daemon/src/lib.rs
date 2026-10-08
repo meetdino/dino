@@ -5909,9 +5909,11 @@ while (sysread(STDIN, my $c, 1)) {
         old.subscribers.lock().unwrap().clear();
 
         let (mut client, server) = UnixStream::pair().unwrap();
+        // Before `attach` can answer and let go: macOS refuses to set a timeout on a socket whose
+        // other end has closed (EINVAL).
+        client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
         let (d2, old2) = (d.clone(), old.clone());
         let attaching = std::thread::spawn(move || attach(&d2, &old2, server, 80, 24, None));
-        client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
         let (kind, _) = ipc::read_frame(&mut client).unwrap();
         assert_eq!(kind, ipc::JSON);
         let next = ipc::read_frame(&mut client);
