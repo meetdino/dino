@@ -8,9 +8,9 @@ Written by scripts/third-party.py from packaging/licenses/ and Cargo.lock; don't
 
 ## In Dino.app, and in the dino binary where it says so
 
-- Ghostty 1.3.2-dev (3c47ca159368), MIT. https://github.com/ghostty-org/ghostty
+- Ghostty 1.3.2-dev (0538f7535be0), MIT. https://github.com/ghostty-org/ghostty
   The terminal engine, libghostty, linked into the app from libghostty-spm. Also its terminfo entries (in the app and the dino binary) and its fish, elvish and nushell shell integration (in the dino binary).
-- libghostty-spm 1.6.20260928, MIT. https://github.com/Lakr233/libghostty-spm
+- libghostty-spm 1.6.20260929, MIT. https://github.com/Lakr233/libghostty-spm
   Builds libghostty for the app. Its Swift wrapper GhosttyTerminal is in the app as DinoGhostty, and its bash and zsh shell integration in the dino binary.
 - Zig's standard library and compiler_rt, MIT. https://codeberg.org/ziglang/zig
   Compiled into libghostty by Zig.
@@ -5016,7 +5016,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by Ghostty 1.3.2-dev (3c47ca159368).
+Used by Ghostty 1.3.2-dev (0538f7535be0).
 
 ```text
 MIT License
@@ -5072,7 +5072,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by libghostty-spm 1.6.20260928.
+Used by libghostty-spm 1.6.20260929.
 
 ```text
 MIT License

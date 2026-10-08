@@ -29,9 +29,9 @@ LICENSES = os.path.join(ROOT, "packaging", "licenses")
 CARGO_ABOUT = "0.9.2"
 
 # The app's Swift packages, as app/Package.swift pins them. NATIVE below was checked at these.
-PACKAGES = {"libghostty-spm": "1.6.20260928", "MSDisplayLink": "2.2.1", "Sparkle": "2.10.0"}
+PACKAGES = {"libghostty-spm": "1.6.20260929", "MSDisplayLink": "2.2.1", "Sparkle": "2.10.0"}
 
-GHOSTTY = "3c47ca159368eb4a860ffe5333abdf4a85b2767b"  # libghostty-spm 1.6.20260928's Ghostty.ref
+GHOSTTY = "0538f7535be0cbca6bbe54e6fde654d5c628f1f2"  # libghostty-spm 1.6.20260929's Ghostty.ref
 
 # What ships besides the Rust crates: (name, version, source, what it is and where it ships,
 # SPDX license, [(license, file in packaging/licenses/native/ or a path in this repository)],

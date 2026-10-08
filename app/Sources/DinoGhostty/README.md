@@ -4,8 +4,9 @@ The Swift wrapper around libghostty from [libghostty-spm](https://github.com/Lak
 by Lakr233, MIT licensed (see `LICENSE` here). Taken from the package's `Sources/GhosttyTerminal`
 at tag `1.6.20260928` (5a025555f0a85ee51da7eb306c35f660d116e879) and renamed to the module
 `DinoGhostty`: SwiftPM won't have two targets named `GhosttyTerminal` in one graph. The engine
-itself (`GhosttyKit`, the libghostty xcframework) still comes from that package at the same version
-(`app/Package.swift`).
+itself (`GhosttyKit`, the libghostty xcframework) still comes from that package, at the version
+`app/Package.swift` pins: 1.6.20260929, whose wrapper changes (a hardware-keyboard fix on iPad and
+a background-color callback for hosts) aren't taken here.
 
 dino carries it so every action Ghostty sends can reach the app, not only the ones the wrapper
 models. Changes from upstream:
