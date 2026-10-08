@@ -1,0 +1,6 @@
+# Commits git blame skips: whole-tree mechanical changes. GitHub's blame view reads this file; for
+# git blame, once per clone:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# cargo fmt --all, when the code took up rustfmt.toml
+04ca69abfd9eb0a176c2da3cf6ac54c8956de90b
