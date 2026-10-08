@@ -82,12 +82,7 @@ pub(crate) fn record(stats: &Stats, session: &str, event: &str, v: &Value) {
             let Some(id) = text(&response["task"]["id"]).or_else(|| response["task"]["id"].as_u64().map(|n| n.to_string())) else {
                 return;
             };
-            let todo = Todo {
-                id,
-                subject: text(&input["subject"]).or_else(|| text(&response["task"]["subject"])).unwrap_or_default(),
-                status: "pending".into(),
-                active: text(&input["activeForm"]),
-            };
+            let todo = Todo { id, subject: text(&input["subject"]).or_else(|| text(&response["task"]["subject"])).unwrap_or_default(), status: "pending".into(), active: text(&input["activeForm"]) };
             stats.update(session, |s| match s.todos.iter_mut().find(|t| t.id == todo.id) {
                 Some(t) => *t = todo,
                 None => s.todos.push(todo),
@@ -115,23 +110,11 @@ pub(crate) fn record(stats: &Stats, session: &str, event: &str, v: &Value) {
         }
         ("PostToolUse", "Bash") if input["run_in_background"].as_bool() == Some(true) => {
             let Some(id) = text(&response["backgroundTaskId"]) else { return };
-            started(stats, session, Background {
-                id,
-                kind: "shell".into(),
-                description: text(&input["description"]),
-                command: text(&input["command"]),
-                ..Default::default()
-            });
+            started(stats, session, Background { id, kind: "shell".into(), description: text(&input["description"]), command: text(&input["command"]), ..Default::default() });
         }
         ("PostToolUse", "Monitor") => {
             let Some(id) = text(&response["taskId"]) else { return };
-            started(stats, session, Background {
-                id,
-                kind: "monitor".into(),
-                description: text(&input["description"]),
-                command: text(&input["command"]),
-                ..Default::default()
-            });
+            started(stats, session, Background { id, kind: "monitor".into(), description: text(&input["description"]), command: text(&input["command"]), ..Default::default() });
         }
         // Stopping one: the shell tool's old name and the general one, which stops agents too.
         ("PostToolUse", "KillShell" | "KillBash" | "TaskStop") => {
@@ -238,13 +221,7 @@ fn reconcile(s: &mut crate::SessionStats, listed: &[Value]) {
         let description = l["description"].as_str().map(String::from);
         if l["type"].as_str() == Some("subagent") {
             if !s.subagents.iter().any(|a| a.id == id) {
-                s.subagents.push(Subagent {
-                    id: id.into(),
-                    agent_type: l["agent_type"].as_str().map(String::from),
-                    description,
-                    running: true,
-                    ..Default::default()
-                });
+                s.subagents.push(Subagent { id: id.into(), agent_type: l["agent_type"].as_str().map(String::from), description, running: true, ..Default::default() });
             }
         } else if !s.background.iter().any(|b| b.id == id) {
             let kind = if l["type"].as_str().is_some_and(|t| t.contains("monitor")) { "monitor" } else { "shell" };
@@ -277,15 +254,21 @@ mod tests {
         let stats = Stats::default();
         let feed = |event: &str, v: Value| record(&stats, "s", event, &v);
         for (id, subject) in [("1", "Task a"), ("2", "Task b"), ("3", "Task c")] {
-            feed("PostToolUse", json!({"tool_name": "TaskCreate", "tool_input": {"subject": subject, "description": "x"},
-                "tool_response": {"task": {"id": id, "subject": subject}}}));
+            feed(
+                "PostToolUse",
+                json!({"tool_name": "TaskCreate", "tool_input": {"subject": subject, "description": "x"},
+                "tool_response": {"task": {"id": id, "subject": subject}}}),
+            );
         }
         feed("PostToolUse", json!({"tool_name": "TaskUpdate", "tool_input": {"taskId": "1", "status": "in_progress", "activeForm": "Doing a"}}));
         feed("PostToolUse", json!({"tool_name": "TaskUpdate", "tool_input": {"taskId": "2", "status": "completed"}}));
         feed("PostToolUse", json!({"tool_name": "TaskUpdate", "tool_input": {"taskId": "3", "status": "deleted"}}));
         // A subagent's own list stays out of it.
-        feed("PostToolUse", json!({"tool_name": "TaskCreate", "agent_id": "a1", "tool_input": {"subject": "mine"},
-            "tool_response": {"task": {"id": "9", "subject": "mine"}}}));
+        feed(
+            "PostToolUse",
+            json!({"tool_name": "TaskCreate", "agent_id": "a1", "tool_input": {"subject": "mine"},
+            "tool_response": {"task": {"id": "9", "subject": "mine"}}}),
+        );
         let got: Vec<_> = stats.session("s").todos.iter().map(|t| (t.id.clone(), t.status.clone(), t.active.clone())).collect();
         assert_eq!(got, vec![("1".into(), "in_progress".into(), Some("Doing a".into())), ("2".into(), "completed".into(), None)]);
 
@@ -298,10 +281,15 @@ mod tests {
     #[test]
     fn task_list_from_todo_write() {
         let stats = Stats::default();
-        record(&stats, "s", "PostToolUse", &json!({"tool_name": "TodoWrite", "tool_input": {"todos": [
-            {"content": "Write it", "status": "completed", "activeForm": "Writing it"},
-            {"content": "Test it", "status": "in_progress", "activeForm": "Testing it"},
-        ]}}));
+        record(
+            &stats,
+            "s",
+            "PostToolUse",
+            &json!({"tool_name": "TodoWrite", "tool_input": {"todos": [
+                {"content": "Write it", "status": "completed", "activeForm": "Writing it"},
+                {"content": "Test it", "status": "in_progress", "activeForm": "Testing it"},
+            ]}}),
+        );
         let todos = stats.session("s").todos;
         assert_eq!(todos.iter().map(|t| (t.id.as_str(), t.subject.as_str())).collect::<Vec<_>>(), vec![("1", "Write it"), ("2", "Test it")]);
     }
@@ -310,21 +298,29 @@ mod tests {
     fn background_work_ends_when_stop_no_longer_lists_it() {
         let stats = Stats::default();
         let feed = |event: &str, v: Value| record(&stats, "s", event, &v);
-        feed("PostToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "sleep 4", "description": "Wait", "run_in_background": true},
-            "tool_response": {"backgroundTaskId": "b1"}}));
+        feed(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_input": {"command": "sleep 4", "description": "Wait", "run_in_background": true},
+            "tool_response": {"backgroundTaskId": "b1"}}),
+        );
         feed("PostToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": {"stdout": ""}}));
-        feed("PostToolUse", json!({"tool_name": "Monitor", "tool_input": {"command": "tail -f x", "description": "Errors"},
-            "tool_response": {"taskId": "m1"}}));
+        feed(
+            "PostToolUse",
+            json!({"tool_name": "Monitor", "tool_input": {"command": "tail -f x", "description": "Errors"},
+            "tool_response": {"taskId": "m1"}}),
+        );
         stats.update("s", |s| s.subagents.push(Subagent { id: "a1".into(), running: true, ..Default::default() }));
         let s = stats.session("s");
-        assert_eq!(s.background.iter().map(|b| (b.id.as_str(), b.kind.as_str(), b.running)).collect::<Vec<_>>(),
-            vec![("b1", "shell", true), ("m1", "monitor", true)]);
+        assert_eq!(s.background.iter().map(|b| (b.id.as_str(), b.kind.as_str(), b.running)).collect::<Vec<_>>(), vec![("b1", "shell", true), ("m1", "monitor", true)]);
 
         feed("PostToolUse", json!({"tool_name": "TaskStop", "tool_input": {"task_id": "m1"}}));
-        feed("Stop", json!({"background_tasks": [
-            {"id": "b1", "type": "shell", "status": "running", "description": "Wait"},
-            {"id": "a2", "type": "subagent", "status": "running", "description": "Earlier", "agent_type": "Explore"},
-        ]}));
+        feed(
+            "Stop",
+            json!({"background_tasks": [
+                {"id": "b1", "type": "shell", "status": "running", "description": "Wait"},
+                {"id": "a2", "type": "subagent", "status": "running", "description": "Earlier", "agent_type": "Explore"},
+            ]}),
+        );
         let s = stats.session("s");
         assert_eq!(s.background.iter().map(|b| (b.id.as_str(), b.running)).collect::<Vec<_>>(), vec![("b1", true), ("m1", false)]);
         assert!(s.background[1].finished.is_some());
@@ -338,20 +334,26 @@ mod tests {
     fn a_turn_that_ends_on_background_work_waits_for_it() {
         let stats = Stats::default();
         let feed = |event: &str, v: Value| record(&stats, "s", event, &v);
-        feed("PostToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "sleep 25", "run_in_background": true},
-            "tool_response": {"backgroundTaskId": "b1"}}));
+        feed(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_input": {"command": "sleep 25", "run_in_background": true},
+            "tool_response": {"backgroundTaskId": "b1"}}),
+        );
         feed("PostToolUse", json!({"tool_name": "Monitor", "tool_input": {"command": "tail -f x"}, "tool_response": {"taskId": "m1"}}));
         // A foreground subagent cut short by Esc: no SubagentStop, and no Stop listed it.
         stats.update("s", |s| s.subagents.push(Subagent { id: "a0".into(), running: true, ..Default::default() }));
         assert_eq!(stats.session("s").waiting(), (0, 0));
 
         // A subagent's own background command is listed as the session's.
-        feed("Stop", json!({"background_tasks": [
-            {"id": "b1", "type": "shell", "status": "running", "command": "sleep 25"},
-            {"id": "m1", "type": "monitor", "status": "running"},
-            {"id": "a1", "type": "subagent", "status": "running", "description": "nap", "agent_type": "general-purpose"},
-            {"id": "b2", "type": "shell", "status": "running", "description": "Its own sleep", "command": "sleep 9"},
-        ]}));
+        feed(
+            "Stop",
+            json!({"background_tasks": [
+                {"id": "b1", "type": "shell", "status": "running", "command": "sleep 25"},
+                {"id": "m1", "type": "monitor", "status": "running"},
+                {"id": "a1", "type": "subagent", "status": "running", "description": "nap", "agent_type": "general-purpose"},
+                {"id": "b2", "type": "shell", "status": "running", "description": "Its own sleep", "command": "sleep 9"},
+            ]}),
+        );
         let s = stats.session("s");
         assert_eq!(s.waiting(), (1, 2));
         assert_eq!(s.background.iter().find(|b| b.id == "b2").and_then(|b| b.command.as_deref()), Some("sleep 9"));
@@ -373,15 +375,24 @@ mod tests {
         let stats = Stats::default();
         let feed = |event: &str, v: Value| record(&stats, "s", event, &v);
         let ids = |stats: &Stats| stats.session("s").crons.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
-        feed("PostToolUse", json!({"tool_name": "CronCreate",
+        feed(
+            "PostToolUse",
+            json!({"tool_name": "CronCreate",
             "tool_input": {"cron": "23 * * * *", "prompt": "Post-merge production watch: say hi", "recurring": true},
-            "tool_response": {"id": "efc5ae94", "humanSchedule": "Every hour at :23", "recurring": true, "durable": false}}));
-        feed("PostToolUse", json!({"tool_name": "CronCreate",
+            "tool_response": {"id": "efc5ae94", "humanSchedule": "Every hour at :23", "recurring": true, "durable": false}}),
+        );
+        feed(
+            "PostToolUse",
+            json!({"tool_name": "CronCreate",
             "tool_input": {"cron": "59 23 31 12 *", "prompt": "new year", "recurring": false},
-            "tool_response": {"id": "08ec38c8", "humanSchedule": "59 23 31 12 *", "recurring": false, "durable": false}}));
+            "tool_response": {"id": "08ec38c8", "humanSchedule": "59 23 31 12 *", "recurring": false, "durable": false}}),
+        );
         // A subagent's own stays out of it, as its other tools do.
-        feed("PostToolUse", json!({"tool_name": "CronCreate", "agent_id": "a1",
-            "tool_input": {"cron": "* * * * *", "prompt": "x"}, "tool_response": {"id": "aaaaaaaa"}}));
+        feed(
+            "PostToolUse",
+            json!({"tool_name": "CronCreate", "agent_id": "a1",
+            "tool_input": {"cron": "* * * * *", "prompt": "x"}, "tool_response": {"id": "aaaaaaaa"}}),
+        );
         let s = stats.session("s");
         assert_eq!(ids(&stats), vec!["efc5ae94", "08ec38c8"]);
         assert_eq!((s.crons[0].schedule.as_str(), s.crons[0].recurring, s.crons[0].human.as_deref()), ("23 * * * *", true, Some("Every hour at :23")));
@@ -391,16 +402,22 @@ mod tests {
         assert_eq!(ids(&stats), vec!["efc5ae94"]);
 
         // The turn's end lists what it has: a `/loop` wakeup it made, and not one gone since.
-        feed("Stop", json!({"background_tasks": [], "session_crons": [
+        feed(
+            "Stop",
+            json!({"background_tasks": [], "session_crons": [
             {"id": "efc5ae94", "schedule": "23 * * * *", "recurring": true, "prompt": "Post-merge production watch: say hi"},
-            {"id": "f5672ede", "schedule": "46 11 * * *", "recurring": false, "prompt": "ping"}]}));
+            {"id": "f5672ede", "schedule": "46 11 * * *", "recurring": false, "prompt": "ping"}]}),
+        );
         let s = stats.session("s");
         assert_eq!(ids(&stats), vec!["efc5ae94", "f5672ede"]);
         assert_eq!(s.crons[0].human.as_deref(), Some("Every hour at :23"), "what dino saw stays");
         assert_eq!(s.crons[1].created, 0);
         // The one-shot ran: the next turn's end no longer lists it.
-        feed("Stop", json!({"background_tasks": [], "session_crons": [
-            {"id": "efc5ae94", "schedule": "23 * * * *", "recurring": true, "prompt": "Post-merge production watch: say hi"}]}));
+        feed(
+            "Stop",
+            json!({"background_tasks": [], "session_crons": [
+            {"id": "efc5ae94", "schedule": "23 * * * *", "recurring": true, "prompt": "Post-merge production watch: say hi"}]}),
+        );
         assert_eq!(ids(&stats), vec!["efc5ae94"]);
         // An agent that says nothing of them leaves them as they are.
         feed("Stop", json!({"background_tasks": []}));

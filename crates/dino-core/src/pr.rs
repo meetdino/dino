@@ -109,11 +109,7 @@ pub fn default_branch(dir: &Path) -> String {
             return b.to_string();
         }
     }
-    ["main", "master"]
-        .into_iter()
-        .find(|b| has_ref(dir, &format!("refs/remotes/origin/{b}")) || has_ref(dir, &format!("refs/heads/{b}")))
-        .unwrap_or("main")
-        .to_string()
+    ["main", "master"].into_iter().find(|b| has_ref(dir, &format!("refs/remotes/origin/{b}")) || has_ref(dir, &format!("refs/heads/{b}"))).unwrap_or("main").to_string()
 }
 
 fn has_ref(dir: &Path, name: &str) -> bool {
@@ -169,15 +165,7 @@ pub fn draft(dir: &Path, came_from: Option<&str>, terminal_title: Option<&str>) 
     let base = suggested_base(&default, came_from, |b| has_ref(&root, &format!("refs/remotes/origin/{b}")));
     let subjects = subjects(&root, &base);
     let uncommitted = git(&root, &["status", "--porcelain", "--untracked-files=all"]).map(|s| s.lines().count() as u32).unwrap_or(0);
-    let mut d = PrDraft {
-        title: prefill_title(&subjects, terminal_title, &branch),
-        body: prefill_body(&subjects),
-        commits: subjects.len() as u32,
-        uncommitted,
-        branch,
-        base,
-        note: None,
-    };
+    let mut d = PrDraft { title: prefill_title(&subjects, terminal_title, &branch), body: prefill_body(&subjects), commits: subjects.len() as u32, uncommitted, branch, base, note: None };
     if d.commits == 0 && d.uncommitted == 0 {
         d.note = Some("Nothing to open a PR with yet".into());
     }

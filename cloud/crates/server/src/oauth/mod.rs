@@ -105,7 +105,10 @@ async fn revoke(State(s): State<AppState>, ClientIp(ip): ClientIp, Form(f): Form
     limits::auth(&s, ip).await?;
     let hash = crypto::hash(&f.token);
     let mut tx = s.db.begin().await?;
-    let device: Option<(uuid::Uuid, String)> = sqlx::query_as("SELECT r.device_id, d.client_id FROM refresh_tokens r JOIN devices d ON d.id = r.device_id WHERE r.hash = $1").bind(&hash).fetch_optional(&mut *tx).await?;
+    let device: Option<(uuid::Uuid, String)> = sqlx::query_as("SELECT r.device_id, d.client_id FROM refresh_tokens r JOIN devices d ON d.id = r.device_id WHERE r.hash = $1")
+        .bind(&hash)
+        .fetch_optional(&mut *tx)
+        .await?;
     if let Some((device, client_id)) = device {
         if f.client_id.as_deref().is_none_or(|c| c == client_id) {
             tokens::revoke_device(&mut tx, device, "signed_out").await?;

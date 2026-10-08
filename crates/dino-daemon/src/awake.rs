@@ -402,16 +402,18 @@ mod tests {
     #[test]
     fn holders_say_who_and_whose_session() {
         let exe = |pid: u32| {
-            Some(match pid {
-                552 => "/System/Library/CoreServices/powerd.bundle/powerd",
-                90 => "/usr/sbin/coreaudiod",
-                91 => "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper",
-                7 => "/usr/bin/caffeinate",
-                8 => "/usr/bin/caffeinate",
-                10 => "/Applications/Dino.app/Contents/MacOS/dino",
-                _ => return None,
-            }
-            .to_string())
+            Some(
+                match pid {
+                    552 => "/System/Library/CoreServices/powerd.bundle/powerd",
+                    90 => "/usr/sbin/coreaudiod",
+                    91 => "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper",
+                    7 => "/usr/bin/caffeinate",
+                    8 => "/usr/bin/caffeinate",
+                    10 => "/Applications/Dino.app/Contents/MacOS/dino",
+                    _ => return None,
+                }
+                .to_string(),
+            )
         };
         let session = |pid: u32| (pid == 7).then(|| "3".to_string());
         let mut audio = raw(90, "coreaudiod", "PreventUserIdleSystemSleep", "com.apple.audio.context", 50);

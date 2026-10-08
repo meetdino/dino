@@ -38,20 +38,15 @@ fn load(path: &Path) -> HashMap<String, Tried> {
         .into_iter()
         .flatten()
         .map(|(id, t)| {
-            let tried = Tried {
-                answers: t["answers"].as_bool().unwrap_or(false),
-                tools: t["tools"].as_bool().unwrap_or(false),
-                ms: t["ms"].as_f64().unwrap_or(f64::MAX),
-                at: t["at"].as_u64().unwrap_or(0),
-            };
+            let tried =
+                Tried { answers: t["answers"].as_bool().unwrap_or(false), tools: t["tools"].as_bool().unwrap_or(false), ms: t["ms"].as_f64().unwrap_or(f64::MAX), at: t["at"].as_u64().unwrap_or(0) };
             (id.clone(), tried)
         })
         .collect()
 }
 
 fn save(path: &Path, listed: &[String], tried: &HashMap<String, Tried>, featured: &[(String, Option<u64>)]) {
-    let tried: serde_json::Map<String, Value> =
-        tried.iter().map(|(id, t)| (id.clone(), json!({"answers": t.answers, "tools": t.tools, "ms": t.ms, "at": t.at}))).collect();
+    let tried: serde_json::Map<String, Value> = tried.iter().map(|(id, t)| (id.clone(), json!({"answers": t.answers, "tools": t.tools, "ms": t.ms, "at": t.at}))).collect();
     let featured: Vec<Value> = featured.iter().map(|(id, max)| json!({"id": id, "max_output": max})).collect();
     let v = json!({"listed": listed, "featured": featured, "tried": tried});
     let _ = std::fs::write(path, serde_json::to_vec_pretty(&v).unwrap_or_default());

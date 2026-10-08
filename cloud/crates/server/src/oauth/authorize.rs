@@ -19,9 +19,9 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::crypto;
 use crate::error::{Error, Result};
+use crate::identity::upstream::Provider;
 use crate::oauth::clients::{self, Client};
 use crate::oauth::tokens::{self, DeviceInfo, TokenResponse};
-use crate::identity::upstream::Provider;
 use crate::web::pages;
 use crate::web::session::Session;
 
@@ -111,21 +111,25 @@ pub async fn confirm(State(s): State<AppState>, headers: HeaderMap) -> Result<Re
     };
     let device = DeviceInfo::new(p.device_name.as_deref(), p.device_os.as_deref(), p.dino_version.as_deref());
     let email: (String,) = sqlx::query_as("SELECT email FROM accounts WHERE id = $1").bind(session.account_id).fetch_one(&s.db).await?;
-    let page = pages::layout(&s, "Continue", html! {
-        h1 { "Sign in to " (client.name) "?" }
-        p { "As " strong { (email.0) } "." }
-        div.panel {
-            div.row { span { "Device" } strong { (device.name) } }
-            @if !device.os.is_empty() { div.row { span.muted { "System" } span.muted { (device.os) } } }
-            @if !device.dino_version.is_empty() { div.row { span.muted { "dino" } span.muted { (device.dino_version) } } }
-        }
-        p.muted { "Only continue if you just asked " (client.name) " to sign in on this device." }
-        form method="post" action="/oauth/authorize/decide" class="stack" {
-            (pages::csrf(&session.csrf(&s)))
-            button.primary type="submit" name="decision" value="allow" { "Continue" }
-            button type="submit" name="decision" value="deny" { "Cancel" }
-        }
-    });
+    let page = pages::layout(
+        &s,
+        "Continue",
+        html! {
+            h1 { "Sign in to " (client.name) "?" }
+            p { "As " strong { (email.0) } "." }
+            div.panel {
+                div.row { span { "Device" } strong { (device.name) } }
+                @if !device.os.is_empty() { div.row { span.muted { "System" } span.muted { (device.os) } } }
+                @if !device.dino_version.is_empty() { div.row { span.muted { "dino" } span.muted { (device.dino_version) } } }
+            }
+            p.muted { "Only continue if you just asked " (client.name) " to sign in on this device." }
+            form method="post" action="/oauth/authorize/decide" class="stack" {
+                (pages::csrf(&session.csrf(&s)))
+                button.primary type="submit" name="decision" value="allow" { "Continue" }
+                button type="submit" name="decision" value="deny" { "Cancel" }
+            }
+        },
+    );
     Ok(page.into_response())
 }
 

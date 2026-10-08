@@ -18,11 +18,11 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::crypto;
-use crate::identity::email;
-use crate::oauth::link;
 use crate::error::{Error, Result};
+use crate::identity::email;
 use crate::limits::{self, ClientIp};
 use crate::oauth::clients::{self, Client};
+use crate::oauth::link;
 use crate::oauth::tokens::{self, DeviceInfo, TokenResponse};
 use crate::web::pages;
 use crate::web::session::Session;
@@ -154,17 +154,21 @@ pub async fn enter(State(s): State<AppState>, headers: HeaderMap, Query(q): Quer
         return Ok(session.attach(Redirect::to("/signin").into_response()));
     }
     let prefill = q.user_code.as_deref().and_then(crypto::normalize_user_code).unwrap_or_default();
-    let page = pages::layout(&s, "Connect a device", html! {
-        h1 { "Connect a device" }
-        p { "Enter the code shown by " strong { "dino" } " on the device you're signing in." }
-        form method="post" action="/device" class="stack" {
-            (pages::csrf(&session.csrf(&s)))
-            label for="user_code" { "Code" }
-            input.codeinput #user_code type="text" name="user_code" value=(prefill) autocomplete="off" autocapitalize="characters" spellcheck="false" required placeholder="XXXX-XXXX";
-            button.primary type="submit" { "Continue" }
-        }
-        p.muted { "Never enter a code someone else sent you." }
-    });
+    let page = pages::layout(
+        &s,
+        "Connect a device",
+        html! {
+            h1 { "Connect a device" }
+            p { "Enter the code shown by " strong { "dino" } " on the device you're signing in." }
+            form method="post" action="/device" class="stack" {
+                (pages::csrf(&session.csrf(&s)))
+                label for="user_code" { "Code" }
+                input.codeinput #user_code type="text" name="user_code" value=(prefill) autocomplete="off" autocapitalize="characters" spellcheck="false" required placeholder="XXXX-XXXX";
+                button.primary type="submit" { "Continue" }
+            }
+            p.muted { "Never enter a code someone else sent you." }
+        },
+    );
     Ok(session.attach(page.into_response()))
 }
 
@@ -199,33 +203,37 @@ pub async fn lookup(State(s): State<AppState>, headers: HeaderMap, ClientIp(ip):
     let elsewhere = requested_ip != ip.to_string();
     let minutes = (Utc::now() - created_at).num_minutes();
     let fresh = session.fresh(FRESH_MINUTES);
-    let page = pages::layout(&s, "Approve device", html! {
-        h1 { "Sign in " (client.name) " on this device?" }
-        (pages::user_code(&code))
-        p { "Check this matches the code on the device." }
-        div.panel {
-            div.row { span { "Device" } strong { (name) } }
-            @if !os.is_empty() { div.row { span.muted { "System" } span.muted { (os) } } }
-            @if !version.is_empty() { div.row { span.muted { "dino" } span.muted { (version) } } }
-            div.row { span.muted { "Requested" } span.muted { @if minutes < 1 { "just now" } @else { (minutes) " min ago" } } }
-        }
-        @if elsewhere {
-            div.panel.warn role="alert" {
-                p { strong { "This request came from a different network than yours" } " (" (requested_ip) "). Approve only if the device is yours and in front of you." }
+    let page = pages::layout(
+        &s,
+        "Approve device",
+        html! {
+            h1 { "Sign in " (client.name) " on this device?" }
+            (pages::user_code(&code))
+            p { "Check this matches the code on the device." }
+            div.panel {
+                div.row { span { "Device" } strong { (name) } }
+                @if !os.is_empty() { div.row { span.muted { "System" } span.muted { (os) } } }
+                @if !version.is_empty() { div.row { span.muted { "dino" } span.muted { (version) } } }
+                div.row { span.muted { "Requested" } span.muted { @if minutes < 1 { "just now" } @else { (minutes) " min ago" } } }
             }
-        }
-        @if fresh {
-            form method="post" action="/device/decide" class="stack" {
-                (pages::csrf(&session.csrf(&s)))
-                input type="hidden" name="user_code" value=(code);
-                button.primary type="submit" name="decision" value="approve" { "Approve" }
-                button type="submit" name="decision" value="deny" { "Deny" }
+            @if elsewhere {
+                div.panel.warn role="alert" {
+                    p { strong { "This request came from a different network than yours" } " (" (requested_ip) "). Approve only if the device is yours and in front of you." }
+                }
             }
-        } @else {
-            p { "For your security, sign in again before approving." }
-            a.btn.primary href=(format!("/signin?again=1&next=/device?user_code={code}")) { "Sign in again" }
-        }
-    });
+            @if fresh {
+                form method="post" action="/device/decide" class="stack" {
+                    (pages::csrf(&session.csrf(&s)))
+                    input type="hidden" name="user_code" value=(code);
+                    button.primary type="submit" name="decision" value="approve" { "Approve" }
+                    button type="submit" name="decision" value="deny" { "Deny" }
+                }
+            } @else {
+                p { "For your security, sign in again before approving." }
+                a.btn.primary href=(format!("/signin?again=1&next=/device?user_code={code}")) { "Sign in again" }
+            }
+        },
+    );
     Ok(page.into_response())
 }
 
@@ -258,10 +266,6 @@ pub async fn decide(State(s): State<AppState>, headers: HeaderMap, ClientIp(ip):
     if changed == 0 {
         return Ok(pages::message(&s, "Code not found", "It expired or was already used. Start again on the device.").into_response());
     }
-    Ok(if approve {
-        pages::message(&s, "Device connected", "You can go back to the device. It signs in by itself.")
-    } else {
-        pages::message(&s, "Denied", "The device wasn't signed in.")
-    }
-    .into_response())
+    Ok(if approve { pages::message(&s, "Device connected", "You can go back to the device. It signs in by itself.") } else { pages::message(&s, "Denied", "The device wasn't signed in.") }
+        .into_response())
 }

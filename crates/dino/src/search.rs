@@ -86,7 +86,12 @@ fn sessions() -> (Vec<Item>, Vec<Item>) {
     if let Ok(Response::Found { sessions, .. }) = c.request(&newest) {
         for f in sessions.into_iter().filter(|f| !f.session_id.is_empty()).take(200) {
             let prefix: String = f.session_id.chars().take(8).collect();
-            past.push(Item { kind: "session", text: f.title.clone(), detail: format!("{} · {}", f.agent, f.cwd.as_deref().map(tilde).unwrap_or_default()), command: format!("dino continue {prefix}") });
+            past.push(Item {
+                kind: "session",
+                text: f.title.clone(),
+                detail: format!("{} · {}", f.agent, f.cwd.as_deref().map(tilde).unwrap_or_default()),
+                command: format!("dino continue {prefix}"),
+            });
         }
     }
     (live, past)
@@ -103,11 +108,12 @@ pub(crate) fn tilde(p: &str) -> String {
 /// conversations.
 fn merge((live, past): (Vec<Item>, Vec<Item>), history: &[String]) -> Vec<Item> {
     let mut seen = std::collections::HashSet::new();
-    let commands = history
-        .iter()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty() && seen.insert(l.to_string()))
-        .map(|l| Item { kind: "command", text: l.to_string(), detail: String::new(), command: l.to_string() });
+    let commands =
+        history
+            .iter()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && seen.insert(l.to_string()))
+            .map(|l| Item { kind: "command", text: l.to_string(), detail: String::new(), command: l.to_string() });
     live.into_iter().chain(commands).chain(past).collect()
 }
 
@@ -132,7 +138,12 @@ fn picker(items: &[Item], query: &str) -> anyhow::Result<Option<Item>> {
         let top = at.saturating_sub(room.saturating_sub(1));
         queue!(tty, cursor::MoveTo(0, 0), terminal::Clear(terminal::ClearType::All))?;
         queue!(tty, style::Print(format!("search: {query}")), cursor::MoveTo(0, 1))?;
-        queue!(tty, style::SetAttribute(style::Attribute::Dim), style::Print(format!("{} of {} · ↑↓ move · ⏎ put on the prompt · esc cancel", shown.len(), items.len())), style::SetAttribute(style::Attribute::Reset))?;
+        queue!(
+            tty,
+            style::SetAttribute(style::Attribute::Dim),
+            style::Print(format!("{} of {} · ↑↓ move · ⏎ put on the prompt · esc cancel", shown.len(), items.len())),
+            style::SetAttribute(style::Attribute::Reset)
+        )?;
         for (row, (n, i)) in shown.iter().enumerate().skip(top).take(room).enumerate() {
             let mark = if i.kind == "session" { "◆ " } else { "  " };
             // A title, a folder or a history line could hold escapes that restyle or retitle the terminal.

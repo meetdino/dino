@@ -41,12 +41,7 @@ pub struct Endpoints {
 
 impl Default for Endpoints {
     fn default() -> Self {
-        Self {
-            authorize: "https://auth.openai.com/api/accounts/authorize".into(),
-            token: "https://auth.openai.com/api/accounts/oauth/token".into(),
-            port: 1455,
-            host: None,
-        }
+        Self { authorize: "https://auth.openai.com/api/accounts/authorize".into(), token: "https://auth.openai.com/api/accounts/oauth/token".into(), port: 1455, host: None }
     }
 }
 
@@ -183,10 +178,7 @@ pub fn refresh_if_due(token_url: &str, keys: &std::collections::HashMap<String, 
     if expires > now() + 5 * 60 {
         return Ok(None);
     }
-    let v = post(
-        token_url,
-        &[("grant_type", "refresh_token".into()), ("client_id", client_id.clone()), ("refresh_token", refresh.clone()), ("resource", RESOURCE.into())],
-    )?;
+    let v = post(token_url, &[("grant_type", "refresh_token".into()), ("client_id", client_id.clone()), ("refresh_token", refresh.clone()), ("resource", RESOURCE.into())])?;
     let mut t = tokens(&v, client_id, Some(refresh))?;
     // A refresh reply may leave the scope out: plan usage stays as it was granted.
     if v["scope"].as_str().is_none() {
@@ -213,7 +205,13 @@ fn form(fields: &[(&str, String)]) -> String {
 
 /// A form POST to OpenAI's token endpoint; its error says why, never what was sent.
 fn post(url: &str, fields: &[(&str, String)]) -> anyhow::Result<Value> {
-    let r = http().post(url).header("content-type", "application/x-www-form-urlencoded").header("accept", "application/json").timeout(Duration::from_secs(30)).body(form(fields)).send()?;
+    let r = http()
+        .post(url)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("accept", "application/json")
+        .timeout(Duration::from_secs(30))
+        .body(form(fields))
+        .send()?;
     let status = r.status();
     let v: Value = r.json().unwrap_or(Value::Null);
     if !status.is_success() {
@@ -251,7 +249,9 @@ fn wait_for_code(listener: &std::net::TcpListener, state: &str) -> anyhow::Resul
         std::io::BufReader::new(&stream).read_line(&mut line)?;
         let target = line.split_whitespace().nth(1).unwrap_or("");
         let reply = |code: &str, title: &str, body: &str| {
-            let page = format!("<!doctype html><meta charset=utf-8><title>{title}</title><body style=\"font:15px -apple-system,sans-serif;margin:15vh auto;max-width:28em;text-align:center\"><h2>{title}</h2><p>{body}</p>");
+            let page = format!(
+                "<!doctype html><meta charset=utf-8><title>{title}</title><body style=\"font:15px -apple-system,sans-serif;margin:15vh auto;max-width:28em;text-align:center\"><h2>{title}</h2><p>{body}</p>"
+            );
             let _ = (&stream).write_all(format!("HTTP/1.1 {code}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len()).as_bytes());
         };
         let Some(query) = target.strip_prefix("/auth/callback?") else {
@@ -384,10 +384,13 @@ mod tests {
     fn a_refused_sign_in_saves_nothing() {
         let port = free_port();
         let (tx, saved) = std::sync::mpsc::channel::<Tokens>();
-        let url = connect(Endpoints { authorize: "https://auth.example/authorize".into(), token: "http://127.0.0.1:9/unused".into(), port, host: Some("urn:uuid:00000000-0000-4000-8000-000000000000".into()) }, move |t| {
-            tx.send(t).unwrap();
-            Ok(())
-        })
+        let url = connect(
+            Endpoints { authorize: "https://auth.example/authorize".into(), token: "http://127.0.0.1:9/unused".into(), port, host: Some("urn:uuid:00000000-0000-4000-8000-000000000000".into()) },
+            move |t| {
+                tx.send(t).unwrap();
+                Ok(())
+            },
+        )
         .unwrap();
         let port = redirect_port(&url);
         let page = http().get(format!("http://127.0.0.1:{port}/auth/callback?error=access_denied")).send().unwrap().text().unwrap();
@@ -402,7 +405,8 @@ mod tests {
             (200, r#"{"access_token":"at-3","expires_in":3600}"#),
             (400, r#"{"error":"invalid_grant","error_description":"refresh token was already used"}"#),
         ]);
-        let mut keys: std::collections::HashMap<String, String> = [(REFRESH_KEY, "rt-1"), (CLIENT_KEY, "oaiapp_dino"), (PLAN_KEY, "granted"), (EXPIRES_KEY, "0")].into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+        let mut keys: std::collections::HashMap<String, String> =
+            [(REFRESH_KEY, "rt-1"), (CLIENT_KEY, "oaiapp_dino"), (PLAN_KEY, "granted"), (EXPIRES_KEY, "0")].into_iter().map(|(k, v)| (k.into(), v.into())).collect();
 
         let t = refresh_if_due(&token, &keys).unwrap().unwrap();
         let f = fields(&sent.recv().unwrap());

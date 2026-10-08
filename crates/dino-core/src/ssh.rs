@@ -72,13 +72,7 @@ fn expand_include(arg: &str, home: &Path) -> Vec<PathBuf> {
         return vec![path];
     }
     let Some(dir) = path.parent() else { return vec![] };
-    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| wildcard(&name, &e.file_name().to_string_lossy()))
-        .map(|e| e.path())
-        .collect();
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| wildcard(&name, &e.file_name().to_string_lossy())).map(|e| e.path()).collect();
     found.sort();
     found
 }
@@ -86,9 +80,7 @@ fn expand_include(arg: &str, home: &Path) -> Vec<PathBuf> {
 fn wildcard(pattern: &str, name: &str) -> bool {
     match pattern.split_once('*') {
         None => pattern == name,
-        Some((head, tail)) => {
-            name.starts_with(head) && (0..=name.len() - head.len()).any(|i| name.is_char_boundary(head.len() + i) && wildcard(tail, &name[head.len() + i..]))
-        }
+        Some((head, tail)) => name.starts_with(head) && (0..=name.len() - head.len()).any(|i| name.is_char_boundary(head.len() + i) && wildcard(tail, &name[head.len() + i..])),
     }
 }
 

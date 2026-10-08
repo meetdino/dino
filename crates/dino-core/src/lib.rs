@@ -74,10 +74,7 @@ pub fn detect_agents() -> Vec<Detected> {
 /// Known agents found on `path` (a `PATH`-style list), else where their installers put them (see
 /// `which`), in catalog order.
 pub fn detect_agents_in(path: &std::ffi::OsStr) -> Vec<Detected> {
-    KNOWN_AGENTS
-        .iter()
-        .filter_map(|kind| find_in(kind, path).map(|path| Detected { kind: kind.clone(), path }))
-        .collect()
+    KNOWN_AGENTS.iter().filter_map(|kind| find_in(kind, path).map(|path| Detected { kind: kind.clone(), path })).collect()
 }
 
 /// `kind`'s command on `path`, else where installers put it: by its name now, then its older ones.
@@ -223,10 +220,8 @@ pub fn try_new_uuid() -> std::io::Result<String> {
 }
 
 /// The hook events dino follows, in Claude Code and in agents that take Claude's hooks (Qwen Code).
-pub const HOOK_EVENTS: &[&str] = &[
-    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-    "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop",
-];
+pub const HOOK_EVENTS: &[&str] =
+    &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop"];
 
 /// Claude Code's own on top of those: the model its session switches to, by `/model` or by itself
 /// (2.1.251; an older Claude ignores an event it doesn't know, with a warning).
@@ -310,12 +305,8 @@ pub fn keys_file() -> PathBuf {
 
 /// Provider keys dino can use itself: its key store, overridden by the environment.
 pub fn load_keys() -> std::collections::HashMap<String, String> {
-    let mut keys: std::collections::HashMap<String, String> = std::fs::read_to_string(keys_file())
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| l.split_once('='))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .collect();
+    let mut keys: std::collections::HashMap<String, String> =
+        std::fs::read_to_string(keys_file()).unwrap_or_default().lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect();
     for (k, v) in std::env::vars() {
         if k.ends_with("_API_KEY") && !v.is_empty() {
             keys.insert(k, v);

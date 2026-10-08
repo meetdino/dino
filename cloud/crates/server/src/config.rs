@@ -169,11 +169,9 @@ impl Config {
             _ => MailConfig::File(var("DINO_MAIL_LOG").unwrap_or_else(|| "dino-cloud-mail.log".into()).into()),
         };
         let turnstile = match (var("DINO_TURNSTILE_SITE_KEY"), var("DINO_TURNSTILE_SECRET")) {
-            (Some(site_key), Some(secret)) => Some(Turnstile {
-                site_key,
-                secret,
-                verify_url: var("DINO_TURNSTILE_VERIFY_URL").unwrap_or_else(|| "https://challenges.cloudflare.com/turnstile/v0/siteverify".into()),
-            }),
+            (Some(site_key), Some(secret)) => {
+                Some(Turnstile { site_key, secret, verify_url: var("DINO_TURNSTILE_VERIFY_URL").unwrap_or_else(|| "https://challenges.cloudflare.com/turnstile/v0/siteverify".into()) })
+            }
             _ => None,
         };
         Ok(Config {
@@ -186,7 +184,13 @@ impl Config {
             secret,
             // Vercel's edge sets the client address; nothing else can reach the function.
             trust_proxy: flag("DINO_TRUST_PROXY", serverless),
-            github: upstream("GITHUB", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", "https://api.github.com/user", Some("https://api.github.com/user/emails")),
+            github: upstream(
+                "GITHUB",
+                "https://github.com/login/oauth/authorize",
+                "https://github.com/login/oauth/access_token",
+                "https://api.github.com/user",
+                Some("https://api.github.com/user/emails"),
+            ),
             google: upstream("GOOGLE", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://openidconnect.googleapis.com/v1/userinfo", None),
             mail,
             turnstile,

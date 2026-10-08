@@ -548,7 +548,36 @@ mod tests {
     #[test]
     fn every_command_dino_runs_is_offered() {
         // The ones `dino --help` lists.
-        for name in ["ls", "status", "new", "attach", "resume", "kill", "fork", "rm", "found", "continue", "stats", "automations", "login", "logout", "sync", "claude-token", "fallback", "power", "permissions", "build-cache", "init", "shell", "ai", "search", "mcp", "ping", "stop", "completions"] {
+        for name in [
+            "ls",
+            "status",
+            "new",
+            "attach",
+            "resume",
+            "kill",
+            "fork",
+            "rm",
+            "found",
+            "continue",
+            "stats",
+            "automations",
+            "login",
+            "logout",
+            "sync",
+            "claude-token",
+            "fallback",
+            "power",
+            "permissions",
+            "build-cache",
+            "init",
+            "shell",
+            "ai",
+            "search",
+            "mcp",
+            "ping",
+            "stop",
+            "completions",
+        ] {
             assert!(COMMANDS.iter().any(|c| c.name == name), "{name}");
             assert!(crate::USAGE.contains(&format!("dino {name}")) || crate::USAGE.contains(&format!("| {name}")), "--help lists {name}");
         }

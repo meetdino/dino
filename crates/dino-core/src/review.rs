@@ -104,9 +104,8 @@ pub fn run(key: &str, dir: &Path, base: &str) -> anyhow::Result<Vec<Finding>> {
 /// until Claude answers, `cancel` is called for `key`, or `timeout` passes. `what` names the job
 /// in errors ("review").
 pub(crate) fn headless(key: &str, dir: &Path, args: &[String], input: String, timeout: Duration, what: &str) -> anyhow::Result<String> {
-    let claude = crate::which("claude").ok_or_else(|| {
-        anyhow::anyhow!("This needs Claude Code, and `claude` isn't installed. Install it (npm install -g @anthropic-ai/claude-code), then try again.")
-    })?;
+    let claude =
+        crate::which("claude").ok_or_else(|| anyhow::anyhow!("This needs Claude Code, and `claude` isn't installed. Install it (npm install -g @anthropic-ai/claude-code), then try again."))?;
     let mut cmd = Command::new(claude);
     // The Claude subscription token when this Mac's Claude Code isn't signed in (or Settings say
     // to use it here); never one the environment happened to hold.
@@ -251,7 +250,8 @@ mod tests {
 
     #[test]
     fn findings_from_a_result() {
-        let out = r#"{"type":"result","subtype":"success","is_error":false,"result":"```json\n[{\"file\":\"./src/a.rs\",\"line\":\"12\",\"severity\":\"Critical\",\"message\":\" off by one \"}]\n```"}"#;
+        let out =
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"```json\n[{\"file\":\"./src/a.rs\",\"line\":\"12\",\"severity\":\"Critical\",\"message\":\" off by one \"}]\n```"}"#;
         let f = parse_output(out).unwrap();
         assert_eq!(f, vec![Finding { file: "src/a.rs".into(), line: 12, severity: "high".into(), message: "off by one".into() }]);
         assert_eq!(parse_output(r#"{"is_error":false,"result":"[]"}"#).unwrap(), vec![]);

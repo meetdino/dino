@@ -21,13 +21,12 @@ pub struct Verified {
 /// The account `v` signs in to, creating or linking as needed.
 pub async fn account_for(state: &AppState, v: &Verified) -> Result<Uuid> {
     let mut tx = state.db.begin().await?;
-    let existing: Option<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-        "SELECT a.id, a.deleted_at FROM identities i JOIN accounts a ON a.id = i.account_id WHERE i.provider = $1 AND i.subject = $2",
-    )
-    .bind(v.provider)
-    .bind(&v.subject)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let existing: Option<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as("SELECT a.id, a.deleted_at FROM identities i JOIN accounts a ON a.id = i.account_id WHERE i.provider = $1 AND i.subject = $2")
+            .bind(v.provider)
+            .bind(&v.subject)
+            .fetch_optional(&mut *tx)
+            .await?;
     if let Some((id, deleted)) = existing {
         if deleted.is_some() {
             return Err(Error::Forbidden("This account is being deleted.".into()));
@@ -37,7 +36,10 @@ pub async fn account_for(state: &AppState, v: &Verified) -> Result<Uuid> {
     let email = v.email.clone().unwrap_or_default();
     // Only a verified address joins an existing account, and only one that was verified too.
     let linked: Option<(Uuid,)> = if v.email_verified && !email.is_empty() {
-        sqlx::query_as("SELECT id FROM accounts WHERE lower(email) = lower($1) AND email_verified AND deleted_at IS NULL ORDER BY created_at LIMIT 1").bind(&email).fetch_optional(&mut *tx).await?
+        sqlx::query_as("SELECT id FROM accounts WHERE lower(email) = lower($1) AND email_verified AND deleted_at IS NULL ORDER BY created_at LIMIT 1")
+            .bind(&email)
+            .fetch_optional(&mut *tx)
+            .await?
     } else {
         None
     };

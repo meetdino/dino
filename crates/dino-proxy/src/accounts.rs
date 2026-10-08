@@ -127,10 +127,7 @@ mod tests {
         // Every one spent: the one back first, by its latest reset.
         let other = window("5h", 1.0, Some(now + 3600));
         let late = refused(Kind::Quota, Some(now + 9000));
-        assert_eq!(
-            all_spent([(Some(&quota), Some(&full_7d)), (None, Some(&other)), (Some(&late), None)], now),
-            Some(Spent { resets_at: Some(now + 3600) })
-        );
+        assert_eq!(all_spent([(Some(&quota), Some(&full_7d)), (None, Some(&other)), (Some(&late), None)], now), Some(Spent { resets_at: Some(now + 3600) }));
         // One that doesn't say when is back last.
         let unknown = window("7d", 1.0, None);
         assert_eq!(all_spent([(None, Some(&unknown)), (Some(&late), None)], now), Some(Spent { resets_at: Some(now + 9000) }));

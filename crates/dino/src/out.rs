@@ -168,11 +168,7 @@ pub fn grid(columns: &[Column], rows: &[Vec<Cell>]) -> String {
 }
 
 fn render(columns: &[Column], rows: &[Vec<Cell>], header: bool, width: usize, on: bool) -> String {
-    let mut widths: Vec<usize> = columns
-        .iter()
-        .enumerate()
-        .map(|(i, c)| rows.iter().map(|r| r[i].text.width()).chain(header.then(|| c.head.width())).max().unwrap_or(0))
-        .collect();
+    let mut widths: Vec<usize> = columns.iter().enumerate().map(|(i, c)| rows.iter().map(|r| r[i].text.width()).chain(header.then(|| c.head.width())).max().unwrap_or(0)).collect();
     // Too wide: take a character at a time from the widest column that can give one.
     let total = |w: &[usize]| w.iter().sum::<usize>() + GAP * w.len().saturating_sub(1);
     while total(&widths) > width {
@@ -361,10 +357,7 @@ mod tests {
     #[test]
     fn tables_fit_and_stay_aligned() {
         let cols = [Column::keep("ID"), Column::end("NAME", 6), Column::path("FOLDER", 8)];
-        let rows = vec![
-            vec![Cell::new("1"), Cell::new("Dinosaurs essay"), Cell::new("~/src/dino-terminal/work")],
-            vec![Cell::new("12"), Cell::new("shell"), Cell::new("/tmp")],
-        ];
+        let rows = vec![vec![Cell::new("1"), Cell::new("Dinosaurs essay"), Cell::new("~/src/dino-terminal/work")], vec![Cell::new("12"), Cell::new("shell"), Cell::new("/tmp")]];
         let wide = render(&cols, &rows, true, 80, false);
         assert_eq!(wide, "ID  NAME             FOLDER\n1   Dinosaurs essay  ~/src/dino-terminal/work\n12  shell            /tmp\n");
         let narrow = render(&cols, &rows, true, 30, false);

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
@@ -16,7 +17,6 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
 use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AColor, Handler, Hyperlink as VteHyperlink, NamedColor, Processor, Rgb};
-use alacritty_terminal::Term;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 /// Colors reported to apps that query them (OSC 10/11); agents use this to pick a light/dark theme.
@@ -1120,24 +1120,14 @@ fn window_size(cols: u16, rows: u16) -> WindowSize {
 }
 
 fn is_blank(cell: &Cell) -> bool {
-    cell.c == ' '
-        && cell.bg == AColor::Named(NamedColor::Background)
-        && !cell.flags.intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
+    cell.c == ' ' && cell.bg == AColor::Named(NamedColor::Background) && !cell.flags.intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
 }
 
 /// Full SGR sequence (reset first) for a cell's colors and attributes.
 fn sgr(cell: &Cell) -> String {
     let mut codes = vec!["0".to_string()];
     let f = cell.flags;
-    for (flag, code) in [
-        (Flags::BOLD, "1"),
-        (Flags::DIM, "2"),
-        (Flags::ITALIC, "3"),
-        (Flags::UNDERLINE, "4"),
-        (Flags::INVERSE, "7"),
-        (Flags::HIDDEN, "8"),
-        (Flags::STRIKEOUT, "9"),
-    ] {
+    for (flag, code) in [(Flags::BOLD, "1"), (Flags::DIM, "2"), (Flags::ITALIC, "3"), (Flags::UNDERLINE, "4"), (Flags::INVERSE, "7"), (Flags::HIDDEN, "8"), (Flags::STRIKEOUT, "9")] {
         if f.contains(flag) {
             codes.push(code.into());
         }
@@ -1464,12 +1454,7 @@ mod tests {
         let p = Pane::emulator(40, 12, false);
         p.feed(SESSION);
         let replay = p.replay(100);
-        assert_eq!(
-            marks(&replay),
-            ["A;cl=line", "B", "C", "A;cl=line", "B", "C", "link:https://example.com/x", "/link", "A;cl=line", "B"],
-            "{}",
-            String::from_utf8_lossy(&replay)
-        );
+        assert_eq!(marks(&replay), ["A;cl=line", "B", "C", "A;cl=line", "B", "C", "link:https://example.com/x", "/link", "A;cl=line", "B"], "{}", String::from_utf8_lossy(&replay));
         assert_eq!(p.text(100), "$ ls\na.txt\n$ cat a.txt\nsee the docs here\n$ gi");
         // Brought back from a replay (a saved screen, a reattach of a reattach): the same again.
         let again = Pane::ended(&replay, 40, 12, None);

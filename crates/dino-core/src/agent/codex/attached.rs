@@ -209,15 +209,7 @@ fn possible(fitting: &[Vec<usize>], optional: &[bool]) -> Vec<BTreeSet<Option<us
     out
 }
 
-fn each_way(
-    members: &[usize],
-    k: usize,
-    fitting: &[Vec<usize>],
-    optional: &[bool],
-    chosen: &mut Vec<Option<usize>>,
-    used: &mut HashSet<usize>,
-    found: &mut dyn FnMut(&[Option<usize>]),
-) {
+fn each_way(members: &[usize], k: usize, fitting: &[Vec<usize>], optional: &[bool], chosen: &mut Vec<Option<usize>>, used: &mut HashSet<usize>, found: &mut dyn FnMut(&[Option<usize>])) {
     let Some(&m) = members.get(k) else {
         found(chosen);
         return;
@@ -499,7 +491,14 @@ mod tests {
         let dir = home.join("app-server-daemon");
         std::fs::create_dir_all(&dir).unwrap();
         let me = procinfo::process(std::process::id()).unwrap();
-        let record = |started_us: u64| format!(r#"{{"pid":{},"processStartTime":"Tue Oct  6 19:14:36 2026","processIdentity":{{"bootId":"C14C44A7","uniqueId":1,"startSeconds":{},"startMicroseconds":{}}}}}"#, me.pid, started_us / 1_000_000, started_us % 1_000_000);
+        let record = |started_us: u64| {
+            format!(
+                r#"{{"pid":{},"processStartTime":"Tue Oct  6 19:14:36 2026","processIdentity":{{"bootId":"C14C44A7","uniqueId":1,"startSeconds":{},"startMicroseconds":{}}}}}"#,
+                me.pid,
+                started_us / 1_000_000,
+                started_us % 1_000_000
+            )
+        };
         assert_eq!(up_in(&home), None, "no record");
         std::fs::write(dir.join("daemon.pid"), record(me.started_us)).unwrap();
         assert_eq!(up_in(&home), Some(me.started_us / 1000));

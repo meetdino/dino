@@ -246,16 +246,7 @@ pub struct Policies {
 
 impl Default for Policies {
     fn default() -> Self {
-        Self {
-            allowed_agents: vec![],
-            default_agent: None,
-            worktree_trust: true,
-            session_token_budget: 0,
-            close_merged: false,
-            allow_bypass: true,
-            session_tools: false,
-            fallback_providers: vec![],
-        }
+        Self { allowed_agents: vec![], default_agent: None, worktree_trust: true, session_token_budget: 0, close_merged: false, allow_bypass: true, session_tools: false, fallback_providers: vec![] }
     }
 }
 
@@ -295,11 +286,7 @@ impl Worktrees {
     /// The branch prefix, or the default when it's blank or can't start a branch name.
     pub fn prefix(&self) -> String {
         let p = self.branch_prefix.trim();
-        let ok = !p.is_empty()
-            && !p.starts_with(['/', '-', '.'])
-            && !p.contains("..")
-            && !p.contains("//")
-            && !p.chars().any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c));
+        let ok = !p.is_empty() && !p.starts_with(['/', '-', '.']) && !p.contains("..") && !p.contains("//") && !p.chars().any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c));
         if ok { p.to_string() } else { DEFAULT_BRANCH_PREFIX.into() }
     }
 }
@@ -594,9 +581,7 @@ const MANAGED_PATH: &str = "/etc/dino/managed-settings.json";
 impl Managed {
     /// Only an admin can write it. `DINO_MANAGED_SETTINGS` names another file (for tests).
     pub fn path() -> PathBuf {
-        std::env::var_os("DINO_MANAGED_SETTINGS")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(MANAGED_PATH))
+        std::env::var_os("DINO_MANAGED_SETTINGS").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(MANAGED_PATH))
     }
 
     pub fn load() -> Self {
@@ -633,10 +618,13 @@ impl Managed {
 
     /// Each locked path's file, as clients get them.
     pub fn locked_from(&self) -> std::collections::BTreeMap<String, String> {
-        self.locked_paths().into_iter().map(|p| {
-            let f = self.from.get(&p).cloned().unwrap_or_else(Self::path);
-            (p, f.display().to_string())
-        }).collect()
+        self.locked_paths()
+            .into_iter()
+            .map(|p| {
+                let f = self.from.get(&p).cloned().unwrap_or_else(Self::path);
+                (p, f.display().to_string())
+            })
+            .collect()
     }
 }
 
@@ -726,19 +714,14 @@ pub fn key_status() -> Vec<KeyInfo> {
     let mut names: Vec<String> = KNOWN_KEYS.iter().map(|(k, _)| k.to_string()).collect();
     // Sign in with ChatGPT's tokens and coding plans' keys are Settings → Providers' to keep, and
     // the dino account's are Settings → Dino Account's: not keys to edit or count here.
-    names.extend(
-        stored
-            .iter()
-            .map(|(k, _)| k.clone())
-            .filter(|k| {
-                !KNOWN_KEYS.iter().any(|(n, _)| n == k)
-                    && !k.starts_with("CHATGPT_")
-                    && !k.starts_with(ACCOUNT_TOKEN_PREFIX)
-                    && !k.starts_with("CLAUDE_ACCOUNT_")
-                    && !k.starts_with(crate::plans::KEY_PREFIX)
-                    && k != crate::claude_token::CREATED_KEY
-            }),
-    );
+    names.extend(stored.iter().map(|(k, _)| k.clone()).filter(|k| {
+        !KNOWN_KEYS.iter().any(|(n, _)| n == k)
+            && !k.starts_with("CHATGPT_")
+            && !k.starts_with(ACCOUNT_TOKEN_PREFIX)
+            && !k.starts_with("CLAUDE_ACCOUNT_")
+            && !k.starts_with(crate::plans::KEY_PREFIX)
+            && k != crate::claude_token::CREATED_KEY
+    }));
     names
         .into_iter()
         .map(|name| {

@@ -45,9 +45,7 @@ fn git_in(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> anyhow::Result<Str
 
 /// The top of the checkout containing `dir`.
 pub fn repo_root(dir: &Path) -> anyhow::Result<PathBuf> {
-    git(dir, &["rev-parse", "--show-toplevel"])
-        .map(|s| PathBuf::from(s.trim()))
-        .map_err(|_| anyhow::anyhow!("{} isn't in a git repository", dir.display()))
+    git(dir, &["rev-parse", "--show-toplevel"]).map(|s| PathBuf::from(s.trim())).map_err(|_| anyhow::anyhow!("{} isn't in a git repository", dir.display()))
 }
 
 /// A checkout of a repo: its folder and branch (None when detached).
@@ -214,11 +212,7 @@ pub fn batch(dir: &Path, heads: &[&str], base: &str) -> Batch {
     let Ok(ahead) = reach_counts(dir, &heads, &["--not", base]) else { return Batch::default() };
     let own: Vec<&str> = heads.iter().copied().filter(|h| ahead.get(*h).is_some_and(|&n| n > 0)).collect();
     let unpushed = if own.is_empty() { Ok(HashMap::new()) } else { reach_counts(dir, &own, &["--not", "--remotes", base]) };
-    let subjects = if own.is_empty() {
-        Ok(String::new())
-    } else {
-        git_in(dir, &["log", "--no-walk=unsorted", "--format=%H%x09%s", "--stdin"], Some((own.join("\n") + "\n").as_bytes()))
-    };
+    let subjects = if own.is_empty() { Ok(String::new()) } else { git_in(dir, &["log", "--no-walk=unsorted", "--format=%H%x09%s", "--stdin"], Some((own.join("\n") + "\n").as_bytes())) };
     let subjects = subjects.map(|out| out.lines().filter_map(|l| l.split_once('\t')).map(|(h, s)| (h.to_string(), s.trim().to_string())).collect());
     match (unpushed, subjects) {
         (Ok(unpushed), Ok(subjects)) => Batch { ahead, unpushed, subjects },
@@ -737,11 +731,7 @@ pub fn slug(name: &str) -> Option<String> {
 /// only what the agent commits. Returns the worktree and the commit its changes count from.
 pub fn start(checkout: &Path, name: &str, branch: &str) -> anyhow::Result<(PathBuf, String)> {
     // git's own word for it ("You do not have the initial commit yet") says nothing of worktrees.
-    anyhow::ensure!(
-        git(checkout, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok(),
-        "{} has no commits yet: a worktree needs a first commit",
-        base_name(checkout)
-    );
+    anyhow::ensure!(git(checkout, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok(), "{} has no commits yet: a worktree needs a first commit", base_name(checkout));
     let base = snapshot(checkout)?;
     let head = git(checkout, &["rev-parse", "HEAD"])?.trim().to_string();
     // Worktrees all live in the main checkout, even when this one is a worktree itself.
@@ -1142,14 +1132,17 @@ mod tests {
         let a = by("a.txt");
         assert_eq!((a.status.as_str(), a.added, a.removed), ("modified", 2, 1));
         let lines: Vec<_> = a.lines.iter().map(|l| (l.kind.as_str(), l.old, l.new, l.text.as_str())).collect();
-        assert_eq!(lines, vec![
-            ("hunk", None, None, "@@ -1,3 +1,4 @@"),
-            ("ctx", Some(1), Some(1), "one"),
-            ("del", Some(2), None, "two"),
-            ("add", None, Some(2), "2"),
-            ("ctx", Some(3), Some(3), "three"),
-            ("add", None, Some(4), "four"),
-        ]);
+        assert_eq!(
+            lines,
+            vec![
+                ("hunk", None, None, "@@ -1,3 +1,4 @@"),
+                ("ctx", Some(1), Some(1), "one"),
+                ("del", Some(2), None, "two"),
+                ("add", None, Some(2), "2"),
+                ("ctx", Some(3), Some(3), "three"),
+                ("add", None, Some(4), "four"),
+            ]
+        );
         assert_eq!(by("gone.txt").status, "deleted");
         let new = by("sub/new file.txt");
         assert_eq!((new.status.as_str(), new.added), ("added", 1));
@@ -1417,10 +1410,35 @@ mod tests {
         assert!(git(repo, &["status", "--porcelain"]).unwrap().lines().all(|l| !l.contains(".dino")));
         let all = list(&wt).unwrap();
         let real = |p: &Path| p.canonicalize().unwrap().to_string_lossy().into_owned();
-        assert_eq!(all, vec![
-            Worktree { path: real(repo), branch: Some("main".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false, reading: false, head: Some(git(repo, &["rev-parse", "HEAD"]).unwrap().trim().into()) },
-            Worktree { path: real(&wt), branch: Some("dino/g-claude".into()), dino: false, git: None, owner: None, made_by: None, users: vec![], in_use: false, reading: false, head: Some(git(&wt, &["rev-parse", "HEAD"]).unwrap().trim().into()) },
-        ]);
+        assert_eq!(
+            all,
+            vec![
+                Worktree {
+                    path: real(repo),
+                    branch: Some("main".into()),
+                    dino: false,
+                    git: None,
+                    owner: None,
+                    made_by: None,
+                    users: vec![],
+                    in_use: false,
+                    reading: false,
+                    head: Some(git(repo, &["rev-parse", "HEAD"]).unwrap().trim().into())
+                },
+                Worktree {
+                    path: real(&wt),
+                    branch: Some("dino/g-claude".into()),
+                    dino: false,
+                    git: None,
+                    owner: None,
+                    made_by: None,
+                    users: vec![],
+                    in_use: false,
+                    reading: false,
+                    head: Some(git(&wt, &["rev-parse", "HEAD"]).unwrap().trim().into())
+                },
+            ]
+        );
 
         std::fs::write(wt.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         std::fs::write(wt.join("new.txt"), "hi\n").unwrap();

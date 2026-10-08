@@ -48,10 +48,8 @@ pub(crate) fn seed(d: &Daemon, id: &str, before: Option<&str>, started_at: u64, 
     let since_ms = (started_at as i64).saturating_mul(1000);
     match store.session_routes(id, before, since_ms, conversation.filter(|c| !c.is_empty())) {
         Ok(routes) => {
-            let routes: Vec<(String, dino_proxy::Usage)> = routes
-                .into_iter()
-                .map(|(route, [input, cache_read, cache_write, output])| (route, dino_proxy::Usage { input, cache_read, cache_write, output }))
-                .collect();
+            let routes: Vec<(String, dino_proxy::Usage)> =
+                routes.into_iter().map(|(route, [input, cache_read, cache_write, output])| (route, dino_proxy::Usage { input, cache_read, cache_write, output })).collect();
             if !routes.is_empty() {
                 d.proxy.stats.seed(id, &routes);
             }

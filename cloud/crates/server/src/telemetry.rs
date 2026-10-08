@@ -31,10 +31,7 @@ pub fn init(json: bool) {
 /// The process-wide Prometheus recorder, installed once.
 pub fn metrics_handle() -> &'static PrometheusHandle {
     METRICS.get_or_init(|| {
-        let recorder = PrometheusBuilder::new()
-            .set_buckets(&[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5])
-            .expect("static buckets")
-            .build_recorder();
+        let recorder = PrometheusBuilder::new().set_buckets(&[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]).expect("static buckets").build_recorder();
         let handle = recorder.handle();
         let _ = metrics::set_global_recorder(recorder);
         handle

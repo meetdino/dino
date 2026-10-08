@@ -23,11 +23,7 @@ pub(crate) fn watch(d: &Daemon) {
     let sessions: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| s.host.is_none() && !s.pane.is_exited()).cloned().collect();
     for s in sessions {
         let running = running_commands(d, &s);
-        let found = if running.is_empty() {
-            vec![]
-        } else {
-            s.agent_pid().map(|agent| serving(&processes(agent), agent, &running)).unwrap_or_default()
-        };
+        let found = if running.is_empty() { vec![] } else { s.agent_pid().map(|agent| serving(&processes(agent), agent, &running)).unwrap_or_default() };
         let mut servers = s.servers.lock().unwrap();
         if *servers != found {
             *servers = found;
@@ -37,14 +33,7 @@ pub(crate) fn watch(d: &Daemon) {
 
 /// The session's background shell commands its agent still lists as running: (task id, command).
 fn running_commands(d: &Daemon, s: &Session) -> Vec<(String, String)> {
-    d.proxy
-        .stats
-        .session(&s.id)
-        .background
-        .into_iter()
-        .filter(|b| b.running && b.kind == "shell")
-        .filter_map(|b| Some((b.id, b.command?)))
-        .collect()
+    d.proxy.stats.session(&s.id).background.into_iter().filter(|b| b.running && b.kind == "shell").filter_map(|b| Some((b.id, b.command?))).collect()
 }
 
 /// The agent and every process under it: its parent and its command line.
@@ -123,10 +112,7 @@ fn listening(pids: &[u32]) -> Vec<u16> {
     let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
     let out = std::process::Command::new("lsof").args(["-a", "-p", &list, "-iTCP", "-sTCP:LISTEN", "-nP", "-Fn"]).output();
     let Ok(out) = out else { return vec![] };
-    let mut ports: Vec<u16> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.strip_prefix('n')?.rsplit(':').next()?.parse().ok())
-        .collect();
+    let mut ports: Vec<u16> = String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.strip_prefix('n')?.rsplit(':').next()?.parse().ok()).collect();
     ports.sort_unstable();
     ports.dedup();
     ports

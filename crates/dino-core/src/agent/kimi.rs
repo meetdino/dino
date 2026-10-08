@@ -490,7 +490,8 @@ fn usage_in(text: &str, from: u64, file: &str, conversation: &str, cwd: &str, mo
         if v["type"] != "usage.record" || !u.is_object() {
             continue;
         }
-        out.push(crate::usage::Used { undated: false,
+        out.push(crate::usage::Used {
+            undated: false,
             id: format!("{file}:{at}"),
             at_ms: history::ms_of(&v["time"]).unwrap_or(0),
             conversation: conversation.into(),
@@ -615,8 +616,11 @@ mod tests {
     #[test]
     fn its_usage_records_are_its_calls() {
         let mut model = None;
-        let wire = format!("{}\n", r#"{"type":"llm.request","agentId":"main","model":"kimi-k2","time":1790739703600}
-{"type":"usage.record","agentId":"main","usage":{"inputOther":19360,"output":3,"inputCacheRead":100,"inputCacheCreation":7},"time":1790739705969}"#);
+        let wire = format!(
+            "{}\n",
+            r#"{"type":"llm.request","agentId":"main","model":"kimi-k2","time":1790739703600}
+{"type":"usage.record","agentId":"main","usage":{"inputOther":19360,"output":3,"inputCacheRead":100,"inputCacheCreation":7},"time":1790739705969}"#
+        );
         let used = usage_in(&wire, 50, "k1:main", "k1", "/r", &mut model);
         assert_eq!(used.len(), 1);
         let first_len = wire.lines().next().unwrap().len() as u64 + 1;

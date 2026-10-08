@@ -23,11 +23,16 @@ pub struct About<'a> {
 /// Blocks until Claude answers, `review::cancel` is called for `key`, or it times out.
 pub fn run(key: &str, about: &About, question: &str, dino: &Path) -> anyhow::Result<String> {
     let args = [
-        "--model", MODEL,
-        "--allowedTools", ALLOWED,
-        "--disallowedTools", &format!("{DISALLOWED},mcp__dino__send_message,mcp__dino__create_session"),
+        "--model",
+        MODEL,
+        "--allowedTools",
+        ALLOWED,
+        "--disallowedTools",
+        &format!("{DISALLOWED},mcp__dino__send_message,mcp__dino__create_session"),
         // Only dino's server, whatever the user configured.
-        "--strict-mcp-config", "--mcp-config", &crate::mcp::config(dino, None, true),
+        "--strict-mcp-config",
+        "--mcp-config",
+        &crate::mcp::config(dino, None, true),
     ]
     .map(String::from);
     let prompt = format!(

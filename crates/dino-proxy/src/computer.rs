@@ -54,9 +54,7 @@ pub fn reach_of(tool: &str, known: bool) -> Option<Reach> {
     // `mcp__<server>__<tool>`: the server by its whole name (`browser_history` isn't `browser`),
     // or a plugin's (`plugin_<plugin>_<server>`).
     if let Some((server, tool)) = name.strip_prefix("mcp__").and_then(|r| r.split_once("__")) {
-        let is = |servers: &[&str]| {
-            servers.iter().any(|s| server == *s || (server.starts_with("plugin_") && server.strip_suffix(s).is_some_and(|p| p.ends_with('_'))))
-        };
+        let is = |servers: &[&str]| servers.iter().any(|s| server == *s || (server.starts_with("plugin_") && server.strip_suffix(s).is_some_and(|p| p.ends_with('_'))));
         return if is(COMPUTER_SERVERS) {
             Some(Reach::Computer)
         } else if is(BROWSER_SERVERS) || playwright(tool) {
@@ -67,9 +65,7 @@ pub fn reach_of(tool: &str, known: bool) -> Option<Reach> {
     }
     // `mcp_<server>_<tool>` (Hermes), `<server>_<tool>` (OpenCode), or a bare name.
     let rest = name.strip_prefix("mcp__").or_else(|| name.strip_prefix("mcp_")).unwrap_or(&name);
-    let server = |servers: &[&str]| {
-        servers.iter().any(|s| rest.strip_prefix(s).is_some_and(|after| after.starts_with('_') && after.len() > 1))
-    };
+    let server = |servers: &[&str]| servers.iter().any(|s| rest.strip_prefix(s).is_some_and(|after| after.starts_with('_') && after.len() > 1));
     // Longest first, so `open_computer_use` isn't read as some other server's tool.
     if server(COMPUTER_SERVERS) {
         return Some(Reach::Computer);

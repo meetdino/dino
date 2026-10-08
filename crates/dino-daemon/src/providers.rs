@@ -177,10 +177,8 @@ pub fn refresh(now: bool) {
     let mut chatgpt = chatgpt_bare();
     let signed_in = crate::chatgpt::status(&keys);
     chatgpt.connected = signed_in.is_some();
-    chatgpt.account = signed_in.map(|plan| providers::Account {
-        label: Some(if plan { "Plan usage allowed" } else { "Signed in, but plan usage wasn't allowed: sign in again and allow it" }.into()),
-        ..Default::default()
-    });
+    chatgpt.account = signed_in
+        .map(|plan| providers::Account { label: Some(if plan { "Plan usage allowed" } else { "Signed in, but plan usage wasn't allowed: sign in again and allow it" }.into()), ..Default::default() });
     {
         let mut c = cache().lock().unwrap();
         let was = c.providers.get("chatgpt").map(|(_, p)| (p.connected, p.error.clone()));
@@ -439,7 +437,14 @@ fn probe(base: &str) -> Vec<Format> {
     Format::ALL
         .into_iter()
         .filter(|f| {
-            let status = http().post(format!("{base}/{}", f.path())).header("content-type", "application/json").body("{}").timeout(Duration::from_secs(5)).send().map(|r| r.status().as_u16()).unwrap_or(0);
+            let status = http()
+                .post(format!("{base}/{}", f.path()))
+                .header("content-type", "application/json")
+                .body("{}")
+                .timeout(Duration::from_secs(5))
+                .send()
+                .map(|r| r.status().as_u16())
+                .unwrap_or(0);
             providers::serves(status)
         })
         .collect()
@@ -517,11 +522,7 @@ fn connect_with(authorize: &str, exchange: &str, save: impl FnOnce(String) -> an
     std::thread::spawn(move || {
         let result = (|| -> anyhow::Result<()> {
             let code = wait_for_code(&listener)?;
-            let r = http()
-                .post(&exchange)
-                .timeout(Duration::from_secs(30))
-                .json(&serde_json::json!({"code": code, "code_verifier": verifier, "code_challenge_method": "S256"}))
-                .send()?;
+            let r = http().post(&exchange).timeout(Duration::from_secs(30)).json(&serde_json::json!({"code": code, "code_verifier": verifier, "code_challenge_method": "S256"})).send()?;
             let status = r.status();
             let v: Value = r.json().unwrap_or(Value::Null);
             let key = v["key"].as_str().filter(|k| !k.is_empty()).ok_or_else(|| anyhow::anyhow!("OpenRouter didn't give a key ({status})"))?;
@@ -566,7 +567,9 @@ fn wait_for_code(listener: &std::net::TcpListener) -> anyhow::Result<String> {
             Some(code) if !code.is_empty() => ("dino is connected to OpenRouter", "You can close this tab and go back to dino.", Ok(code)),
             _ => ("OpenRouter wasn't connected", "Nothing was changed. You can close this tab.", Err(anyhow::anyhow!("OpenRouter said {}", param("error").unwrap_or_else(|| "no".into())))),
         };
-        let page = format!("<!doctype html><meta charset=utf-8><title>{title}</title><body style=\"font:15px -apple-system,sans-serif;margin:15vh auto;max-width:28em;text-align:center\"><h2>{title}</h2><p>{body}</p>");
+        let page = format!(
+            "<!doctype html><meta charset=utf-8><title>{title}</title><body style=\"font:15px -apple-system,sans-serif;margin:15vh auto;max-width:28em;text-align:center\"><h2>{title}</h2><p>{body}</p>"
+        );
         let _ = (&stream).write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len()).as_bytes());
         return got;
     }
@@ -624,7 +627,14 @@ fn fetch_models(id: &str) {
         // The account's own list; Codex's catalog for the same account when that's empty or out of reach.
         "chatgpt" => {
             let access = dino_core::load_keys().remove(crate::chatgpt::ACCESS_KEY).unwrap_or_default();
-            let api = http().get(format!("{}/models", crate::chatgpt::API)).bearer_auth(access).send().ok().filter(|r| r.status().is_success()).and_then(|r| r.json::<Value>().ok()).unwrap_or(Value::Null);
+            let api = http()
+                .get(format!("{}/models", crate::chatgpt::API))
+                .bearer_auth(access)
+                .send()
+                .ok()
+                .filter(|r| r.status().is_success())
+                .and_then(|r| r.json::<Value>().ok())
+                .unwrap_or(Value::Null);
             let models = providers::chatgpt_models(&api, dino_core::models::codex_cache().as_deref());
             if models.is_empty() { Err("ChatGPT listed no models, and Codex has no list for this account".into()) } else { Ok(models) }
         }

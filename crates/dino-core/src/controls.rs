@@ -208,10 +208,7 @@ mod tests {
     fn claude_flags() {
         let claude = k("claude");
         assert_eq!(args("claude", &Controls::default(), &claude), Vec::<String>::new());
-        assert_eq!(
-            args("claude", &c(Some("ask"), Some("sonnet"), Some("high")), &claude),
-            ["--permission-mode", "manual", "--model", "sonnet", "--effort", "high"]
-        );
+        assert_eq!(args("claude", &c(Some("ask"), Some("sonnet"), Some("high")), &claude), ["--permission-mode", "manual", "--model", "sonnet", "--effort", "high"]);
         assert_eq!(args("claude", &c(Some("bypass"), None, None), &claude), ["--permission-mode", "bypassPermissions"]);
         // Haiku takes no effort; an older Opus has no xhigh, so it gets the level below.
         assert_eq!(args("claude", &c(None, Some("haiku"), Some("high")), &claude), ["--model", "haiku"]);

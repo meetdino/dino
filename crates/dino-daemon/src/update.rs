@@ -90,9 +90,7 @@ pub(crate) fn idle(d: &Daemon) -> bool {
         }
         let st = crate::stats(d, s);
         let (agents, commands) = st.waiting();
-        !matches!(st.activity, Some(dino_proxy::Activity::Working | dino_proxy::Activity::NeedsPermission(_)))
-            && agents + commands == 0
-            && st.in_flight == 0
+        !matches!(st.activity, Some(dino_proxy::Activity::Working | dino_proxy::Activity::NeedsPermission(_))) && agents + commands == 0 && st.in_flight == 0
     })
 }
 
@@ -170,11 +168,7 @@ fn check(feed: &str, key: &[u8], exe: &Path) -> anyhow::Result<Option<String>> {
         return Ok(None);
     }
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
-    let cli = clis
-        .iter()
-        .find(|c| c.arch == arch)
-        .or_else(|| clis.iter().find(|c| c.arch == "universal"))
-        .ok_or_else(|| anyhow::anyhow!("dino {version} has no build for {arch}"))?;
+    let cli = clis.iter().find(|c| c.arch == arch).or_else(|| clis.iter().find(|c| c.arch == "universal")).ok_or_else(|| anyhow::anyhow!("dino {version} has no build for {arch}"))?;
     let bytes = client.get(&cli.url).send()?.error_for_status()?.bytes()?;
     let sum = hex::encode(sha2::Sha256::digest(&bytes));
     anyhow::ensure!(sum.eq_ignore_ascii_case(&cli.sha256), "dino {version}'s download doesn't match its SHA-256");
