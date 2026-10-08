@@ -18,6 +18,9 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var output_tokens: UInt64
     /// Of `input_tokens`, what was read again from the prompt cache; nil from an older dinod.
     var cache_read_tokens: UInt64?
+    /// Of the tokens in and out, what its subagents used (Claude's Agent tool); nil from an older dinod.
+    var subagent_input_tokens: UInt64?
+    var subagent_output_tokens: UInt64?
     var last_model: String?
     var tier: String?
     var activity: String?

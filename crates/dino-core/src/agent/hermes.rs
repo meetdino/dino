@@ -433,6 +433,7 @@ fn usage_from(c: &Connection, seen: &mut crate::usage::Seen) -> Vec<crate::usage
             cache_read: if tokens { grew[1] } else { 0 },
             cache_write: if tokens { grew[2] } else { 0 },
             output: if tokens { grew[3] + grew[4] } else { 0 },
+            ..Default::default()
         };
         match answers.split_last() {
             Some((newest, rest)) => {

@@ -270,6 +270,9 @@ pub(crate) fn claude_usage_in(jsonl: &str) -> Vec<crate::usage::Used> {
         };
         let next = crate::usage::Used {
             undated: false,
+            answer: Some(id.clone()),
+            // A subagent's own file, or its lines in its parent's (older Claude Codes).
+            subagent: v["isSidechain"] == true,
             id,
             at_ms: ms_of(&v["timestamp"]).unwrap_or(0),
             conversation: v["sessionId"].as_str().unwrap_or_default().to_string(),
@@ -336,6 +339,7 @@ pub(crate) fn codex_usage_in(jsonl: &str, id: &str, model: &mut Option<String>, 
                     cache_read: cached,
                     cache_write: count(&last["cache_write_input_tokens"]),
                     output: count(&last["output_tokens"]),
+                    ..Default::default()
                 });
             }
             _ => {}
@@ -891,9 +895,13 @@ mod tests {
 {"type":"assistant","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:04:33.255Z","requestId":"req_1","message":{"id":"msg_1","model":"claude-x","usage":{"input_tokens":2,"cache_creation_input_tokens":640,"cache_read_input_tokens":0,"output_tokens":1}}}
 {"type":"assistant","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:04:34.424Z","requestId":"req_1","message":{"id":"msg_1","model":"claude-x","usage":{"input_tokens":2,"cache_creation_input_tokens":640,"cache_read_input_tokens":0,"output_tokens":182}}}
 {"type":"assistant","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:05:00.000Z","message":{"id":"x","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
-{"type":"assistant","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:06:00.000Z","requestId":"req_2","message":{"id":"msg_2","model":"claude-x","usage":{"input_tokens":5,"cache_read_input_tokens":640,"output_tokens":7}}}"#;
+{"type":"assistant","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:06:00.000Z","requestId":"req_2","message":{"id":"msg_2","model":"claude-x","usage":{"input_tokens":5,"cache_read_input_tokens":640,"output_tokens":7}}}
+{"type":"assistant","isSidechain":true,"agentId":"a1","sessionId":"s1","cwd":"/r","timestamp":"2026-10-03T23:06:01.000Z","requestId":"req_3","message":{"id":"msg_3","model":"claude-x","usage":{"input_tokens":3,"output_tokens":2}}}"#;
         let used = claude_usage_in(jsonl);
-        assert_eq!(used.len(), 2, "one per answer, not per line; nothing for a synthetic one");
+        assert_eq!(used.len(), 3, "one per answer, not per line; nothing for a synthetic one");
+        // The id dino's proxy also knows the answer by, and whose it was.
+        assert_eq!((used[0].answer.as_deref(), used[0].subagent), (Some("msg_1:req_1"), false));
+        assert_eq!((used[2].answer.as_deref(), used[2].subagent, used[2].conversation.as_str()), (Some("msg_3:req_3"), true, "s1"), "a subagent's, in its parent's conversation");
         assert_eq!((used[0].id.as_str(), used[0].conversation.as_str(), used[0].cwd.as_deref()), ("msg_1:req_1", "s1", Some("/r")));
         assert_eq!((used[0].input, used[0].cache_write, used[0].output), (2, 640, 182));
         assert_eq!(used[0].at_ms, crate::usage::parse_time("2026-10-03T23:04:33.255Z").unwrap());

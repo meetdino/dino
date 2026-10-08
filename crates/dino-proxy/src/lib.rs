@@ -119,6 +119,8 @@ pub struct SessionStats {
     pub in_flight: u32,
     pub errors: u64,
     pub usage: Usage,
+    /// Of `usage`, what its subagents used (Claude's Agent tool: its calls say which subagent).
+    pub subagent_usage: Usage,
     pub last_model: Option<String>,
     /// Why the session's last turn failed, as shown. Without hooks: the last model call's failure,
     /// cleared by the next one that succeeds. With hooks the agent says whether its turn failed,
@@ -341,6 +343,32 @@ pub struct Call {
     pub fallback: Option<String>,
     /// What the route said it cost (OpenRouter's `usage.cost`).
     pub cost: Option<f64>,
+    /// The agent's own conversation the call is for, as the call says (Claude Code's
+    /// `x-claude-code-session-id`): one dino session can carry several (a background job or a
+    /// `claude -p` started in it, a conversation cleared and begun again).
+    pub conversation: Option<String>,
+    /// The subagent that made it (Claude Code's `x-claude-code-agent-id`).
+    pub subagent: Option<String>,
+    /// The answer's id as the agent's own record keeps it: Claude's message id, with the
+    /// provider's `request-id` after a colon when it sent one. Only for an agent whose record
+    /// keeps it (Claude Code), so the record's copy of the answer is known to be this one.
+    pub answer: Option<String>,
+    /// The provider's `request-id` for the call, until the answer's id is known.
+    pub(crate) request_id: Option<String>,
+}
+
+impl Call {
+    /// Who a call is from, as Claude Code says in its headers.
+    fn from_agent(headers: &HeaderMap) -> Self {
+        let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty()).map(String::from);
+        Call { conversation: get("x-claude-code-session-id"), subagent: get("x-claude-code-agent-id"), ..Default::default() }
+    }
+
+    /// The provider's id for the call, from its answer's headers (Anthropic's `request-id`).
+    fn answered(mut self, headers: &HeaderMap) -> Self {
+        self.request_id = headers.get("request-id").and_then(|v| v.to_str().ok()).map(String::from);
+        self
+    }
 }
 
 /// A refusal as the provider sent it: given to the agent again when its account is the one back
@@ -395,11 +423,12 @@ impl Stats {
 
     /// What session `id` used before this dinod started (from usage statistics), so its tokens and
     /// its budget carry on across a restart. Only into a session that hasn't been metered yet.
-    pub fn seed(&self, id: &str, routes: &[(String, Usage)]) {
+    pub fn seed(&self, id: &str, routes: &[(String, Usage)], subagents: &Usage) {
         self.update(id, |s| {
             if s.usage.total_input() + s.usage.output > 0 {
                 return;
             }
+            s.subagent_usage = subagents.clone();
             for (route, u) in routes {
                 let tag = (!route.is_empty()).then(|| RouteTag { path: route.clone(), name: fallback::seed_name(route) });
                 s.metered(tag.as_ref(), u);
@@ -990,6 +1019,8 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
     let url = if coding_plan.is_some() { format!("{upstream}{query}") } else { format!("{upstream}/{rest}{query}") };
     let (parts, body) = req.into_parts();
+    // Which conversation, and which subagent of it, the call is for, as the agent says.
+    let who = Call::from_agent(&parts.headers);
     let Ok(mut body) = axum::body::to_bytes(body, MAX_BODY).await else {
         return error(StatusCode::BAD_REQUEST, "unreadable body, or over 64 MiB".into());
     };
@@ -1127,7 +1158,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
     // A model call that got no answer to count, for statistics.
     let failed = |status: CallStatus, model: Option<String>| {
         if is_model_call {
-            st.stats.record_call(Call { at_ms, session: session.clone(), route: route.clone(), model, duration_ms: Some(ms(started.elapsed())), status, ..Default::default() });
+            st.stats.record_call(Call { at_ms, session: session.clone(), route: route.clone(), model, duration_ms: Some(ms(started.elapsed())), status, ..who.clone() });
         }
     };
     // Answered as the provider would when it's briefly unreachable, so the agent's own retries
@@ -1386,6 +1417,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
     for (name, value) in resp.headers().iter().filter(|(n, _)| !hop_by_hop(n) && !(collect && n.as_str() == "content-type")) {
         builder = builder.header(name, value);
     }
+    let answered = who.clone().answered(resp.headers());
     if collect && status.is_success() {
         // A stream cut off halfway is no answer: never hand the agent a partial one as complete.
         let whole = match read_capped(resp, MAX_BODY).await {
@@ -1398,7 +1430,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
             session,
             route: primary.map(|p| p.tag),
             _in_flight: guard,
-            call: is_model_call.then(|| Call { at_ms, route, model, ..Default::default() }),
+            call: is_model_call.then_some(Call { at_ms, route, model, ..answered }),
             started,
             first: None,
         };
@@ -1414,7 +1446,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
         session,
         route: primary.map(|p| p.tag),
         _in_flight: guard,
-        call: is_model_call.then(|| Call { at_ms, route, model, ..Default::default() }),
+        call: is_model_call.then_some(Call { at_ms, route, model, ..answered }),
         started,
         first: None,
     };
@@ -1552,7 +1584,7 @@ async fn steps(
             model: Some(step.model.clone()),
             status,
             fallback: Some(primary.tag.path.clone()),
-            ..Default::default()
+            ..Call::from_agent(headers)
         };
         let sent = st
             .upstream
@@ -1597,8 +1629,16 @@ async fn steps(
             builder = builder.header(name, value);
         }
         let route = Some(RouteTag { path: step.route.clone(), name: step.name.clone() });
-        let tap =
-            Tap { meter: Meter::default(), stats: st.stats.clone(), session: session.to_string(), route, _in_flight: in_flight, call: Some(call(CallStatus::Ok)), started: step_started, first: None };
+        let tap = Tap {
+            meter: Meter::default(),
+            stats: st.stats.clone(),
+            session: session.to_string(),
+            route,
+            _in_flight: in_flight,
+            call: Some(call(CallStatus::Ok).answered(resp.headers())),
+            started: step_started,
+            first: None,
+        };
         return Some(builder.body(tapped(resp, tap)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into())));
     }
     log(format_args!("{session} {} spent, and no fallback answered", primary.tag.name));
@@ -1687,8 +1727,17 @@ impl Drop for Tap {
         if let Some(e) = &self.meter.error {
             log(format_args!("{} model call answered 200 with an error: {e}", self.session));
         }
+        let subagent = self.call.as_ref().is_some_and(|c| c.subagent.is_some());
         if let Some(mut call) = self.call.take() {
             call.session = self.session.clone();
+            // Kept only for an agent that says which conversation a call is for (Claude Code):
+            // its record keeps the same id, so the two are known to be one answer.
+            if let Some(id) = self.meter.answer.take().filter(|_| call.conversation.is_some()) {
+                call.answer = Some(match call.request_id.take() {
+                    Some(r) => format!("{id}:{r}"),
+                    None => id,
+                });
+            }
             if let Some(m) = &self.meter.model {
                 call.model = Some(m.clone());
             }
@@ -1708,6 +1757,9 @@ impl Drop for Tap {
             }
             if let Some(u) = self.meter.seen.take() {
                 s.metered(self.route.as_ref(), &u);
+                if subagent {
+                    s.subagent_usage.add(&u);
+                }
                 // Probes (Claude checks its quota with a one-word call) say nothing about the conversation.
                 let probe = u.total_input() < 100;
                 if let Some(model) = self.meter.model.take().or_else(|| s.last_model.clone()).filter(|_| !probe) {
@@ -2034,6 +2086,8 @@ struct Meter {
     seen: Option<Usage>,
     /// The model that answered, as the response says.
     model: Option<String>,
+    /// The answer's id, as Anthropic's Messages API gives it (`msg_…`).
+    answer: Option<String>,
     /// The whole answer came through. Agents hang up once they have it, so the body running
     /// out can't tell a finished answer from an interrupted one; its last event can.
     complete: bool,
@@ -2137,6 +2191,14 @@ impl Meter {
             });
             self.complete = true;
         }
+        if self.answer.is_none() {
+            let id = match v["type"].as_str() {
+                Some("message_start") => &v["message"]["id"],
+                Some("message") => &v["id"],
+                _ => &Value::Null,
+            };
+            self.answer = id.as_str().map(String::from);
+        }
         if self.model.is_none() {
             self.model = [&v["message"]["model"], &v["response"]["model"], &v["model"]].iter().find_map(|m| m.as_str()).map(String::from);
         }
@@ -2182,12 +2244,13 @@ mod tests {
     fn a_session_is_seeded_once_from_its_history() {
         let stats = Stats::default();
         let u = |input, output| Usage { input, output, ..Default::default() };
-        stats.seed("1", &[("anthropic".into(), u(100, 10)), ("plan/zai".into(), u(5, 1))]);
+        stats.seed("1", &[("anthropic".into(), u(100, 10)), ("plan/zai".into(), u(5, 1))], &u(30, 3));
         let s = stats.session("1");
         assert_eq!((s.usage.total_input(), s.usage.output), (105, 11));
+        assert_eq!((s.subagent_usage.total_input(), s.subagent_usage.output), (30, 3), "its subagents' part");
         assert_eq!(s.by_route.iter().find(|r| r.route == "anthropic").map(|r| r.name.as_str()), Some("Anthropic"));
         // A second seed (the same session started again) doesn't count it twice.
-        stats.seed("1", &[("anthropic".into(), u(100, 10))]);
+        stats.seed("1", &[("anthropic".into(), u(100, 10))], &u(1, 1));
         assert_eq!(stats.session("1").usage.total_input(), 105);
         // A live call adds to it, and names the route as it knows it.
         stats.update("1", |s| s.metered(Some(&RouteTag { path: "anthropic".into(), name: "Claude".into() }), &u(1, 1)));
@@ -2382,6 +2445,52 @@ mod tests {
              event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
         );
         format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    /// Over real connections: each call says which conversation and which subagent it's for
+    /// (Claude Code's headers), and its answer's id as Claude's transcript keeps it (message id,
+    /// then the provider's request id), so the transcript's copy is known to be the same answer.
+    /// A subagent's tokens count toward the session and toward its subagents' part. A call that
+    /// doesn't say whose it is (another agent) keeps no answer id.
+    #[test]
+    fn a_call_says_whose_it_is_and_which_answer() {
+        use std::io::{Read, Write};
+        let (up, _from_up) = stand_in(|_| {
+            let body = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01A\",\"model\":\"claude-haiku-5-5\",\"usage\":{\"input_tokens\":3,\"cache_read_input_tokens\":100,\"output_tokens\":1}}}\n\n\
+                        event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n\
+                        event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nrequest-id: req_01B\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+        });
+        let proxy = Proxy::start(HashMap::new()).unwrap();
+        proxy.set_plans(HashMap::from([("a".to_string(), plan::Plan { name: "Plan A".into(), anthropic: Some(up.clone()), openai: None, key: "key-a".into() })]));
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let send = |headers: &str| {
+            let path = proxy.base_url("9", "plan/a").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+            let body = json!({"model": "claude-haiku-5-5", "max_tokens": 10, "stream": true, "messages": [{"role": "user", "content": "hi"}]}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\n{headers}anthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        };
+        send("x-claude-code-session-id: conv-1\r\n");
+        send("x-claude-code-session-id: conv-1\r\nx-claude-code-agent-id: a1b2\r\n");
+        send("");
+        // The tap records a call as its body is dropped, just after the agent has it all.
+        let since = Instant::now();
+        let mut calls = vec![];
+        while calls.len() < 3 && since.elapsed() < std::time::Duration::from_secs(5) {
+            calls.extend(proxy.stats.take_calls());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let got: Vec<_> = calls.iter().map(|c| (c.conversation.as_deref(), c.subagent.as_deref(), c.answer.as_deref())).collect();
+        assert!(got.contains(&(Some("conv-1"), None, Some("msg_01A:req_01B"))), "{got:?}");
+        assert!(got.contains(&(Some("conv-1"), Some("a1b2"), Some("msg_01A:req_01B"))), "{got:?}");
+        assert!(got.contains(&(None, None, None)), "{got:?}");
+        assert!(calls.iter().all(|c| (c.usage.input, c.usage.cache_read, c.usage.output) == (3, 100, 7)));
+        let s = proxy.stats.session("9");
+        assert_eq!((s.usage.total_input(), s.usage.output), (309, 21));
+        assert_eq!((s.subagent_usage.total_input(), s.subagent_usage.output), (103, 7), "one subagent call");
     }
 
     /// A session that was on a fallback goes back to its own route at a turn's start. When that

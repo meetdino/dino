@@ -17,6 +17,8 @@ const SLACK_MS: i64 = 60 * 1000;
 const TOP_MODELS: usize = 5;
 /// Days in the activity heatmap.
 const HEATMAP_DAYS: i64 = 371;
+/// Sessions listed one by one, most tokens first.
+const TOP_SESSIONS: usize = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -76,9 +78,48 @@ impl Tokens {
     }
 }
 
+/// Some of the tokens, and the calls that used them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Part {
+    pub tokens: Tokens,
+    pub requests: u64,
+}
+
+/// What in a conversation used its tokens. The three add up to the whole.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Parts {
+    /// The conversation itself, and whatever can't be told apart from it (agents that don't say).
+    pub main: Part,
+    /// Its subagents (Claude's Agent tool): as each call said, or the agent's record of them.
+    pub subagents: Part,
+    /// Calls the agent made that its own record doesn't keep: Claude Code's titles, compaction,
+    /// auto mode's checks of tool calls, prompt suggestions. Only dino's proxy sees them, so
+    /// they're counted only for sessions it carried.
+    pub side: Part,
+}
+
+impl Parts {
+    fn add(&mut self, r: &Row) {
+        // A call the proxy carried with an answer id the agent's record never kept.
+        let side = r.proxied && r.has_answer && !r.matched;
+        let p = if r.subagent {
+            &mut self.subagents
+        } else if side {
+            &mut self.side
+        } else {
+            &mut self.main
+        };
+        p.tokens.add(r);
+        p.requests += 1;
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Totals {
     pub tokens: Tokens,
+    /// The same tokens, by what used them.
+    #[serde(default)]
+    pub parts: Parts,
     /// Model calls (answers, in agents' own records).
     pub requests: u64,
     pub errors: u64,
@@ -107,6 +148,21 @@ pub struct LongestSession {
     pub cwd: Option<String>,
     pub ms: i64,
     pub started_ms: i64,
+}
+
+/// One conversation (or a dino session whose conversation isn't known) in the range.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionUse {
+    pub agent: String,
+    pub conversation: Option<String>,
+    /// The dino session that carried it, when one did.
+    pub session: Option<String>,
+    pub cwd: Option<String>,
+    pub first_ms: i64,
+    pub last_ms: i64,
+    pub tokens: Tokens,
+    pub requests: u64,
+    pub parts: Parts,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -181,6 +237,8 @@ pub struct AgentUse {
     /// on no day or hour (heatmap, streaks, active days, by hour, tokens per day).
     #[serde(default)]
     pub undated: u64,
+    #[serde(default)]
+    pub parts: Parts,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -284,6 +342,9 @@ pub struct Report {
     pub routes: Vec<RouteUse>,
     pub speed: Vec<Speed>,
     pub sources: Sources,
+    /// The sessions with the most tokens, most first, each by what used them.
+    #[serde(default)]
+    pub sessions: Vec<SessionUse>,
 }
 
 pub const SCHEMA: u32 = 1;
@@ -484,10 +545,14 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
     struct Sess {
         agent: String,
         conversation: Option<String>,
+        session: Option<String>,
         cwd: Option<String>,
         first: i64,
         last: i64,
         busy: i64,
+        tokens: Tokens,
+        requests: u64,
+        parts: Parts,
     }
     let mut sessions: HashMap<String, Sess> = HashMap::new();
     let mut day_model: BTreeMap<(i64, String), u64> = BTreeMap::new();
@@ -499,10 +564,10 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
         _ => midnight(heat_from.min(first_day.unwrap_or(heat_from))).min(midnight(today - 29)),
     };
     store.each_row(since, |r| {
-        if !r.proxied
-            && let Some(c) = &r.conversation
-            && by_conv.get(c.as_str()).is_some_and(|v| v.iter().any(|(a, b)| r.ts >= a - SLACK_MS && r.ts <= b + SLACK_MS))
-        {
+        // An answer the proxy carried too: the same answer id, or (for calls that have none) in
+        // the time the proxy carried its conversation.
+        let in_span = || r.conversation.as_deref().is_some_and(|c| by_conv.get(c).is_some_and(|v| v.iter().any(|(a, b)| r.ts >= a - SLACK_MS && r.ts <= b + SLACK_MS)));
+        if !r.proxied && (r.matched || in_span()) {
             if first_day.is_none_or(|f| local_day(r.ts).0 >= f) {
                 sources.deduplicated += 1;
             }
@@ -544,6 +609,7 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
             sources.recorded += 1;
         }
         totals.tokens.add(&r);
+        totals.parts.add(&r);
         totals.requests += 1;
         match r.status {
             Status::Error => totals.errors += 1,
@@ -573,6 +639,7 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
         }
         let a = agents.entry(r.agent.clone()).or_insert_with(|| (AgentUse { agent: r.agent.clone(), ..Default::default() }, HashSet::new(), HashSet::new(), HashMap::new()));
         a.0.tokens.add(&r);
+        a.0.parts.add(&r);
         a.0.requests += 1;
         if r.proxied {
             a.0.proxied += 1
@@ -638,7 +705,24 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
                 }
             }
         }
-        let s = sessions.entry(key).or_insert_with(|| Sess { agent: r.agent.clone(), conversation: r.conversation.clone(), cwd: r.cwd.clone(), first: r.ts, last: r.ts, busy: 0 });
+        let s = sessions.entry(key).or_insert_with(|| Sess {
+            agent: r.agent.clone(),
+            conversation: r.conversation.clone(),
+            session: None,
+            cwd: r.cwd.clone(),
+            first: r.ts,
+            last: r.ts,
+            busy: 0,
+            tokens: Tokens::default(),
+            requests: 0,
+            parts: Parts::default(),
+        });
+        s.tokens.add(&r);
+        s.parts.add(&r);
+        s.requests += 1;
+        if s.session.is_none() {
+            s.session.clone_from(&r.session);
+        }
         // Time in a session is only measured between real times.
         if dated {
             let gap = r.ts - s.last;
@@ -692,6 +776,23 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
         ms: s.busy,
         started_ms: s.first,
     });
+    let mut top: Vec<Sess> = sessions.into_values().collect();
+    top.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total).then(a.first.cmp(&b.first)));
+    let sessions: Vec<SessionUse> = top
+        .into_iter()
+        .take(TOP_SESSIONS)
+        .map(|s| SessionUse {
+            agent: s.agent,
+            conversation: s.conversation,
+            session: s.session,
+            cwd: s.cwd,
+            first_ms: s.first,
+            last_ms: s.last,
+            tokens: s.tokens,
+            requests: s.requests,
+            parts: s.parts,
+        })
+        .collect();
 
     let total_tokens = totals.tokens.total.max(1) as f64;
     let mut models: Vec<Model> = models.into_values().collect();
@@ -783,6 +884,7 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
         routes,
         speed,
         sources,
+        sessions,
     })
 }
 
@@ -849,6 +951,10 @@ mod tests {
         // Agents' own records aren't the proxy's: never in the meter.
         st.add_used(&[("claude", used("u1", 5_500, "conv-a", 50_000))]).unwrap();
         assert_eq!(st.session_routes("7", None, 4_000, Some("conv-a")).unwrap().iter().map(|(_, t)| t[0]).sum::<u64>(), 1110);
+        // Its subagents' part, the same way.
+        assert_eq!(st.session_subagents("7", None, 4_000, Some("conv-a")).unwrap(), [0; 4]);
+        st.add_calls(&[Call { subagent: true, ..call(7_000, "7", Some("conv-a"), "m", 40) }, Call { subagent: true, ..call(7_000, "4", Some("conv-b"), "m", 9) }]).unwrap();
+        assert_eq!(st.session_subagents("7", None, 4_000, Some("conv-a")).unwrap(), [40, 0, 0, 10]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -894,6 +1000,112 @@ mod tests {
         assert_eq!(r.speed[0].ttft_p50_ms, Some(400));
         assert_eq!(r.speed[0].tps_p50, None, "too few tokens to say");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Claude Code's calls say their conversation, their subagent and their answer's id: an answer
+    /// in both the proxy's calls and the transcript is counted once, exactly, whichever dino
+    /// session carried it (a background job in another session's terminal is its own
+    /// conversation); one only the transcript has is counted even inside the time the proxy
+    /// carried that conversation; one only the proxy carried is a side request (a title,
+    /// compaction). Subagents' tokens are their own part, per session too.
+    #[test]
+    fn answers_are_matched_by_id_and_split_by_what_used_them() {
+        let (mut s, dir) = store();
+        let now = noon(1_791_115_200_000, 0) + 3_600_000;
+        let t = noon(now, 0);
+        let claude = |at: i64, conv: &str, answer: Option<&str>, subagent: bool, tokens: u64| Call { answer: answer.map(String::from), subagent, ..call(at, "7", Some(conv), "opus", tokens) };
+        s.add_calls(&[
+            claude(t, "c1", Some("m1:r1"), false, 100),
+            claude(t + 1_000, "c1", Some("m2:r2"), true, 200),
+            // A title: no transcript keeps it.
+            claude(t + 2_000, "c1", Some("m3:r3"), false, 7),
+            // A background job started in the same dino session: its own conversation.
+            claude(t + 3_000, "job", Some("m4:r4"), false, 1_000),
+            // A call that failed: no answer, no tokens.
+            Call { status: Status::Error, ..claude(t + 4_000, "c1", None, false, 0) },
+        ])
+        .unwrap();
+        s.link("7", "claude", "c1").unwrap();
+        let rec = |id: &str, at: i64, conv: &str, tokens: u64, subagent: bool| ("claude", Used { answer: Some(id.into()), subagent, ..used(id, at, conv, tokens) });
+        s.add_used(&[
+            rec("m1:r1", t + 500, "c1", 100, false),
+            rec("m2:r2", t + 1_500, "c1", 200, true),
+            rec("m4:r4", t + 3_500, "job", 1_000, false),
+            // Made while the proxy carried c1, but not through it (the agent went direct).
+            rec("m5:r5", t + 2_500, "c1", 50, false),
+        ])
+        .unwrap();
+        let r = report(&s, Range::Week, now).unwrap();
+        assert_eq!(r.sources, Sources { proxied: 5, recorded: 1, deduplicated: 3 });
+        assert_eq!(r.totals.tokens.input, 100 + 200 + 7 + 1_000 + 50, "every answer once");
+        let p = &r.totals.parts;
+        assert_eq!((p.main.tokens.input, p.main.requests), (100 + 1_000 + 50, 4));
+        assert_eq!((p.subagents.tokens.input, p.subagents.requests), (200, 1));
+        assert_eq!((p.side.tokens.input, p.side.requests), (7, 1));
+        assert_eq!(p.main.tokens.total + p.subagents.tokens.total + p.side.tokens.total, r.totals.tokens.total, "the parts add up");
+        assert_eq!(r.agents[0].parts, r.totals.parts);
+        assert_eq!(r.totals.sessions, 2, "the job is a conversation of its own");
+        let c1 = r.sessions.iter().find(|x| x.conversation.as_deref() == Some("c1")).unwrap();
+        assert_eq!((c1.tokens.input, c1.requests, c1.session.as_deref()), (357, 5, Some("7")));
+        assert_eq!((c1.parts.subagents.tokens.input, c1.parts.side.tokens.input), (200, 7));
+        assert_eq!(r.sessions[0].conversation.as_deref(), Some("job"), "most tokens first");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A stats.db from before answer ids: the columns are added, Claude's answers read before get
+    /// theirs from their key, and subagents' records are read again to say they were subagents'.
+    /// A call the proxy carried then gets the id of the answer with the same counts near it, and
+    /// that answer's conversation (here a `claude -p` run in the session's terminal): counted
+    /// once, as the subagent's its record says it was.
+    #[test]
+    fn an_older_stats_db_learns_answer_ids() {
+        let dir = std::env::temp_dir().join(format!("dino-usage-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("stats.db");
+        let t = noon(1_791_115_200_000, 0);
+        {
+            let db = rusqlite::Connection::open(&p).unwrap();
+            db.execute_batch(&format!(
+                "CREATE TABLE calls (id INTEGER PRIMARY KEY, source INTEGER NOT NULL, key TEXT UNIQUE, ts INTEGER NOT NULL, agent TEXT NOT NULL,
+                   session TEXT, conversation TEXT, cwd TEXT, route TEXT, model TEXT, input INTEGER NOT NULL DEFAULT 0, cache_read INTEGER NOT NULL DEFAULT 0,
+                   cache_write INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0, ttft_ms INTEGER, duration_ms INTEGER,
+                   status TEXT NOT NULL DEFAULT 'ok', fallback TEXT, cost REAL, undated INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO calls (source, key, ts, agent, conversation, input) VALUES (1, 'claude:msg_1:req_1', {t}, 'claude', 'c1', 5);
+                 INSERT INTO calls (source, key, ts, agent, conversation, input) VALUES (1, 'codex:r1:9', {t}, 'codex', 'r1', 5);
+                 INSERT INTO calls (source, ts, agent, session, conversation, input) VALUES (0, {t} - 1000, 'claude', '7', 'the-sessions', 5);
+                 INSERT INTO calls (source, ts, agent, session, conversation, input) VALUES (0, {t} + 1000, 'claude', '7', 'the-sessions', 6);
+                 INSERT INTO meta (key, value) VALUES ('seen', '{{\"files\":{{\"/p/c1.jsonl\":[1,2,2],\"/p/c1/subagents/agent-a.jsonl\":[1,2,2]}},\"marks\":{{}}}}');"
+            ))
+            .unwrap();
+        }
+        let mut s = Store::open_at(&p).unwrap();
+        let rows: Vec<(i64, String, Option<String>, Option<String>)> = s
+            .db()
+            .prepare("SELECT source, agent, answer, conversation FROM calls ORDER BY source, agent, ts")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let row = |source, agent: &str, answer: Option<&str>, conv: &str| (source, agent.to_string(), answer.map(String::from), Some(conv.to_string()));
+        assert_eq!(rows, [row(0, "claude", Some("msg_1:req_1"), "c1"), row(0, "claude", None, "the-sessions"), row(1, "claude", Some("msg_1:req_1"), "c1"), row(1, "codex", None, "r1")]);
+        let seen = s.seen();
+        assert!(seen.files.contains_key("/p/c1.jsonl") && !seen.files.contains_key("/p/c1/subagents/agent-a.jsonl"), "{seen:?}");
+        // Read again, the answer is a subagent's: marked, nothing added.
+        let again = Used { answer: Some("msg_1:req_1".into()), subagent: true, ..used("msg_1:req_1", t, "c1", 5) };
+        assert_eq!(s.add_used(&[("claude", again)]).unwrap(), 1);
+        let marked: (i64, i64) = s.db().query_row("SELECT COUNT(*), SUM(subagent) FROM calls WHERE agent = 'claude' AND source = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(marked, (1, 1));
+        let r = report(&s, Range::Week, t + 3_600_000).unwrap();
+        let claude = r.agents.iter().find(|a| a.agent == "claude").unwrap();
+        assert_eq!((claude.requests, claude.tokens.input), (2, 11), "the matched answer once, the other call too");
+        assert_eq!((claude.parts.subagents.requests, claude.parts.subagents.tokens.input), (1, 5));
+        drop(s);
+        // Opened again: nothing to do.
+        Store::open_at(&p).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
