@@ -63,10 +63,7 @@ impl AppState {
     }
 
     fn with_migrated_pool(cfg: Config, db: PgPool) -> anyhow::Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .user_agent(concat!("dino-cloud/", env!("CARGO_PKG_VERSION")))
-            .build()?;
+        let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).user_agent(concat!("dino-cloud/", env!("CARGO_PKG_VERSION"))).build()?;
         let mailer = Arc::new(identity::mailer::Mailer::new(&cfg.mail, http.clone()));
         let limits = Arc::new(limits::Limits::new(&cfg));
         Ok(AppState { cfg: Arc::new(cfg), db, http, limits, mailer, hub: Default::default() })

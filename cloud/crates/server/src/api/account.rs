@@ -30,7 +30,8 @@ pub async fn summary(s: &AppState, account: Uuid) -> Result<Value> {
         .fetch_optional(&s.db)
         .await?
         .ok_or(Error::Unauthorized)?;
-    let identities: Vec<(String, Option<String>, DateTime<Utc>)> = sqlx::query_as("SELECT provider, email, created_at FROM identities WHERE account_id = $1 ORDER BY created_at").bind(account).fetch_all(&s.db).await?;
+    let identities: Vec<(String, Option<String>, DateTime<Utc>)> =
+        sqlx::query_as("SELECT provider, email, created_at FROM identities WHERE account_id = $1 ORDER BY created_at").bind(account).fetch_all(&s.db).await?;
     Ok(json!({
         "account_id": account,
         "email": email,
@@ -82,12 +83,10 @@ pub async fn delete(s: &AppState, account: Uuid) -> Result<DateTime<Utc>> {
 /// Everything stored about the account, as JSON.
 pub async fn export(s: &AppState, account: Uuid) -> Result<Value> {
     let mut v = summary(s, account).await?;
-    let all: Vec<Device> = sqlx::query_as::<_, Device>(
-        "SELECT id, client_id, name, os, dino_version, created_at, last_seen_at, revoked_at FROM devices WHERE account_id = $1 ORDER BY created_at",
-    )
-    .bind(account)
-    .fetch_all(&s.db)
-    .await?;
+    let all: Vec<Device> = sqlx::query_as::<_, Device>("SELECT id, client_id, name, os, dino_version, created_at, last_seen_at, revoked_at FROM devices WHERE account_id = $1 ORDER BY created_at")
+        .bind(account)
+        .fetch_all(&s.db)
+        .await?;
     v["devices"] = json!(all);
     v["records"] = json!(crate::api::sync::export(s, account).await?);
     v["exported_at"] = json!(Utc::now());

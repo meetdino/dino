@@ -28,9 +28,19 @@ async fn native_pkce_login_and_the_code_rules() {
 
     // A wrong verifier, another client, another redirect: all refused, and the code is spent.
     let (code, verifier, redirect) = s.authorize(&b, "dino", "Second Mac").await;
-    let bad = app().post(s.url("/oauth/token")).form(&[("grant_type", "authorization_code"), ("client_id", "dino"), ("code", &code), ("redirect_uri", &redirect), ("code_verifier", &format!("{verifier}x"))]).send().await.unwrap();
+    let bad = app()
+        .post(s.url("/oauth/token"))
+        .form(&[("grant_type", "authorization_code"), ("client_id", "dino"), ("code", &code), ("redirect_uri", &redirect), ("code_verifier", &format!("{verifier}x"))])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(bad.status(), 400);
-    let again = app().post(s.url("/oauth/token")).form(&[("grant_type", "authorization_code"), ("client_id", "dino"), ("code", &code), ("redirect_uri", &redirect), ("code_verifier", &verifier)]).send().await.unwrap();
+    let again = app()
+        .post(s.url("/oauth/token"))
+        .form(&[("grant_type", "authorization_code"), ("client_id", "dino"), ("code", &code), ("redirect_uri", &redirect), ("code_verifier", &verifier)])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(again.status(), 400, "a code works once, even after a failed try");
 
     // A code used twice signs out the device it made.
@@ -46,7 +56,14 @@ async fn native_pkce_login_and_the_code_rules() {
 
     // Cancel sends access_denied back to the app.
     let mut u = url::Url::parse(&s.url("/oauth/authorize")).unwrap();
-    u.query_pairs_mut().extend_pairs([("response_type", "code"), ("client_id", "dino"), ("redirect_uri", "http://127.0.0.1:1/callback"), ("state", "s"), ("code_challenge", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"), ("code_challenge_method", "S256")]);
+    u.query_pairs_mut().extend_pairs([
+        ("response_type", "code"),
+        ("client_id", "dino"),
+        ("redirect_uri", "http://127.0.0.1:1/callback"),
+        ("state", "s"),
+        ("code_challenge", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
+        ("code_challenge_method", "S256"),
+    ]);
     b.get(u.as_str()).send().await.unwrap();
     let page = b.get(s.url("/oauth/authorize/confirm")).send().await.unwrap().text().await.unwrap();
     let r = b.post(s.url("/oauth/authorize/decide")).form(&[("csrf", csrf(&page).as_str()), ("decision", "deny")]).send().await.unwrap();
@@ -157,7 +174,12 @@ async fn device_flow_with_consent_and_fresh_sign_in() {
     assert_eq!(user_code.len(), 9);
     assert_eq!(d["verification_uri"], s.url("/device"));
     assert_eq!(d["interval"], 5);
-    let poll = || app().post(s.url("/oauth/token")).form(&[("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("client_id", "dino"), ("device_code", device_code.as_str())]).send();
+    let poll = || {
+        app()
+            .post(s.url("/oauth/token"))
+            .form(&[("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("client_id", "dino"), ("device_code", device_code.as_str())])
+            .send()
+    };
     let e: Value = poll().await.unwrap().json().await.unwrap();
     assert_eq!(e["error"], "authorization_pending");
     let e: Value = poll().await.unwrap().json().await.unwrap();
@@ -199,7 +221,15 @@ async fn device_flow_with_consent_and_fresh_sign_in() {
     assert!(nf.contains("Code not found"));
     let consent = b.post(s.url("/device")).form(&[("csrf", csrf(&page).as_str()), ("user_code", code2.as_str())]).send().await.unwrap().text().await.unwrap();
     b.post(s.url("/device/decide")).form(&[("csrf", csrf(&consent).as_str()), ("user_code", code2.as_str()), ("decision", "deny")]).send().await.unwrap();
-    let e: Value = app().post(s.url("/oauth/token")).form(&[("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("client_id", "dino"), ("device_code", d["device_code"].as_str().unwrap())]).send().await.unwrap().json().await.unwrap();
+    let e: Value = app()
+        .post(s.url("/oauth/token"))
+        .form(&[("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("client_id", "dino"), ("device_code", d["device_code"].as_str().unwrap())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(e["error"], "access_denied");
 }
 
@@ -332,7 +362,12 @@ async fn rate_limits_trip() {
     let s = start().await;
     let mut limited = 0;
     for _ in 0..40 {
-        let r = app().post(s.url("/oauth/token")).form(&[("grant_type", "authorization_code"), ("client_id", "dino"), ("code", "nope"), ("redirect_uri", "http://127.0.0.1:1/callback"), ("code_verifier", "x")]).send().await.unwrap();
+        let r = app()
+            .post(s.url("/oauth/token"))
+            .form(&[("grant_type", "authorization_code"), ("client_id", "dino"), ("code", "nope"), ("redirect_uri", "http://127.0.0.1:1/callback"), ("code_verifier", "x")])
+            .send()
+            .await
+            .unwrap();
         if r.status() == 429 {
             assert!(r.headers().get("retry-after").is_some());
             limited += 1;

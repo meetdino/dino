@@ -81,9 +81,7 @@ fn ticks_per_sec() -> u64 {
 /// start time counts from. Read once, so a process's start time stays the same between looks.
 fn boot_secs() -> u64 {
     static BOOT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *BOOT.get_or_init(|| {
-        std::fs::read_to_string("/proc/stat").ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok())).unwrap_or(0)
-    })
+    *BOOT.get_or_init(|| std::fs::read_to_string("/proc/stat").ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok())).unwrap_or(0))
 }
 
 fn started_us_of(stat: &Stat) -> u64 {

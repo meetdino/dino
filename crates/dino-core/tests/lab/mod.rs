@@ -80,7 +80,9 @@ impl Lab {
         // Each agent reads its records under this HOME, and nowhere its variables would send it.
         unsafe {
             std::env::set_var("HOME", &home);
-            for v in ["CODEX_HOME", "KIMI_CODE_HOME", "COPILOT_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "QWEN_HOME", "CODEWHALE_HOME", "OPENCODE_DB"] {
+            for v in
+                ["CODEX_HOME", "KIMI_CODE_HOME", "COPILOT_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "QWEN_HOME", "CODEWHALE_HOME", "OPENCODE_DB"]
+            {
                 std::env::remove_var(v);
             }
         }

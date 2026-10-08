@@ -16,7 +16,6 @@ use serde_json::{Value, json};
 use sha2::Digest;
 use sqlx::postgres::PgPoolOptions;
 
-
 static LOGS: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -42,11 +41,7 @@ fn init_logs() {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let w = LogWriter(buf.clone());
         // Debug, not info: whatever a verbose production setting would print is checked too.
-        let _ = tracing_subscriber::fmt()
-            .json()
-            .with_env_filter("debug,hyper=info,hyper_util=info,h2=info,rustls=info,reqwest=info,tower=info")
-            .with_writer(move || w.clone())
-            .try_init();
+        let _ = tracing_subscriber::fmt().json().with_env_filter("debug,hyper=info,hyper_util=info,h2=info,rustls=info,reqwest=info,tower=info").with_writer(move || w.clone()).try_init();
         buf
     });
 }
@@ -60,15 +55,16 @@ pub struct Server {
 
 async fn upstream_mock() -> SocketAddr {
     let app = axum::Router::new()
-        .route("/gh/token", post(|body: String| async move {
-            let ok = body.contains("code=GHCODE") && body.contains("code_verifier=");
-            Json(if ok { json!({"access_token": "gh-access", "token_type": "bearer"}) } else { json!({"error": "bad_verification_code"}) })
-        }))
+        .route(
+            "/gh/token",
+            post(|body: String| async move {
+                let ok = body.contains("code=GHCODE") && body.contains("code_verifier=");
+                Json(if ok { json!({"access_token": "gh-access", "token_type": "bearer"}) } else { json!({"error": "bad_verification_code"}) })
+            }),
+        )
         .route("/gh/user", get(|| async { Json(json!({"id": 4242, "login": "dino-tester"})) }))
         .route("/gh/emails", get(|| async { Json(json!([{"email": "gh-and-google@example.com", "primary": true, "verified": true}])) }))
-        .route("/g/token", post(|body: String| async move {
-            Json(if body.contains("code=GCODE") { json!({"access_token": "g-access"}) } else { json!({"error": "invalid_grant"}) })
-        }))
+        .route("/g/token", post(|body: String| async move { Json(if body.contains("code=GCODE") { json!({"access_token": "g-access"}) } else { json!({"error": "invalid_grant"}) }) }))
         .route("/g/userinfo", get(|| async { Json(json!({"sub": "g-123", "email": "gh-and-google@example.com", "email_verified": true})) }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();

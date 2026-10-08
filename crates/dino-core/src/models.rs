@@ -180,19 +180,10 @@ pub fn claude(catalog: &str, version: Option<&str>, allowed: Option<&[String]>) 
             let main = m.get("section").and_then(Value::as_str).is_none_or(|s| s == "main");
             let options = m.pointer("/thinking/effort_options").and_then(Value::as_array);
             let efforts: Vec<String> = options.map(|o| o.iter().filter_map(|e| e.get("id")?.as_str().map(String::from)).collect()).unwrap_or_default();
-            let default_effort = options
-                .and_then(|o| o.iter().find(|e| e.get("badge").is_some_and(|b| !b.is_null())))
-                .and_then(|e| e.get("id")?.as_str().map(String::from));
+            let default_effort = options.and_then(|o| o.iter().find(|e| e.get("badge").is_some_and(|b| !b.is_null()))).and_then(|e| e.get("id")?.as_str().map(String::from));
             // The alias ("haiku") names the main entry, not an older one in the overflow.
             let aliases = main.then(|| m.get("short_name").and_then(Value::as_str).map(str::to_lowercase)).flatten().into_iter().collect();
-            Some(ModelInfo {
-                label: m.get("name").and_then(Value::as_str).unwrap_or(&id).to_string(),
-                id,
-                efforts,
-                default_effort,
-                group: (!main).then(|| "More models".to_string()),
-                aliases,
-            })
+            Some(ModelInfo { label: m.get("name").and_then(Value::as_str).unwrap_or(&id).to_string(), id, efforts, default_effort, group: (!main).then(|| "More models".to_string()), aliases })
         })
         .filter(|m| allowed.is_none_or(|a| a.iter().any(|x| m.named(x))))
         .collect();

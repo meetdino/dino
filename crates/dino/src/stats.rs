@@ -209,7 +209,15 @@ fn overview(p: &mut Printer, r: &Report) {
     }
     let k = &t.tokens;
     let mut rows = vec![
-        ("Tokens", format!("{}  {}", tokens(k.total), out::paint(&format!("{} in, {} out, {} cache read, {} cache write", tokens(k.input), tokens(k.output), tokens(k.cache_read), tokens(k.cache_write)), Paint::Dim)), k.total.to_string()),
+        (
+            "Tokens",
+            format!(
+                "{}  {}",
+                tokens(k.total),
+                out::paint(&format!("{} in, {} out, {} cache read, {} cache write", tokens(k.input), tokens(k.output), tokens(k.cache_read), tokens(k.cache_write)), Paint::Dim)
+            ),
+            k.total.to_string(),
+        ),
         (
             "Requests",
             {
@@ -259,10 +267,7 @@ fn overview(p: &mut Printer, r: &Report) {
         return;
     }
     let period = |x: &dino_core::usage::report::Period| format!("{} tokens, {} requests", tokens(x.tokens), x.requests);
-    println!(
-        "{}",
-        out::paint(&format!("Today {}  ·  7 days {}  ·  30 days {}", period(&r.periods.today), period(&r.periods.week), period(&r.periods.month)), Paint::Dim)
-    );
+    println!("{}", out::paint(&format!("Today {}  ·  7 days {}  ·  30 days {}", period(&r.periods.today), period(&r.periods.week), period(&r.periods.month)), Paint::Dim));
     println!();
     print!("{}", heatmap(r));
 }
@@ -319,7 +324,16 @@ fn weekday(date: &str) -> usize {
 
 fn models(p: &mut Printer, r: &Report) {
     p.heading("Models");
-    let cols = [Column::end("MODEL", 12), Column::right("TOKENS"), Column::right("SHARE"), Column::right("IN"), Column::right("OUT"), Column::right("CACHED"), Column::right("REQUESTS"), Column::end("AGENTS", 8)];
+    let cols = [
+        Column::end("MODEL", 12),
+        Column::right("TOKENS"),
+        Column::right("SHARE"),
+        Column::right("IN"),
+        Column::right("OUT"),
+        Column::right("CACHED"),
+        Column::right("REQUESTS"),
+        Column::end("AGENTS", 8),
+    ];
     let rows = r
         .models
         .iter()
@@ -341,7 +355,17 @@ fn models(p: &mut Printer, r: &Report) {
 
 fn agents(p: &mut Printer, r: &Report) {
     p.heading("Agents");
-    let cols = [Column::keep("AGENT"), Column::right("TOKENS"), Column::right("REQUESTS"), Column::right("SESSIONS"), Column::right("DAYS"), Column::right("VIA DINO"), Column::right("FROM RECORDS"), Column::end("TOP MODEL", 8), Column::keep("LAST")];
+    let cols = [
+        Column::keep("AGENT"),
+        Column::right("TOKENS"),
+        Column::right("REQUESTS"),
+        Column::right("SESSIONS"),
+        Column::right("DAYS"),
+        Column::right("VIA DINO"),
+        Column::right("FROM RECORDS"),
+        Column::end("TOP MODEL", 8),
+        Column::keep("LAST"),
+    ];
     let rows = r
         .agents
         .iter()
@@ -456,27 +480,10 @@ mod tests {
         assert_eq!(weekday("2026-10-04"), 6, "a Sunday");
         assert_eq!(weekday("2024-02-29"), 3);
         assert_eq!(
-            (
-                tokens(999),
-                tokens(1_000),
-                tokens(999_949),
-                tokens(999_999),
-                tokens(999_999_999),
-                tokens(5_000_000_000),
-            ),
-            (
-                "999".into(),
-                "1.0k".into(),
-                "999.9k".into(),
-                "1.0M".into(),
-                "1.00B".into(),
-                "5.00B".into(),
-            )
+            (tokens(999), tokens(1_000), tokens(999_949), tokens(999_999), tokens(999_999_999), tokens(5_000_000_000),),
+            ("999".into(), "1.0k".into(), "999.9k".into(), "1.0M".into(), "1.00B".into(), "5.00B".into(),)
         );
-        assert_eq!(
-            (tokens(1_500), tokens(2_500_000), tokens(3_210_000_000)),
-            ("1.5k".into(), "2.5M".into(), "3.21B".into())
-        );
+        assert_eq!((tokens(1_500), tokens(2_500_000), tokens(3_210_000_000)), ("1.5k".into(), "2.5M".into(), "3.21B".into()));
         assert_eq!((duration(42_000), duration(14 * 60_000), duration(134 * 60_000)), ("42s".into(), "14m".into(), "2h 14m".into()));
     }
 }

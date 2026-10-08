@@ -252,8 +252,21 @@ impl Agent for Cursor {
 
     fn value_flags(&self) -> &'static [&'static str] {
         &[
-            "--api-key", "-H", "--header", "-e", "--endpoint", "--output-format", "--mode", "--resume", "--new-session-id", "--model", "--sandbox",
-            "--workspace", "--add-dir", "--plugin-dir", "--worktree-base",
+            "--api-key",
+            "-H",
+            "--header",
+            "-e",
+            "--endpoint",
+            "--output-format",
+            "--mode",
+            "--resume",
+            "--new-session-id",
+            "--model",
+            "--sandbox",
+            "--workspace",
+            "--add-dir",
+            "--plugin-dir",
+            "--worktree-base",
         ]
     }
 
@@ -348,7 +361,11 @@ impl Agent for Cursor {
     }
 
     fn portable_flags(&self, args: &[String]) -> Vec<String> {
-        found::drop_flags(args, &["--resume", "--new-session-id", "--output-format", "--api-key", "-w", "--worktree", "--worktree-base"], &["--continue", "-p", "--print", "--stream-partial-output", "--list-models"])
+        found::drop_flags(
+            args,
+            &["--resume", "--new-session-id", "--output-format", "--api-key", "-w", "--worktree", "--worktree-base"],
+            &["--continue", "-p", "--print", "--stream-partial-output", "--list-models"],
+        )
     }
 
     fn headless(&self, args: &[String]) -> bool {
@@ -500,7 +517,8 @@ mod tests {
 
     #[test]
     fn models_as_it_lists_them() {
-        let out = "Available models\n\nauto - Auto\nclaude-opus-4-8 - Claude Opus 4.8 (default)\ngpt-5.5 - GPT-5.5 (current)\n\nTip: use --model <id> (or /model <id> in interactive mode) to switch.\n";
+        let out =
+            "Available models\n\nauto - Auto\nclaude-opus-4-8 - Claude Opus 4.8 (default)\ngpt-5.5 - GPT-5.5 (current)\n\nTip: use --model <id> (or /model <id> in interactive mode) to switch.\n";
         let c = catalog_in(out).unwrap();
         let ids: Vec<(&str, &str)> = c.models.iter().map(|m| (m.id.as_str(), m.label.as_str())).collect();
         assert_eq!(ids, [("auto", "Auto"), ("claude-opus-4-8", "Claude Opus 4.8"), ("gpt-5.5", "GPT-5.5")]);

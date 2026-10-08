@@ -165,7 +165,9 @@ mod tests {
     #[test]
     fn codex_context_from_the_last_token_count() {
         let count = |total: u64, window: &str| {
-            format!(r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"total_tokens":99999}},"last_token_usage":{{"input_tokens":16188,"cached_input_tokens":3328,"output_tokens":39,"total_tokens":{total}}},"model_context_window":{window}}},"rate_limits":{{}}}}}}"#)
+            format!(
+                r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"total_tokens":99999}},"last_token_usage":{{"input_tokens":16188,"cached_input_tokens":3328,"output_tokens":39,"total_tokens":{total}}},"model_context_window":{window}}},"rate_limits":{{}}}}}}"#
+            )
         };
         let jsonl = [
             r#"{"type":"session_meta","payload":{"id":"x"}}"#.to_string(),

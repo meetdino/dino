@@ -145,9 +145,7 @@ fn quoted(name: &str) -> String {
 /// Format a local time relative to another broken-down local time.
 fn when_local(tm: &libc::tm, today: &libc::tm) -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
     let day_number = |time: &libc::tm| {
         let year = i64::from(time.tm_year) + 1900;
@@ -164,11 +162,7 @@ fn when_local(tm: &libc::tm, today: &libc::tm) -> String {
         -6..=6 => format!("{} {clock}", DAYS[tm.tm_wday.clamp(0, 6) as usize]),
         _ => {
             let month = MONTHS[tm.tm_mon.clamp(0, 11) as usize];
-            if tm.tm_year == today.tm_year {
-                format!("{month} {} {clock}", tm.tm_mday)
-            } else {
-                format!("{month} {} {} {clock}", tm.tm_mday, tm.tm_year + 1900)
-            }
+            if tm.tm_year == today.tm_year { format!("{month} {} {clock}", tm.tm_mday) } else { format!("{month} {} {} {clock}", tm.tm_mday, tm.tm_year + 1900) }
         }
     }
 }
@@ -286,12 +280,15 @@ fn cmd_show(key: &str) -> anyhow::Result<()> {
     if t.output.pr_comment {
         rows.push(("after", "comments on the PR".into()));
     }
-    rows.push(("status", match (&t.problem, t.enabled, t.next_run) {
-        (Some(p), ..) => format!("can't look: {p}"),
-        (None, false, _) => "paused".into(),
-        (None, true, Some(n)) => format!("runs next {}", when(n)),
-        (None, true, None) => "waiting for its trigger".into(),
-    }));
+    rows.push((
+        "status",
+        match (&t.problem, t.enabled, t.next_run) {
+            (Some(p), ..) => format!("can't look: {p}"),
+            (None, false, _) => "paused".into(),
+            (None, true, Some(n)) => format!("runs next {}", when(n)),
+            (None, true, None) => "waiting for its trigger".into(),
+        },
+    ));
     if !t.state.queue.is_empty() {
         rows.push(("waiting", t.state.queue.iter().map(|e| e.title.clone()).collect::<Vec<_>>().join("; ")));
     }
@@ -351,7 +348,10 @@ fn cmd_show(key: &str) -> anyhow::Result<()> {
 }
 
 fn cmd_add(args: &[String]) -> anyhow::Result<()> {
-    let name = args.first().filter(|a| !a.starts_with('-')).ok_or_else(|| anyhow::anyhow!("usage: dino automations add <name> [options] [--] <prompt>\n`dino automations --help` lists the options."))?;
+    let name = args
+        .first()
+        .filter(|a| !a.starts_with('-'))
+        .ok_or_else(|| anyhow::anyhow!("usage: dino automations add <name> [options] [--] <prompt>\n`dino automations --help` lists the options."))?;
     let cwd = std::env::current_dir()?.display().to_string();
     let mut t = ScheduledTask { name: name.clone(), cwd, enabled: true, frequency: Frequency::Manual, ..Default::default() };
     t.worktree = dino_core::worktree::repo_root(std::path::Path::new(&t.cwd)).is_ok();
@@ -636,25 +636,10 @@ mod tests {
     #[test]
     fn when_uses_weekdays_for_six_days_and_dates_beyond() {
         let today = broken_down(2026, 9, 28, 270, 1);
-        assert_eq!(
-            when_local(&broken_down(2026, 9, 22, 264, 2), &today),
-            "Tue 09:00"
-        );
-        assert_eq!(
-            when_local(&broken_down(2026, 10, 4, 276, 0), &today),
-            "Sun 09:00"
-        );
-        assert_eq!(
-            when_local(&broken_down(2026, 9, 21, 263, 1), &today),
-            "Sep 21 09:00"
-        );
-        assert_eq!(
-            when_local(&broken_down(2026, 10, 5, 277, 1), &today),
-            "Oct 5 09:00"
-        );
-        assert_eq!(
-            when_local(&broken_down(2025, 9, 28, 270, 0), &today),
-            "Sep 28 2025 09:00"
-        );
+        assert_eq!(when_local(&broken_down(2026, 9, 22, 264, 2), &today), "Tue 09:00");
+        assert_eq!(when_local(&broken_down(2026, 10, 4, 276, 0), &today), "Sun 09:00");
+        assert_eq!(when_local(&broken_down(2026, 9, 21, 263, 1), &today), "Sep 21 09:00");
+        assert_eq!(when_local(&broken_down(2026, 10, 5, 277, 1), &today), "Oct 5 09:00");
+        assert_eq!(when_local(&broken_down(2025, 9, 28, 270, 0), &today), "Sep 28 2025 09:00");
     }
 }

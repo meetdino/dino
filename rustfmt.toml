@@ -1,0 +1,5 @@
+# The house style: long one-line expressions. These settings are the ones that reformatted the tree
+# with the least churn when rustfmt was adopted; stable options only, since CI runs stable.
+max_width = 200
+use_small_heuristics = "Max"
+chain_width = 170

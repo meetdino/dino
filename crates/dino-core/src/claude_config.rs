@@ -19,10 +19,7 @@ pub const ENV: &str = "CLAUDE_CONFIG_DIR";
 /// Where Claude keeps its records when nothing says otherwise: dinod's own `CLAUDE_CONFIG_DIR`,
 /// else `~/.claude`.
 pub fn home() -> PathBuf {
-    std::env::var_os(ENV)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".claude"))
+    std::env::var_os(ENV).filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".claude"))
 }
 
 /// The folders noted besides the default one, for as long as dinod runs.

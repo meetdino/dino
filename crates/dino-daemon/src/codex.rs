@@ -166,7 +166,9 @@ fn track(d: &Daemon, s: &Session, claimed: &[String]) -> Option<(Option<String>,
     // dialog gone from its screen says it (see `question_answered`).
     if r.needs.is_none() {
         r.approval = false;
-    } else if r.approval && let Some(what) = r.needs.clone() {
+    } else if r.approval
+        && let Some(what) = r.needs.clone()
+    {
         let quiet = s.last_write.lock().unwrap().is_none_or(|t| t.elapsed() > super::TURN_OVER_QUIET);
         if super::question_answered(s, "codex", &what, r.notices, quiet) != super::Answer::Waiting {
             r.needs = None;
@@ -348,7 +350,9 @@ mod tests {
         assert_eq!(old.len(), 2);
         assert_eq!(reach_of(&old[0].0, false), Some(Reach::Computer));
         // Its browser, through the Node REPL (as the Codex app wrote it); other REPL work isn't.
-        let browse = run(&[r#"{"type":"response_item","payload":{"type":"function_call","name":"js","namespace":"mcp__node_repl__","arguments":"{\"title\":\"Check browser tabs\",\"code\":\"const openTabs = await agent.browser.user.openTabs();\"}","call_id":"b1"}}"#]);
+        let browse = run(&[
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"js","namespace":"mcp__node_repl__","arguments":"{\"title\":\"Check browser tabs\",\"code\":\"const openTabs = await agent.browser.user.openTabs();\"}","call_id":"b1"}}"#,
+        ]);
         assert_eq!(reach_of(&browse[0].0, false), Some(Reach::Browser));
         assert!(run(&[r#"{"type":"response_item","payload":{"type":"function_call","name":"js","namespace":"mcp__node_repl__","arguments":"{\"code\":\"1+1\"}","call_id":"b2"}}"#]).is_empty());
     }

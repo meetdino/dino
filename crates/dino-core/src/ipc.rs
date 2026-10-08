@@ -73,7 +73,9 @@ pub enum Request {
     State,
     /// `State`, once it differs from the one tagged `seen` in anything a client shows (or after a
     /// few seconds regardless): a client waits on this instead of asking over and over.
-    StateChange { seen: Option<u64> },
+    StateChange {
+        seen: Option<u64>,
+    },
     /// What can be started now: allowed by the policies, the default first.
     Launchers,
     /// Every launcher, allowed or not (for choosing policies).
@@ -81,7 +83,10 @@ pub enum Request {
     /// Every agent dino knows, whether it's on this Mac and signed in, and how to get it.
     AgentSetup,
     /// Run agent `id`'s own `install` or `sign_in` command in a new shell session.
-    AgentAction { id: String, action: String },
+    AgentAction {
+        id: String,
+        action: String,
+    },
     /// Settings → Experimental's computer use for more agents: where it stands.
     ComputerUse,
     /// Install the pinned open-computer-use, checked, in dino's own folder.
@@ -89,7 +94,10 @@ pub enum Request {
     /// Run its `doctor`: what macOS has granted it, and its setup window when something's missing.
     ComputerUsePermissions,
     /// Add it to agent `agent` (with the agent's own MCP command), or remove what dino added.
-    ComputerUseAgent { agent: String, on: bool },
+    ComputerUseAgent {
+        agent: String,
+        on: bool,
+    },
     /// The build cache shared by every session's builds (Settings → Workspaces → Worktrees): where
     /// it stands, and its hits and misses.
     BuildCache,
@@ -133,21 +141,37 @@ pub enum Request {
         #[serde(default)]
         stay: bool,
     },
-    Kill { id: String },
+    Kill {
+        id: String,
+    },
     /// Close session `id` for everyone as `Kill` does, but keep its program and screen, unseen,
     /// for `undo_ms`: `Reopen` brings it back as it was until then. 0 is `Kill`.
-    Close { id: String, undo_ms: u64 },
+    Close {
+        id: String,
+        undo_ms: u64,
+    },
     /// Bring back session `id`, closed with `Close` and still within its time to undo.
-    Reopen { id: String },
+    Reopen {
+        id: String,
+    },
     /// "Keep as terminal" for shell `id`: agents typed into it stay plain processes (`on`), or
     /// report to dino again.
-    KeepTerminal { id: String, on: bool },
+    KeepTerminal {
+        id: String,
+        on: bool,
+    },
     /// Change a session's mode, model or effort. The agent restarts, resuming its conversation;
     /// mid-turn, that waits until the turn is over. Each field replaces the session's, so `None`
     /// goes back to the agent's own default.
-    SetControls { id: String, controls: Controls },
+    SetControls {
+        id: String,
+        controls: Controls,
+    },
     /// Stop a background command session `id`'s agent left serving (see `SessionInfo::servers`).
-    StopServer { id: String, task: String },
+    StopServer {
+        id: String,
+        task: String,
+    },
     /// Stop builds left running by sessions that are gone (`Response::State`'s `leftovers`), by
     /// their pids as listed there; none named: all of them.
     StopLeftovers {
@@ -169,7 +193,9 @@ pub enum Request {
         scrollback: Option<u64>,
     },
     /// Start the agent of a session that ended again, in place, continuing its conversation.
-    Resume { id: String },
+    Resume {
+        id: String,
+    },
     /// Fork session `id`: a new session on a copy of its conversation, made by the agent's own
     /// fork (see `LauncherInfo::forks`), with its mode, model, flags and account. The original
     /// conversation stays as it is. With `worktree`, in a new git worktree off the session's
@@ -191,9 +217,15 @@ pub enum Request {
     /// `running_only` leaves out finished conversations on disk.
     /// Bring an agent running in a tmux pane (a found session's `tmux`) to the front in the client
     /// attached to its server. Nothing changes when no client is attached.
-    TmuxShow { socket: String, pane: String },
+    TmuxShow {
+        socket: String,
+        pane: String,
+    },
     /// What that pane shows, for a look without taking it over.
-    TmuxScreen { socket: String, pane: String },
+    TmuxScreen {
+        socket: String,
+        pane: String,
+    },
     Found {
         cloud: bool,
         #[serde(default)]
@@ -210,22 +242,36 @@ pub enum Request {
     },
     /// Hide a found session from "On this Mac" and the session browser, or (`hidden` false) show
     /// it again: a running one until its process ends, a finished conversation until shown again.
-    Hide { session: crate::found::FoundSession, hidden: bool },
+    Hide {
+        session: crate::found::FoundSession,
+        hidden: bool,
+    },
     /// Read a conversation, a found session's or a subagent's (see `history::conversation`).
-    Conversation { agent: String, session_id: String, before: Option<u64> },
+    Conversation {
+        agent: String,
+        session_id: String,
+        before: Option<u64>,
+    },
     /// Usage statistics over `range` (see `usage::report`): what the proxy carried, and agents'
     /// own records, read first for what's new.
-    Stats { range: crate::usage::Range },
+    Stats {
+        range: crate::usage::Range,
+    },
     /// Forget all usage statistics.
     StatsClear,
     /// Continue a found session in dino: running ones are handed off (waited on until idle,
     /// stopped, resumed here). `cwd` is where cloud sessions land.
-    Adopt { session: crate::found::FoundSession, cwd: Option<String> },
+    Adopt {
+        session: crate::found::FoundSession,
+        cwd: Option<String>,
+    },
     /// Stop waiting to continue a conversation in dino (`Adopt`, which waits for its turn to end):
     /// `id` is the conversation's id, or the process's for one that hasn't named it. The waiting
     /// request then fails with "cancelled", and the agent runs on where it is. An error when
     /// nothing waits for it (it may have just moved).
-    CancelTakeOver { id: String },
+    CancelTakeOver {
+        id: String,
+    },
     /// Repos (with their worktrees) and folders where sessions run, plus `folders` the app shows.
     /// `known`: the version of the tree the asker has; the same one is answered with `same`.
     Tree {
@@ -235,29 +281,49 @@ pub enum Request {
     },
     /// Any session's changes, per file, for review: one in a worktree dino made since that
     /// worktree began, any other since its checkout's last commit.
-    Changes { id: String },
+    Changes {
+        id: String,
+    },
     /// Type `text` into a session, as a paste; `submit` presses Return after it.
-    SendInput { id: String, text: String, submit: bool },
+    SendInput {
+        id: String,
+        text: String,
+        submit: bool,
+    },
     /// Write `text` to a session as typed keys, not a paste (the app's ⌘I to a shell's AI line):
     /// only while something reads keys in its terminal, a shell's line editor at its prompt among
     /// them. Refused in line mode (a command running), where the terminal would print them.
-    SendKeys { id: String, text: String },
+    SendKeys {
+        id: String,
+        text: String,
+    },
     /// Interrupt the agent's turn the way its own key does (Esc in most), leaving the session
     /// running: what Stop does while it uses the Mac.
-    Interrupt { id: String },
+    Interrupt {
+        id: String,
+    },
     /// What runs in the foreground of session `id`'s terminal right now, when it isn't the
     /// session's own program (a shell at its prompt): what closing it would stop.
-    Foreground { id: String },
+    Foreground {
+        id: String,
+    },
     /// What a shell's last command printed and its exit code, from its shell integration's
     /// marks: the context `dino ai` hands an agent.
-    ShellOutput { id: String },
+    ShellOutput {
+        id: String,
+    },
     /// What session `id`'s processes cost the Mac now: its program and everything under it.
     /// dinod measures only when asked, so a client asks while it shows the answer (a row's hover
     /// card, every couple of seconds) and stops when it's gone. Answers `SessionCost`.
-    SessionCost { id: String },
+    SessionCost {
+        id: String,
+    },
     /// Close a worktree dino made for a session: stop the sessions in it, remove it and its branch.
     /// `apply` first brings its changes into the checkout it came from, uncommitted.
-    RemoveWorktree { path: String, apply: bool },
+    RemoveWorktree {
+        path: String,
+        apply: bool,
+    },
     /// Remove a worktree and its branch if git sees it merged (a branch it doesn't stays). Refuses
     /// the main checkout and one in use (see `Worktree::in_use`); refuses one with
     /// uncommitted work unless `force`, which loses that work.
@@ -269,27 +335,44 @@ pub enum Request {
     /// The settings document.
     Settings,
     /// Replace the settings document.
-    SetSettings { settings: crate::settings::Settings },
+    SetSettings {
+        settings: crate::settings::Settings,
+    },
     /// Which provider keys exist and where from; never their values.
     Keys,
     /// Store a key in dino's key store, or remove it with no `value`. Takes effect at once.
-    SetKey { name: String, value: Option<String> },
+    SetKey {
+        name: String,
+        value: Option<String>,
+    },
     /// Where models come from: OpenRouter and model servers on this Mac, as last looked at.
     Providers,
     /// The models `provider` serves, as last fetched; asks again in the background when stale.
-    Models { provider: String },
+    Models {
+        provider: String,
+    },
     /// Start connecting a hosted provider (OpenRouter) in the browser: the page to open. dinod
     /// stores the key it gets and never shows it.
-    ConnectProvider { provider: String },
+    ConnectProvider {
+        provider: String,
+    },
     /// Forget the key dino got for it.
-    DisconnectProvider { provider: String },
+    DisconnectProvider {
+        provider: String,
+    },
     /// Connect coding plan `plan` (`plan-zai`) with the key the user pasted, and for the generic
     /// entry (`plan-other`) its base URL. dinod checks the key with the plan when it can, keeps
     /// it in the key store (which never syncs) and never shows it again.
-    ConnectPlan { plan: String, key: String, base: Option<String> },
+    ConnectPlan {
+        plan: String,
+        key: String,
+        base: Option<String>,
+    },
     /// Keeping agents running with the lid closed: `status`, `setup` (installs the one-time
     /// permission, asking for an administrator's password) or `remove`. Replies `Power`.
-    Power { action: String },
+    Power {
+        action: String,
+    },
     /// The Claude subscription token: `status`, `create` (runs `claude setup-token` in a new
     /// shell and keeps the token it prints), `set` (`value`: a token to keep) or `remove`.
     /// Replies `ClaudeToken`.
@@ -323,32 +406,64 @@ pub enum Request {
         value: Option<String>,
     },
     /// What a PR from the session's branch would hold, to fill the Create PR form.
-    PrDraft { id: String },
+    PrDraft {
+        id: String,
+    },
     /// Commit what's uncommitted as `title`, push the session's branch, and open a PR into `base`.
-    PrCreate { id: String, title: String, body: String, base: String, draft: bool },
+    PrCreate {
+        id: String,
+        title: String,
+        body: String,
+        base: String,
+        draft: bool,
+    },
     /// Tell the session's agent which checks failed on its PR, with their logs, to fix and push.
-    PrFix { id: String },
+    PrFix {
+        id: String,
+    },
     /// Squash-merge the session's PR.
-    PrMerge { id: String },
+    PrMerge {
+        id: String,
+    },
     /// Have Claude review the session's changes (what `Changes` shows) for bugs. Takes minutes.
-    Review { id: String },
+    Review {
+        id: String,
+    },
     /// Stop the session's running review; its `Review` request answers with an error.
-    ReviewCancel { id: String },
+    ReviewCancel {
+        id: String,
+    },
     /// Turn the session's PR automation on or off; a missing flag stays as it is.
-    PrAuto { id: String, fix: Option<bool>, merge: Option<bool> },
+    PrAuto {
+        id: String,
+        fix: Option<bool>,
+        merge: Option<bool>,
+    },
     /// Name a session, over the title its agent sets; an empty name goes back to that title.
-    Rename { id: String, name: String },
+    Rename {
+        id: String,
+        name: String,
+    },
     /// Keep a session at the top of its group, and out of dino's own archiving (or stop).
-    Pin { id: String, pinned: bool },
+    Pin {
+        id: String,
+        pinned: bool,
+    },
     /// Stop a session but keep it to pick up later. Its worktree goes too when nothing in it
     /// would be lost (clean, and pushed or merged); `Unarchive` makes it again from the branch.
-    Archive { id: String },
+    Archive {
+        id: String,
+    },
     /// Archived sessions, newest first.
     Archived,
     /// Start an archived session again, resuming its agent's conversation where the agent can.
-    Unarchive { id: String },
+    Unarchive {
+        id: String,
+    },
     /// Forget an archived session for good.
-    DeleteArchived { id: String },
+    DeleteArchived {
+        id: String,
+    },
     /// Delete session `id`: stop its agent, forget it, and remove the worktree dino made for it
     /// (its branch too when merged or empty; one with unmerged commits stays). Never a shell's
     /// folder or a checkout of the user's. The agent's own conversation file stays. `dry_run`
@@ -362,12 +477,16 @@ pub enum Request {
     Storage,
     /// Remove a worktree dino made (and its branch when merged), never forcing: refuses one
     /// with uncommitted work and one a session runs in.
-    RemoveStored { path: String },
+    RemoveStored {
+        path: String,
+    },
     /// Remove every worktree dino made that nothing would be lost from: no session running in
     /// it, no uncommitted changes, and its commits merged or pushed.
     FreeUpSpace,
     /// The dev servers the session's folder configures (`.dino/launch.json`, `.claude/launch.json`).
-    PreviewConfigs { id: String },
+    PreviewConfigs {
+        id: String,
+    },
     /// Start the named dev server in the session's folder; it stops with the session. `approved`
     /// is the configuration the user saw and agreed to run: started only if the launch file still
     /// says exactly that.
@@ -377,26 +496,50 @@ pub enum Request {
         #[serde(default)]
         approved: Option<crate::preview::PreviewConfig>,
     },
-    PreviewStop { id: String, name: String },
+    PreviewStop {
+        id: String,
+        name: String,
+    },
     /// What the named dev server has printed (the tail).
-    PreviewLog { id: String, name: String },
+    PreviewLog {
+        id: String,
+        name: String,
+    },
     /// Automations (scheduled tasks, as they began), with their history and next run. The request
     /// names stay as they were: clients from before automations keep working.
     ScheduleList,
     /// Add an automation (no `id`) or replace one; pausing and resuming is a put with `enabled` changed.
-    SchedulePut { task: crate::schedule::ScheduledTask },
-    ScheduleDelete { id: String },
+    SchedulePut {
+        task: crate::schedule::ScheduledTask,
+    },
+    ScheduleDelete {
+        id: String,
+    },
     /// Run an automation now, whatever its trigger and conditions; answers with the session it
     /// started (empty when its action starts none, as a command doesn't).
-    ScheduleRun { id: String },
+    ScheduleRun {
+        id: String,
+    },
     /// Check for due tasks now, as if the time were `now` (seconds since the epoch) when given.
-    ScheduleTick { now: Option<u64> },
+    ScheduleTick {
+        now: Option<u64>,
+    },
     /// Start a session for another agent (`dino mcp`): `prompt` is its first message, `by` the
     /// session asking, when there is one. With `worktree`, in a new git worktree of the repo at `cwd`.
-    Start { launcher: String, cwd: Option<String>, prompt: Option<String>, #[serde(default)] worktree: bool, by: Option<String> },
+    Start {
+        launcher: String,
+        cwd: Option<String>,
+        prompt: Option<String>,
+        #[serde(default)]
+        worktree: bool,
+        by: Option<String>,
+    },
     /// What a session has been doing, as text: its conversation's last turns when dino can read
     /// them, and the screen now. `lines` bounds the screen part.
-    ReadSession { id: String, lines: Option<u32> },
+    ReadSession {
+        id: String,
+        lines: Option<u32>,
+    },
     /// A subagent and its conversation so far (answers `Subagent`): subagent `agent` of session
     /// `session`, or the one that made `worktree`.
     ReadSubagent {
@@ -409,11 +552,20 @@ pub enum Request {
     },
     /// Type `text` into session `id` and submit it, only while it's between turns: refused while
     /// it works or waits on a permission. `by` is the session sending it.
-    Message { id: String, text: String, by: Option<String> },
+    Message {
+        id: String,
+        text: String,
+        by: Option<String>,
+    },
     /// Answer a question about session `id` (side chat); Claude reads it without disturbing it.
     /// Takes up to minutes; `AskCancel` stops it.
-    Ask { id: String, question: String },
-    AskCancel { id: String },
+    Ask {
+        id: String,
+        question: String,
+    },
+    AskCancel {
+        id: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -440,13 +592,28 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<u64>,
     },
-    Launchers { launchers: Vec<LauncherInfo> },
-    AgentSetup { agents: Vec<AgentSetupInfo> },
-    ComputerUse { info: ComputerUseInfo },
-    BuildCache { info: BuildCacheInfo },
-    Created { id: String },
-    ShellOutput { output: Option<String>, exit: Option<i32> },
-    SessionCost { cost: SessionCost },
+    Launchers {
+        launchers: Vec<LauncherInfo>,
+    },
+    AgentSetup {
+        agents: Vec<AgentSetupInfo>,
+    },
+    ComputerUse {
+        info: ComputerUseInfo,
+    },
+    BuildCache {
+        info: BuildCacheInfo,
+    },
+    Created {
+        id: String,
+    },
+    ShellOutput {
+        output: Option<String>,
+        exit: Option<i32>,
+    },
+    SessionCost {
+        cost: SessionCost,
+    },
     /// `more`: older finished conversations were left out (past `limit`). `hidden`: how many the
     /// user hid (none of them are listed, unless asked for).
     Found {
@@ -458,9 +625,16 @@ pub enum Response {
     },
     /// Shown in the tmux client on `tty`; `session` is the dino tab that client runs in, if any.
     /// Neither when no client is attached.
-    TmuxShown { tty: Option<String>, session: Option<String> },
-    Conversation { page: crate::history::Page },
-    Stats { report: Box<crate::usage::Report> },
+    TmuxShown {
+        tty: Option<String>,
+        session: Option<String>,
+    },
+    Conversation {
+        page: crate::history::Page,
+    },
+    Stats {
+        report: Box<crate::usage::Report>,
+    },
     /// `same`: it's the version the asker has (`repos` is left empty, a thousand worktrees
     /// aren't sent and decoded again every few seconds for nothing).
     Tree {
@@ -472,7 +646,12 @@ pub enum Response {
     },
     /// `root` is the checkout the paths are in, `base` what they're compared with (for people).
     /// No repo: no files, and `note` says why.
-    Changes { root: String, base: String, files: Vec<FileDiff>, note: Option<String> },
+    Changes {
+        root: String,
+        base: String,
+        files: Vec<FileDiff>,
+        note: Option<String>,
+    },
     /// `settings` is what's in effect; `locked` the key paths an organization sets ("policies.allow_bypass").
     Settings {
         settings: crate::settings::Settings,
@@ -488,35 +667,84 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    Keys { keys: Vec<crate::settings::KeyInfo> },
-    Providers { providers: Vec<crate::providers::ProviderInfo> },
+    Keys {
+        keys: Vec<crate::settings::KeyInfo>,
+    },
+    Providers {
+        providers: Vec<crate::providers::ProviderInfo>,
+    },
     /// Open this page to go on.
-    Connect { url: String },
-    Sync { status: SyncStatus },
-    Power { power: PowerInfo },
-    ClaudeToken { token: ClaudeTokenInfo },
-    ClaudeAccounts { accounts: ClaudeAccountsInfo },
+    Connect {
+        url: String,
+    },
+    Sync {
+        status: SyncStatus,
+    },
+    Power {
+        power: PowerInfo,
+    },
+    ClaudeToken {
+        token: ClaudeTokenInfo,
+    },
+    ClaudeAccounts {
+        accounts: ClaudeAccountsInfo,
+    },
     /// `loading`: dinod is asking the provider now; ask again for what it says.
-    Models { provider: String, models: Vec<ModelRow>, loading: bool, error: Option<String> },
-    PrDraft { draft: PrDraft },
-    Pr { pr: PrInfo },
-    Review { findings: Vec<crate::review::Finding> },
-    Archived { sessions: Vec<ArchivedInfo> },
+    Models {
+        provider: String,
+        models: Vec<ModelRow>,
+        loading: bool,
+        error: Option<String>,
+    },
+    PrDraft {
+        draft: PrDraft,
+    },
+    Pr {
+        pr: PrInfo,
+    },
+    Review {
+        findings: Vec<crate::review::Finding>,
+    },
+    Archived {
+        sessions: Vec<ArchivedInfo>,
+    },
     /// What deleting a session does, or did.
-    Deletion { deletion: Deletion },
-    Storage { worktrees: Vec<StoredWorktree> },
+    Deletion {
+        deletion: Deletion,
+    },
+    Storage {
+        worktrees: Vec<StoredWorktree>,
+    },
     /// The answer to `Foreground`: nothing when the session's own program has the terminal.
-    Foreground { foreground: Option<ForegroundProcess> },
+    Foreground {
+        foreground: Option<ForegroundProcess>,
+    },
     /// What Free up space removed, and how many bytes that gave back (as last measured).
-    Freed { removed: Vec<String>, bytes: u64 },
+    Freed {
+        removed: Vec<String>,
+        bytes: u64,
+    },
     /// A broken launch file lists nothing, and `error` says why.
-    PreviewConfigs { configs: Vec<crate::preview::PreviewConfig>, error: Option<String> },
-    PreviewLog { text: String },
-    Schedule { tasks: Vec<crate::schedule::ScheduledTask> },
-    Text { text: String },
-    Subagent { subagent: SubagentView },
+    PreviewConfigs {
+        configs: Vec<crate::preview::PreviewConfig>,
+        error: Option<String>,
+    },
+    PreviewLog {
+        text: String,
+    },
+    Schedule {
+        tasks: Vec<crate::schedule::ScheduledTask>,
+    },
+    Text {
+        text: String,
+    },
+    Subagent {
+        subagent: SubagentView,
+    },
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     /// `installed`: a newer `dino` this dinod put in place of its own binary; it restarts into it
     /// once no agent is working and no shell is running a command. `launchd`: the launch agent
     /// running this dinod (its label), if launchd started it. `build`: which build of `dino` it

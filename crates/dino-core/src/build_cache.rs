@@ -82,7 +82,9 @@ pub fn size_value(gb: u32) -> String {
 /// there, else rustc as is. With `cache` none (turned off), always rustc as is: sessions started
 /// while it was on keep `RUSTC_WRAPPER`, and turning it off reaches them at once.
 pub fn script(cache: Option<(&Path, &Path, u32)>) -> String {
-    let mut s = String::from("#!/bin/sh\n# dino's build cache (Settings → Workspaces → Worktrees, `dino build-cache`): rustc through\n# sccache, or rustc as is whenever the cache can't help. Written by dinod.\n");
+    let mut s = String::from(
+        "#!/bin/sh\n# dino's build cache (Settings → Workspaces → Worktrees, `dino build-cache`): rustc through\n# sccache, or rustc as is whenever the cache can't help. Written by dinod.\n",
+    );
     if let Some((dino, sccache, gb)) = cache {
         let q = |p: &Path| quote(&p.display().to_string());
         s.push_str(&format!(
@@ -200,9 +202,7 @@ fn configured_wrapper(dirs: &[PathBuf], cargo_home: &Path) -> Option<(String, Pa
         // Cargo reads `config` over `config.toml` when both are there.
         read(cargo_dir.join("config"), base).or_else(|| read(cargo_dir.join("config.toml"), base))
     };
-    dirs.iter()
-        .find_map(|dir| dir.ancestors().find_map(|d| at(&d.join(".cargo"), d)))
-        .or_else(|| at(cargo_home, cargo_home.parent().unwrap_or(cargo_home)))
+    dirs.iter().find_map(|dir| dir.ancestors().find_map(|d| at(&d.join(".cargo"), d))).or_else(|| at(cargo_home, cargo_home.parent().unwrap_or(cargo_home)))
 }
 
 /// A wrapper as Cargo finds it: a bare name on the `PATH` (left to exec), a path with a slash

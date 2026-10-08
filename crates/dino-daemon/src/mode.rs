@@ -57,9 +57,7 @@ fn on_screen(s: &Session) -> Option<String> {
 /// there, else what its hooks last said (`hooked`, in the agent's words). `None` when nothing has
 /// said: it's in whatever it was started with.
 pub(crate) fn now(s: &Session, hooked: Option<&str>) -> Option<String> {
-    on_screen(s)
-        .or_else(|| s.mode_seen.lock().unwrap().now.clone())
-        .or_else(|| hooked.and_then(|m| controls::reported_mode(&s.agent_now(), m)))
+    on_screen(s).or_else(|| s.mode_seen.lock().unwrap().now.clone()).or_else(|| hooked.and_then(|m| controls::reported_mode(&s.agent_now(), m)))
 }
 
 /// The model `s`'s agent says it's on (`said`: `SessionStats::agent_model`), once it has said
@@ -75,11 +73,7 @@ pub(crate) fn model_now(s: &Session, said: Option<&str>) -> Option<String> {
 pub(crate) fn current(d: &Daemon, s: &Session) -> Controls {
     let st = d.proxy.stats.session(&s.id);
     let launched = s.launched_controls();
-    Controls {
-        mode: now(s, st.agent_mode.as_deref()).or_else(|| launched.mode.clone()),
-        model: model_now(s, st.agent_model.as_deref()).or_else(|| launched.model.clone()),
-        ..launched
-    }
+    Controls { mode: now(s, st.agent_mode.as_deref()).or_else(|| launched.mode.clone()), model: model_now(s, st.agent_model.as_deref()).or_else(|| launched.model.clone()), ..launched }
 }
 
 /// Whether a switch of `s` to `want` is worth trying in place: its agent has a key for it, and

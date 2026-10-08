@@ -15,12 +15,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use dino_core::ipc::LauncherInfo;
-use dino_core::schedule::{
-    ActionKind, Event, Frequency, MAX_HISTORY, MAX_QUEUE, MAX_SEEN, Retry, ScheduledRun, ScheduledTask, TriggerKind, TriggerState, fill, fill_command, shorten,
-    split_args,
-};
 use dino_core::controls::Controls;
+use dino_core::ipc::LauncherInfo;
+use dino_core::schedule::{ActionKind, Event, Frequency, MAX_HISTORY, MAX_QUEUE, MAX_SEEN, Retry, ScheduledRun, ScheduledTask, TriggerKind, TriggerState, fill, fill_command, shorten, split_args};
 use dino_core::settings::{AgentSwitch, Settings};
 use dino_core::worktree;
 use dino_proxy::Activity;
@@ -223,11 +220,7 @@ pub(crate) fn put(d: &Daemon, mut t: ScheduledTask) -> anyhow::Result<ScheduledT
     check(d, &mut t)?;
     let now = now_secs();
     let mut tasks = d.schedule.tasks.lock().unwrap();
-    anyhow::ensure!(
-        !tasks.iter().any(|o| o.id != t.id && o.name.eq_ignore_ascii_case(&t.name)),
-        "there's already an automation called {}",
-        t.name
-    );
+    anyhow::ensure!(!tasks.iter().any(|o| o.id != t.id && o.name.eq_ignore_ascii_case(&t.name)), "there's already an automation called {}", t.name);
     if t.trigger.on == TriggerKind::After {
         let other = tasks.iter().find(|o| o.id == t.trigger.after || o.name.eq_ignore_ascii_case(t.trigger.after.trim()));
         if let Some(o) = other {
@@ -251,10 +244,7 @@ pub(crate) fn put(d: &Daemon, mut t: ScheduledTask) -> anyhow::Result<ScheduledT
             let s = sessions.iter().find(|s| s.id == t.trigger.after || s.name == t.trigger.after.trim());
             let s = s.ok_or_else(|| anyhow::anyhow!("no automation or session {}", t.trigger.after))?;
             t.trigger.after = s.id.clone();
-            anyhow::ensure!(
-                !(t.action.kind == ActionKind::Continue && (t.action.session == s.id || t.action.session == s.name)),
-                "continuing the session it comes after would run forever"
-            );
+            anyhow::ensure!(!(t.action.kind == ActionKind::Continue && (t.action.session == s.id || t.action.session == s.name)), "continuing the session it comes after would run forever");
         }
     }
     t.last_due = prev_due(t.frequency, now);
@@ -470,15 +460,7 @@ fn owed(d: &Daemon, now: u64) {
 /// Start a run of `t`, conditions permitting, and keep it in the history; none when it waits
 /// for the run before it.
 fn run(d: &Daemon, t: &ScheduledTask, why: Why) -> Option<ScheduledRun> {
-    let base = ScheduledRun {
-        id: new_uuid()[..8].to_string(),
-        at: now_secs(),
-        due: why.due,
-        catch_up: why.catch_up,
-        event: why.event.clone(),
-        attempt: why.attempt,
-        ..Default::default()
-    };
+    let base = ScheduledRun { id: new_uuid()[..8].to_string(), at: now_secs(), due: why.due, catch_up: why.catch_up, event: why.event.clone(), attempt: why.attempt, ..Default::default() };
     let mut launcher = t.launcher.clone();
     if !why.manual {
         match hold(d, t, &why) {
@@ -552,7 +534,9 @@ fn hold(d: &Daemon, t: &ScheduledTask, why: &Why) -> Result<Option<String>, Hold
     if c.lid_open && lid_closed() {
         return Err(Hold::Skip("the lid was closed".into()));
     }
-    if !c.parallel && let Some(prev) = still_going(d, t) {
+    if !c.parallel
+        && let Some(prev) = still_going(d, t)
+    {
         // An event is owed a run; a scheduled time just comes round again.
         return if why.event.is_some() && why.attempt == 0 { Err(Hold::Wait) } else { Err(Hold::Skip(format!("the previous run ({prev}) was still going"))) };
     }
@@ -563,7 +547,11 @@ fn hold(d: &Daemon, t: &ScheduledTask, why: &Why) -> Result<Option<String>, Hold
         }
     }
     let uses_agent = matches!(t.action.kind, ActionKind::Agent) || (t.action.kind == ActionKind::Command && t.action.then_agent == "always");
-    if uses_agent && t.route.is_none() && let Some(l) = d.launcher(&t.launcher) && let Some(limit) = at_limit(d, &l) {
+    if uses_agent
+        && t.route.is_none()
+        && let Some(l) = d.launcher(&t.launcher)
+        && let Some(limit) = at_limit(d, &l)
+    {
         return match c.on_limit.as_str() {
             "run" => Ok(None),
             "fallback" => match fallback(d, &l) {
@@ -811,7 +799,10 @@ fn run_command(command: &str, dir: &Path) -> (Option<i32>, String) {
         }
     };
     let out = String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned();
-    let tail: String = { let n = out.chars().count(); out.chars().skip(n.saturating_sub(OUTPUT_KEEP)).collect() };
+    let tail: String = {
+        let n = out.chars().count();
+        out.chars().skip(n.saturating_sub(OUTPUT_KEEP)).collect()
+    };
     (status, if status.is_none() && start.elapsed() > COMMAND_TIME { format!("{tail}\n(stopped after {} minutes)", COMMAND_TIME.as_secs() / 60) } else { tail })
 }
 
@@ -1132,7 +1123,9 @@ fn finish(d: &Daemon, t: &ScheduledTask, run_id: &str, ok: bool, reason: Option<
         run.reason = reason;
     }
     record(d, &t.id, run.clone());
-    if t.output.pr_comment && let Some(text) = full.clone() {
+    if t.output.pr_comment
+        && let Some(text) = full.clone()
+    {
         post_comment(d, t, &run, text);
     }
     if !ok {

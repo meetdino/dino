@@ -56,10 +56,14 @@ pub fn turnstile(state: &AppState) -> Markup {
 }
 
 pub fn message(state: &AppState, title: &str, text: &str) -> Markup {
-    layout(state, title, html! {
-        h1 { (title) }
-        p { (text) }
-    })
+    layout(
+        state,
+        title,
+        html! {
+            h1 { (title) }
+            p { (text) }
+        },
+    )
 }
 
 /// A user code with its separator, large and easy to compare.

@@ -53,19 +53,9 @@ fn sessions(c: &Connection) -> Vec<Row> {
                 coalesce((select max(timestamp) from messages m where m.session_id = s.id), s.started_at)
              from sessions s where s.source = 'cli' and coalesce(s.archived, 0) = 0 order by s.started_at";
     let Ok(mut stmt) = c.prepare(q) else { return vec![] };
-    stmt.query_map([], |r| {
-        Ok(Row {
-            id: r.get(0)?,
-            title: r.get(1)?,
-            cwd: r.get(2)?,
-            started: r.get(3)?,
-            base_url: r.get(4)?,
-            first_prompt: r.get(5)?,
-            updated: r.get(6)?,
-        })
-    })
-    .map(|rows| rows.flatten().collect())
-    .unwrap_or_default()
+    stmt.query_map([], |r| Ok(Row { id: r.get(0)?, title: r.get(1)?, cwd: r.get(2)?, started: r.get(3)?, base_url: r.get(4)?, first_prompt: r.get(5)?, updated: r.get(6)? }))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
 }
 
 impl Row {
@@ -83,11 +73,7 @@ impl Row {
 /// asks for tools.
 fn turn_in(c: &Connection, session: &str) -> Option<bool> {
     let last = c
-        .query_row(
-            "select role, finish_reason from messages where session_id = ?1 order by id desc limit 1",
-            params![session],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-        )
+        .query_row("select role, finish_reason from messages where session_id = ?1 order by id desc limit 1", params![session], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
         .ok();
     let ended: bool = c.query_row("select ended_at is not null from sessions where id = ?1", params![session], |r| r.get(0)).ok()?;
     Some(match last {
@@ -103,11 +89,7 @@ fn turn_in(c: &Connection, session: &str) -> Option<bool> {
 
 /// The tools its last message asks for, while their results aren't in yet: the calls out now.
 fn tools_in(c: &Connection, session: &str) -> Vec<String> {
-    let last = c.query_row(
-        "select role, tool_calls from messages where session_id = ?1 order by id desc limit 1",
-        params![session],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-    );
+    let last = c.query_row("select role, tool_calls from messages where session_id = ?1 order by id desc limit 1", params![session], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)));
     let Ok((role, Some(calls))) = last else { return vec![] };
     if role != "assistant" {
         return vec![];
@@ -128,8 +110,7 @@ fn free_env(pid: u32) -> bool {
     #[cfg(not(target_os = "macos"))]
     return crate::procinfo::args_and_env(pid).is_some_and(|(_, env)| env.iter().any(|w| w.starts_with("CUSTOM_BASE_URL=http://127.0.0.1:") && w.contains("/free")));
     #[cfg(target_os = "macos")]
-    found::run("ps", &["eww", "-o", "command=", "-p", &pid.to_string()])
-        .is_some_and(|e| e.split_whitespace().any(|w| w.starts_with("CUSTOM_BASE_URL=http://127.0.0.1:") && w.contains("/free")))
+    found::run("ps", &["eww", "-o", "command=", "-p", &pid.to_string()]).is_some_and(|e| e.split_whitespace().any(|w| w.starts_with("CUSTOM_BASE_URL=http://127.0.0.1:") && w.contains("/free")))
 }
 
 /// Hermes on an OpenAI-compatible endpoint at `url` (ending `/v1`): its bare `custom` provider,
@@ -270,10 +251,7 @@ impl Agent for Hermes {
     }
 
     fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
-        sessions(&store()?)
-            .into_iter()
-            .find(|r| r.started + 1.0 >= since as f64 && !claimed.contains(&r.id) && r.cwd.as_deref().is_some_and(|c| same_dir(c, cwd)))
-            .map(|r| r.id)
+        sessions(&store()?).into_iter().find(|r| r.started + 1.0 >= since as f64 && !claimed.contains(&r.id) && r.cwd.as_deref().is_some_and(|c| same_dir(c, cwd))).map(|r| r.id)
     }
 
     fn busy(&self, pid: u32) -> Option<bool> {
@@ -382,11 +360,8 @@ const PAGE: i64 = 200;
 /// A page of a session's turns, positions being its message ids.
 fn turns_page(c: &Connection, session: &str, before: Option<u64>) -> Option<Page> {
     let before = before.map_or(i64::MAX, |b| b as i64);
-    let mut stmt = c
-        .prepare("select id, role, content, tool_calls from messages where session_id = ?1 and id < ?2 order by id desc limit ?3")
-        .ok()?;
-    let mut rows: Vec<(i64, String, Option<String>, Option<String>)> =
-        stmt.query_map(params![session, before, PAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).ok()?.flatten().collect();
+    let mut stmt = c.prepare("select id, role, content, tool_calls from messages where session_id = ?1 and id < ?2 order by id desc limit ?3").ok()?;
+    let mut rows: Vec<(i64, String, Option<String>, Option<String>)> = stmt.query_map(params![session, before, PAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).ok()?.flatten().collect();
     rows.reverse();
     let first: Option<i64> = c.query_row("select min(id) from messages where session_id = ?1", params![session], |r| r.get(0)).ok()?;
     let start = match rows.first() {
@@ -447,7 +422,8 @@ fn usage_from(c: &Connection, seen: &mut crate::usage::Seen) -> Vec<crate::usage
         if answers.is_empty() && grew.iter().all(|g| *g == 0) {
             continue;
         }
-        let used = |id: String, at: f64, tokens: bool| crate::usage::Used { undated: false,
+        let used = |id: String, at: f64, tokens: bool| crate::usage::Used {
+            undated: false,
             id,
             at_ms: (at * 1000.0) as i64,
             conversation: key[7..].to_string(),
@@ -560,10 +536,13 @@ mod tests {
         assert_eq!(used.len(), 1);
         assert_eq!((used[0].conversation.as_str(), used[0].at_ms, used[0].input), ("20260930_001903_cdc088", 102_000, 0));
         assert!(usage_from(&c, &mut seen).is_empty(), "nothing new");
-        c.execute_batch("alter table sessions add column model text; alter table sessions add column input_tokens integer; alter table sessions add column output_tokens integer;
+        c.execute_batch(
+            "alter table sessions add column model text; alter table sessions add column input_tokens integer; alter table sessions add column output_tokens integer;
              update sessions set model = 'h-1', input_tokens = 500, output_tokens = 20 where id = '20260930_001903_cdc088';
              insert into messages (session_id, role, content, timestamp) values ('20260930_001903_cdc088', 'assistant', 'a', 103.0);
-             insert into messages (session_id, role, content, timestamp) values ('20260930_001903_cdc088', 'assistant', 'b', 104.0);").unwrap();
+             insert into messages (session_id, role, content, timestamp) values ('20260930_001903_cdc088', 'assistant', 'b', 104.0);",
+        )
+        .unwrap();
         let used = usage_from(&c, &mut seen);
         assert_eq!(used.len(), 2);
         assert_eq!((used[0].input, used[1].input, used[1].output, used[1].model.as_deref()), (0, 500, 20, Some("h-1")));

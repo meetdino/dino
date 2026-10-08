@@ -192,11 +192,7 @@ pub fn shown(program: &str, change: &Change, adding: Option<(&str, &Server)>) ->
 }
 
 fn quoted(a: &str) -> String {
-    if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@+,".contains(c)) {
-        a.to_string()
-    } else {
-        format!("'{}'", a.replace('\'', r"'\''"))
-    }
+    if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@+,".contains(c)) { a.to_string() } else { format!("'{}'", a.replace('\'', r"'\''")) }
 }
 
 /// Make the change with the agent's program `bin`: its own command, or an edit of its file.
@@ -209,12 +205,7 @@ pub fn apply(agent: &str, bin: &Path, name: &str, change: &Change, server: Optio
 
 /// Its own command, answering what it asks; what it said when it fails.
 fn run(bin: &Path, args: &[String], stdin: Option<&str>) -> anyhow::Result<()> {
-    let mut child = Command::new(bin)
-        .args(args)
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = Command::new(bin).args(args).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     if let (Some(text), Some(mut input)) = (stdin, child.stdin.take()) {
         let _ = input.write_all(text.as_bytes());
     }

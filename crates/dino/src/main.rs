@@ -159,11 +159,7 @@ fn command_help(cli: &[String]) -> Option<String> {
     } else {
         args.iter().take_while(|arg| arg.as_str() != "--").any(|arg| matches!(arg.as_str(), "-h" | "--help"))
     };
-    asks_for_help.then(|| {
-        detailed_help
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("Usage: {}\n\nRun `dino --help` to list all commands.", usage.unwrap()))
-    })
+    asks_for_help.then(|| detailed_help.map(str::to_string).unwrap_or_else(|| format!("Usage: {}\n\nRun `dino --help` to list all commands.", usage.unwrap())))
 }
 
 /// The build this is: the commit app/build.sh and scripts/release.sh built it from. Read here, in
@@ -277,7 +273,8 @@ fn dino() -> anyhow::Result<()> {
                 [on, provider, model, args @ ..] if on == "--on" => (Some(ProviderRoute { provider: provider.clone(), model: model.clone(), format: None, name: String::new() }), args.to_vec()),
                 args => (None, args.to_vec()),
             };
-            let req = Request::New { launcher: agent.clone(), args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route, reveal: false, tmux: None, stay };
+            let req =
+                Request::New { launcher: agent.clone(), args, cwd, cols, rows, worktree, controls: Default::default(), host: None, prompt: None, by: None, route, reveal: false, tmux: None, stay };
             let id = created(client::request(&req)?)?;
             // Piped, only the id, for `id=$(dino new claude)`.
             if out::tty() {
@@ -287,7 +284,13 @@ fn dino() -> anyhow::Result<()> {
                     && let Some(why) = &s.instead_of
                 {
                     let until = why.resets_at.map(|t| format!(", back in {}", duration(t.saturating_sub(out::now())))).unwrap_or_default();
-                    println!("{} is at its limit ({}{until}): started {} instead. `dino new --stay {}` starts it anyway.", agent_name(&why.agent_id), printable(&why.name), agent_name(&s.agent_id), printable(&agent));
+                    println!(
+                        "{} is at its limit ({}{until}): started {} instead. `dino new --stay {}` starts it anyway.",
+                        agent_name(&why.agent_id),
+                        printable(&why.name),
+                        agent_name(&s.agent_id),
+                        printable(&agent)
+                    );
                 }
                 println!("Started {} as session {id}. `dino attach {id}` opens it here.", printable(&agent));
             } else {
@@ -397,9 +400,7 @@ fn is_folder(arg: &str) -> bool {
     if arg == "." || arg == ".." || arg.starts_with('~') || arg.contains('/') {
         return true;
     }
-    !arg.starts_with('-')
-        && std::path::Path::new(arg).is_dir()
-        && !matches!(client::request(&Request::Launchers), Ok(Response::Launchers { launchers }) if launchers.iter().any(|l| l.short == arg))
+    !arg.starts_with('-') && std::path::Path::new(arg).is_dir() && !matches!(client::request(&Request::Launchers), Ok(Response::Launchers { launchers }) if launchers.iter().any(|l| l.short == arg))
 }
 
 /// `dino <folder> [agent [args...]]`: a session in that folder, shown in the terminal app. Inside
@@ -720,7 +721,9 @@ fn ls_table(sessions: &[SessionInfo], usage: bool) -> (Vec<Column>, Vec<Vec<Cell
 #[cfg(target_os = "macos")]
 fn cmd_power(action: &str) -> anyhow::Result<()> {
     if !matches!(action, "status" | "setup" | "remove") {
-        println!("usage: dino power [status|setup|remove]\n\n  status   show what's keeping your Mac awake now: dino, an agent, or another app\n  setup    let dino keep your Mac awake with the lid closed while agents work\n           (asks for an administrator password once; same as Settings → Power)\n  remove   take that permission back");
+        println!(
+            "usage: dino power [status|setup|remove]\n\n  status   show what's keeping your Mac awake now: dino, an agent, or another app\n  setup    let dino keep your Mac awake with the lid closed while agents work\n           (asks for an administrator password once; same as Settings → Power)\n  remove   take that permission back"
+        );
         return Ok(());
     }
     let p = match client::request(&Request::Power { action: action.into() })? {
@@ -805,9 +808,12 @@ fn cmd_build_cache(args: &[String]) -> anyhow::Result<()> {
         ["on"] => Some((Some(true), None)),
         ["off"] => Some((Some(false), None)),
         ["size", gb] => {
-            let gb: u32 = gb.trim_end_matches(['G', 'g']).parse().ok().filter(|g| BuildCache::SIZES_GB.contains(g)).ok_or_else(|| {
-                anyhow::anyhow!("the size must be from {} to {} GB, not {}", BuildCache::SIZES_GB.start(), BuildCache::SIZES_GB.end(), printable(gb))
-            })?;
+            let gb: u32 = gb
+                .trim_end_matches(['G', 'g'])
+                .parse()
+                .ok()
+                .filter(|g| BuildCache::SIZES_GB.contains(g))
+                .ok_or_else(|| anyhow::anyhow!("the size must be from {} to {} GB, not {}", BuildCache::SIZES_GB.start(), BuildCache::SIZES_GB.end(), printable(gb)))?;
             Some((None, Some(gb)))
         }
         ["install"] => {
@@ -884,10 +890,13 @@ fn build_cache_rows(i: &dino_core::ipc::BuildCacheInfo) -> Vec<(&'static str, St
         if s.not_cacheable > 0 {
             rows.push(("Not cacheable", format!("{} (programs, build scripts, incremental builds: always compiled)", s.not_cacheable)));
         }
-        rows.push(("Size", match i.size_bytes {
-            Some(b) => format!("{} of {}", gb(b), gb(i.max_bytes)),
-            None => format!("up to {}", gb(i.max_bytes)),
-        }));
+        rows.push((
+            "Size",
+            match i.size_bytes {
+                Some(b) => format!("{} of {}", gb(b), gb(i.max_bytes)),
+                None => format!("up to {}", gb(i.max_bytes)),
+            },
+        ));
         rows.push(("Folder", printable(&search::tilde(&i.dir))));
     }
     rows
@@ -942,7 +951,11 @@ fn cmd_fallback(args: &[String]) -> anyhow::Result<()> {
         print!("{}", show_fallback(&settings, &agent, &provider_name));
         return Ok(());
     }
-    anyhow::ensure!(!locked.iter().any(|p| p == "fallbacks" || *p == format!("fallbacks.{agent}") || p.starts_with(&format!("fallbacks.{agent}."))), "{}'s fallbacks are set by your organization", agent_name(&agent));
+    anyhow::ensure!(
+        !locked.iter().any(|p| p == "fallbacks" || *p == format!("fallbacks.{agent}") || p.starts_with(&format!("fallbacks.{agent}."))),
+        "{}'s fallbacks are set by your organization",
+        agent_name(&agent)
+    );
     if rest == ["off"] {
         settings.fallbacks.remove(&agent);
     } else {
@@ -960,7 +973,8 @@ fn cmd_fallback(args: &[String]) -> anyhow::Result<()> {
                 }
                 step => {
                     // Models have colons of their own (qwen3:4b); provider ids don't.
-                    let (provider, model) = step.split_once(':').filter(|(p, m)| !p.is_empty() && !m.is_empty()).ok_or_else(|| anyhow::anyhow!("{} isn't <provider>:<model>\n\n{FALLBACK_USAGE}", printable(step)))?;
+                    let (provider, model) =
+                        step.split_once(':').filter(|(p, m)| !p.is_empty() && !m.is_empty()).ok_or_else(|| anyhow::anyhow!("{} isn't <provider>:<model>\n\n{FALLBACK_USAGE}", printable(step)))?;
                     anyhow::ensure!(names.contains_key(provider), "there's no provider called {}. `dino login` connects one.", printable(provider));
                     anyhow::ensure!(settings.policies.allows_fallback(provider), "agents aren't allowed to fall back to {} (Settings → Agents → Limits)", provider_name(provider));
                     f.steps.push(FallbackStep { provider: provider.into(), model: model.into(), ..Default::default() });
@@ -1265,12 +1279,7 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
         println!("{}", out::paint(heading, Paint::Bold));
     };
     let row = |f: &dino_core::found::FoundSession| {
-        vec![
-            Cell::new(printable(&shown(f))),
-            Cell::new(printable(&f.agent)),
-            Cell::new(printable(&f.title)),
-            Cell::new(printable(&out::short_path(f.cwd.as_deref().unwrap_or("")))),
-        ]
+        vec![Cell::new(printable(&shown(f))), Cell::new(printable(&f.agent)), Cell::new(printable(&f.title)), Cell::new(printable(&out::short_path(f.cwd.as_deref().unwrap_or(""))))]
     };
     let running: Vec<_> = sessions.iter().filter(|f| f.source == Source::Running).collect();
     if !running.is_empty() {
@@ -1339,7 +1348,11 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
         section("Claude Code on the web");
         for f in cloud {
             // Not a session yet: the app's session browser lists the web's to pick from.
-            let what = if f.session_id.is_empty() { "To continue a web session, open the dino app and choose Session → Continue a Session… (⌘K)".into() } else { format!("{}  {}", printable(&shown(f)), printable(&f.title)) };
+            let what = if f.session_id.is_empty() {
+                "To continue a web session, open the dino app and choose Session → Continue a Session… (⌘K)".into()
+            } else {
+                format!("{}  {}", printable(&shown(f)), printable(&f.title))
+            };
             println!("{what}");
         }
     }
@@ -1355,7 +1368,9 @@ fn cmd_found(args: &[String]) -> anyhow::Result<()> {
 /// to paste), then wait until dinod has what it gave.
 fn cmd_login(provider: Option<&str>) -> anyhow::Result<()> {
     let Some(provider) = provider else {
-        println!("usage: dino login openrouter|chatgpt\n\n  openrouter  connect OpenRouter in your browser; dino stores the key and never shows it\n  chatgpt     sign in with ChatGPT, so agents in dino can use your ChatGPT plan (up to the weekly\n              cap you set for dino in ChatGPT → Settings → Usage)");
+        println!(
+            "usage: dino login openrouter|chatgpt\n\n  openrouter  connect OpenRouter in your browser; dino stores the key and never shows it\n  chatgpt     sign in with ChatGPT, so agents in dino can use your ChatGPT plan (up to the weekly\n              cap you set for dino in ChatGPT → Settings → Usage)"
+        );
         return Ok(());
     };
     if let Response::Providers { providers } = client::request(&Request::Providers)?

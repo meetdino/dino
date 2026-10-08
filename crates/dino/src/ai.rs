@@ -133,7 +133,9 @@ fn private_temp(prefix: &str) -> std::io::Result<std::path::PathBuf> {
 /// whichever is here first. Each must be able to answer once with no tools (`Agent::answers_once`).
 fn asker(asked: Option<&str>, s: &Settings) -> anyhow::Result<(&'static dyn Agent, PathBuf)> {
     if let Some(id) = asked {
-        let a = agents::agent(one_shot_id(id)).filter(|a| a.answers_once()).ok_or_else(|| anyhow::anyhow!("{id} can't suggest commands: it can't answer a single question without tools"))?;
+        let a = agents::agent(one_shot_id(id))
+            .filter(|a| a.answers_once())
+            .ok_or_else(|| anyhow::anyhow!("{id} can't suggest commands: it can't answer a single question without tools"))?;
         let program = agent_program(a.id()).ok_or_else(|| anyhow::anyhow!("{} isn't installed", agent_name(a.id())))?;
         return Ok((a, program));
     }
@@ -240,9 +242,7 @@ fn shell_output() -> Option<(String, Option<i32>)> {
 /// `text` with any line that looks like it holds a secret (a key, a token, a password, a private
 /// key) replaced by a note: output goes to a model, and a leaked credential can't be taken back.
 pub fn hide_secrets(text: &str) -> String {
-    const MARKERS: [&str; 16] = [
-        "sk-", "sk_live_", "rk_live_", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "xoxb-", "xoxp-", "akia", "nvapi-", "aiza", "-----begin", "eyjhbgci", "glpat-",
-    ];
+    const MARKERS: [&str; 16] = ["sk-", "sk_live_", "rk_live_", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "xoxb-", "xoxp-", "akia", "nvapi-", "aiza", "-----begin", "eyjhbgci", "glpat-"];
     const NAMES: [&str; 8] = ["password", "passwd", "secret", "token", "api_key", "apikey", "authorization", "private_key"];
     let looks_secret = |line: &str| {
         let lower = line.to_ascii_lowercase();
@@ -254,9 +254,8 @@ pub fn hide_secrets(text: &str) -> String {
             return true;
         }
         // A long run of letters and digits mixed: a key or a hash of one.
-        line.split(|c: char| !(c.is_ascii_alphanumeric() || "+/_=-".contains(c))).any(|w| {
-            w.len() >= 32 && w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(|c| c.is_ascii_alphabetic()) && !w.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-        })
+        line.split(|c: char| !(c.is_ascii_alphanumeric() || "+/_=-".contains(c)))
+            .any(|w| w.len() >= 32 && w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(|c| c.is_ascii_alphabetic()) && !w.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
     };
     text.lines().map(|l| if looks_secret(l) { "[line hidden: it looks like a secret]" } else { l }).collect::<Vec<_>>().join("\n")
 }
@@ -283,13 +282,7 @@ fn suggest(o: &Opts) -> Result<String, Failure> {
         .filter(|(_, exit)| exit.is_some_and(|e| e != 0))
         .map(|(text, _)| text.lines().rev().take(SUGGEST_OUTPUT_LINES).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
     let out_file = private_temp("dino-ai")?;
-    let ask = OneShot {
-        instructions: &instructions(&o.shell),
-        request: &request_text(o, output.as_deref()),
-        controls: control_args(a.id(), &settings),
-        cwd: &o.cwd,
-        answer: &out_file,
-    };
+    let ask = OneShot { instructions: &instructions(&o.shell), request: &request_text(o, output.as_deref()), controls: control_args(a.id(), &settings), cwd: &o.cwd, answer: &out_file };
     let mut cmd = Command::new(&program);
     cmd.args(a.one_shot(&ask));
     scrub(&mut cmd);
@@ -457,9 +450,10 @@ fn erases_a_disk(verb: &str) -> bool {
 
 /// `find` with an action that deletes: `-delete`, or `-exec rm …`.
 fn find_deletes(words: &[&str]) -> bool {
-    words.iter().enumerate().any(|(i, w)| {
-        *w == "-delete" || (matches!(*w, "-exec" | "-execdir" | "-ok" | "-okdir") && words.get(i + 1).is_some_and(|c| matches!(name(c), "rm" | "rmdir" | "unlink" | "shred" | "srm")))
-    })
+    words
+        .iter()
+        .enumerate()
+        .any(|(i, w)| *w == "-delete" || (matches!(*w, "-exec" | "-execdir" | "-ok" | "-okdir") && words.get(i + 1).is_some_and(|c| matches!(name(c), "rm" | "rmdir" | "unlink" | "shred" | "srm"))))
 }
 
 fn git_risk(args: &[&str]) -> Option<&'static str> {
@@ -617,7 +611,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dino-risky-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.txt"), "x").unwrap();
-        for c in ["rm -rf build", "rm -r x", "sudo ls", "dd if=/dev/zero of=x", "mkfs.ext4 /dev/sda", "git push --force", "git push -f origin main", "git reset --hard HEAD~1", "chmod -R 777 .", "ls && rm -Rf /tmp/x", "echo hi > notes.txt", "find . -name '*.o' -delete", "git clean -fd"] {
+        for c in [
+            "rm -rf build",
+            "rm -r x",
+            "sudo ls",
+            "dd if=/dev/zero of=x",
+            "mkfs.ext4 /dev/sda",
+            "git push --force",
+            "git push -f origin main",
+            "git reset --hard HEAD~1",
+            "chmod -R 777 .",
+            "ls && rm -Rf /tmp/x",
+            "echo hi > notes.txt",
+            "find . -name '*.o' -delete",
+            "git clean -fd",
+        ] {
             assert!(risky(c, &dir).is_some(), "{c}");
         }
         for c in ["ls -la", "rm notes.txt", "echo hi >> notes.txt", "echo hi > new.txt", "cmd 2>&1 | less", "cmd > /dev/null", "git push", "git reset HEAD", "grep -r foo ."] {

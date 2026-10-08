@@ -8,8 +8,8 @@ use dino_core::agent::agent;
 use dino_core::ipc::{AgentLimit, FallbackInfo, InsteadOf, LauncherInfo, RouteUsageInfo};
 use dino_core::providers::{Format, ProviderInfo, ProviderRoute, provider_of_route, route_path};
 use dino_core::settings::{AgentSwitch, Settings};
-use dino_proxy::fallback::{Chain, Kind, Step};
 use dino_proxy::SessionStats;
+use dino_proxy::fallback::{Chain, Kind, Step};
 
 use crate::{Daemon, Session, providers};
 
@@ -100,11 +100,8 @@ pub(crate) fn info(st: &SessionStats) -> Option<FallbackInfo> {
 
 /// What each route answered for it, most first.
 pub(crate) fn usage(st: &SessionStats) -> Vec<RouteUsageInfo> {
-    let mut out: Vec<RouteUsageInfo> = st
-        .by_route
-        .iter()
-        .map(|r| RouteUsageInfo { route: r.route.clone(), name: r.name.clone(), input_tokens: r.usage.total_input(), output_tokens: r.usage.output })
-        .collect();
+    let mut out: Vec<RouteUsageInfo> =
+        st.by_route.iter().map(|r| RouteUsageInfo { route: r.route.clone(), name: r.name.clone(), input_tokens: r.usage.total_input(), output_tokens: r.usage.output }).collect();
     out.sort_by_key(|r| std::cmp::Reverse(r.input_tokens + r.output_tokens));
     out
 }

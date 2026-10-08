@@ -71,7 +71,9 @@ pub(crate) fn headers(plan: &Plan, rest: &str) -> Result<Vec<(&'static str, Stri
 pub(crate) fn refused(name: &str, status: u16, message: &str) -> String {
     let said = if message.is_empty() { String::new() } else { format!(": {message}") };
     match limited(status, message) {
-        Some(Limit::Usage) => format!("{name}'s usage limit was reached ({status}{said}). dino doesn't switch to other billing unless you set a fallback (Settings → Agents): the plan works again once its window resets"),
+        Some(Limit::Usage) => format!(
+            "{name}'s usage limit was reached ({status}{said}). dino doesn't switch to other billing unless you set a fallback (Settings → Agents): the plan works again once its window resets"
+        ),
         Some(Limit::Rate) => format!("{name} is rate limiting ({status}{said})"),
         Some(Limit::Balance) => format!("{name} is out of balance ({status}{said}). Top it up with {name}; dino doesn't switch to other billing unless you set a fallback (Settings → Agents)"),
         None if matches!(status, 401 | 403) => format!("{name} turned the call down ({status}{said}). Check the plan's key and the model in dino's Settings → Models & Providers"),

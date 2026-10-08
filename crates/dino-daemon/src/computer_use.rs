@@ -134,14 +134,7 @@ pub(crate) fn info() -> ComputerUseInfo {
             let added = rec.added.get(&id).map(Added::server);
             let program = bin.file_name().map_or(id.clone(), |n| n.to_string_lossy().into_owned());
             let command = agent_mcp::adding(&id, NAME, &ours).map(|c| agent_mcp::shown(&program, &c, Some((NAME, &ours)))).unwrap_or_default();
-            ComputerUseAgentInfo {
-                on: added.is_some() && there == added,
-                theirs: there.is_some() && there != added,
-                native: native(&id, &bin),
-                id,
-                name,
-                command,
-            }
+            ComputerUseAgentInfo { on: added.is_some() && there == added, theirs: there.is_some() && there != added, native: native(&id, &bin), id, name, command }
         })
         .collect();
     ComputerUseInfo { version: VERSION.into(), installed: installed(), accessibility: granted.map(|g| g.0), screen_recording: granted.map(|g| g.1), agents }

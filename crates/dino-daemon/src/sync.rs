@@ -636,7 +636,13 @@ pub fn looking() {
 pub fn status() -> SyncStatus {
     let s = state().lock().unwrap();
     let l = live().lock().unwrap();
-    let phase = if l.signing_in || matches!(s.phase.as_str(), "joining" | "upgrade") { "signing_in".to_string() } else if s.phase.is_empty() { "signed_out".into() } else { s.phase.clone() };
+    let phase = if l.signing_in || matches!(s.phase.as_str(), "joining" | "upgrade") {
+        "signing_in".to_string()
+    } else if s.phase.is_empty() {
+        "signed_out".into()
+    } else {
+        s.phase.clone()
+    };
     let server = if s.server.is_empty() { cloud::default_server() } else { s.server.clone() };
     let local: Entries = s.conflict_local.iter().cloned().collect();
     // Every setting the account holds, a newer dino's too, as the account page counts them.

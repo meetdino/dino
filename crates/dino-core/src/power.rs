@@ -52,12 +52,15 @@ impl Off {
             Off::Disabled | Off::Idle => None,
             Off::Unplugged => Some("Unplugged from power, so closing the lid sleeps the Mac again".into()),
             Off::Battery(p) => Some(format!("Battery at {p}%, so closing the lid sleeps the Mac again")),
-            Off::MaxDuration(m) => Some(format!("Kept awake for {}, so closing the lid sleeps the Mac again", match m {
+            Off::MaxDuration(m) => Some(format!(
+                "Kept awake for {}, so closing the lid sleeps the Mac again",
+                match m {
                     1 => "a minute".into(),
                     60 => "an hour".into(),
                     m if m % 60 == 0 => format!("{} hours", m / 60),
                     m => format!("{m} minutes"),
-                })),
+                }
+            )),
             Off::Thermal => Some("The Mac is running hot, so closing the lid sleeps it again".into()),
         }
     }

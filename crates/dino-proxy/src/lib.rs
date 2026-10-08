@@ -663,13 +663,12 @@ impl Proxy {
             rt.block_on(async move {
                 // What an ssh tunnel reaches: hooks, by a token only that session knows. The
                 // remote port is open to everyone on that machine, so no API routes and no ids.
-                let remote_app = axum::Router::new()
-                    .route("/r/{token}/hook", post(remote_hook))
-                    .with_state(RemoteState { app: state.clone(), tokens: remote_tokens });
+                let remote_app = axum::Router::new().route("/r/{token}/hook", post(remote_hook)).with_state(RemoteState { app: state.clone(), tokens: remote_tokens });
                 let remote_listener = tokio::net::TcpListener::from_std(remote_listener).unwrap();
                 tokio::spawn(async move { axum::serve(remote_listener, remote_app).await });
                 let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
-                let app = axum::Router::new().route("/k/{key}/s/{session}/{provider}/{*rest}", any(forward))
+                let app = axum::Router::new()
+                    .route("/k/{key}/s/{session}/{provider}/{*rest}", any(forward))
                     .route("/h/s/{session}/{provider}/{*rest}", any(forward_keyed))
                     .route("/k/{key}/s/{session}/hook", post(hook))
                     .fallback(|req: Request| async move {
@@ -889,11 +888,7 @@ const MAX_BODY: usize = 64 << 20;
 
 /// Headers we must not copy between the two connections.
 fn hop_by_hop(name: &HeaderName) -> bool {
-    matches!(
-        name.as_str(),
-        "host" | "connection" | "keep-alive" | "transfer-encoding" | "upgrade" | "proxy-connection" | "te" | "trailer"
-            | "content-length" | "accept-encoding" | KEY_HEADER
-    )
+    matches!(name.as_str(), "host" | "connection" | "keep-alive" | "transfer-encoding" | "upgrade" | "proxy-connection" | "te" | "trailer" | "content-length" | "accept-encoding" | KEY_HEADER)
 }
 
 async fn forward_keyed(State(st): State<AppState>, Path((session, provider, rest)): Path<(String, String, String)>, req: Request) -> Response<Body> {
@@ -901,11 +896,7 @@ async fn forward_keyed(State(st): State<AppState>, Path((session, provider, rest
     forward(State(st), Path((key, session, provider, rest)), req).await
 }
 
-async fn forward(
-    State(st): State<AppState>,
-    Path((key, session, provider, rest)): Path<(String, String, String, String)>,
-    req: Request,
-) -> Response<Body> {
+async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)): Path<(String, String, String, String)>, req: Request) -> Response<Body> {
     let (started, at_ms) = (Instant::now(), now_ms());
     if !admitted(&st.secret, st.port, &key, req.headers()) {
         return error(StatusCode::FORBIDDEN, "dino proxy: not for you".into());
@@ -1003,7 +994,10 @@ async fn forward(
     let mut model = requested.clone();
     // The ChatGPT plan streams; an agent that asked for one JSON answer gets it put together.
     let collect = provider == siwc::PROVIDER && is_model_call && !siwc::wants_stream(&body);
-    if provider == siwc::PROVIDER && is_model_call && let Some(b) = siwc::shape(&body) {
+    if provider == siwc::PROVIDER
+        && is_model_call
+        && let Some(b) = siwc::shape(&body)
+    {
         body = Bytes::from(b);
     }
     // A Codex model the backend rejected lately: straight to the one that answered instead, and
@@ -1319,7 +1313,12 @@ async fn forward(
     let status = resp.status();
     log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
     if std::env::var_os("DINO_PROXY_LOG_HEADERS").is_some() {
-        let names: Vec<String> = resp.headers().iter().filter(|(n, _)| (n.as_str().contains("limit") || n.as_str().starts_with("x-codex")) && !n.as_str().ends_with("turn-state")).map(|(n, v)| format!("{n}={}", v.to_str().unwrap_or("?"))).collect();
+        let names: Vec<String> = resp
+            .headers()
+            .iter()
+            .filter(|(n, _)| (n.as_str().contains("limit") || n.as_str().starts_with("x-codex")) && !n.as_str().ends_with("turn-state"))
+            .map(|(n, v)| format!("{n}={}", v.to_str().unwrap_or("?")))
+            .collect();
         log(format_args!("  headers: {}", names.join(" ")));
     }
     record_quota(&st.stats, &quota_key(&provider, account.as_ref()), resp.headers());
@@ -1389,14 +1388,32 @@ async fn forward(
             Ok(w) => w,
             Err(e) => return upstream_error(e),
         };
-        let mut tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, route: primary.map(|p| p.tag), _in_flight: guard, call: is_model_call.then(|| Call { at_ms, route, model, ..Default::default() }), started, first: None };
+        let mut tap = Tap {
+            meter: Meter::default(),
+            stats: st.stats.clone(),
+            session,
+            route: primary.map(|p| p.tag),
+            _in_flight: guard,
+            call: is_model_call.then(|| Call { at_ms, route, model, ..Default::default() }),
+            started,
+            first: None,
+        };
         tap.meter.feed(&whole);
         let answer = siwc::collect(&whole).unwrap_or_else(|| whole.to_vec());
         return builder.header("content-type", "application/json").body(Body::from(answer)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()));
     }
 
     // Tee the body: pass every chunk through immediately, scan a copy for usage.
-    let tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session, route: primary.map(|p| p.tag), _in_flight: guard, call: is_model_call.then(|| Call { at_ms, route, model, ..Default::default() }), started, first: None };
+    let tap = Tap {
+        meter: Meter::default(),
+        stats: st.stats.clone(),
+        session,
+        route: primary.map(|p| p.tag),
+        _in_flight: guard,
+        call: is_model_call.then(|| Call { at_ms, route, model, ..Default::default() }),
+        started,
+        first: None,
+    };
     builder.body(tapped(resp, tap)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into()))
 }
 
@@ -1576,7 +1593,8 @@ async fn steps(
             builder = builder.header(name, value);
         }
         let route = Some(RouteTag { path: step.route.clone(), name: step.name.clone() });
-        let tap = Tap { meter: Meter::default(), stats: st.stats.clone(), session: session.to_string(), route, _in_flight: in_flight, call: Some(call(CallStatus::Ok)), started: step_started, first: None };
+        let tap =
+            Tap { meter: Meter::default(), stats: st.stats.clone(), session: session.to_string(), route, _in_flight: in_flight, call: Some(call(CallStatus::Ok)), started: step_started, first: None };
         return Some(builder.body(tapped(resp, tap)).unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "bad response".into())));
     }
     log(format_args!("{session} {} spent, and no fallback answered", primary.tag.name));
@@ -1914,7 +1932,13 @@ fn reason(e: &reqwest::Error) -> String {
         words.push(c.to_string());
         cause = c.source();
     }
-    let kind = if e.is_connect() { "couldn't connect" } else if e.is_timeout() { "timed out" } else { "the connection failed" };
+    let kind = if e.is_connect() {
+        "couldn't connect"
+    } else if e.is_timeout() {
+        "timed out"
+    } else {
+        "the connection failed"
+    };
     match words.last() {
         Some(w) => format!("{kind} ({w})"),
         None => kind.into(),
@@ -2135,7 +2159,6 @@ impl Meter {
         }
     }
 }
-
 
 /// The human part of an upstream error body: `{"error":{"message":…}}`, `{"detail":…}` or the text.
 pub(crate) fn error_message(body: &[u8]) -> String {
@@ -2518,7 +2541,8 @@ mod tests {
             let path = proxy.base_url(session, "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
             let body = json!({"model": "claude-opus-5-5", "max_tokens": 10, "stream": true, "messages": messages}).to_string();
             let mut c = std::net::TcpStream::connect(&here).unwrap();
-            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer {auth}\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer {auth}\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                .unwrap();
             let mut out = String::new();
             let _ = c.read_to_string(&mut out);
             out
@@ -2608,7 +2632,12 @@ mod tests {
             let path = proxy.base_url("allspent", "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
             let body = json!({"model": "claude-opus-5-5", "max_tokens": 10, "stream": true, "messages": [{"role": "user", "content": "hi"}]}).to_string();
             let mut c = std::net::TcpStream::connect(&here).unwrap();
-            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-own\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            write!(
+                c,
+                "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-own\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
             let mut out = String::new();
             let _ = c.read_to_string(&mut out);
             out.to_lowercase()
@@ -2654,7 +2683,11 @@ mod tests {
             if req.contains("\"max_tokens\":1,") {
                 reply("429 Too Many Requests", "", r#"{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}"#)
             } else if req.contains("retry-me") {
-                reply("429 Too Many Requests", "retry-after: 3\r\n", r#"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#)
+                reply(
+                    "429 Too Many Requests",
+                    "retry-after: 3\r\n",
+                    r#"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#,
+                )
             } else if req.contains("spent-now") {
                 claude_spent(reset)
             } else {
@@ -2668,7 +2701,11 @@ mod tests {
                      anthropic-ratelimit-unified-reset: {reset}\r\n",
                     reset + 86400
                 );
-                reply("200 OK", &h, r#"{"id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"OK"}],"model":"claude-opus-5-5","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1}}"#)
+                reply(
+                    "200 OK",
+                    &h,
+                    r#"{"id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"OK"}],"model":"claude-opus-5-5","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1}}"#,
+                )
             }
         });
         let base = anthropic.trim_end_matches("/api/anthropic").to_string();
@@ -2679,7 +2716,12 @@ mod tests {
             let path = proxy.base_url("probe", "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
             let body = json!({"model": "claude-opus-5-5", "max_tokens": max_tokens, "messages": [{"role": "user", "content": text}]}).to_string();
             let mut c = std::net::TcpStream::connect(&here).unwrap();
-            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-own\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            write!(
+                c,
+                "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-own\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
             let mut out = String::new();
             let _ = c.read_to_string(&mut out);
             out
@@ -2707,7 +2749,11 @@ mod tests {
         *codex::tests::CACHE.lock().unwrap() = Some(cache);
         let (base, seen) = stand_in(|req| {
             if req.contains(r#""model":"gpt-5.5""#) {
-                reply("404 Not Found", "", r#"{"error":{"message":"The model `gpt-5.5` does not exist or you do not have access to it.","type":"invalid_request_error","param":null,"code":"model_not_found"}}"#)
+                reply(
+                    "404 Not Found",
+                    "",
+                    r#"{"error":{"message":"The model `gpt-5.5` does not exist or you do not have access to it.","type":"invalid_request_error","param":null,"code":"model_not_found"}}"#,
+                )
             } else {
                 reply("200 OK", "", r#"{"id":"r","object":"response","status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}"#)
             }
@@ -2720,7 +2766,12 @@ mod tests {
             let path = proxy.base_url("codex-sub", "chatgpt").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/codex/responses";
             let body = json!({"model": model, "input": [{"role": "user", "content": "hi"}], "stream": false}).to_string();
             let mut c = std::net::TcpStream::connect(&here).unwrap();
-            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer chatgpt-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            write!(
+                c,
+                "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer chatgpt-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
             let mut out = String::new();
             let _ = c.read_to_string(&mut out);
             out
@@ -2849,8 +2900,19 @@ mod tests {
         assert_eq!(clean_path("v1/models/gpt-5.5"), Some("v1/models/gpt-5.5"));
         assert_eq!(clean_path("codex/responses"), Some("codex/responses"));
         let bad = [
-            "v1/models/../../v1/files", "v1/./messages", "v1//messages", "v1/%2e%2e/files", "v1/%2F/files", "v1/..\\files",
-            "v1/messages?x", "v1/messages#", "v1/mes sages", "v1/.\t./files", "v1/é", "", "/",
+            "v1/models/../../v1/files",
+            "v1/./messages",
+            "v1//messages",
+            "v1/%2e%2e/files",
+            "v1/%2F/files",
+            "v1/..\\files",
+            "v1/messages?x",
+            "v1/messages#",
+            "v1/mes sages",
+            "v1/.\t./files",
+            "v1/é",
+            "",
+            "/",
         ];
         for rest in bad {
             assert_eq!(clean_path(rest), None, "{rest:?}");
@@ -2940,9 +3002,7 @@ mod tests {
             let _ = c.read_to_string(&mut answer);
             answer
         };
-        let switch = |from: &str, to: &str, source: &str| {
-            json!({"hook_event_name": "PostModelSwitch", "session_id": "c1", "from_model": from, "to_model": to, "requested_model": null, "source": source, "context_tokens": 0})
-        };
+        let switch = |from: &str, to: &str, source: &str| json!({"hook_event_name": "PostModelSwitch", "session_id": "c1", "from_model": from, "to_model": to, "requested_model": null, "source": source, "context_tokens": 0});
         assert_eq!(proxy.stats.session("7").agent_model, None, "nothing said: what it was started with");
         post(json!({"hook_event_name": "Stop"}));
         proxy.stats.report("7", Activity::Done);
@@ -3008,7 +3068,9 @@ mod tests {
     #[test]
     fn a_stream_in_any_pieces_reads_the_same() {
         let delta = |t: &str| format!("event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":{}}}}}\n\n", json!(t));
-        let mut stream = String::from("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5\",\"usage\":{\"input_tokens\":120,\"cache_read_input_tokens\":3000,\"output_tokens\":1}}}\n\n");
+        let mut stream = String::from(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5\",\"usage\":{\"input_tokens\":120,\"cache_read_input_tokens\":3000,\"output_tokens\":1}}}\n\n",
+        );
         for t in ["The \"error\" field ", "and \"usage\": {\"output_tokens\": 99999} ", "are \"message_stop\" words."] {
             stream += &delta(t);
         }
@@ -3048,7 +3110,9 @@ mod tests {
             first: Some(started + std::time::Duration::from_millis(300)),
         };
         tap.meter.feed(&Bytes::from_static(b"data: {\"model\":\"answered/model\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"));
-        tap.meter.feed(&Bytes::from_static(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":100},\"cost\":0.00042}}\n\ndata: [DONE]\n\n"));
+        tap.meter.feed(&Bytes::from_static(
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":100},\"cost\":0.00042}}\n\ndata: [DONE]\n\n",
+        ));
         drop(tap);
         let calls = stats.take_calls();
         assert_eq!(calls.len(), 1);
@@ -3069,7 +3133,9 @@ mod tests {
             tap.meter.feed(&Bytes::from(body.to_string()));
         };
         // OpenRouter, as it answered for real: HTTP 200, and an upstream 503 in the body.
-        call(r#"{"id":"gen-1790742907-SecNFKzI8AeVJ53NBH9p","error":{"message":"Upstream error from Nvidia: Service temporarily overloaded","code":503,"metadata":{"error_type":"provider_overloaded"}}}"#);
+        call(
+            r#"{"id":"gen-1790742907-SecNFKzI8AeVJ53NBH9p","error":{"message":"Upstream error from Nvidia: Service temporarily overloaded","code":503,"metadata":{"error_type":"provider_overloaded"}}}"#,
+        );
         let s = stats.session("1");
         assert_eq!(s.errors, 1);
         assert_eq!(s.last_error.as_deref(), Some("503 Upstream error from Nvidia: Service temporarily overloaded"));
@@ -3096,7 +3162,9 @@ mod tests {
             tap.meter.feed(&Bytes::from(events));
         };
         let start = |model: &str, input: u64, cached: u64| {
-            format!("event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"model\":\"{model}\",\"usage\":{{\"input_tokens\":{input},\"cache_read_input_tokens\":{cached},\"output_tokens\":1}}}}}}\n\n")
+            format!(
+                "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"model\":\"{model}\",\"usage\":{{\"input_tokens\":{input},\"cache_read_input_tokens\":{cached},\"output_tokens\":1}}}}}}\n\n"
+            )
         };
         call(start("claude-opus-5-5", 10, 50_000));
         call(start("claude-haiku-4-5", 300, 0));
@@ -3149,12 +3217,8 @@ mod tests {
         feed("SubagentStop", json!({"agent_id": "zzz", "agent_type": ""}));
 
         let s = stats.session("s1");
-        let got: Vec<_> =
-            s.subagents.iter().map(|a| (a.id.as_str(), a.description.as_deref(), a.cwd.clone(), a.running)).collect();
-        assert_eq!(got, vec![
-            ("bbb", Some("Read the README"), Some(format!("{wt}bbb")), true),
-            ("aaa", Some("Count python files"), Some(format!("{wt}aaa")), true),
-        ]);
+        let got: Vec<_> = s.subagents.iter().map(|a| (a.id.as_str(), a.description.as_deref(), a.cwd.clone(), a.running)).collect();
+        assert_eq!(got, vec![("bbb", Some("Read the README"), Some(format!("{wt}bbb")), true), ("aaa", Some("Count python files"), Some(format!("{wt}aaa")), true),]);
         assert!(s.pending_agents.is_empty());
 
         feed("SubagentStop", json!({"agent_id": "aaa", "agent_type": "general-purpose"}));

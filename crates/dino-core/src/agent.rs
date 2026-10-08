@@ -13,8 +13,8 @@ use crate::providers::{Format, ProviderModel};
 
 pub(crate) mod amp;
 mod claude;
-pub mod codex;
 mod codewhale;
+pub mod codex;
 mod copilot;
 mod cursor;
 mod hermes;
@@ -59,13 +59,25 @@ pub enum ServerEvent {
     Busy(String),
     Idle(String),
     /// It waits on the user for `what`, until `Answered(id)`.
-    Asked { id: String, session: String, what: String },
+    Asked {
+        id: String,
+        session: String,
+        what: String,
+    },
     Answered(String),
     /// An answer in `session` read `used` tokens of `model`'s context.
-    Context { session: String, model: String, used: u64 },
+    Context {
+        session: String,
+        model: String,
+        used: u64,
+    },
     /// Tool call `call` (tool `name`, as the agent names it) is out, or has ended (`done`). Said
     /// again as it goes: only its first word and its end count.
-    Tool { call: String, name: String, done: bool },
+    Tool {
+        call: String,
+        name: String,
+        done: bool,
+    },
     Other,
 }
 

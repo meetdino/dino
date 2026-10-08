@@ -48,11 +48,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // DINO_SNAP_REPLAY: render a fresh emulator fed only with the replay, to check attach fidelity.
-    let pane = if std::env::var_os("DINO_SNAP_REPLAY").is_some() {
-        Pane::ended(&pane.replay(1000), w, h, None)
-    } else {
-        pane
-    };
+    let pane = if std::env::var_os("DINO_SNAP_REPLAY").is_some() { Pane::ended(&pane.replay(1000), w, h, None) } else { pane };
     println!("+{}+", "-".repeat(w as usize));
     let text = pane.text(0);
     let mut lines = text.lines();

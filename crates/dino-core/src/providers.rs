@@ -163,9 +163,9 @@ pub fn ollama_model(tag: &Value, show: &Value) -> Option<ProviderModel> {
     // Newer Ollamas put capabilities and context in `/api/tags` too; `/api/show` for older ones.
     let caps: Option<Vec<&str>> = tag["capabilities"].as_array().or(show["capabilities"].as_array()).map(|a| a.iter().filter_map(Value::as_str).collect());
     // `model_info` keys are per architecture: "qwen3.context_length", "llama.context_length".
-    let context = tag["details"]["context_length"].as_u64().or_else(|| {
-        show["model_info"].as_object().and_then(|o| o.iter().find(|(k, _)| k.ends_with(".context_length")).and_then(|(_, v)| v.as_u64()))
-    });
+    let context = tag["details"]["context_length"]
+        .as_u64()
+        .or_else(|| show["model_info"].as_object().and_then(|o| o.iter().find(|(k, _)| k.ends_with(".context_length")).and_then(|(_, v)| v.as_u64())));
     Some(ProviderModel {
         name: id.clone(),
         provider: "ollama".into(),
