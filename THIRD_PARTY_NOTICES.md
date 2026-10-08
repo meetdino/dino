@@ -44,7 +44,7 @@ Written by scripts/third-party.py from packaging/licenses/ and Cargo.lock; don't
   Ghostty 1.3.1's color themes, generated from it, in the app's resources.
 - bash-preexec, MIT. https://github.com/rcaloras/bash-preexec
   In the dino binary's bash integration.
-- MSDisplayLink 2.2.0, MIT. https://github.com/Lakr233/MSDisplayLink
+- MSDisplayLink 2.2.1, MIT. https://github.com/Lakr233/MSDisplayLink
   Linked into the app.
 - Sparkle 2.10.0, MIT AND BSD-2-Clause AND Zlib. https://github.com/sparkle-project/Sparkle
   The app's updater: Contents/Frameworks/Sparkle.framework. Includes bsdiff, sais-lite, orlp/ed25519 and SUSignatureVerifier, whose notices are in its license.
@@ -4988,7 +4988,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by MSDisplayLink 2.2.0.
+Used by MSDisplayLink 2.2.1.
 
 ```text
 MIT License

@@ -29,7 +29,7 @@ LICENSES = os.path.join(ROOT, "packaging", "licenses")
 CARGO_ABOUT = "0.9.2"
 
 # The app's Swift packages, as app/Package.swift pins them. NATIVE below was checked at these.
-PACKAGES = {"libghostty-spm": "1.6.20260928", "MSDisplayLink": "2.2.0", "Sparkle": "2.10.0"}
+PACKAGES = {"libghostty-spm": "1.6.20260928", "MSDisplayLink": "2.2.1", "Sparkle": "2.10.0"}
 
 GHOSTTY = "3c47ca159368eb4a860ffe5333abdf4a85b2767b"  # libghostty-spm 1.6.20260928's Ghostty.ref
 
