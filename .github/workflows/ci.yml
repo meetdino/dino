@@ -113,6 +113,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --workspace --all-targets --locked
       - run: cargo test --workspace --locked
+      # The Linux code (procinfo/linux.rs, inotify, the *_linux.rs stand-ins) is linted here, as
+      # the clippy job lints macOS's: any warning fails it.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   clippy:
     needs: changes
