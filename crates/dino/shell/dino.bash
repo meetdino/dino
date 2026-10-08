@@ -12,6 +12,7 @@
 [[ -n $_DINO_BASH ]] && return 0
 _DINO_BIN=${DINO_BIN:-__DINO_BIN__}
 _DINO_BASH=1
+# The last command entered and how it ended, for the agent asked about the next one.
 _DINO_LAST=
 _DINO_STATUS=0
 
@@ -81,7 +82,11 @@ _dino_prompt_command() {
   builtin history -s -- "$_DINO_OUT"
   # The answer isn't a request, even one commented out.
   _DINO_ASKED=$(HISTTIMEFORMAT= builtin history 1)
-  printf '→ %s   (↑ puts it on the prompt)\n' "$_DINO_OUT"
+  # On old bash ⌘I's request ends in a space (see its keys below), and its answer comes up on the
+  # next prompt by itself.
+  if [[ $last != *' ' ]] || (( BASH_VERSINFO[0] >= 4 )); then
+    printf '→ %s   (↑ puts it on the prompt)\n' "$_DINO_OUT"
+  fi
 }
 PROMPT_COMMAND="_dino_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 
@@ -126,18 +131,24 @@ if (( BASH_VERSINFO[0] >= 4 )); then
       READLINE_POINT=${#READLINE_LINE}
     fi
   }
-  bind -x '"\e[57300~": _dino_ai_line'
+  bind -x '"\e[105;9u": _dino_ai_line'
   bind -x "\"${DINO_AI_KEY:-\\ei}\": _dino_ai_line"
-  bind -x '"\e[57301~": _dino_ai_agent'
+  bind -x '"\e[13;9u": _dino_ai_agent'
   bind -x '"\e\C-m": _dino_ai_agent'
   bind -x '"\er": _dino_search'
   [[ -n $DINO_SEARCH_CTRL_R ]] && bind -x '"\C-r": _dino_search'
 else
-  # Old bash uses dedicated keys to insert and submit the request.
+  # Old bash can't change the line from a key, so ⌘I (Alt+I) makes it a # request and ⌘⏎
+  # (Alt+Enter) a #@ one, and enters it, through keys of its own for the start and end of the
+  # line, Enter and ↑, whatever the user bound. ⌘I's request ends in a space, and its keys go on
+  # at the next prompt, once the request is answered: ↑ there puts the answer on the line (the
+  # request again, when it failed).
   bind '"\e[57397~": beginning-of-line'
   bind '"\e[57398~": accept-line'
-  bind '"\e[57300~": "\e[57397~# \e[57398~"'
-  bind "\"${DINO_AI_KEY:-\\ei}\": \"\\e[57397~# \\e[57398~\""
-  bind '"\e[57301~": "\e[57397~#@ \e[57398~"'
+  bind '"\e[57396~": end-of-line'
+  bind '"\e[57395~": previous-history'
+  bind '"\e[105;9u": "\e[57397~# \e[57396~ \e[57398~\e[57395~"'
+  bind "\"${DINO_AI_KEY:-\\ei}\": \"\\e[57397~# \\e[57396~ \\e[57398~\\e[57395~\""
+  bind '"\e[13;9u": "\e[57397~#@ \e[57398~"'
   bind '"\e\C-m": "\e[57397~#@ \e[57398~"'
 fi
