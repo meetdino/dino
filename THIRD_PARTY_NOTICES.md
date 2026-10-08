@@ -57,7 +57,7 @@ in the CLI tarball.
 - aho-corasick 1.1.5, Unlicense OR MIT. https://github.com/BurntSushi/aho-corasick
 - alacritty_terminal 0.26.0, Apache-2.0. https://github.com/alacritty/alacritty
 - anyhow 1.0.104, MIT OR Apache-2.0. https://github.com/dtolnay/anyhow
-- anyllm_translate 0.16.1, MIT. https://github.com/whit3rabbit/anyllm-proxy
+- anyllm_translate 0.17.0, MIT. https://github.com/whit3rabbit/anyllm-proxy
 - arrayvec 0.7.8, MIT OR Apache-2.0. https://github.com/bluss/arrayvec
 - atomic-waker 1.1.2, Apache-2.0 OR MIT. https://github.com/smol-rs/atomic-waker
 - aws-lc-rs 1.18.1, ISC AND (Apache-2.0 OR ISC). https://github.com/aws/aws-lc-rs
@@ -5100,7 +5100,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by anyllm_translate 0.16.1.
+Used by anyllm_translate 0.17.0.
 
 ```text
 MIT License
