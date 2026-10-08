@@ -2216,7 +2216,11 @@ fn local_spec(
     if wired_args.iter().any(|a| a.contains(r#""statusLine""#)) {
         env.insert(dino_core::statusline::HOOK_ENV.into(), d.proxy.base_url(id, "hook"));
     }
-    // The Claude subscription token, for the real Claude Code only, in its env, never its argv.
+    // The Claude subscription token, for the real Claude Code only, in its env, never its argv;
+    // after a sign-in check under way (a token just set) has said whether it needs it.
+    if l.agent_id == "claude" && route.is_none() {
+        subtoken::settled();
+    }
     if let Some(t) = claude_token::for_launch(&l.agent_id, claude_token::Launch::Local, route.is_some(), settings, &load_keys(), claude_token::signed_in()) {
         env.insert(claude_token::KEY.into(), t);
     }

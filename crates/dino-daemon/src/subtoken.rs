@@ -3,7 +3,7 @@
 //! own (which decides whether sessions here get the token, see `dino_core::claude_token`).
 
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use dino_core::claude_token::{self as token, CREATED_KEY, KEY, LIFETIME_SECS};
@@ -26,14 +26,49 @@ pub(crate) struct State {
 
 static STATE: Mutex<State> = Mutex::new(State { creating: None, error: None });
 
+/// Sign-in checks under way: a Claude Code session starting meanwhile waits for their answer (see
+/// [`settled`]), or it would start without the token a moment before dinod knew it needed it (#179).
+static CHECKS: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+/// The most a session waits for one: a check gives up after 5 s.
+const SETTLE_WITHIN: Duration = Duration::from_secs(6);
+
+/// One check under way, from before its thread starts until it has noted its answer.
+struct Check;
+
+impl Check {
+    fn begin() -> Self {
+        *CHECKS.0.lock().unwrap() += 1;
+        Check
+    }
+}
+
+impl Drop for Check {
+    fn drop(&mut self) {
+        let mut n = CHECKS.0.lock().unwrap();
+        *n = n.saturating_sub(1);
+        CHECKS.1.notify_all();
+    }
+}
+
+/// Once no sign-in check is under way (or [`SETTLE_WITHIN`] has passed): what
+/// `dino_core::claude_token::signed_in` says then is the answer for the token kept now.
+pub(crate) fn settled() {
+    let n = CHECKS.0.lock().unwrap();
+    let _ = CHECKS.1.wait_timeout_while(n, SETTLE_WITHIN, |n| *n > 0);
+}
+
 /// Keep the "signed in on its own" note fresh while a token is kept.
 pub(crate) fn start() {
+    let first = Check::begin();
     std::thread::Builder::new()
         .name("claude-token".into())
-        .spawn(|| {
+        .spawn(move || {
+            check_signed_in();
+            drop(first);
             loop {
-                check_signed_in();
                 std::thread::sleep(RECHECK);
+                let _check = Check::begin();
+                check_signed_in();
             }
         })
         .ok();
@@ -119,7 +154,12 @@ fn keep(t: &str, created: Option<u64>) -> anyhow::Result<()> {
         None => settings::set_key(CREATED_KEY, None)?,
     }
     STATE.lock().unwrap().error = None;
-    std::thread::spawn(check_signed_in);
+    // Counted before this returns, so a session asked for right after waits for its answer.
+    let check = Check::begin();
+    std::thread::spawn(move || {
+        check_signed_in();
+        drop(check);
+    });
     Ok(())
 }
 
@@ -175,4 +215,28 @@ pub(crate) fn setup_token_shell(d: &Arc<Daemon>, label: &str, state: &'static Mu
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session started while a check is under way waits for it, and only that long.
+    #[test]
+    fn a_session_waits_for_the_check_under_way() {
+        let check = Check::begin();
+        let started = Instant::now();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(check);
+        });
+        settled();
+        let waited = started.elapsed();
+        t.join().unwrap();
+        assert!(waited >= Duration::from_millis(250) && waited < SETTLE_WITHIN, "{waited:?}");
+        // Nothing under way: no wait.
+        let started = Instant::now();
+        settled();
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
 }
