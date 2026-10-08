@@ -24,7 +24,8 @@ The app's **Settings** window edits the same settings. Some values are recorded 
 
 When you're signed in to a dino account, these settings sync to your other Macs: `routing`,
 `policies`, `worktrees`, `agents`, `ssh`, `terminal`, `tmux`, and `fallbacks`. Repository variables
-sync by the repository's Git remote, so different checkout paths on two Macs still match. Only
+sync by the repository's Git remote, so different checkout paths on two Macs still match; a
+repository with no remote doesn't sync its variables. Only
 well-formed variable names that are safe to sync travel; variables that can change which code runs
 or where traffic goes (such as `PATH`, `SHELL`, and proxy variables) stay on the Mac where they
 were set. Repository variables are stored unencrypted; don't put passwords or tokens in them.
@@ -53,8 +54,10 @@ Synced. The app location for each setting is listed below.
   all agents are allowed; `shell` is always allowed. App: **Agents**.
 - `default_agent` (optional string, default *unset*): agent short name started by ⌘N. Unset uses
   Claude Code, or the first allowed agent when Claude Code is unavailable. App: **Agents**.
-- `worktree_trust` (`boolean`, default `true`): carry Claude Code's folder-trust approval from a
-  repository into its dino worktrees. App: **Workspaces → Worktrees**.
+- `worktree_trust` (`boolean`, default `true`): when a folder inside a repository is trusted in
+  Claude Code, mark the same folder trusted in each worktree dino makes, and remove the mark when the
+  worktree is removed. Claude Code already carries the repository's own trust into its worktrees.
+  App: **Workspaces → Worktrees → Trust**.
 - `session_token_budget` (unsigned 64-bit integer, default `0`): maximum input, cached, and output
   tokens for one routed session. `0` means no limit. App: **Agents → Limits**.
 - `close_merged` (`boolean`, default `false`): archive a worktree session after its pull request is
@@ -65,8 +68,9 @@ Synced. The app location for each setting is listed below.
 - `session_tools` (`boolean`, default `false`): give Claude sessions dino's cross-session tools.
   App: **Experimental**.
 - `fallback_providers` (array of strings, default `[]`): provider IDs agents may use as fallbacks.
-  This key has no Settings control; it only narrows providers offered under **Agents → Limits → When
-  [agent] Hits a Limit**. Empty means any compatible provider.
+  This key has no Settings control. When set, dino skips fallback steps on other providers, and
+  **Agents → Limits → When [agent] Hits a Limit** and `dino fallback` offer only these. Empty means
+  any compatible provider.
 
 ### `[machine]`
 
@@ -98,6 +102,11 @@ user-facing values under **General**, **Terminal**, **Agents**, **Power**, and
 - `shell_features` (string, default `"cursor,title"`): Ghostty shell-integration features last read
   by dino. dino updates both `shell_integration_mode` and `shell_features` from the Ghostty config;
   they are not separate controls in Settings.
+- `computer_use` (optional `boolean`, default *unset*, which means on): let agents use the Mac's
+  apps. dino installs a pinned, checked release of open-computer-use in its own folder and adds it to
+  each agent on this Mac that takes MCP servers, except the agents you turn it off for. When off,
+  dino removes what it added. App: **Agents → Computer Use**, and the Welcome screen. While this key
+  is unset, an older `[experimental].computer_use` applies.
 
 #### `[machine.lid]`
 
@@ -207,11 +216,11 @@ Local to this Mac. In the app: **Experimental**.
   API key. When enabled and a TypeSafe key is configured, dino sends up to the first 8,000 characters
   of each turn's prompt to `api.typesafe.ai` for model selection; while this is off, nothing is sent.
   App: **Experimental → Free models pool**.
-- `computer_use` (`boolean`, default `false`): when enabled, dino installs a pinned, checked
-  release of open-computer-use and adds it to selected agents. When disabled, dino removes what it
-  added. App: **Agents**.
+- `computer_use` (optional `boolean`, default *unset*): where earlier versions kept the computer-use
+  switch. dino reads it only while `[machine].computer_use` is unset, so an old `false` keeps
+  computer use off. New choices are saved to `[machine].computer_use`. It has no control in Settings.
 
-These features are off until enabled. dino keeps unknown switches in this table when reading and
+`free_models` is off until you turn it on. dino keeps unknown switches in this table when reading and
 writing settings, so a newer or older version can carry them through.
 
 ### `[fallbacks.<agent>]`
@@ -221,9 +230,11 @@ conversation stays with its agent; only its model route changes. Fallback provid
 in the local key store and never sync.
 
 - `steps` (array of tables, default `[]`): routes to try in order. Each step has `provider` (string,
-  provider ID from **Models & Providers**) and `model` (string, that provider's model name). Current
-  IDs are `plan-zai`, `openrouter`, `ollama`, `chatgpt`, and `free`; `free` requires
-  `[experimental].free_models = true`. Each provider must support the agent's API.
+  provider ID from **Models & Providers**) and `model` (string, that provider's model name).
+  Provider IDs are `openrouter`, `chatgpt`, a coding plan as `plan-<plan>` (for example `plan-zai`,
+  `plan-kimi` or `plan-other`), a server on this Mac (`ollama`, `lmstudio`, `llamacpp` or `vllm`),
+  and `free`, which requires `[experimental].free_models = true`. Each provider must support the
+  agent's API.
 - `on_outage` (`boolean`, default `false`): use the chain when the current route is repeatedly
   failing or unreachable, as well as when it reaches a usage limit.
 - `new_sessions` (optional table, default *unset*): agent and optional model for new sessions and

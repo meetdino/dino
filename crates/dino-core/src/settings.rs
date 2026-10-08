@@ -773,18 +773,80 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// docs/settings.md documents every key, in its table's section, and nothing that isn't one.
     #[test]
-    fn settings_reference_lists_every_top_level_table() {
+    fn settings_reference_lists_every_key() {
         let doc = include_str!("../../../docs/settings.md");
-        let settings = serde_json::to_value(Settings::default()).unwrap();
-        for table in settings.as_object().unwrap().keys() {
-            let plain = format!("`[{table}]`");
-            let nested = format!("`[{table}.<");
-            let path_keyed = format!("`[{table}.\"<");
-            assert!(
-                doc.contains(&plain) || doc.contains(&nested) || doc.contains(&path_keyed),
-                "missing [{table}] from docs/settings.md"
-            );
+        // Every optional value and map filled in, so that each key is written.
+        let mut s = Settings::default();
+        s.policies.default_agent = Some("claude".into());
+        s.machine.computer_use = Some(true);
+        s.experimental.computer_use = Some(true);
+        s.agents.insert("claude".into(), Controls { mode: Some("ask".into()), model: Some("opus".into()), effort: Some("high".into()) });
+        s.repos.insert("/repo".into(), Repo { env: [("VAR".to_string(), "1".to_string())].into() });
+        s.ssh.insert("host".into(), SshHost::default());
+        let step = FallbackStep { provider: "openrouter".into(), model: "m".into(), extra: Extra::default() };
+        let switch = AgentSwitch { agent: "codex".into(), model: Some("m".into()), extra: Extra::default() };
+        s.fallbacks.insert("claude".into(), Fallback { steps: vec![step], new_sessions: Some(switch), ..Default::default() });
+        // Each key as (the table whose section documents it, the key, directly in that table).
+        fn keys(v: &serde_json::Value, table: &str, direct: bool, out: &mut Vec<(String, String, bool)>) {
+            let serde_json::Value::Object(m) = v else { return };
+            for (k, v) in m {
+                out.push((table.to_string(), k.clone(), direct));
+                match v {
+                    // A table of its own, with its own section: `[machine.lid]`.
+                    serde_json::Value::Object(_) if table == "machine" => keys(v, &format!("{table}.{k}"), true, out),
+                    // Values that are the user's own names (repo variables) aren't keys.
+                    serde_json::Value::Object(_) if k == "env" => {}
+                    serde_json::Value::Object(_) => keys(v, table, false, out),
+                    serde_json::Value::Array(a) => a.iter().for_each(|x| keys(x, table, false, out)),
+                    _ => {}
+                }
+            }
+        }
+        let mut found = vec![];
+        for (table, v) in serde_json::to_value(&s).unwrap().as_object().unwrap() {
+            if matches!(table.as_str(), "agents" | "repos" | "ssh" | "fallbacks") {
+                // Keyed by agent, path or host: each entry is the table.
+                v.as_object().unwrap().values().for_each(|e| keys(e, table, true, &mut found));
+            } else {
+                keys(v, table, true, &mut found);
+            }
+        }
+        // The doc's sections, by table: `### `[agents.<agent>]`` is agents' section.
+        let mut sections: BTreeMap<String, String> = BTreeMap::new();
+        let mut current = None;
+        for line in doc.lines() {
+            if line.starts_with("## ") {
+                current = None;
+            } else if let Some(h) = line.strip_prefix("### `[").or_else(|| line.strip_prefix("#### `[")) {
+                let name = h.split("]`").next().unwrap();
+                let table = name.split(".<").next().unwrap().split(".\"").next().unwrap().to_string();
+                current = Some(table);
+            } else if let Some(t) = &current {
+                let text = sections.entry(t.clone()).or_default();
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+        for t in serde_json::to_value(&s).unwrap().as_object().unwrap().keys() {
+            assert!(sections.contains_key(t), "docs/settings.md has no section for [{t}]");
+        }
+        for (table, key, direct) in &found {
+            let text = sections.get(table).unwrap_or_else(|| panic!("docs/settings.md has no section for [{table}]"));
+            let said = if *direct { format!("- `{key}` (") } else { format!("`{key}`") };
+            assert!(text.contains(&said), "docs/settings.md doesn't document {table}.{key}");
+        }
+        // Its examples are settings.
+        for example in doc.split("```toml\n").skip(1).map(|b| b.split("```").next().unwrap()) {
+            toml::from_str::<Settings>(example).unwrap_or_else(|e| panic!("an example in docs/settings.md doesn't parse: {e}\n{example}"));
+        }
+        // And each key it lists is one.
+        for (table, text) in &sections {
+            for line in text.lines() {
+                let Some(key) = line.strip_prefix("- `").and_then(|l| l.split_once("` (")).map(|(k, _)| k) else { continue };
+                assert!(found.iter().any(|(t, k, d)| t == table && k == key && *d), "docs/settings.md lists {table}.{key}, which isn't a setting");
+            }
         }
     }
 
