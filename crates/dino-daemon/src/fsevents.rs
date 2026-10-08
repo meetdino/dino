@@ -126,11 +126,7 @@ extern "C" fn changed(_stream: *const c_void, info: *mut c_void, count: usize, p
     let shared = unsafe { &*(info as *const Shared) };
     let paths = unsafe { std::slice::from_raw_parts(paths as *const *const c_char, count) };
     let flags = unsafe { std::slice::from_raw_parts(flags, count) };
-    let batch: Vec<(PathBuf, u32)> = paths
-        .iter()
-        .zip(flags)
-        .map(|(&p, &f)| (PathBuf::from(unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()), f))
-        .collect();
+    let batch: Vec<(PathBuf, u32)> = paths.iter().zip(flags).map(|(&p, &f)| (PathBuf::from(unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()), f)).collect();
     (shared.on)(&batch);
 }
 
@@ -344,10 +340,13 @@ mod tests {
                             1 => Box::new(Folders::files(&roots[..1], on(live, calls)).unwrap()),
                             _ => {
                                 let (h, c) = (Held::new(live), calls.clone());
-                                Box::new(Watch::new(&roots[1], move || {
-                                    let _ = &h;
-                                    c.fetch_add(1, Ordering::SeqCst);
-                                }).unwrap())
+                                Box::new(
+                                    Watch::new(&roots[1], move || {
+                                        let _ = &h;
+                                        c.fetch_add(1, Ordering::SeqCst);
+                                    })
+                                    .unwrap(),
+                                )
                             }
                         };
                         held.push(made);

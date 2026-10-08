@@ -14,10 +14,8 @@ pub struct Client {
     pub redirect_path: &'static str,
 }
 
-pub const CLIENTS: &[Client] = &[
-    Client { id: "dino", name: "dino", aud: "dino", redirect_path: "/callback" },
-    Client { id: "dino-harness", name: "dino harness", aud: "dino-harness", redirect_path: "/callback" },
-];
+pub const CLIENTS: &[Client] =
+    &[Client { id: "dino", name: "dino", aud: "dino", redirect_path: "/callback" }, Client { id: "dino-harness", name: "dino harness", aud: "dino-harness", redirect_path: "/callback" }];
 
 pub const SCOPES: &[&str] = &["openid", "email", "account", "sync"];
 

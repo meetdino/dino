@@ -130,7 +130,9 @@ fn event_of(v: &Value) -> LogEvent {
         "assistant.message" if d["toolRequests"].as_array().is_none_or(|t| t.is_empty()) => LogEvent::TurnEnded,
         "abort" | "session.error" | "session.shutdown" | "session.task_complete" => LogEvent::TurnEnded,
         "permission.requested" if d["resolvedByHook"] != true => LogEvent::Needs(asked(d)),
-        "assistant.turn_end" | "session.start" | "session.resume" | "session.usage_checkpoint" | "session.info" | "session.model_change" | "session.mode_changed" | "hook.start" | "hook.end" => LogEvent::Bookkeeping,
+        "assistant.turn_end" | "session.start" | "session.resume" | "session.usage_checkpoint" | "session.info" | "session.model_change" | "session.mode_changed" | "hook.start" | "hook.end" => {
+            LogEvent::Bookkeeping
+        }
         _ => LogEvent::Other,
     }
 }
@@ -236,11 +238,45 @@ impl Agent for Copilot {
 
     fn value_flags(&self) -> &'static [&'static str] {
         &[
-            "-i", "--interactive", "-p", "--prompt", "--model", "--reasoning-effort", "--context", "--auto-tier", "--agent", "-n", "--name", "--session-id",
-            "-C", "--log-dir", "--extension-sdk-path", "--log-level", "--stream", "--output-format", "--add-dir", "--attachment", "--disable-mcp-server",
-            "--add-github-mcp-toolset", "--add-github-mcp-tool", "--plugin-dir", "--additional-mcp-config", "--mcp-github-auth", "--allow-tool", "--deny-tool",
-            "--available-tools", "--excluded-tools", "--secret-env-vars", "--allow-url", "--deny-url", "--max-autopilot-continues", "--mode",
-            "--dynamic-retrieval", "--enable-mcp-server", "--max-ai-credits", "--usage-output-file",
+            "-i",
+            "--interactive",
+            "-p",
+            "--prompt",
+            "--model",
+            "--reasoning-effort",
+            "--context",
+            "--auto-tier",
+            "--agent",
+            "-n",
+            "--name",
+            "--session-id",
+            "-C",
+            "--log-dir",
+            "--extension-sdk-path",
+            "--log-level",
+            "--stream",
+            "--output-format",
+            "--add-dir",
+            "--attachment",
+            "--disable-mcp-server",
+            "--add-github-mcp-toolset",
+            "--add-github-mcp-tool",
+            "--plugin-dir",
+            "--additional-mcp-config",
+            "--mcp-github-auth",
+            "--allow-tool",
+            "--deny-tool",
+            "--available-tools",
+            "--excluded-tools",
+            "--secret-env-vars",
+            "--allow-url",
+            "--deny-url",
+            "--max-autopilot-continues",
+            "--mode",
+            "--dynamic-retrieval",
+            "--enable-mcp-server",
+            "--max-ai-credits",
+            "--usage-output-file",
         ]
     }
 
@@ -344,11 +380,7 @@ impl Agent for Copilot {
 
     // `-p` (not `-i`, a session with a first prompt), its ACP server, its other commands.
     fn headless(&self, args: &[String]) -> bool {
-        super::runs_with(
-            args,
-            &["-p", "--prompt", "--acp"],
-            &["login", "mcp", "plugin", "skill", "update", "version", "help", "completion", "instruction", "lsp", "sandbox", "workflow"],
-        )
+        super::runs_with(args, &["-p", "--prompt", "--acp"], &["login", "mcp", "plugin", "skill", "update", "version", "help", "completion", "instruction", "lsp", "sandbox", "workflow"])
     }
 
     fn may_be(&self, comm: &str) -> bool {
@@ -563,9 +595,12 @@ mod tests {
         assert!(!busy_in(answered), "an answer that asks for no tool ends it");
         assert!(!busy_in(EVENTS));
         // Stopped mid-turn (Esc): its `abort` ends the turn.
-        let stopped = format!("{answered}{}", r#"{"type":"user.message","data":{"content":"go on"}}
+        let stopped = format!(
+            "{answered}{}",
+            r#"{"type":"user.message","data":{"content":"go on"}}
 {"type":"assistant.turn_start","data":{"turnId":"0"}}
-{"type":"abort","data":{"reason":"user_initiated"}}"#);
+{"type":"abort","data":{"reason":"user_initiated"}}"#
+        );
         assert!(!busy_in(&stopped));
         assert_eq!(turns_in(&stopped).last().map(|t| t.text.as_str()), Some("Interrupted"));
     }

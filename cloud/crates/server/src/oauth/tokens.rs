@@ -95,7 +95,11 @@ async fn insert_access(tx: &mut Transaction<'_, Postgres>, account: Uuid, device
 
 /// Sign a device out: its row is marked, every token of its family goes.
 pub async fn revoke_device(tx: &mut Transaction<'_, Postgres>, device: Uuid, reason: &str) -> Result<()> {
-    sqlx::query("UPDATE devices SET revoked_at = coalesce(revoked_at, now()), revoke_reason = coalesce(revoke_reason, $2) WHERE id = $1").bind(device).bind(reason).execute(&mut **tx).await?;
+    sqlx::query("UPDATE devices SET revoked_at = coalesce(revoked_at, now()), revoke_reason = coalesce(revoke_reason, $2) WHERE id = $1")
+        .bind(device)
+        .bind(reason)
+        .execute(&mut **tx)
+        .await?;
     sqlx::query("DELETE FROM refresh_tokens WHERE device_id = $1").bind(device).execute(&mut **tx).await?;
     sqlx::query("DELETE FROM access_tokens WHERE device_id = $1").bind(device).execute(&mut **tx).await?;
     Ok(())
@@ -103,7 +107,11 @@ pub async fn revoke_device(tx: &mut Transaction<'_, Postgres>, device: Uuid, rea
 
 /// Every device and token of an account.
 pub async fn revoke_account(tx: &mut Transaction<'_, Postgres>, account: Uuid, reason: &str) -> Result<()> {
-    sqlx::query("UPDATE devices SET revoked_at = now(), revoke_reason = $2 WHERE account_id = $1 AND revoked_at IS NULL").bind(account).bind(reason).execute(&mut **tx).await?;
+    sqlx::query("UPDATE devices SET revoked_at = now(), revoke_reason = $2 WHERE account_id = $1 AND revoked_at IS NULL")
+        .bind(account)
+        .bind(reason)
+        .execute(&mut **tx)
+        .await?;
     sqlx::query("DELETE FROM refresh_tokens WHERE account_id = $1").bind(account).execute(&mut **tx).await?;
     sqlx::query("DELETE FROM access_tokens WHERE account_id = $1").bind(account).execute(&mut **tx).await?;
     sqlx::query("DELETE FROM web_sessions WHERE account_id = $1").bind(account).execute(&mut **tx).await?;

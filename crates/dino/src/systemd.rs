@@ -143,7 +143,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             let active = installed && systemctl(&["is-active", "--quiet", &name]);
             let rows = vec![
                 ("Unit", if installed { path.display().to_string() } else { "not installed: `dino service install`".into() }),
-                ("Running", if active { "yes, under systemd".to_string() } else if crate::client::Control::open_existing().is_ok() { "yes, started by a dino command".into() } else { "no".into() }),
+                (
+                    "Running",
+                    if active {
+                        "yes, under systemd".to_string()
+                    } else if crate::client::Control::open_existing().is_ok() {
+                        "yes, started by a dino command".into()
+                    } else {
+                        "no".into()
+                    },
+                ),
                 ("Lingering", if lingering() { "on: runs while you're logged out".into() } else { "off: `loginctl enable-linger $USER` to run while logged out".into() }),
             ];
             print!("{}", crate::out::fields(&rows));

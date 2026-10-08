@@ -323,9 +323,9 @@ pub fn turn_start(api: Api, body: &[u8]) -> bool {
     let Ok(v) = serde_json::from_slice::<Value>(body) else { return false };
     let last_said = |messages: &Value| messages.as_array().and_then(|m| m.iter().rev().find(|m| !matches!(m["role"].as_str(), Some("system" | "developer")))).cloned();
     match api {
-        Api::Anthropic => last_said(&v["messages"]).is_some_and(|m| {
-            m["role"] == "user" && (m["content"].is_string() || m["content"].as_array().is_some_and(|c| !c.iter().any(|b| b["type"] == "tool_result")))
-        }),
+        Api::Anthropic => {
+            last_said(&v["messages"]).is_some_and(|m| m["role"] == "user" && (m["content"].is_string() || m["content"].as_array().is_some_and(|c| !c.iter().any(|b| b["type"] == "tool_result"))))
+        }
         Api::Chat => last_said(&v["messages"]).is_some_and(|m| m["role"] == "user"),
         Api::Responses => match &v["input"] {
             Value::String(_) => true,
@@ -447,7 +447,8 @@ mod tests {
         assert!(is_outage(529) && is_outage(500) && is_outage(503) && !is_outage(429) && !is_outage(400));
 
         // ChatGPT's plan, as Codex gets it: no Retry-After, the reset in the body.
-        let chatgpt = br#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":1789676095,"eligible_promo":null,"resets_in_seconds":4182}}"#;
+        let chatgpt =
+            br#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":1789676095,"eligible_promo":null,"resets_in_seconds":4182}}"#;
         assert_eq!(classify(429, &none, chatgpt), Some(Trigger { kind: Kind::Quota, resets_at: Some(1_789_676_095), said: "The usage limit has been reached".into() }));
         let flat = br#"{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":60}"#;
         let t = classify(429, &none, flat).unwrap();
@@ -481,7 +482,10 @@ mod tests {
         assert!(t.said.contains("reset at 2026-10-04 02:00:00"), "its words come along: {}", t.said);
         assert_eq!(classify(429, &none, br#"{"error":{"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-06 10:00:00"}}"#).unwrap().kind, Kind::Quota);
         assert_eq!(classify(403, &none, br#"{"error":{"message":"You've reached your 5-hour usage limit. Upgrade at kimi.com","type":"rate_limit_reached_error"}}"#).unwrap().kind, Kind::Quota);
-        assert_eq!(classify(429, &none, br#"{"base_resp":{"status_code":2056},"error":{"message":"usage limit exceeded, 5-hour usage limit reached for Token Plan (2056)"}}"#).unwrap().kind, Kind::Quota);
+        assert_eq!(
+            classify(429, &none, br#"{"base_resp":{"status_code":2056},"error":{"message":"usage limit exceeded, 5-hour usage limit reached for Token Plan (2056)"}}"#).unwrap().kind,
+            Kind::Quota
+        );
         assert_eq!(classify(429, &none, br#"{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}"#).unwrap().kind, Kind::Balance);
         assert_eq!(classify(429, &none, br#"{"error":{"code":"1302","message":"Rate limit reached for requests"}}"#), None);
         assert_eq!(classify(403, &none, br#"{"error":{"message":"You don't have access to this model"}}"#), None);

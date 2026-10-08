@@ -113,9 +113,29 @@ impl Provider {
                     primary: bool,
                     verified: bool,
                 }
-                let user: User = s.http.get(&up.userinfo_url).bearer_auth(&access).header("accept", "application/vnd.github+json").send().await.map_err(|_| fail("user request failed"))?.json().await.map_err(|_| fail("user unreadable"))?;
+                let user: User = s
+                    .http
+                    .get(&up.userinfo_url)
+                    .bearer_auth(&access)
+                    .header("accept", "application/vnd.github+json")
+                    .send()
+                    .await
+                    .map_err(|_| fail("user request failed"))?
+                    .json()
+                    .await
+                    .map_err(|_| fail("user unreadable"))?;
                 let emails: Vec<Email> = match &up.emails_url {
-                    Some(u) => s.http.get(u).bearer_auth(&access).header("accept", "application/vnd.github+json").send().await.map_err(|_| fail("emails request failed"))?.json().await.map_err(|_| fail("emails unreadable"))?,
+                    Some(u) => s
+                        .http
+                        .get(u)
+                        .bearer_auth(&access)
+                        .header("accept", "application/vnd.github+json")
+                        .send()
+                        .await
+                        .map_err(|_| fail("emails request failed"))?
+                        .json()
+                        .await
+                        .map_err(|_| fail("emails unreadable"))?,
                     None => vec![],
                 };
                 let best = emails.iter().find(|e| e.primary && e.verified).or_else(|| emails.iter().find(|e| e.verified));

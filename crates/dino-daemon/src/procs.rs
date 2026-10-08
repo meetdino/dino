@@ -36,8 +36,31 @@ pub(crate) fn tag(home: &Path, id: &str) -> String {
 
 /// Programs that build: a process with one of these names is a build at work.
 const BUILD_TOOLS: &[&str] = &[
-    "cargo", "rustc", "rustdoc", "clippy-driver", "swift-build", "swift-test", "swift-frontend", "swift-driver", "swiftc", "xcodebuild", "make",
-    "gmake", "ninja", "cmake", "clang", "clang++", "cc", "c++", "gcc", "g++", "ld", "go", "gradle", "bazel", "javac",
+    "cargo",
+    "rustc",
+    "rustdoc",
+    "clippy-driver",
+    "swift-build",
+    "swift-test",
+    "swift-frontend",
+    "swift-driver",
+    "swiftc",
+    "xcodebuild",
+    "make",
+    "gmake",
+    "ninja",
+    "cmake",
+    "clang",
+    "clang++",
+    "cc",
+    "c++",
+    "gcc",
+    "g++",
+    "ld",
+    "go",
+    "gradle",
+    "bazel",
+    "javac",
 ];
 
 pub(crate) fn is_build(name: &str) -> bool {
@@ -87,9 +110,7 @@ pub(crate) fn look(home: &Path) -> Look {
 
 fn env_of(pid: u32) -> Env {
     match procinfo::args_and_env(pid) {
-        Some((_, env)) if !env.is_empty() => {
-            env.iter().find_map(|e| e.strip_prefix(TAG).and_then(|r| r.strip_prefix('='))).map_or(Env::Untagged, |t| Env::Tagged(t.to_string()))
-        }
+        Some((_, env)) if !env.is_empty() => env.iter().find_map(|e| e.strip_prefix(TAG).and_then(|r| r.strip_prefix('='))).map_or(Env::Untagged, |t| Env::Tagged(t.to_string())),
         _ => Env::Hidden,
     }
 }
@@ -339,12 +360,7 @@ pub(crate) fn settle(home: &Path, sessions: &[String], known: &[PathBuf]) -> Vec
         if pids.is_empty() {
             continue;
         }
-        eprintln!(
-            "{} dinod: session {id} {}: stopping {}",
-            crate::stamp(),
-            if back { "came back" } else { "didn't come back" },
-            describe(&look, &pids)
-        );
+        eprintln!("{} dinod: session {id} {}: stopping {}", crate::stamp(), if back { "came back" } else { "didn't come back" }, describe(&look, &pids));
         let sids: HashSet<u32> = pids.iter().filter_map(|&p| look.sid(p)).collect();
         stop(pids, &look, move |l| l.in_sessions(&sids, &id));
     }
@@ -399,13 +415,7 @@ fn leftovers(look: &Look, known: &[PathBuf]) -> Vec<(Leftover, u64)> {
         .filter_map(|(top, named)| {
             let t = look.procs.get(&top)?;
             let n = look.procs.get(&named)?;
-            let leftover = Leftover {
-                pid: top,
-                name: label(named, &n.name),
-                cwd: procinfo::cwd_of(named).unwrap_or_default(),
-                started: t.started_us / 1_000_000,
-                ..Default::default()
-            };
+            let leftover = Leftover { pid: top, name: label(named, &n.name), cwd: procinfo::cwd_of(named).unwrap_or_default(), started: t.started_us / 1_000_000, ..Default::default() };
             Some((leftover, t.started_us))
         })
         .collect();

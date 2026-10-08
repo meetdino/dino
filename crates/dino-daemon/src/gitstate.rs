@@ -307,10 +307,7 @@ fn watch(d: &Daemon, main: &str, worktrees: &[String]) -> Option<(u64, Arc<Marks
             // Without the git dir watched, remote branches moving goes unseen: read on a timer.
             git.as_ref()?;
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
-            all.insert(
-                main.to_string(),
-                RepoWatch { id, marks: marks.clone(), worktrees: worktrees.to_vec(), roots, _folders: folders, _git: git, used: Instant::now() },
-            );
+            all.insert(main.to_string(), RepoWatch { id, marks: marks.clone(), worktrees: worktrees.to_vec(), roots, _folders: folders, _git: git, used: Instant::now() });
             Some((id, marks))
         }
     }
@@ -372,13 +369,7 @@ enum Job {
 /// paths), next to `base`: what's known where nothing changed, read again where something did.
 /// `until`: no more reads after then; a worktree never read before is then still to be read
 /// (true beside it), the next look reads it.
-pub(crate) fn summaries(
-    d: &Daemon,
-    w: &[worktree::Worktree],
-    paths: &[String],
-    base: &str,
-    until: Option<Instant>,
-) -> Vec<(Option<worktree::Summary>, bool)> {
+pub(crate) fn summaries(d: &Daemon, w: &[worktree::Worktree], paths: &[String], base: &str, until: Option<Instant>) -> Vec<(Option<worktree::Summary>, bool)> {
     let Some(first) = w.first() else { return Vec::new() };
     let base_tip = first.head.clone().unwrap_or_default();
     let watched = watch(d, &paths[0], &paths[1..]);
@@ -392,13 +383,9 @@ pub(crate) fn summaries(
         for (i, (wt, path)) in w.iter().zip(paths).enumerate().skip(1) {
             let k = known.get_mut(path.as_str());
             let stamp = match (&watched, &wt.head) {
-                (Some((id, _)), Some(head)) if !base_tip.is_empty() => Some(Stamp {
-                    head: head.clone(),
-                    base: base_tip.clone(),
-                    watch: *id,
-                    seen: seen.get(path.as_str()).copied().unwrap_or(0) + lost,
-                    remotes,
-                }),
+                (Some((id, _)), Some(head)) if !base_tip.is_empty() => {
+                    Some(Stamp { head: head.clone(), base: base_tip.clone(), watch: *id, seen: seen.get(path.as_str()).copied().unwrap_or(0) + lost, remotes })
+                }
                 _ => None,
             };
             let job = match (&k, &stamp) {
@@ -445,8 +432,13 @@ pub(crate) fn summaries(
     // What history says of them, for all at once: a few git runs instead of a few each.
     let full: Vec<&str> = jobs.iter().filter(|j| matches!(j.1, Job::Full)).filter_map(|j| w[j.0].head.as_deref()).collect();
     let batch = if full.is_empty() || base_tip.is_empty() { worktree::Batch::default() } else { worktree::batch(Path::new(&paths[0]), &full, base) };
-    let pushes: Vec<(&str, u32)> =
-        jobs.iter().filter_map(|j| match &j.1 { Job::Unpushed(s) => Some((w[j.0].head.as_deref()?, s.ahead)), Job::Full => None }).collect();
+    let pushes: Vec<(&str, u32)> = jobs
+        .iter()
+        .filter_map(|j| match &j.1 {
+            Job::Unpushed(s) => Some((w[j.0].head.as_deref()?, s.ahead)),
+            Job::Full => None,
+        })
+        .collect();
     let unpushed = if pushes.is_empty() { HashMap::new() } else { worktree::unpushed_all(Path::new(&paths[0]), &pushes, base) };
     // Read side by side, a few at a time.
     let next = AtomicUsize::new(0);
@@ -467,9 +459,7 @@ pub(crate) fn summaries(
                         d.git.reads.fetch_add(1, Ordering::Relaxed);
                     }
                     let s = match (job, &wt.head) {
-                        (Job::Full, Some(head)) if !base_tip.is_empty() => {
-                            worktree::summary_of(Path::new(path), wt.branch.as_deref(), base, head, &base_tip, &batch).ok()
-                        }
+                        (Job::Full, Some(head)) if !base_tip.is_empty() => worktree::summary_of(Path::new(path), wt.branch.as_deref(), base, head, &base_tip, &batch).ok(),
                         (Job::Full, _) => worktree::summary(Path::new(path), wt.branch.as_deref(), base).ok(),
                         (Job::Unpushed(s), head) => {
                             let mut s = s.clone();

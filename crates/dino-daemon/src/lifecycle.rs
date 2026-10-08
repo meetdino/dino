@@ -13,10 +13,7 @@ use serde::{Deserialize, Serialize};
 use dino_core::ipc::{self, Request, Response};
 use dino_core::{pr, trust, worktree};
 
-use super::{
-    Daemon, Launch, SavedSession, SessionWorktree, kill, now_secs, real, save, save_worktrees,
-    session_worktree, sessions_in, spawn,
-};
+use super::{Daemon, Launch, SavedSession, SessionWorktree, kill, now_secs, real, save, save_worktrees, session_worktree, sessions_in, spawn};
 
 /// A stopped session kept to start again, with the worktree it ran in.
 #[derive(Serialize, Deserialize, Clone)]
@@ -482,22 +479,14 @@ pub(crate) fn clean_up(d: &Daemon, path: &str, force: bool) -> anyhow::Result<()
     if let Some(s) = ended.iter().find(|s| !s.pane.is_exited()) {
         anyhow::bail!("{} is running in it", s.label.lock().unwrap().clone().unwrap_or_else(|| s.name.clone()));
     }
-    anyhow::ensure!(
-        !super::subagent_owners(d).iter().any(|(p, o)| *p == target && o.running),
-        "a subagent is working in it"
-    );
+    anyhow::ensure!(!super::subagent_owners(d).iter().any(|(p, o)| *p == target && o.running), "a subagent is working in it");
     let me = std::process::id();
     let inside = |p: &str| p == target || p.starts_with(&format!("{target}/"));
-    let mut users: Vec<String> =
-        dino_core::procinfo::working_dirs().into_iter().filter(|(pid, _, cwd)| *pid != me && inside(cwd)).map(|p| p.1).collect();
+    let mut users: Vec<String> = dino_core::procinfo::working_dirs().into_iter().filter(|(pid, _, cwd)| *pid != me && inside(cwd)).map(|p| p.1).collect();
     users.sort();
     users.dedup();
     anyhow::ensure!(users.is_empty(), "{} is working in it", users.join(", "));
-    anyhow::ensure!(
-        !worktree::recently(worktree::last_changed(Path::new(&target)), super::now_secs()),
-        "it changed in the last {} minutes",
-        worktree::RECENTLY / 60
-    );
+    anyhow::ensure!(!worktree::recently(worktree::last_changed(Path::new(&target)), super::now_secs()), "it changed in the last {} minutes", worktree::RECENTLY / 60);
     // Looked up while it's there: a path that's gone doesn't resolve to compare.
     let w = d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == target).cloned();
     worktree::clean_as(Path::new(path), force)?;

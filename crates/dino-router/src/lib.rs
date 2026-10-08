@@ -226,11 +226,7 @@ impl Tier {
 pub fn classifier_state(anthropic_req: &Value) -> Option<String> {
     let current = new_turn_text(anthropic_req)?;
     let msgs = anthropic_req["messages"].as_array()?;
-    let mut earlier: Vec<String> = msgs
-        .iter()
-        .filter(|m| m["role"] == "user")
-        .filter_map(|m| new_turn_text(&json!({ "messages": [m] })))
-        .collect();
+    let mut earlier: Vec<String> = msgs.iter().filter(|m| m["role"] == "user").filter_map(|m| new_turn_text(&json!({ "messages": [m] }))).collect();
     earlier.pop(); // that's `current`
     let start = earlier.len().saturating_sub(3);
     let mut state = String::new();

@@ -125,7 +125,13 @@ fn print(s: &SyncStatus) {
     let ago = |t: u64| {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let d = now.saturating_sub(t);
-        if d < 60 { format!("{d}s ago") } else if d < 3600 { format!("{}m ago", d / 60) } else { format!("{}h ago", d / 3600) }
+        if d < 60 {
+            format!("{d}s ago")
+        } else if d < 3600 {
+            format!("{}m ago", d / 60)
+        } else {
+            format!("{}h ago", d / 3600)
+        }
     };
     match s.phase.as_str() {
         "signed_out" => println!("Not signed in. `dino login` turns on settings sync."),

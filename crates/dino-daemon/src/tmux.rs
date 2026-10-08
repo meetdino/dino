@@ -244,13 +244,8 @@ pub fn place(found: &mut [dino_core::found::FoundSession]) {
             chain.iter().find_map(|c| srv.panes.iter().find(|p| p.pid == *c)).map(|p| (p.clone(), srv.bin.clone(), srv.socket.clone()))
         };
         let Some((p, bin, socket)) = pane else { continue };
-        found[i].tmux = Some(dino_core::found::TmuxPlace {
-            socket: socket.display().to_string(),
-            pane: p.id.clone(),
-            target: p.target.clone(),
-            label: named(&p.label, &found[i].agent),
-            attached: p.attached,
-        });
+        found[i].tmux =
+            Some(dino_core::found::TmuxPlace { socket: socket.display().to_string(), pane: p.id.clone(), target: p.target.clone(), label: named(&p.label, &found[i].agent), attached: p.attached });
         found[i].terminal = Some(format!("tmux {}", named(&p.label, &found[i].agent)));
         // An agent's own status says busy, not that it's asking: its dialog on screen does.
         if capture(&bin, &socket, &p.id).is_some_and(|t| dino_core::found::asking(&found[i].agent, &t)) {

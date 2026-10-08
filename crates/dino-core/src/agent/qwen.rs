@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::{Agent, ControlKind, StatusSource, Wiring, strings};
-use crate::providers::Format;
 use crate::found::{self, FoundSession, Source};
 use crate::history::{self, Meta, Turn, one_line, turn, typed};
+use crate::providers::Format;
 
 pub(crate) struct Qwen {
     pub(crate) free: bool,
@@ -294,10 +294,7 @@ impl Agent for Qwen {
     fn portable_flags(&self, args: &[String]) -> Vec<String> {
         found::drop_flags(
             args,
-            &[
-                "--resume", "-r", "--session-id", "-p", "--prompt", "-i", "--prompt-interactive", "-o", "--output-format", "--input-format",
-                "--json-file", "--json-fd", "--input-file", "--worktree",
-            ],
+            &["--resume", "-r", "--session-id", "-p", "--prompt", "-i", "--prompt-interactive", "-o", "--output-format", "--input-format", "--json-file", "--json-fd", "--input-file", "--worktree"],
             &["--continue", "-c", "--fork-session", "--acp"],
         )
     }
@@ -397,7 +394,8 @@ fn usage_in(jsonl: &str) -> Vec<crate::usage::Used> {
             continue;
         }
         let cached = history::count(&u["cachedContentTokenCount"]);
-        out.push(crate::usage::Used { undated: false,
+        out.push(crate::usage::Used {
+            undated: false,
             id: id.into(),
             at_ms: history::ms_of(&v["timestamp"]).unwrap_or(0),
             conversation: conversation.into(),
@@ -427,12 +425,7 @@ mod tests {
     #[test]
     fn a_conversation_reads_as_turns() {
         let turns: Vec<(String, String)> = turns_in(CHAT).into_iter().map(|t| (t.role, t.text)).collect();
-        let want = [
-            ("user", "add a dark mode\nto the settings"),
-            ("assistant", "Let me look."),
-            ("tool", "read_file /r/settings.ts"),
-            ("assistant", "Done: a toggle in Settings."),
-        ];
+        let want = [("user", "add a dark mode\nto the settings"), ("assistant", "Let me look."), ("tool", "read_file /r/settings.ts"), ("assistant", "Done: a toggle in Settings.")];
         assert_eq!(turns, want.map(|(r, t)| (r.to_string(), t.to_string())));
     }
 

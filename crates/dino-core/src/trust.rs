@@ -162,7 +162,11 @@ mod tests {
 
         // Claude keys by the real path; dino may hold the /tmp spelling.
         let real = |p: &Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
-        std::fs::write(&config, json!({"zeta": 1, "projects": {real(&repo.join("sub")): {"hasTrustDialogAccepted": true, "history": [1]}, real(&dir): {"hasTrustDialogAccepted": true}}, "alpha": 2}).to_string()).unwrap();
+        std::fs::write(
+            &config,
+            json!({"zeta": 1, "projects": {real(&repo.join("sub")): {"hasTrustDialogAccepted": true, "history": [1]}, real(&dir): {"hasTrustDialogAccepted": true}}, "alpha": 2}).to_string(),
+        )
+        .unwrap();
         assert_eq!(claude_trusted_in(&repo, &repo), None, "a trusted folder above the repo doesn't count");
         assert_eq!(claude_trusted_in(&repo.join("sub/deep"), &repo), Some(PathBuf::from("sub")));
 

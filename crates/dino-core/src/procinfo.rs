@@ -2,16 +2,16 @@
 //! those takes ~50 ms to start, and discovery asks every few seconds.
 
 #[cfg(target_os = "macos")]
-use std::ffi::{c_void, CStr};
+use std::ffi::{CStr, c_void};
 #[cfg(target_os = "macos")]
 use std::mem::{size_of, size_of_val};
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-use linux::{all_pids, name_of};
-#[cfg(target_os = "linux")]
 pub use linux::{alive, args_and_env, children_of, cwd_of, exe_of, now_ns, open_fds, open_file, parent_of, process, rusage, started};
+#[cfg(target_os = "linux")]
+use linux::{all_pids, name_of};
 
 /// Every pid on the system, like `ps -A`.
 #[cfg(target_os = "macos")]

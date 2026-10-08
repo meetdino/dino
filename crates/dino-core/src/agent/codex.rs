@@ -12,12 +12,12 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::{Agent, ControlKind, StatusSource, Wiring, strings};
-use attached::Attached;
 use crate::found::{self, FoundSession, Source};
 use crate::history::{self, Turn};
 use crate::models::{self, Catalog};
-use crate::providers::Format;
 use crate::procinfo;
+use crate::providers::Format;
+use attached::Attached;
 
 pub(crate) struct Codex;
 
@@ -46,8 +46,7 @@ impl Codex {
 
 /// Flags that make Codex say on its terminal when it waits on the user (an approval, a
 /// question), focused or not. It notices a finished turn too, which its rollout says anyway.
-pub const NOTICE_ARGS: [&str; 6] =
-    ["-c", "tui.notifications=true", "-c", "tui.notification_method=\"osc9\"", "-c", "tui.notification_condition=\"always\""];
+pub const NOTICE_ARGS: [&str; 6] = ["-c", "tui.notifications=true", "-c", "tui.notification_method=\"osc9\"", "-c", "tui.notification_condition=\"always\""];
 
 /// The conversation Codex process `pid` is on: the rollout it has open. A subagent's is open too
 /// while it runs; the session's own is the one that isn't a subagent's.
@@ -164,15 +163,7 @@ fn in_terminals(procs: &procinfo::Procs, pids: &[u32]) -> (Vec<attached::Tui>, V
             (Some(d), None) => Some(PathBuf::from(d)),
             (None, h) => h.clone(),
         };
-        tuis.push(attached::Tui {
-            pid,
-            home,
-            started_ms: p.started_us / 1000,
-            cwd: cwd.map(|c| attached::resolved(&c)),
-            open: rollout.as_deref().and_then(history::rollout_id).or(lock),
-            told,
-            picks,
-        });
+        tuis.push(attached::Tui { pid, home, started_ms: p.started_us / 1000, cwd: cwd.map(|c| attached::resolved(&c)), open: rollout.as_deref().and_then(history::rollout_id).or(lock), told, picks });
     }
     (tuis, open)
 }
@@ -265,19 +256,75 @@ fn cloud_tasks(codex: &Path) -> Vec<Value> {
 /// Codex's command line (`codex --help`), for finding a prompt in it.
 const CLI: super::Cli = super::Cli {
     value: &[
-        "-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env", "-m", "--model", "--local-provider", "-p", "--profile", "-s",
-        "--sandbox", "-C", "--cd", "--add-dir", "-a", "--ask-for-approval",
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+        "--remote",
+        "--remote-auth-token-env",
+        "-m",
+        "--model",
+        "--local-provider",
+        "-p",
+        "--profile",
+        "-s",
+        "--sandbox",
+        "-C",
+        "--cd",
+        "--add-dir",
+        "-a",
+        "--ask-for-approval",
     ],
     optional: &[],
     variadic: &["-i", "--image"],
     flags: &[
-        "--strict-config", "--oss", "--approve-for-me", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--worktree",
-        "--search", "--no-alt-screen", "--no-daemon", "--full-auto", "--yolo", "-h", "--help", "-V", "--version",
+        "--strict-config",
+        "--oss",
+        "--approve-for-me",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--worktree",
+        "--search",
+        "--no-alt-screen",
+        "--no-daemon",
+        "--full-auto",
+        "--yolo",
+        "-h",
+        "--help",
+        "-V",
+        "--version",
     ],
     commands: &[
-        "agents", "exec", "e", "review", "login", "logout", "mcp", "plugin", "app-server", "remote-control", "app", "completion", "update", "doctor",
-        "sandbox", "debug", "apply", "a", "resume", "queue", "archive", "delete", "migrate-rollouts", "unarchive", "fork", "cloud", "exec-server",
-        "features", "help", "mcp-server",
+        "agents",
+        "exec",
+        "e",
+        "review",
+        "login",
+        "logout",
+        "mcp",
+        "plugin",
+        "app-server",
+        "remote-control",
+        "app",
+        "completion",
+        "update",
+        "doctor",
+        "sandbox",
+        "debug",
+        "apply",
+        "a",
+        "resume",
+        "queue",
+        "archive",
+        "delete",
+        "migrate-rollouts",
+        "unarchive",
+        "fork",
+        "cloud",
+        "exec-server",
+        "features",
+        "help",
+        "mcp-server",
     ],
 };
 
@@ -344,9 +391,7 @@ impl Agent for Codex {
 
     fn control_of(&self, name: &str, value: Option<&str>) -> Option<ControlKind> {
         match name {
-            "-s" | "--sandbox" | "-a" | "--ask-for-approval" | "--approve-for-me" | "--full-auto" | "--dangerously-bypass-approvals-and-sandbox" | "--yolo" => {
-                Some(ControlKind::Mode)
-            }
+            "-s" | "--sandbox" | "-a" | "--ask-for-approval" | "--approve-for-me" | "--full-auto" | "--dangerously-bypass-approvals-and-sandbox" | "--yolo" => Some(ControlKind::Mode),
             "-m" | "--model" => Some(ControlKind::Model),
             "-c" | "--config" if value.is_some_and(|v| v.trim_start().starts_with("model_reasoning_effort")) => Some(ControlKind::Effort),
             _ => None,
@@ -471,8 +516,7 @@ impl Agent for Codex {
     // The server of whichever Codex home has it: the one the Codexes dino starts run with, or one
     // a Codex running now runs with (one found running keeps its `CODEX_HOME` continued in dino).
     fn in_shared_server(&self, session: &str) -> bool {
-        attached::in_server(&models::codex_home(), session)
-            || procinfo::pids_named("codex").into_iter().filter_map(home_of).any(|h| attached::in_server(&h, session))
+        attached::in_server(&models::codex_home(), session) || procinfo::pids_named("codex").into_iter().filter_map(home_of).any(|h| attached::in_server(&h, session))
     }
 
     // Without the notices dino asks of the sessions it starts: what a person types.
@@ -579,8 +623,34 @@ impl Agent for Codex {
             args,
             &[],
             &[
-                "agents", "exec", "e", "review", "login", "logout", "mcp", "mcp-server", "plugin", "app-server", "remote-control", "app", "completion", "update",
-                "doctor", "sandbox", "debug", "apply", "a", "queue", "archive", "delete", "migrate-rollouts", "unarchive", "cloud", "exec-server", "features", "help",
+                "agents",
+                "exec",
+                "e",
+                "review",
+                "login",
+                "logout",
+                "mcp",
+                "mcp-server",
+                "plugin",
+                "app-server",
+                "remote-control",
+                "app",
+                "completion",
+                "update",
+                "doctor",
+                "sandbox",
+                "debug",
+                "apply",
+                "a",
+                "queue",
+                "archive",
+                "delete",
+                "migrate-rollouts",
+                "unarchive",
+                "cloud",
+                "exec-server",
+                "features",
+                "help",
                 "proto",
             ],
         )
@@ -730,7 +800,10 @@ mod tests {
         let write = |id: &str, source: &str| {
             let day = day_dir(&sessions, since).unwrap();
             std::fs::create_dir_all(&day).unwrap();
-            let meta = format!(r#"{{"timestamp":"2026-10-06T20:23:43.400Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}","originator":"codex-tui","cli_version":"0.160.1","source":{source}}}}}"#, here.display());
+            let meta = format!(
+                r#"{{"timestamp":"2026-10-06T20:23:43.400Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}","originator":"codex-tui","cli_version":"0.160.1","source":{source}}}}}"#,
+                here.display()
+            );
             std::fs::write(day.join(format!("rollout-2026-10-06T13-23-43-{id}.jsonl")), meta + "\n").unwrap();
         };
         let its = id(since * 1000 + 600, "cd2-b4cb-58e3cc582ab7");

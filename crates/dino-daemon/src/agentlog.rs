@@ -34,8 +34,7 @@ fn followed(s: &Session) -> bool {
 /// Look at every session whose agent keeps such a record.
 pub(crate) fn watch(d: &Daemon) {
     let sessions: Vec<_> = d.sessions.lock().unwrap().iter().filter(|s| followed(s)).cloned().collect();
-    let claimed: Vec<(String, String)> =
-        sessions.iter().filter_map(|s| Some((s.id.clone(), s.agent_session.lock().unwrap().clone()?))).collect();
+    let claimed: Vec<(String, String)> = sessions.iter().filter_map(|s| Some((s.id.clone(), s.agent_session.lock().unwrap().clone()?))).collect();
     for s in sessions.iter().filter(|s| !s.pane.is_exited()) {
         let others: Vec<String> = claimed.iter().filter(|(id, _)| *id != s.id).map(|(_, c)| c.clone()).collect();
         track(d, s, &others);

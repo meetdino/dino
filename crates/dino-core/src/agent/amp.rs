@@ -134,7 +134,26 @@ impl Agent for Amp {
     }
 
     fn value_flags(&self) -> &'static [&'static str] {
-        &["-m", "--mode", "--visibility", "--settings-file", "--log-level", "--log-file", "--mcp-config", "--features", "--executor", "--runner-dir", "-x", "--execute", "--attach", "--project", "--orb-size", "--title", "-l", "--label"]
+        &[
+            "-m",
+            "--mode",
+            "--visibility",
+            "--settings-file",
+            "--log-level",
+            "--log-file",
+            "--mcp-config",
+            "--features",
+            "--executor",
+            "--runner-dir",
+            "-x",
+            "--execute",
+            "--attach",
+            "--project",
+            "--orb-size",
+            "--title",
+            "-l",
+            "--label",
+        ]
     }
 
     fn control_of(&self, name: &str, _value: Option<&str>) -> Option<ControlKind> {
@@ -205,7 +224,11 @@ impl Agent for Amp {
             Some("last" | "l") => args[1..].to_vec(),
             _ => args.to_vec(),
         };
-        found::drop_flags(&args, &["-x", "--execute", "--title", "-l", "--label", "--attach", "--log-file"], &["--last", "--pick", "-ox", "--orb-execute", "--stream-json", "--stream-json-thinking", "--stream-json-input"])
+        found::drop_flags(
+            &args,
+            &["-x", "--execute", "--title", "-l", "--label", "--attach", "--log-file"],
+            &["--last", "--pick", "-ox", "--orb-execute", "--stream-json", "--stream-json-thinking", "--stream-json-input"],
+        )
     }
 
     // Execute mode, `-x`, and its stream.
@@ -303,7 +326,8 @@ fn usage_in(text: &str) -> Vec<crate::usage::Used> {
         let at = [&u["timestamp"], &m["meta"]["sentAt"]].into_iter().find_map(crate::history::ms_of);
         let Some(at_ms) = at else { continue };
         let which = m["messageId"].as_u64().map_or_else(|| i.to_string(), |n| n.to_string());
-        out.push(crate::usage::Used { undated: false,
+        out.push(crate::usage::Used {
+            undated: false,
             id: format!("{thread}:{which}"),
             at_ms,
             conversation: thread.into(),

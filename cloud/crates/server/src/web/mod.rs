@@ -108,23 +108,27 @@ async fn signin(State(s): State<AppState>, headers: HeaderMap, Query(q): Query<S
         return Ok(session.attach(Redirect::to(&to).into_response()));
     }
     let providers: Vec<Provider> = [Provider::GitHub, Provider::Google].into_iter().filter(|p| p.config(&s).is_some()).collect();
-    let page = pages::layout(&s, "Sign in", html! {
-        h1 { @if q.again.is_some() { "Sign in again" } @else { "Sign in to dino" } }
-        p { "Your settings follow you to every Mac you sign in on." }
-        div.stack {
-            @for p in &providers {
-                a.btn href=(format!("/signin/{}", p.id())) { "Continue with " (p.name()) }
+    let page = pages::layout(
+        &s,
+        "Sign in",
+        html! {
+            h1 { @if q.again.is_some() { "Sign in again" } @else { "Sign in to dino" } }
+            p { "Your settings follow you to every Mac you sign in on." }
+            div.stack {
+                @for p in &providers {
+                    a.btn href=(format!("/signin/{}", p.id())) { "Continue with " (p.name()) }
+                }
             }
-        }
-        @if !providers.is_empty() { p.or { "or" } }
-        form method="post" action="/signin/email" class="stack" {
-            (pages::csrf(&session.csrf(&s)))
-            label for="email" { "Email" }
-            input #email type="email" name="email" autocomplete="email" required;
-            (pages::turnstile(&s))
-            button.primary type="submit" { "Email me a code" }
-        }
-    });
+            @if !providers.is_empty() { p.or { "or" } }
+            form method="post" action="/signin/email" class="stack" {
+                (pages::csrf(&session.csrf(&s)))
+                label for="email" { "Email" }
+                input #email type="email" name="email" autocomplete="email" required;
+                (pages::turnstile(&s))
+                button.primary type="submit" { "Email me a code" }
+            }
+        },
+    );
     Ok(session.attach(page.into_response()))
 }
 
@@ -197,7 +201,9 @@ async fn email_send(State(s): State<AppState>, headers: HeaderMap, ClientIp(ip):
     let Some(mut session) = Session::load(&s, &headers).await? else { return Ok(Redirect::to("/signin").into_response()) };
     check_form(&s, &session, &headers, &f.csrf)?;
     let Some(address) = email::normalize(&f.email) else {
-        return Ok(pages::layout(&s, "Check the address", html! { h1 { "Check the address" } p { "That doesn't look like an email address." } a.btn.primary href="/signin" { "Back" } }).into_response());
+        return Ok(
+            pages::layout(&s, "Check the address", html! { h1 { "Check the address" } p { "That doesn't look like an email address." } a.btn.primary href="/signin" { "Back" } }).into_response()
+        );
     };
     email::turnstile(&s, f.turnstile.as_deref(), ip).await?;
     email::send(&s, &address).await?;
@@ -209,17 +215,21 @@ async fn email_send(State(s): State<AppState>, headers: HeaderMap, ClientIp(ip):
 async fn email_code_page(State(s): State<AppState>, headers: HeaderMap) -> Result<Response> {
     let Some(session) = Session::load(&s, &headers).await? else { return Ok(Redirect::to("/signin").into_response()) };
     let Some(address) = session.get_str("email") else { return Ok(Redirect::to("/signin").into_response()) };
-    Ok(pages::layout(&s, "Enter the code", html! {
-        h1 { "Check your email" }
-        p { "We sent a six-digit code to " strong { (address) } ". It works for 10 minutes." }
-        form method="post" action="/signin/email/code" class="stack" {
-            (pages::csrf(&session.csrf(&s)))
-            label for="code" { "Code" }
-            input.codeinput #code type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" required;
-            button.primary type="submit" { "Sign in" }
-        }
-        a href="/signin" { "Use a different address" }
-    })
+    Ok(pages::layout(
+        &s,
+        "Enter the code",
+        html! {
+            h1 { "Check your email" }
+            p { "We sent a six-digit code to " strong { (address) } ". It works for 10 minutes." }
+            form method="post" action="/signin/email/code" class="stack" {
+                (pages::csrf(&session.csrf(&s)))
+                label for="code" { "Code" }
+                input.codeinput #code type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" required;
+                button.primary type="submit" { "Sign in" }
+            }
+            a href="/signin" { "Use a different address" }
+        },
+    )
     .into_response())
 }
 
@@ -288,64 +298,68 @@ async fn account_page(State(s): State<AppState>, headers: HeaderMap) -> Result<R
     let synced = crate::api::sync::settings(&s, account).await?;
     let csrf = session.csrf(&s);
     let providers: Vec<String> = summary["identities"].as_array().into_iter().flatten().filter_map(|i| i["provider"].as_str().map(str::to_owned)).collect();
-    let page = pages::layout(&s, "Account", html! {
-        h1 { "Your account" }
-        p { "Signed in as " strong { (summary["email"].as_str().unwrap_or("")) } @if !providers.is_empty() { " · " (providers.join(", ")) } }
-        h2 { "Devices" }
-        div.panel {
-            @if devices.is_empty() { p.muted { "No devices are signed in." } }
-            ul.devices {
-                @for d in &devices {
-                    li {
-                        div.row {
-                            strong { (d.name) }
-                            form.inline method="post" action=(format!("/account/devices/{}/revoke", d.id)) {
-                                (pages::csrf(&csrf))
-                                button type="submit" aria-label=(format!("Sign out {}", d.name)) { "Sign out" }
+    let page = pages::layout(
+        &s,
+        "Account",
+        html! {
+            h1 { "Your account" }
+            p { "Signed in as " strong { (summary["email"].as_str().unwrap_or("")) } @if !providers.is_empty() { " · " (providers.join(", ")) } }
+            h2 { "Devices" }
+            div.panel {
+                @if devices.is_empty() { p.muted { "No devices are signed in." } }
+                ul.devices {
+                    @for d in &devices {
+                        li {
+                            div.row {
+                                strong { (d.name) }
+                                form.inline method="post" action=(format!("/account/devices/{}/revoke", d.id)) {
+                                    (pages::csrf(&csrf))
+                                    button type="submit" aria-label=(format!("Sign out {}", d.name)) { "Sign out" }
+                                }
+                            }
+                            div.muted { (d.os) @if !d.dino_version.is_empty() { " · dino " (d.dino_version) } " · last seen " (ago(d.last_seen_at)) }
+                        }
+                    }
+                }
+            }
+            h2 { "Synced settings" }
+            div.panel {
+                @if synced.is_empty() {
+                    p.muted { "Nothing synced yet. Turn on sync in dino to keep your settings on every Mac." }
+                } @else {
+                    ul.devices {
+                        @for (collection, key, value, at) in &synced {
+                            li {
+                                div.row { strong { (collection) "." (key) } span.muted { (ago(*at)) } }
+                                code.value { (shown(value)) }
                             }
                         }
-                        div.muted { (d.os) @if !d.dino_version.is_empty() { " · dino " (d.dino_version) } " · last seen " (ago(d.last_seen_at)) }
                     }
                 }
+                p.muted { "API keys and tokens never leave your Macs, and aren't here." }
             }
-        }
-        h2 { "Synced settings" }
-        div.panel {
-            @if synced.is_empty() {
-                p.muted { "Nothing synced yet. Turn on sync in dino to keep your settings on every Mac." }
-            } @else {
-                ul.devices {
-                    @for (collection, key, value, at) in &synced {
-                        li {
-                            div.row { strong { (collection) "." (key) } span.muted { (ago(*at)) } }
-                            code.value { (shown(value)) }
-                        }
-                    }
+            h2 { "Your data" }
+            div.stack {
+                a.btn href="/account/export" download="dino-account.json" { "Export everything" }
+                form method="post" action="/account/signout-everywhere" {
+                    (pages::csrf(&csrf))
+                    button type="submit" { "Sign out everywhere" }
+                }
+                form method="post" action="/signout" {
+                    (pages::csrf(&csrf))
+                    button type="submit" { "Sign out of this browser" }
                 }
             }
-            p.muted { "API keys and tokens never leave your Macs, and aren't here." }
-        }
-        h2 { "Your data" }
-        div.stack {
-            a.btn href="/account/export" download="dino-account.json" { "Export everything" }
-            form method="post" action="/account/signout-everywhere" {
+            h2 { "Delete account" }
+            form method="post" action="/account/delete" class="stack" {
                 (pages::csrf(&csrf))
-                button type="submit" { "Sign out everywhere" }
+                p { "Signs out every device now and erases the account 30 days later. Type your email to confirm." }
+                label for="confirm" { "Email" }
+                input #confirm type="email" name="confirm" required autocomplete="off";
+                button.danger type="submit" { "Delete account" }
             }
-            form method="post" action="/signout" {
-                (pages::csrf(&csrf))
-                button type="submit" { "Sign out of this browser" }
-            }
-        }
-        h2 { "Delete account" }
-        form method="post" action="/account/delete" class="stack" {
-            (pages::csrf(&csrf))
-            p { "Signs out every device now and erases the account 30 days later. Type your email to confirm." }
-            label for="confirm" { "Email" }
-            input #confirm type="email" name="confirm" required autocomplete="off";
-            button.danger type="submit" { "Delete account" }
-        }
-    });
+        },
+    );
     Ok(page.into_response())
 }
 

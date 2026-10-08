@@ -151,11 +151,7 @@ fn own_pct(prev: &Sample, now: &Sample, pid: u32, p: &Proc) -> f64 {
 
 fn report(samples: &[Sample]) -> SessionCost {
     let now = samples.last().expect("measured");
-    let mut cost = SessionCost {
-        mem_bytes: now.procs.values().map(|p| p.usage.footprint).sum(),
-        processes: now.procs.len() as u32,
-        ..Default::default()
-    };
+    let mut cost = SessionCost { mem_bytes: now.procs.values().map(|p| p.usage.footprint).sum(), processes: now.procs.len() as u32, ..Default::default() };
     let Some(prev) = samples.len().checked_sub(2).map(|i| &samples[i]) else { return cost };
     cost.cpu_pct = pct(used_between(prev, now), now.at_ns - prev.at_ns);
     // Back from the newest until it covers `AVERAGE`.
@@ -169,18 +165,13 @@ fn report(samples: &[Sample]) -> SessionCost {
     }
     cost.cpu_avg_pct = pct(used, now.at_ns - from);
     cost.avg_secs = ((now.at_ns - from) as f64 / 1e9).round() as u32;
-    cost.top_child = now
-        .procs
-        .iter()
-        .filter(|(pid, _)| **pid != now.root)
-        .max_by_key(|(_, p)| p.usage.footprint)
-        .map(|(&pid, p)| ProcessCost {
-            name: p.name.clone(),
-            pid,
-            mem_bytes: p.usage.footprint,
-            cpu_pct: own_pct(prev, now, pid, p),
-            ..Default::default()
-        });
+    cost.top_child = now.procs.iter().filter(|(pid, _)| **pid != now.root).max_by_key(|(_, p)| p.usage.footprint).map(|(&pid, p)| ProcessCost {
+        name: p.name.clone(),
+        pid,
+        mem_bytes: p.usage.footprint,
+        cpu_pct: own_pct(prev, now, pid, p),
+        ..Default::default()
+    });
     cost.builds = builds(prev, now);
     cost
 }
@@ -200,14 +191,7 @@ fn builds(prev: &Sample, now: &Sample) -> Vec<ProcessCost> {
             } else {
                 pct(used_between(&Sample { root: top, at_ns: prev.at_ns, procs: a }, &Sample { root: top, at_ns: now.at_ns, procs: b.clone() }), now.at_ns - prev.at_ns)
             };
-            ProcessCost {
-                name: crate::procs::label(top, &p.name),
-                pid: top,
-                mem_bytes: b.values().map(|q| q.usage.footprint).sum(),
-                cpu_pct: cpu,
-                background: p.apart,
-                ..Default::default()
-            }
+            ProcessCost { name: crate::procs::label(top, &p.name), pid: top, mem_bytes: b.values().map(|q| q.usage.footprint).sum(), cpu_pct: cpu, background: p.apart, ..Default::default() }
         })
         .collect();
     out.sort_by(|x, y| y.cpu_pct.total_cmp(&x.cpu_pct).then(x.pid.cmp(&y.pid)));
@@ -356,10 +340,7 @@ mod tests {
     #[test]
     fn measures_a_real_tree() {
         // A shell running a busy job in its own process group (`set -m`), and a sleeper.
-        let mut sh = std::process::Command::new("/bin/sh")
-            .args(["-c", "set -m; (while :; do :; done) & sleep 30 & wait"])
-            .spawn()
-            .unwrap();
+        let mut sh = std::process::Command::new("/bin/sh").args(["-c", "set -m; (while :; do :; done) & sleep 30 & wait"]).spawn().unwrap();
         let root = sh.id();
         std::thread::sleep(Duration::from_millis(300));
         let costs = Costs::default();

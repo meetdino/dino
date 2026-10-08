@@ -31,9 +31,7 @@ fn cache_path() -> Option<PathBuf> {
     if let Some(p) = tests::CACHE.lock().unwrap().clone() {
         return Some(p);
     }
-    let home = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")));
+    let home = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")));
     home.map(|h| h.join("models_cache.json"))
 }
 

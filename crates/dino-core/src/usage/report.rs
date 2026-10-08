@@ -574,7 +574,11 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
         let a = agents.entry(r.agent.clone()).or_insert_with(|| (AgentUse { agent: r.agent.clone(), ..Default::default() }, HashSet::new(), HashSet::new(), HashMap::new()));
         a.0.tokens.add(&r);
         a.0.requests += 1;
-        if r.proxied { a.0.proxied += 1 } else { a.0.recorded += 1 }
+        if r.proxied {
+            a.0.proxied += 1
+        } else {
+            a.0.recorded += 1
+        }
         a.0.last_ms = a.0.last_ms.max(r.ts);
         if !a.1.contains(&key) {
             a.1.insert(key.clone());
@@ -681,11 +685,13 @@ pub fn report(store: &Store, range: Range, now_ms: i64) -> anyhow::Result<Report
     totals.active_days = range_days.len() as u64;
     totals.most_active_day = range_days.iter().filter_map(|d| per_day.get(d)).max_by_key(|d| d.tokens).cloned();
     totals.peak_hour = hours.iter().filter(|h| h.requests > 0).max_by_key(|h| h.requests).map(|h| h.hour);
-    totals.longest_session = sessions
-        .values()
-        .filter(|s| s.busy > 0)
-        .max_by_key(|s| s.busy)
-        .map(|s| LongestSession { agent: s.agent.clone(), conversation: s.conversation.clone(), cwd: s.cwd.clone(), ms: s.busy, started_ms: s.first });
+    totals.longest_session = sessions.values().filter(|s| s.busy > 0).max_by_key(|s| s.busy).map(|s| LongestSession {
+        agent: s.agent.clone(),
+        conversation: s.conversation.clone(),
+        cwd: s.cwd.clone(),
+        ms: s.busy,
+        started_ms: s.first,
+    });
 
     let total_tokens = totals.tokens.total.max(1) as f64;
     let mut models: Vec<Model> = models.into_values().collect();
@@ -872,9 +878,7 @@ mod tests {
         let t = noon(now, 0);
         s.add_calls(&[call(t, "7", Some("c1"), "opus", 100), call(t + 60_000, "7", Some("c1"), "opus", 200)]).unwrap();
         // The same two answers in the transcript, and one from days later outside dino.
-        let n = s
-            .add_used(&[("claude", used("a", t + 2000, "c1", 100)), ("claude", used("b", t + 62_000, "c1", 200)), ("claude", used("c", noon(now, 3), "c1", 50))])
-            .unwrap();
+        let n = s.add_used(&[("claude", used("a", t + 2000, "c1", 100)), ("claude", used("b", t + 62_000, "c1", 200)), ("claude", used("c", noon(now, 3), "c1", 50))]).unwrap();
         assert_eq!(n, 3);
         // Read again: nothing new.
         assert_eq!(s.add_used(&[("claude", used("a", t + 2000, "c1", 100))]).unwrap(), 0);

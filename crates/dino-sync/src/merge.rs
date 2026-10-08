@@ -59,10 +59,13 @@ impl Store {
 
     /// Applies a batch, returning the ids that changed.
     pub fn apply_all(&mut self, incoming: impl IntoIterator<Item = Record>) -> Vec<RecordId> {
-        incoming.into_iter().filter_map(|r| {
-            let id = r.id.clone();
-            self.apply(r).then_some(id)
-        }).collect()
+        incoming
+            .into_iter()
+            .filter_map(|r| {
+                let id = r.id.clone();
+                self.apply(r).then_some(id)
+            })
+            .collect()
     }
 
     /// `apply`, for a record from elsewhere: refused when it's stamped further ahead of `now_ms`

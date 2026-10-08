@@ -17,9 +17,7 @@ use crate::limits;
 use crate::oauth::{self, tokens};
 
 pub fn routes(push: bool) -> Router<AppState> {
-    Router::new()
-        .route("/me", get(me))
-        .merge(sync::routes(push))
+    Router::new().route("/me", get(me)).merge(sync::routes(push))
 }
 
 /// A request made with a live dino access token.

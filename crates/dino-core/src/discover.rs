@@ -53,7 +53,9 @@ pub fn setup(id: &str) -> Setup {
         _ => ("", None, None),
     };
     let sign_in_note = match id {
-        "pi" => Some("Pi has no models of its own. Sign in to an AI provider you already use, with your account or an API key: click Sign In, then type /login in Pi. Or run Pi on a provider from Settings → Models & Providers."),
+        "pi" => Some(
+            "Pi has no models of its own. Sign in to an AI provider you already use, with your account or an API key: click Sign In, then type /login in Pi. Or run Pi on a provider from Settings → Models & Providers.",
+        ),
         "copilot" => Some("Copilot CLI runs on your GitHub account's Copilot plan (Copilot Free included). It also uses the GitHub CLI's sign-in when there is one."),
         _ => None,
     };
@@ -199,7 +201,10 @@ pub fn version_of(bin: &Path) -> Option<String> {
             let out = child.wait_with_output().ok()?;
             let text = String::from_utf8_lossy(&out.stdout);
             // "GitHub Copilot CLI 1.0.91." ends its sentence.
-            return text.split_whitespace().find(|w| w.trim_start_matches('v').starts_with(|c: char| c.is_ascii_digit())).map(|v| v.trim_start_matches('v').trim_end_matches(['.', ',']).to_string());
+            return text
+                .split_whitespace()
+                .find(|w| w.trim_start_matches('v').starts_with(|c: char| c.is_ascii_digit()))
+                .map(|v| v.trim_start_matches('v').trim_end_matches(['.', ',']).to_string());
         }
         std::thread::sleep(Duration::from_millis(100));
     }

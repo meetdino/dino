@@ -18,7 +18,14 @@ const PER_HOUR: i64 = 5;
 pub fn normalize(email: &str) -> Option<String> {
     let e = email.trim().to_lowercase();
     let (local, domain) = e.split_once('@')?;
-    (e.len() <= 254 && !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.') && !e.chars().any(|c| c.is_whitespace() || c.is_control()) && !domain.contains('@')).then_some(e)
+    (e.len() <= 254
+        && !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !e.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !domain.contains('@'))
+    .then_some(e)
 }
 
 fn mac(state: &AppState, email: &str, code: &str) -> [u8; 32] {

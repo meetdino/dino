@@ -37,11 +37,7 @@ impl Layers {
         drop_ins.sort();
         drop_ins.reverse();
         drop_ins.push(managed_dir.join("managed-settings.json"));
-        let rest = vec![
-            project.join(".claude/settings.local.json"),
-            project.join(".claude/settings.json"),
-            config.join("settings.json"),
-        ];
+        let rest = vec![project.join(".claude/settings.local.json"), project.join(".claude/settings.json"), config.join("settings.json")];
         Self { managed: drop_ins, rest }
     }
 
@@ -110,7 +106,14 @@ pub const HOOKS_FLAG: &str = "--hooks";
 /// Where the HTTP hooks in Claude settings `json` report (all to one place, see `hook_settings`).
 fn hooks_url(json: &str) -> Option<String> {
     let v: Value = serde_json::from_str(json).ok()?;
-    v["hooks"].as_object()?.values().flat_map(|e| e.as_array().into_iter().flatten()).flat_map(|m| m["hooks"].as_array().into_iter().flatten()).find(|h| h["type"] == "http").and_then(|h| h["url"].as_str()).map(String::from)
+    v["hooks"]
+        .as_object()?
+        .values()
+        .flat_map(|e| e.as_array().into_iter().flatten())
+        .flat_map(|m| m["hooks"].as_array().into_iter().flatten())
+        .find(|h| h["type"] == "http")
+        .and_then(|h| h["url"].as_str())
+        .map(String::from)
 }
 
 /// `dino statusline [<hook_url> | --hooks <settings file>]`: pass what Claude Code gives the

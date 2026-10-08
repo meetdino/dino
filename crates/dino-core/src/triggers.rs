@@ -197,13 +197,7 @@ pub fn comments(list: &Value, repo: &str, phrase: &str, since: u64) -> Vec<Event
             ];
             let kind = if c["pull_request_url"].is_string() { "r" } else { "" };
             let line = body.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
-            event(
-                TriggerKind::Comment,
-                format!("comment:{repo}:{kind}{}", s(&c["id"])),
-                format!("{} on #{n}: {}", s(&c["user"]["login"]), crate::schedule::shorten(line, 80)),
-                &url,
-                fields,
-            )
+            event(TriggerKind::Comment, format!("comment:{repo}:{kind}{}", s(&c["id"])), format!("{} on #{n}: {}", s(&c["user"]["login"]), crate::schedule::shorten(line, 80)), &url, fields)
         })
         .collect();
     // Asked for newest first; run oldest first.

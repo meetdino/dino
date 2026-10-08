@@ -21,7 +21,8 @@ pub(crate) fn serve(d: &Arc<Daemon>, action: &str, value: Option<String>, accoun
     match action {
         "status" => {}
         "add" => {
-            let t = token::find(value.as_deref().unwrap_or_default()).ok_or_else(|| anyhow::anyhow!("that isn't a Claude token: paste the one claude setup-token printed (it starts with sk-ant-oat)"))?;
+            let t =
+                token::find(value.as_deref().unwrap_or_default()).ok_or_else(|| anyhow::anyhow!("that isn't a Claude token: paste the one claude setup-token printed (it starts with sk-ant-oat)"))?;
             added = Some(add(d, &t)?);
         }
         "create" => {
@@ -100,9 +101,7 @@ fn rows(accounts: impl Iterator<Item = (u32, Option<Limited>, Option<Quota>)>) -
                 spent: spent.is_some(),
                 resets_at: spent.as_ref().and_then(|l| l.resets_at),
                 retry_at: spent.as_ref().map(|l| l.retry_at),
-                windows: quota
-                    .map(|q| q.windows.into_iter().map(|(name, w)| WindowInfo { name, utilization: w.utilization, resets_at: w.resets_at }).collect())
-                    .unwrap_or_default(),
+                windows: quota.map(|q| q.windows.into_iter().map(|(name, w)| WindowInfo { name, utilization: w.utilization, resets_at: w.resets_at }).collect()).unwrap_or_default(),
             }
         })
         .collect()

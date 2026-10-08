@@ -45,9 +45,7 @@ pub const CHANNEL: &str = "dino_sync";
 /// `push`: serve `/sync/ws`. Without it the route isn't there, and `/v1/meta` tells devices to look
 /// on their own.
 pub fn routes(push: bool) -> Router<AppState> {
-    let r = Router::new()
-        .route("/meta", get(meta))
-        .route("/sync", get(pull).post(push_records).layer(DefaultBodyLimit::max(8 * 1024 * 1024)));
+    let r = Router::new().route("/meta", get(meta)).route("/sync", get(pull).post(push_records).layer(DefaultBodyLimit::max(8 * 1024 * 1024)));
     if push { r.route("/sync/ws", get(ws)) } else { r }
 }
 
@@ -231,7 +229,6 @@ async fn notify(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, account: Uuid, n
     sqlx::query("SELECT pg_notify($1, $2)").bind(CHANNEL).bind(payload).execute(&mut **tx).await?;
     Ok(())
 }
-
 
 /// Connected devices on this node, by account. Nudges are hints (a device also pulls on wake and
 /// every few minutes), so a slow socket just misses some rather than holding anything up.

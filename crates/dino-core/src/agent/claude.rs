@@ -53,23 +53,96 @@ fn bypass_ready(config: &Path, managed: &Path, cwd: &Path) -> bool {
 /// Claude Code's command line (`claude --help`, 2.1), for finding a prompt in it.
 const CLI: super::Cli = super::Cli {
     value: &[
-        "--agent", "--agents", "--append-system-prompt", "--append-system-prompt-file", "--autocompact", "--debug-file", "--effort", "--environment",
-        "--fallback-model", "--input-format", "--json-schema", "--max-budget-usd", "--max-turns", "--model", "-n", "--name", "--output-format",
-        "--permission-mode", "--permission-prompts", "--permission-prompt-tool", "--plugin-dir", "--plugin-url", "--remote-control-session-name-prefix",
-        "--session-id", "--setting-sources", "--settings", "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot",
+        "--agent",
+        "--agents",
+        "--append-system-prompt",
+        "--append-system-prompt-file",
+        "--autocompact",
+        "--debug-file",
+        "--effort",
+        "--environment",
+        "--fallback-model",
+        "--input-format",
+        "--json-schema",
+        "--max-budget-usd",
+        "--max-turns",
+        "--model",
+        "-n",
+        "--name",
+        "--output-format",
+        "--permission-mode",
+        "--permission-prompts",
+        "--permission-prompt-tool",
+        "--plugin-dir",
+        "--plugin-url",
+        "--remote-control-session-name-prefix",
+        "--session-id",
+        "--setting-sources",
+        "--settings",
+        "--system-prompt",
+        "--system-prompt-file",
+        "--system-prompt-snapshot",
     ],
     optional: &["--cloud", "-d", "--debug", "--from-pr", "--prompt-suggestions", "--remote-control", "-r", "--resume", "--teleport", "-w", "--worktree"],
     variadic: &["--add-dir", "--allowedTools", "--allowed-tools", "--betas", "--disallowedTools", "--disallowed-tools", "--file", "--mcp-config", "--tools"],
     flags: &[
-        "--allow-dangerously-skip-permissions", "--ax-screen-reader", "--bg", "--background", "--bare", "--brief", "--chrome", "-c", "--continue",
-        "--dangerously-skip-permissions", "--desktop", "--disable-slash-commands", "--exclude-dynamic-system-prompt-sections", "--fork-session",
-        "--forward-subagent-text", "-h", "--help", "--ide", "--include-hook-events", "--include-partial-messages", "--no-chrome",
-        "--no-session-persistence", "-p", "--print", "--replay-user-messages", "--restricted", "--safe-mode", "--strict-mcp-config", "--tmux",
-        "--verbose", "-v", "--version",
+        "--allow-dangerously-skip-permissions",
+        "--ax-screen-reader",
+        "--bg",
+        "--background",
+        "--bare",
+        "--brief",
+        "--chrome",
+        "-c",
+        "--continue",
+        "--dangerously-skip-permissions",
+        "--desktop",
+        "--disable-slash-commands",
+        "--exclude-dynamic-system-prompt-sections",
+        "--fork-session",
+        "--forward-subagent-text",
+        "-h",
+        "--help",
+        "--ide",
+        "--include-hook-events",
+        "--include-partial-messages",
+        "--no-chrome",
+        "--no-session-persistence",
+        "-p",
+        "--print",
+        "--replay-user-messages",
+        "--restricted",
+        "--safe-mode",
+        "--strict-mcp-config",
+        "--tmux",
+        "--verbose",
+        "-v",
+        "--version",
     ],
     commands: &[
-        "agents", "attach", "auth", "auto-mode", "config", "doctor", "gateway", "import", "install", "logs", "mcp", "migrate-installer", "plugin",
-        "plugins", "purge", "respawn", "rm", "setup-token", "stop", "kill", "ultrareview", "update", "upgrade",
+        "agents",
+        "attach",
+        "auth",
+        "auto-mode",
+        "config",
+        "doctor",
+        "gateway",
+        "import",
+        "install",
+        "logs",
+        "mcp",
+        "migrate-installer",
+        "plugin",
+        "plugins",
+        "purge",
+        "respawn",
+        "rm",
+        "setup-token",
+        "stop",
+        "kill",
+        "ultrareview",
+        "update",
+        "upgrade",
     ],
 };
 
@@ -183,14 +256,8 @@ impl Agent for Claude {
     // (shift+tab to cycle)". Versions before 2.1.2xx name no mode in the default one, only "? for
     // shortcuts".
     fn screen_mode(&self, screen: &str) -> Option<String> {
-        const SAYS: &[(&str, &str)] = &[
-            ("manual mode on", "ask"),
-            ("default mode on", "ask"),
-            ("accept edits on", "edits"),
-            ("plan mode on", "plan"),
-            ("auto mode on", "auto"),
-            ("bypass permissions on", "bypass"),
-        ];
+        const SAYS: &[(&str, &str)] =
+            &[("manual mode on", "ask"), ("default mode on", "ask"), ("accept edits on", "edits"), ("plan mode on", "plan"), ("auto mode on", "auto"), ("bypass permissions on", "bypass")];
         for line in screen.lines().rev().filter(|l| !l.trim().is_empty()).take(3) {
             let t = line.trim_start();
             if let Some(rest) = t.strip_prefix("⏵⏵").or_else(|| t.strip_prefix('⏸')) {
@@ -223,11 +290,7 @@ impl Agent for Claude {
     // that warning up as every session starts, and declining it quits (seen with 2.1.291).
     fn reach_args(&self, mode: &str, cwd: &Path, config: Option<&Path>) -> Vec<String> {
         let config = config.map_or_else(claude_config::home, Path::to_path_buf);
-        if mode == "bypass" && bypass_ready(&config, Path::new(models::CLAUDE_MANAGED), cwd) {
-            strings(&["--allow-dangerously-skip-permissions"])
-        } else {
-            vec![]
-        }
+        if mode == "bypass" && bypass_ready(&config, Path::new(models::CLAUDE_MANAGED), cwd) { strings(&["--allow-dangerously-skip-permissions"]) } else { vec![] }
     }
 
     fn catalog_key(&self) -> &'static str {
@@ -287,7 +350,8 @@ impl Agent for Claude {
             ("ANTHROPIC_API_KEY".into(), String::new()),
             ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into()),
         ];
-        for var in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"] {
+        for var in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"]
+        {
             env.push((var.into(), model.into()));
         }
         Some((env, strings(&["--model", model])))
@@ -413,8 +477,26 @@ impl Agent for Claude {
             args,
             &["-p", "--print", "--output-format", "--input-format", "--sdk-url"],
             &[
-                "agents", "auth", "auto-mode", "doctor", "gateway", "import", "install", "logs", "mcp", "plugin", "plugins", "purge", "respawn", "rm", "setup-token",
-                "stop", "kill", "ultrareview", "update", "upgrade",
+                "agents",
+                "auth",
+                "auto-mode",
+                "doctor",
+                "gateway",
+                "import",
+                "install",
+                "logs",
+                "mcp",
+                "plugin",
+                "plugins",
+                "purge",
+                "respawn",
+                "rm",
+                "setup-token",
+                "stop",
+                "kill",
+                "ultrareview",
+                "update",
+                "upgrade",
             ],
         )
     }

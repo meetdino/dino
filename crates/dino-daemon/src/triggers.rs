@@ -158,9 +158,8 @@ fn look(d: &Daemon, t: &ScheduledTask) -> anyhow::Result<Found> {
         }
         TriggerKind::CiFailed => {
             let pulls = pulls()?;
-            let pr_of = |branch: &str| {
-                pulls.as_array().into_iter().flatten().find(|p| p["head"]["ref"] == branch).map(|p| (p["number"].to_string(), p["html_url"].as_str().unwrap_or_default().to_string()))
-            };
+            let pr_of =
+                |branch: &str| pulls.as_array().into_iter().flatten().find(|p| p["head"]["ref"] == branch).map(|p| (p["number"].to_string(), p["html_url"].as_str().unwrap_or_default().to_string()));
             let mut refs: Vec<(String, String)> = vec![];
             if !t.trigger.branch.trim().is_empty() {
                 let branch = t.trigger.branch.trim();
@@ -391,14 +390,7 @@ fn not_ignored(root: &Path, files: Vec<String>) -> Vec<String> {
     if files.is_empty() {
         return files;
     }
-    let child = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["check-ignore", "--stdin", "-z"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
+    let child = Command::new("git").arg("-C").arg(root).args(["check-ignore", "--stdin", "-z"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
     let Ok(mut child) = child else { return files };
     let input: Vec<u8> = files.iter().flat_map(|f| f.bytes().chain([0])).collect();
     // Written from a thread: a long list could fill both pipes at once.

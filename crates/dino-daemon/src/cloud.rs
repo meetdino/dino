@@ -86,7 +86,13 @@ fn stored(name: &str) -> Option<String> {
 }
 
 fn token_post(server: &str, fields: &[(&str, String)]) -> anyhow::Result<Value> {
-    let r = http().post(format!("{server}/oauth/token")).header("content-type", "application/x-www-form-urlencoded").header("accept", "application/json").timeout(Duration::from_secs(20)).body(form(fields)).send()?;
+    let r = http()
+        .post(format!("{server}/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("accept", "application/json")
+        .timeout(Duration::from_secs(20))
+        .body(form(fields))
+        .send()?;
     let status = r.status();
     let v: Value = r.json().unwrap_or(Value::Null);
     if !status.is_success() {
@@ -111,9 +117,20 @@ fn tokens(v: &Value) -> anyhow::Result<Tokens> {
 /// What the server shows for this Mac on its devices page.
 fn device_fields() -> Vec<(&'static str, String)> {
     #[cfg(target_os = "macos")]
-    let name = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Mac".into());
+    let name = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "Mac".into());
     #[cfg(target_os = "macos")]
-    let os = std::process::Command::new("sw_vers").arg("-productVersion").output().ok().map(|o| format!("macOS {}", String::from_utf8_lossy(&o.stdout).trim())).unwrap_or_else(|| "macOS".into());
+    let os = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .map(|o| format!("macOS {}", String::from_utf8_lossy(&o.stdout).trim()))
+        .unwrap_or_else(|| "macOS".into());
     // Linux: the host name, and the distribution as os-release names it.
     #[cfg(not(target_os = "macos"))]
     let name = std::fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Linux".into());
@@ -234,7 +251,9 @@ fn wait_for_code(listener: &std::net::TcpListener, state: &str, server: &str) ->
         std::io::BufReader::new(&stream).read_line(&mut line)?;
         let target = line.split_whitespace().nth(1).unwrap_or("");
         let reply = |code: &str, title: &str, body: &str| {
-            let page = format!("<!doctype html><meta charset=utf-8><title>{title}</title><body style=\"font:15px -apple-system,sans-serif;margin:15vh auto;max-width:28em;text-align:center\"><h2>{title}</h2><p>{body}</p>");
+            let page = format!(
+                "<!doctype html><meta charset=utf-8><title>{title}</title><body style=\"font:15px -apple-system,sans-serif;margin:15vh auto;max-width:28em;text-align:center\"><h2>{title}</h2><p>{body}</p>"
+            );
             let _ = (&stream).write_all(format!("HTTP/1.1 {code}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len()).as_bytes());
         };
         let Some(query) = target.strip_prefix("/callback?") else {
@@ -319,7 +338,12 @@ pub fn send(server: &str, method: reqwest::Method, path: &str, body: &Value) -> 
 /// Sign this Mac out at the server (its tokens stop working), then here.
 pub fn logout(server: &str) {
     if let Some(rt) = stored(REFRESH_KEY) {
-        let _ = http().post(format!("{server}/oauth/revoke")).header("content-type", "application/x-www-form-urlencoded").timeout(Duration::from_secs(5)).body(form(&[("token", rt), ("client_id", CLIENT.into())])).send();
+        let _ = http()
+            .post(format!("{server}/oauth/revoke"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .timeout(Duration::from_secs(5))
+            .body(form(&[("token", rt), ("client_id", CLIENT.into())]))
+            .send();
     }
     forget_tokens();
 }
@@ -343,7 +367,11 @@ pub fn meta(server: &str) -> anyhow::Result<Meta> {
 
 /// The nudge socket, as a WebSocket URL.
 pub fn ws_url(server: &str) -> String {
-    let base = server.strip_prefix("https://").map(|r| format!("wss://{r}")).or_else(|| server.strip_prefix("http://").map(|r| format!("ws://{r}"))).unwrap_or_else(|| server.to_string());
+    let base = server
+        .strip_prefix("https://")
+        .map(|r| format!("wss://{r}"))
+        .or_else(|| server.strip_prefix("http://").map(|r| format!("ws://{r}")))
+        .unwrap_or_else(|| server.to_string());
     format!("{base}/v1/sync/ws")
 }
 

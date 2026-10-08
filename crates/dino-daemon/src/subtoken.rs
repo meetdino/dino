@@ -130,12 +130,7 @@ fn create(d: &Arc<Daemon>) -> anyhow::Result<()> {
 /// A shell that runs `claude setup-token`, in front of the user: they sign in in the browser, and
 /// when the token shows up dinod hands it to `keep` and closes the shell, so it doesn't stay on
 /// screen. `state` says meanwhile which shell it is, and after, what went wrong.
-pub(crate) fn setup_token_shell(
-    d: &Arc<Daemon>,
-    label: &str,
-    state: &'static Mutex<State>,
-    keep: impl FnOnce(&str) -> anyhow::Result<()> + Send + 'static,
-) -> anyhow::Result<()> {
+pub(crate) fn setup_token_shell(d: &Arc<Daemon>, label: &str, state: &'static Mutex<State>, keep: impl FnOnce(&str) -> anyhow::Result<()> + Send + 'static) -> anyhow::Result<()> {
     anyhow::ensure!(dino_core::which("claude").is_some(), "Claude Code isn't installed: install it first (Settings → Agents)");
     if let Some(open) = state.lock().unwrap().creating.clone() {
         if d.sessions.lock().unwrap().iter().any(|s| s.id == open && !s.pane.is_exited()) {

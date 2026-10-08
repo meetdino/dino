@@ -28,7 +28,16 @@ async fn meta_tells_devices_to_poll_and_there_is_no_socket() {
     s.email_signin(&b, "poll@example.com").await;
     let t = s.native_login(&b, "dino", "Mac A").await;
     let at = t["access_token"].as_str().unwrap();
-    let r = app().get(s.url("/v1/sync/ws")).bearer_auth(at).header("connection", "upgrade").header("upgrade", "websocket").header("sec-websocket-version", "13").header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==").send().await.unwrap();
+    let r = app()
+        .get(s.url("/v1/sync/ws"))
+        .bearer_auth(at)
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 404, "no socket without push");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(listening(&s).await, 0, "nothing LISTENs");
@@ -50,10 +59,26 @@ async fn sync_works_by_request_alone() {
     let mut clock = Clock::new(device.clone());
     let rec = Record { id: RecordId::new("agents", "claude.mode"), hlc: clock.now(now_ms()), schema: 1, value: json!("plan"), deleted: false, seq: None, extra: Map::new() };
     let req = PushRequest { device_id: device, records: vec![rec], extra: Map::new() };
-    let r = app().post(s.url("/v1/sync")).bearer_auth(ta["access_token"].as_str().unwrap()).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).json(&req).send().await.unwrap();
+    let r = app()
+        .post(s.url("/v1/sync"))
+        .bearer_auth(ta["access_token"].as_str().unwrap())
+        .header("dino-sync-version", dino_sync::record::PROTOCOL.to_string())
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200, "push");
 
-    let pulled: PullResponse = app().get(s.url("/v1/sync?since=0")).bearer_auth(tb["access_token"].as_str().unwrap()).header("dino-sync-version", dino_sync::record::PROTOCOL.to_string()).send().await.unwrap().json().await.unwrap();
+    let pulled: PullResponse = app()
+        .get(s.url("/v1/sync?since=0"))
+        .bearer_auth(tb["access_token"].as_str().unwrap())
+        .header("dino-sync-version", dino_sync::record::PROTOCOL.to_string())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(pulled.records.len(), 1);
     assert_eq!(pulled.records[0].value, json!("plan"));
     let counted: i64 = sqlx::query_scalar("SELECT count(*) FROM rate_counters WHERE key LIKE 'sync:%'").fetch_one(&s.state.db).await.unwrap();
@@ -64,7 +89,11 @@ async fn sync_works_by_request_alone() {
 /// by, places it) has under `room` seconds left, until the next one starts: attempts made from
 /// here on are all counted in one window, not reset partway by a new one.
 async fn fresh_window(s: &Server, window: f64, room: f64) {
-    let left: f64 = sqlx::query_scalar("SELECT $1 - (extract(epoch FROM now())::float8 - floor(extract(epoch FROM now())::float8 / $1) * $1)").bind(window).fetch_one(&s.state.db).await.unwrap();
+    let left: f64 = sqlx::query_scalar("SELECT $1 - (extract(epoch FROM now())::float8 - floor(extract(epoch FROM now())::float8 / $1) * $1)")
+        .bind(window)
+        .fetch_one(&s.state.db)
+        .await
+        .unwrap();
     if left < room {
         tokio::time::sleep(std::time::Duration::from_secs_f64(left + 0.05)).await;
     }

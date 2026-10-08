@@ -149,8 +149,27 @@ fn values_a_newer_dino_shapes_differently_are_skipped() {
 fn repo_variables_that_run_code_never_sync() {
     let remote = "git@github.com:acme/api.git";
     let hostile = [
-        "NODE_OPTIONS", "BASH_ENV", "GIT_SSH_COMMAND", "GIT_CONFIG_COUNT", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "PATH", "PYTHONSTARTUP", "PERL5OPT", "RUBYOPT",
-        "ZDOTDIR", "ENV", "PROMPT_COMMAND", "node_options", "Path", "ANTHROPIC_BASE_URL", "HTTPS_PROXY", "BASH_FUNC_ls%%", "A=B", "1X", "",
+        "NODE_OPTIONS",
+        "BASH_ENV",
+        "GIT_SSH_COMMAND",
+        "GIT_CONFIG_COUNT",
+        "DYLD_INSERT_LIBRARIES",
+        "LD_PRELOAD",
+        "PATH",
+        "PYTHONSTARTUP",
+        "PERL5OPT",
+        "RUBYOPT",
+        "ZDOTDIR",
+        "ENV",
+        "PROMPT_COMMAND",
+        "node_options",
+        "Path",
+        "ANTHROPIC_BASE_URL",
+        "HTTPS_PROXY",
+        "BASH_FUNC_ls%%",
+        "A=B",
+        "1X",
+        "",
     ];
     for var in hostile {
         assert!(!syncable_env(var), "{var} must not sync");

@@ -18,11 +18,23 @@ use crate::worktree::DiffStat;
 pub enum Frequency {
     /// Only when the user asks (Run now).
     Manual,
-    Hourly { minute: u8 },
-    Daily { hour: u8, minute: u8 },
+    Hourly {
+        minute: u8,
+    },
+    Daily {
+        hour: u8,
+        minute: u8,
+    },
     /// Monday to Friday.
-    Weekdays { hour: u8, minute: u8 },
-    Weekly { weekday: u8, hour: u8, minute: u8 },
+    Weekdays {
+        hour: u8,
+        minute: u8,
+    },
+    Weekly {
+        weekday: u8,
+        hour: u8,
+        minute: u8,
+    },
 }
 
 impl Default for Frequency {
@@ -562,8 +574,11 @@ mod tests {
     fn commands_get_values_as_words() {
         let f: BTreeMap<String, String> = [("comment.body".to_string(), "hi'; rm -rf ~ #\n$(x)".to_string())].into();
         let cmd = fill_command("echo {comment.body}", &f);
-        assert_eq!(cmd, r#"echo 'hi'\''; rm -rf ~ #
-$(x)'"#);
+        assert_eq!(
+            cmd,
+            r#"echo 'hi'\''; rm -rf ~ #
+$(x)'"#
+        );
         let out = std::process::Command::new("/bin/sh").arg("-c").arg(&cmd).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hi'; rm -rf ~ #\n$(x)\n");
     }

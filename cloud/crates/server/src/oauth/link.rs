@@ -39,9 +39,7 @@ pub async fn send(s: &AppState, device_hash: &[u8], device_name: &str, email: &s
         .execute(&s.db)
         .await?;
     let link = s.cfg.url(&format!("/login/{token}"));
-    let text = format!(
-        "Sign in to dino on {device_name}:\n\n{link}\n\nThe link works once, for 15 minutes. If you didn't ask for it, ignore this email: nobody can sign in without it."
-    );
+    let text = format!("Sign in to dino on {device_name}:\n\n{link}\n\nThe link works once, for 15 minutes. If you didn't ask for it, ignore this email: nobody can sign in without it.");
     s.mailer.send_html(email, "Sign in to dino", &text, Some(&html_mail(&link, device_name))).await.map_err(|e| Error::Internal(e.context("sending the sign-in link")))?;
     metrics::counter!("email_links_sent_total").increment(1);
     Ok(())
@@ -89,14 +87,18 @@ pub async fn page(State(s): State<AppState>, ClientIp(ip): ClientIp, Path(token)
     if used {
         return Ok(gone(&s));
     }
-    Ok(pages::layout(&s, "Sign in", html! {
-        h1 { "Sign in to dino on " (device) "?" }
-        p { "As " strong { (email) } "." }
-        form method="post" action=(format!("/login/{token}")) class="stack" {
-            button.primary type="submit" { "Sign in" }
-        }
-        p.muted { "Only continue if you just asked dino to sign in." }
-    })
+    Ok(pages::layout(
+        &s,
+        "Sign in",
+        html! {
+            h1 { "Sign in to dino on " (device) "?" }
+            p { "As " strong { (email) } "." }
+            form method="post" action=(format!("/login/{token}")) class="stack" {
+                button.primary type="submit" { "Sign in" }
+            }
+            p.muted { "Only continue if you just asked dino to sign in." }
+        },
+    )
     .into_response())
 }
 

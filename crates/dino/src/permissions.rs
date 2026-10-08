@@ -29,17 +29,22 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     if !args.is_empty() {
-        println!("usage: dino permissions [--json]\n\nWhat macOS lets programs here do. In a dino terminal they get dino's permissions; Settings → General → Permissions in the dino app asks for them.");
+        println!(
+            "usage: dino permissions [--json]\n\nWhat macOS lets programs here do. In a dino terminal they get dino's permissions; Settings → General → Permissions in the dino app asks for them."
+        );
         return Ok(());
     }
     let rows: Vec<(&str, String)> = checked
         .iter()
         .map(|(_, name, ok)| {
-            (*name, match ok {
-                Some(true) => "allowed".to_string(),
-                Some(false) => "not allowed".into(),
-                None => "unknown".into(),
-            })
+            (
+                *name,
+                match ok {
+                    Some(true) => "allowed".to_string(),
+                    Some(false) => "not allowed".into(),
+                    None => "unknown".into(),
+                },
+            )
         })
         .collect();
     print!("{}", crate::out::fields(&rows));

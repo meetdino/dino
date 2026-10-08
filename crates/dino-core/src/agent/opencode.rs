@@ -126,18 +126,12 @@ fn first_prompt(c: &Connection, session: &str) -> Option<String> {
 /// A message's parts, in order.
 fn parts(c: &Connection, message: &str) -> Vec<Value> {
     let Ok(mut stmt) = c.prepare("select data from part where message_id = ?1 order by id") else { return vec![] };
-    stmt.query_map(params![message], |r| r.get::<_, String>(0))
-        .map(|rows| rows.flatten().filter_map(|d| serde_json::from_str(&d).ok()).collect())
-        .unwrap_or_default()
+    stmt.query_map(params![message], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().filter_map(|d| serde_json::from_str(&d).ok()).collect()).unwrap_or_default()
 }
 
 /// What the person typed in a message: its text parts, but those OpenCode added itself.
 fn typed_text(parts: &[Value]) -> Option<String> {
-    let text: Vec<&str> = parts
-        .iter()
-        .filter(|p| p["type"] == "text" && p["synthetic"] != true && p["ignored"] != true)
-        .filter_map(|p| p["text"].as_str())
-        .collect();
+    let text: Vec<&str> = parts.iter().filter(|p| p["type"] == "text" && p["synthetic"] != true && p["ignored"] != true).filter_map(|p| p["text"].as_str()).collect();
     let text = text.join("\n");
     history::typed(&text).map(String::from)
 }
@@ -167,8 +161,29 @@ const PROCESS_NAMES: &[&str] = &["opencode", "opencode.exe"];
 
 /// Its commands other than its terminal UI: they aren't a conversation someone is in.
 const COMMANDS: &[&str] = &[
-    "completion", "acp", "mcp", "attach", "run", "debug", "providers", "auth", "agent", "upgrade", "uninstall", "serve", "web", "models", "stats",
-    "export", "import", "github", "pr", "session", "plugin", "plug", "db",
+    "completion",
+    "acp",
+    "mcp",
+    "attach",
+    "run",
+    "debug",
+    "providers",
+    "auth",
+    "agent",
+    "upgrade",
+    "uninstall",
+    "serve",
+    "web",
+    "models",
+    "stats",
+    "export",
+    "import",
+    "github",
+    "pr",
+    "session",
+    "plugin",
+    "plug",
+    "db",
 ];
 
 /// Arguments (after the program) that run its terminal UI.
@@ -560,9 +575,7 @@ impl Agent for OpenCode {
             "message.part.updated" if p["part"]["type"] == "tool" => {
                 let part = &p["part"];
                 match (part["callID"].as_str().or(part["id"].as_str()), part["tool"].as_str()) {
-                    (Some(call), Some(name)) => {
-                        ServerEvent::Tool { call: call.into(), name: name.into(), done: matches!(part["state"]["status"].as_str(), Some("completed" | "error")) }
-                    }
+                    (Some(call), Some(name)) => ServerEvent::Tool { call: call.into(), name: name.into(), done: matches!(part["state"]["status"].as_str(), Some("completed" | "error")) },
                     _ => ServerEvent::Other,
                 }
             }
@@ -578,12 +591,7 @@ impl Agent for OpenCode {
     fn server_snapshot_events(&self, path: &str, answer: &Value) -> Vec<ServerEvent> {
         let as_event = |kind: &str, properties: &Value| self.server_event(&json!({ "type": kind, "properties": properties }));
         match path {
-            "/session/status" => answer
-                .as_object()
-                .into_iter()
-                .flatten()
-                .map(|(session, status)| as_event("session.status", &json!({ "sessionID": session, "status": status })))
-                .collect(),
+            "/session/status" => answer.as_object().into_iter().flatten().map(|(session, status)| as_event("session.status", &json!({ "sessionID": session, "status": status }))).collect(),
             "/permission" => answer.as_array().into_iter().flatten().map(|p| as_event("permission.asked", p)).collect(),
             "/question" => answer.as_array().into_iter().flatten().map(|q| as_event("question.asked", q)).collect(),
             _ => vec![],
@@ -602,9 +610,7 @@ impl Agent for OpenCode {
 
     fn is_conversation(&self, session: &str) -> bool {
         // A subagent's session has a parent; one not in the store yet is the one being started.
-        store().is_none_or(|c| {
-            c.query_row("select parent_id from session where id = ?1", params![session], |r| r.get::<_, Option<String>>(0)).map_or(true, |p| p.is_none())
-        })
+        store().is_none_or(|c| c.query_row("select parent_id from session where id = ?1", params![session], |r| r.get::<_, Option<String>>(0)).map_or(true, |p| p.is_none()))
     }
 
     fn turn_now(&self, session: &str, _since: u64) -> Option<bool> {
@@ -612,11 +618,7 @@ impl Agent for OpenCode {
     }
 
     fn new_conversation(&self, cwd: &Path, since: u64, claimed: &[String]) -> Option<String> {
-        sessions_in(&store()?, cwd)
-            .into_iter()
-            .filter(|r| r.created / 1000 + 1 >= since && !claimed.contains(&r.id))
-            .min_by_key(|r| r.created)
-            .map(|r| r.id)
+        sessions_in(&store()?, cwd).into_iter().filter(|r| r.created / 1000 + 1 >= since && !claimed.contains(&r.id)).min_by_key(|r| r.created).map(|r| r.id)
     }
 
     fn busy(&self, pid: u32) -> Option<bool> {
@@ -772,7 +774,8 @@ fn usage_from(c: &Connection, since: i64) -> (Vec<crate::usage::Used>, i64) {
         if v["role"] != "assistant" || !v["time"]["completed"].is_number() || !t.is_object() {
             continue;
         }
-        let used = crate::usage::Used { undated: false,
+        let used = crate::usage::Used {
+            undated: false,
             id,
             at_ms: v["time"]["created"].as_i64().unwrap_or(created),
             conversation,
@@ -831,7 +834,8 @@ mod tests {
         assert_eq!(turn_in(&c, "ses_a"), Some(false), "answered");
         c.execute(r#"insert into message values ('msg_5', 'ses_a', 102000, '{"role":"user"}')"#, []).unwrap();
         assert_eq!(turn_in(&c, "ses_a"), Some(true), "asked again");
-        c.execute(r#"insert into message values ('msg_6', 'ses_a', 102100, '{"role":"assistant","error":{"name":"MessageAbortedError"},"time":{"created":102100}}')"#, []).unwrap();
+        c.execute(r#"insert into message values ('msg_6', 'ses_a', 102100, '{"role":"assistant","error":{"name":"MessageAbortedError"},"time":{"created":102100}}')"#, [])
+            .unwrap();
         assert_eq!(turn_in(&c, "ses_a"), Some(false), "interrupted");
         assert_eq!(turn_in(&c, "nope"), None);
     }
@@ -863,7 +867,9 @@ mod tests {
         assert_eq!(ev(r#"{"type":"session.status","properties":{"sessionID":"ses_a","status":{"type":"retry","attempt":1,"message":"rate limited","next":5}}}"#), ServerEvent::Busy("ses_a".into()));
         assert_eq!(ev(r#"{"type":"session.status","properties":{"sessionID":"ses_a","status":{"type":"idle"}}}"#), ServerEvent::Idle("ses_a".into()));
         // As OpenCode 1.18.34 sent it.
-        let asked = ev(r#"{"type":"permission.asked","properties":{"id":"per_1","sessionID":"ses_a","permission":"read","patterns":["Users/x/p/.env"],"metadata":{},"always":["*"],"tool":{"messageID":"msg_1","callID":"call_1"}}}"#);
+        let asked = ev(
+            r#"{"type":"permission.asked","properties":{"id":"per_1","sessionID":"ses_a","permission":"read","patterns":["Users/x/p/.env"],"metadata":{},"always":["*"],"tool":{"messageID":"msg_1","callID":"call_1"}}}"#,
+        );
         assert_eq!(asked, ServerEvent::Asked { id: "per_1".into(), session: "ses_a".into(), what: "read .env".into() });
         let bash = ev(r#"{"type":"permission.asked","properties":{"id":"per_2","sessionID":"ses_a","permission":"bash","patterns":["rm -rf build/"]}}"#);
         assert_eq!(bash, ServerEvent::Asked { id: "per_2".into(), session: "ses_a".into(), what: "bash rm -rf build/".into() });
@@ -871,7 +877,9 @@ mod tests {
         let q = ev(r#"{"type":"question.asked","properties":{"id":"que_1","sessionID":"ses_a","questions":[{"question":"Which database?","header":"Database","options":[]}]}}"#);
         assert_eq!(q, ServerEvent::Asked { id: "que_1".into(), session: "ses_a".into(), what: "Database".into() });
         assert_eq!(ev(r#"{"type":"question.rejected","properties":{"sessionID":"ses_a","requestID":"que_1"}}"#), ServerEvent::Answered("que_1".into()));
-        let ctx = ev(r#"{"type":"message.updated","properties":{"sessionID":"ses_a","info":{"role":"assistant","sessionID":"ses_a","providerID":"anthropic","modelID":"claude-x","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":1000,"write":20}}}}}"#);
+        let ctx = ev(
+            r#"{"type":"message.updated","properties":{"sessionID":"ses_a","info":{"role":"assistant","sessionID":"ses_a","providerID":"anthropic","modelID":"claude-x","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":1000,"write":20}}}}}"#,
+        );
         assert_eq!(ctx, ServerEvent::Context { session: "ses_a".into(), model: "anthropic/claude-x".into(), used: 1035 });
         assert_eq!(ev(r#"{"type":"message.part.delta","properties":{}}"#), ServerEvent::Other);
         let busy = o.server_snapshot_events("/session/status", &json!({"ses_a": {"type": "busy"}}));

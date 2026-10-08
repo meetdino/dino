@@ -13,13 +13,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use dino_core::agent::{StatusSource, agent};
+use dino_core::controls::{self, Controls, Knobs};
 use dino_core::found::{self, FoundSession, Source};
 use dino_core::ipc::{self, LauncherInfo, QuotaInfo, Request, Response, SessionInfo, WindowInfo};
-use dino_core::controls::{self, Controls, Knobs};
 use dino_core::models::Catalog;
 use dino_core::providers::{Format, ProviderRoute, pick_format, route_path};
 use dino_core::settings::{self, Settings};
-use dino_core::agent::{StatusSource, agent};
 use dino_core::{claude_config, claude_token, detect_agents, load_keys, new_uuid, pr, proxy_wiring, ssh, trust, user_shell, worktree};
 use dino_proxy::{Activity, Proxy, SessionStats};
 use dino_term::{Pane, SpawnSpec};
@@ -40,8 +40,8 @@ mod fallbacks;
 mod fork;
 #[cfg_attr(target_os = "linux", path = "inotify.rs")]
 mod fsevents;
-mod gitstate;
 mod github;
+mod gitstate;
 mod hidden;
 #[cfg_attr(target_os = "linux", path = "lid_linux.rs")]
 mod lid;
@@ -67,7 +67,8 @@ mod update;
 /// program starting now gets the terminal as a new one is: back on the normal screen, and none of
 /// the input modes the one before it asked for (bracketed paste, focus and mouse reports, cursor
 /// keys, keypad, kitty keyboard flags), which a shell at its prompt would get as text.
-const RESTART_MARK: &[u8] = b"\x1b[?1049l\r\n\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1l\x1b>\x1b[?25h\x1b[=0;1u\x1b[0m\x1b[2m-- dino restarted; above is where this session was --\x1b[0m\r\n";
+const RESTART_MARK: &[u8] =
+    b"\x1b[?1049l\r\n\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1l\x1b>\x1b[?25h\x1b[=0;1u\x1b[0m\x1b[2m-- dino restarted; above is where this session was --\x1b[0m\r\n";
 
 /// A saved screen without the restart lines earlier restarts left in it: one line per restart,
 /// not one more each time.
@@ -610,12 +611,7 @@ fn claim_socket(path: &Path) -> anyhow::Result<std::fs::File> {
     // SAFETY: no arguments; it can't fail.
     let me = unsafe { libc::geteuid() };
     anyhow::ensure!(meta.is_dir(), "{} isn't a directory; dinod keeps its socket there", dir.display());
-    anyhow::ensure!(
-        meta.uid() == me,
-        "{} belongs to another user (uid {}, not {me}); dinod won't put its socket there",
-        dir.display(),
-        meta.uid()
-    );
+    anyhow::ensure!(meta.uid() == me, "{} belongs to another user (uid {}, not {me}); dinod won't put its socket there", dir.display(), meta.uid());
     if meta.mode() & 0o077 != 0 {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
@@ -872,25 +868,88 @@ fn launchers_from(free_tier: bool, agents: Vec<dino_core::Detected>) -> Vec<Laun
     for d in agents {
         let program: String = d.path.to_string_lossy().into();
         if d.kind.id == "claude" && free_tier {
-            out.push(LauncherInfo { short: "free".into(), agent_id: "claude-free".into(), label: "Claude Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false });
+            out.push(LauncherInfo {
+                short: "free".into(),
+                agent_id: "claude-free".into(),
+                label: "Claude Code · free models".into(),
+                program: program.clone(),
+                knobs: Default::default(),
+                answers_once: false,
+                formats: vec![],
+                forks: false,
+            });
         }
         if d.kind.id == "qwen" && free_tier {
-            out.push(LauncherInfo { short: "qwen-free".into(), agent_id: "qwen-free".into(), label: "Qwen Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false });
+            out.push(LauncherInfo {
+                short: "qwen-free".into(),
+                agent_id: "qwen-free".into(),
+                label: "Qwen Code · free models".into(),
+                program: program.clone(),
+                knobs: Default::default(),
+                answers_once: false,
+                formats: vec![],
+                forks: false,
+            });
         }
         if d.kind.id == "kimi" && free_tier {
-            out.push(LauncherInfo { short: "kimi-free".into(), agent_id: "kimi-free".into(), label: "Kimi Code · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false });
+            out.push(LauncherInfo {
+                short: "kimi-free".into(),
+                agent_id: "kimi-free".into(),
+                label: "Kimi Code · free models".into(),
+                program: program.clone(),
+                knobs: Default::default(),
+                answers_once: false,
+                formats: vec![],
+                forks: false,
+            });
         }
         if d.kind.id == "pi" && free_tier {
-            out.push(LauncherInfo { short: "pi-free".into(), agent_id: "pi-free".into(), label: "Pi · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false });
+            out.push(LauncherInfo {
+                short: "pi-free".into(),
+                agent_id: "pi-free".into(),
+                label: "Pi · free models".into(),
+                program: program.clone(),
+                knobs: Default::default(),
+                answers_once: false,
+                formats: vec![],
+                forks: false,
+            });
         }
         if d.kind.id == "hermes" && free_tier {
-            out.push(LauncherInfo { short: "hermes-free".into(), agent_id: "hermes-free".into(), label: "Hermes Agent · free models".into(), program: program.clone(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false });
+            out.push(LauncherInfo {
+                short: "hermes-free".into(),
+                agent_id: "hermes-free".into(),
+                label: "Hermes Agent · free models".into(),
+                program: program.clone(),
+                knobs: Default::default(),
+                answers_once: false,
+                formats: vec![],
+                forks: false,
+            });
         }
-        out.push(LauncherInfo { short: d.kind.id.into(), agent_id: d.kind.id.into(), label: d.kind.name.into(), program, knobs: Default::default(), answers_once: false, formats: vec![], forks: false });
+        out.push(LauncherInfo {
+            short: d.kind.id.into(),
+            agent_id: d.kind.id.into(),
+            label: d.kind.name.into(),
+            program,
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        });
     }
     let shell = user_shell();
     let shell_name = shell.rsplit('/').next().unwrap_or("shell").to_string();
-    out.push(LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: format!("Shell ({shell_name})"), program: shell, knobs: Default::default(), answers_once: false, formats: vec![], forks: false });
+    out.push(LauncherInfo {
+        short: "shell".into(),
+        agent_id: "shell".into(),
+        label: format!("Shell ({shell_name})"),
+        program: shell,
+        knobs: Default::default(),
+        answers_once: false,
+        formats: vec![],
+        forks: false,
+    });
     out
 }
 
@@ -920,7 +979,16 @@ fn launcher_for(d: &Daemon, id: &str, pid: Option<u32>) -> anyhow::Result<()> {
     let Some(kind) = dino_core::KNOWN_AGENTS.iter().find(|k| k.id == id) else { anyhow::bail!("dino can't run {id}, so it keeps running where it is") };
     if let Some(program) = pid.and_then(|p| dino_core::program_of(kind, p)) {
         let program = program.display().to_string();
-        d.launchers.write().unwrap().push(LauncherInfo { short: id.into(), agent_id: id.into(), label: kind.name.into(), program, knobs: Default::default(), answers_once: agent(id).is_some_and(|a| a.answers_once()), formats: vec![], forks: false });
+        d.launchers.write().unwrap().push(LauncherInfo {
+            short: id.into(),
+            agent_id: id.into(),
+            label: kind.name.into(),
+            program,
+            knobs: Default::default(),
+            answers_once: agent(id).is_some_and(|a| a.answers_once()),
+            formats: vec![],
+            forks: false,
+        });
         return Ok(());
     }
     anyhow::bail!(
@@ -1180,13 +1248,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             },
             Request::Settings => {
                 let managed = dino_core::settings::Managed::load();
-                Response::Settings {
-                    settings: Settings::load(),
-                    locked: managed.locked_paths(),
-                    locked_from: managed.locked_from(),
-                    ssh_config_hosts: ssh::config_hosts(),
-                    error: Settings::error(),
-                }
+                Response::Settings { settings: Settings::load(), locked: managed.locked_paths(), locked_from: managed.locked_from(), ssh_config_hosts: ssh::config_hosts(), error: Settings::error() }
             }
             Request::SetSettings { settings } => match settings.save() {
                 Ok(()) => {
@@ -1284,23 +1346,19 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             },
             Request::ConnectProvider { provider } if provider == "chatgpt" => {
                 let d = d.clone();
-                match chatgpt::connect(chatgpt::Endpoints::default(), move |t| {
-                    save_chatgpt(&d, &t)
-                }) {
+                match chatgpt::connect(chatgpt::Endpoints::default(), move |t| save_chatgpt(&d, &t)) {
                     Ok(url) => Response::Connect { url },
                     Err(e) => Response::Error { message: e.to_string() },
                 }
             }
-            Request::DisconnectProvider { provider } if provider == "chatgpt" => {
-                match chatgpt::SIGNED_IN.iter().try_for_each(|k| settings::set_key(k, None)) {
-                    Ok(()) => {
-                        providers::forget("chatgpt");
-                        keys_changed(d);
-                        Response::Ok
-                    }
-                    Err(e) => Response::Error { message: e.to_string() },
+            Request::DisconnectProvider { provider } if provider == "chatgpt" => match chatgpt::SIGNED_IN.iter().try_for_each(|k| settings::set_key(k, None)) {
+                Ok(()) => {
+                    providers::forget("chatgpt");
+                    keys_changed(d);
+                    Response::Ok
                 }
-            }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::ConnectPlan { plan, key, base } => match providers::connect_plan(&plan, &key, base.as_deref(), settings::set_key) {
                 Ok(()) => {
                     keys_changed(d);
@@ -1318,9 +1376,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::ConnectProvider { provider } if provider.starts_with(dino_core::plans::PREFIX) => {
                 Response::Error { message: "connect a coding plan with its API key: paste it in Settings → Models & Providers, or run `dino login <plan>`".into() }
             }
-            Request::ConnectProvider { provider } | Request::DisconnectProvider { provider } => {
-                Response::Error { message: format!("{provider} doesn't need signing in: dino finds it on your Mac") }
-            }
+            Request::ConnectProvider { provider } | Request::DisconnectProvider { provider } => Response::Error { message: format!("{provider} doesn't need signing in: dino finds it on your Mac") },
             Request::Providers => {
                 let mut list = providers::list();
                 // A plan's last refusal (key, balance, limit), as the proxy saw it.
@@ -1466,9 +1522,9 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::TmuxShow { socket, pane } => {
                 let tty = tmux::show(&socket, &pane);
                 // The dino tab whose shell runs that client, to bring it forward too.
-                let session = tty.as_ref().and_then(|tty| {
-                    d.sessions.lock().unwrap().iter().find(|s| s.inside.lock().unwrap().tmux.as_ref().and_then(|t| t.1.as_ref()).is_some_and(|v| &v.tty == tty)).map(|s| s.id.clone())
-                });
+                let session = tty
+                    .as_ref()
+                    .and_then(|tty| d.sessions.lock().unwrap().iter().find(|s| s.inside.lock().unwrap().tmux.as_ref().and_then(|t| t.1.as_ref()).is_some_and(|v| &v.tty == tty)).map(|s| s.id.clone()));
                 Response::TmuxShown { tty, session }
             }
             Request::TmuxScreen { socket, pane } => match tmux::screen(&socket, &pane) {
@@ -1598,16 +1654,14 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::PrCreate { id, title, body, base, draft } => {
-                match pr_session(d, &id).and_then(|s| pr::create(&s.cwd, &title, &body, &base, draft)) {
-                    Ok(pr) => {
-                        d.prs.lock().unwrap().insert(id, pr.clone());
-                        refresh_prs_soon(d);
-                        Response::Pr { pr }
-                    }
-                    Err(e) => Response::Error { message: e.to_string() },
+            Request::PrCreate { id, title, body, base, draft } => match pr_session(d, &id).and_then(|s| pr::create(&s.cwd, &title, &body, &base, draft)) {
+                Ok(pr) => {
+                    d.prs.lock().unwrap().insert(id, pr.clone());
+                    refresh_prs_soon(d);
+                    Response::Pr { pr }
                 }
-            }
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Request::PrFix { id } => match pr_fix(d, &id) {
                 Ok(()) => {
                     refresh_prs_soon(d);
@@ -1780,7 +1834,10 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     // fallback names (Settings → Agents), unless asked to stay. Its arguments were the other
     // agent's; its mode carries over.
     let mut instead_of = restore.as_ref().and_then(|r| r.instead_of.clone());
-    if restore.is_none() && host.is_none() && route.is_none() && !stay
+    if restore.is_none()
+        && host.is_none()
+        && route.is_none()
+        && !stay
         && let Some((other, switch, why)) = fallbacks::instead(d, &settings, &l.agent_id)
     {
         eprintln!("{} dinod: {} is at its limit ({}): starting {} instead", stamp(), l.label, why.name, other.label);
@@ -2097,10 +2154,7 @@ fn local_spec(
     let claude_config = session_claude_config(&repo, &account);
     // Claude reports its context window to its statusline; wrap the user's, if they have one.
     let adapter = agent(&l.agent_id);
-    let status_line = std::env::current_exe()
-        .ok()
-        .filter(|_| adapter.is_some_and(|a| a.statusline()))
-        .and_then(|dino| dino_core::statusline::wrapper(&cwd, claude_config.as_deref(), &dino));
+    let status_line = std::env::current_exe().ok().filter(|_| adapter.is_some_and(|a| a.statusline())).and_then(|dino| dino_core::statusline::wrapper(&cwd, claude_config.as_deref(), &dino));
     // On a provider's model the agent's own API isn't routed (it isn't used): only its status
     // wiring, then the provider's, which wins. The proxy's URLs carry its secret, so they go in
     // the agent's environment or a private file; one that must have them on its command line gets
@@ -2121,7 +2175,10 @@ fn local_spec(
     }
     // The model picked since (the model control), over the one it started on.
     let model = route.map(|r| controls.model.clone().unwrap_or_else(|| r.model.clone()));
-    let provider = route.zip(adapter).zip(model.as_deref()).and_then(|((r, a), m)| a.provider_wiring_for(&base(&route_path(&r.provider)), r.format?, m, providers::model(&r.provider, m).as_ref()));
+    let provider = route
+        .zip(adapter)
+        .zip(model.as_deref())
+        .and_then(|((r, a), m)| a.provider_wiring_for(&base(&route_path(&r.provider)), r.format?, m, providers::model(&r.provider, m).as_ref()));
     // The repo's environment first: dino's own wiring must win, or metering and hooks break.
     let mut env: HashMap<String, String> = repo.into_iter().collect();
     env.extend(wiring_env);
@@ -2170,10 +2227,7 @@ fn local_spec(
     if adapter.is_some_and(|a| a.session_tools()) && settings.policies.session_tools {
         peers::wire_claude(id, &mut wired_args);
     }
-    if l.agent_id == "shell"
-        && settings.machine.shell_integration
-        && shell::wire(&l.program, &mut env, &mut wired_args, &settings.machine.shell_integration_mode, &settings.machine.shell_features)
-    {
+    if l.agent_id == "shell" && settings.machine.shell_integration && shell::wire(&l.program, &mut env, &mut wired_args, &settings.machine.shell_integration_mode, &settings.machine.shell_features) {
         // Where the shell integration finds the settings that make an agent typed here report to
         // this session (see `sync_shell_agents`); it reads the file each time, so it can come and go.
         env.insert(SHELL_AGENT_ENV.into(), shell_agent_settings(id).display().to_string());
@@ -2207,9 +2261,7 @@ fn local_spec(
     // Bypass in the cycle of the agent's own mode key while the policies allow it (Claude's
     // Shift+Tab): switching into it later is a keypress, not a restart once its turn is over.
     let reach = match adapter {
-        Some(a) if settings.policies.allow_bypass && controls.mode.as_deref() != Some("bypass") => {
-            a.reach_args("bypass", &cwd, claude_config.as_deref())
-        }
+        Some(a) if settings.policies.allow_bypass && controls.mode.as_deref() != Some("bypass") => a.reach_args("bypass", &cwd, claude_config.as_deref()),
         _ => vec![],
     };
     wired_args.extend(reach.iter().cloned());
@@ -2729,9 +2781,7 @@ fn pi_setup_prompt(screen: &str) -> Option<&'static str> {
     // What follows the warning in the conversation, up to Pi's input box: only the warning's own lines.
     let after = lines[warned + 1..].iter().map(|l| l.trim()).take_while(|l| !l.starts_with('─'));
     // Wrapped in a narrow pane, its sentence and paths go over several lines.
-    let part_of_warning = |l: &str| {
-        !l.contains(' ') || ["/login", "provider", "API key", ".md", "Error:", "See:"].iter().any(|w| l.contains(w))
-    };
+    let part_of_warning = |l: &str| !l.contains(' ') || ["/login", "provider", "API key", ".md", "Error:", "See:"].iter().any(|w| l.contains(w));
     let only_warning = after.filter(|l| !l.is_empty()).all(part_of_warning);
     only_warning.then_some("Connect a provider: type /login in Pi")
 }
@@ -2804,7 +2854,9 @@ fn context_use(s: &Session, st: &SessionStats) -> (u64, Option<u64>) {
     if let Some(r) = st.reported_context {
         return (r.used.unwrap_or(0), Some(r.window));
     }
-    if watched(s) && let Some((used, window)) = codex::context(s) {
+    if watched(s)
+        && let Some((used, window)) = codex::context(s)
+    {
         return (used, Some(window));
     }
     (st.context().map_or(0, |(_, used)| used), None)
@@ -2890,16 +2942,24 @@ fn state(d: &Daemon) -> Response {
             // reader takes some of them (`last_output`) holding the screen this reads.
             // Before its first hook, Claude can already be waiting on you: its folder trust
             // prompt, its login, its first-run setup, its bypass warning. Shown, so it isn't "idle".
-            let activity = on_screen(s, claude_setup(s, st.activity.as_ref()).map(|what| format!("needs:{what}")).or_else(|| st.activity.clone().map(|a| match a {
-                Activity::Working => "working".into(),
-                Activity::Done => match (waiting.0, waiting.1.saturating_sub(serving_waited)) {
-                    (0, 0) if serving_waited > 0 => format!("server:{}", ports(&serving)),
-                    (0, 0) => "done".into(),
-                    (agents, commands) => format!("waiting:{}", waiting_words(agents, commands)),
-                },
-                Activity::NeedsPermission(what) => format!("needs:{what}"),
-            }))
-            .or_else(|| (s.agent_now() == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))), st.hooked);
+            let activity = on_screen(
+                s,
+                claude_setup(s, st.activity.as_ref())
+                    .map(|what| format!("needs:{what}"))
+                    .or_else(|| {
+                        st.activity.clone().map(|a| match a {
+                            Activity::Working => "working".into(),
+                            Activity::Done => match (waiting.0, waiting.1.saturating_sub(serving_waited)) {
+                                (0, 0) if serving_waited > 0 => format!("server:{}", ports(&serving)),
+                                (0, 0) => "done".into(),
+                                (agents, commands) => format!("waiting:{}", waiting_words(agents, commands)),
+                            },
+                            Activity::NeedsPermission(what) => format!("needs:{what}"),
+                        })
+                    })
+                    .or_else(|| (s.agent_now() == "pi" && !s.pane.is_exited()).then(|| pi_setup_prompt(&s.pane.text(0))).flatten().map(|what| format!("needs:{what}"))),
+                st.hooked,
+            );
             let output_ms_ago = s.last_output.lock().unwrap().map(|t| t.elapsed().as_millis() as u64);
             // Each of its locks read on its own, none held as the next is taken: a lock taken in
             // the struct below is held to its end, and `snapshot` (the save loop) takes some of
@@ -2918,7 +2978,13 @@ fn state(d: &Daemon) -> Response {
                 name: s.name.clone(),
                 agent_id: s.agent_id.clone(),
                 // Not its shell's, while its agent typed there starts again.
-                title: label.clone().or(named).or_else(|| s.pane.title().filter(|_| s.agent_id != "shell" || s.agent_pid().is_some() || inside.is_none()).and_then(|t| s.adapter().map_or(Some(t.clone()), |a| a.shown_title(&t))).and_then(|t| undecorated(&t))),
+                title: label.clone().or(named).or_else(|| {
+                    s.pane
+                        .title()
+                        .filter(|_| s.agent_id != "shell" || s.agent_pid().is_some() || inside.is_none())
+                        .and_then(|t| s.adapter().map_or(Some(t.clone()), |a| a.shown_title(&t)))
+                        .and_then(|t| undecorated(&t))
+                }),
                 exited: s.pane.is_exited(),
                 exit_code: s.pane.exit_code(),
                 output_ms_ago,
@@ -2976,10 +3042,10 @@ fn state(d: &Daemon) -> Response {
     let quotas = ["anthropic", "chatgpt"]
         .iter()
         .filter_map(|p| {
-            d.proxy.stats.quota(p).map(|q| QuotaInfo {
-                provider: p.to_string(),
-                windows: q.windows.into_iter().map(|(name, w)| WindowInfo { name, utilization: w.utilization, resets_at: w.resets_at }).collect(),
-            })
+            d.proxy
+                .stats
+                .quota(p)
+                .map(|q| QuotaInfo { provider: p.to_string(), windows: q.windows.into_iter().map(|(name, w)| WindowInfo { name, utilization: w.utilization, resets_at: w.resets_at }).collect() })
         })
         .collect();
     let limits = fallbacks::limits(d);
@@ -3074,7 +3140,15 @@ fn shown(resp: &mut Response) -> u64 {
     let Response::State { sessions, .. } = resp else { return 0 };
     let exact: Vec<(Option<u64>, Option<u32>)> = sessions.iter().map(|s| (s.output_ms_ago, s.foreground.as_ref().map(|f| f.pid))).collect();
     for s in sessions.iter_mut() {
-        s.output_ms_ago = s.output_ms_ago.map(|ms| if ms < 1500 { 0 } else if ms < 5000 { 1500 } else { 5000 });
+        s.output_ms_ago = s.output_ms_ago.map(|ms| {
+            if ms < 1500 {
+                0
+            } else if ms < 5000 {
+                1500
+            } else {
+                5000
+            }
+        });
         if let Some(f) = &mut s.foreground {
             f.pid = 0;
         }
@@ -3947,11 +4021,7 @@ fn stop(pid: u32) -> anyhow::Result<()> {
 
 /// "Pineapple memory word" → "pineapple-memory"
 fn session_name(title: &str) -> String {
-    let words: Vec<String> = title
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_lowercase())
-        .collect();
+    let words: Vec<String> = title.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect();
     let mut name = String::new();
     for w in words {
         if !name.is_empty() && name.len() + w.len() + 1 > 16 {
@@ -4347,9 +4417,7 @@ fn tree_until(d: &Daemon, folders: Vec<String>, until: Option<Instant>) -> Vec<i
                     w.git = git;
                     w.reading = reading;
                     w.owner = owners.iter().find(|o| &o.0 == path).map(|o| o.1.clone());
-                    w.in_use = !w.users.is_empty()
-                        || w.owner.as_ref().is_some_and(|o| o.running)
-                        || worktree::recently(w.git.as_ref().and_then(|g| g.changed), now);
+                    w.in_use = !w.users.is_empty() || w.owner.as_ref().is_some_and(|o| o.running) || worktree::recently(w.git.as_ref().and_then(|g| g.changed), now);
                 }
                 let default_branch = default_branch(&w[0]);
                 let path = w[0].path.clone();
@@ -4406,11 +4474,7 @@ fn session_tasks(st: &dino_proxy::SessionStats, cwd: &Path, exited: bool) -> ipc
     let here = real(cwd);
     let now = dino_proxy::tasks::now();
     ipc::SessionTasks {
-        todos: st
-            .todos
-            .iter()
-            .map(|t| ipc::TodoInfo { id: t.id.clone(), subject: t.subject.clone(), status: t.status.clone(), active: t.active.clone() })
-            .collect(),
+        todos: st.todos.iter().map(|t| ipc::TodoInfo { id: t.id.clone(), subject: t.subject.clone(), status: t.status.clone(), active: t.active.clone() }).collect(),
         subagents: st
             .subagents
             .iter()
@@ -4473,8 +4537,7 @@ fn subagents_path(home: &Path) -> PathBuf {
 
 /// A restart stops every agent, so none is running any more; worktrees removed since are gone.
 fn load_subagents(home: &Path) -> Vec<SubagentWorktree> {
-    let all: Vec<SubagentWorktree> =
-        std::fs::read(subagents_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let all: Vec<SubagentWorktree> = std::fs::read(subagents_path(home)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     all.into_iter().filter(|a| Path::new(&a.worktree).exists()).map(|a| SubagentWorktree { running: false, ..a }).collect()
 }
 
@@ -4491,19 +4554,10 @@ pub(crate) fn subagent_owners(d: &Daemon) -> Vec<(String, worktree::Owner)> {
         for a in d.proxy.stats.session(id).subagents {
             // Only ones in a worktree of their own matter here; others run in the session's.
             let Some(cwd) = a.cwd.as_deref() else { continue };
-            let rec = SubagentWorktree {
-                id: a.id.clone(),
-                session: id.clone(),
-                worktree: real(Path::new(cwd)),
-                description: a.description,
-                agent_type: a.agent_type,
-                running: a.running,
-            };
+            let rec = SubagentWorktree { id: a.id.clone(), session: id.clone(), worktree: real(Path::new(cwd)), description: a.description, agent_type: a.agent_type, running: a.running };
             match all.iter_mut().find(|o| o.id == rec.id) {
                 Some(o) => *o = rec,
-                None if Path::new(cwd).file_name().is_some_and(|n| n.to_string_lossy() == format!("agent-{}", rec.id)) => {
-                    all.push(rec)
-                }
+                None if Path::new(cwd).file_name().is_some_and(|n| n.to_string_lossy() == format!("agent-{}", rec.id)) => all.push(rec),
                 None => {}
             }
         }
@@ -4514,12 +4568,7 @@ pub(crate) fn subagent_owners(d: &Daemon) -> Vec<(String, worktree::Owner)> {
     all.iter()
         .map(|a| {
             let alive = sessions.iter().any(|(id, live)| *id == a.session && *live);
-            let owner = worktree::Owner {
-                session: a.session.clone(),
-                description: a.description.clone(),
-                agent_type: a.agent_type.clone(),
-                running: a.running && alive,
-            };
+            let owner = worktree::Owner { session: a.session.clone(), description: a.description.clone(), agent_type: a.agent_type.clone(), running: a.running && alive };
             (a.worktree.clone(), owner)
         })
         .collect()
@@ -4551,30 +4600,13 @@ fn read_subagent(d: &Daemon, session: &str, id: &str) -> Option<ipc::SubagentVie
     });
     let (view, output) = match known {
         Some((a, output)) => (
-            ipc::SubagentView {
-                id: a.id,
-                session: session.into(),
-                worktree: a.worktree,
-                agent_type: a.agent_type,
-                description: a.description,
-                running: a.running,
-                task: None,
-                conversation: None,
-            },
+            ipc::SubagentView { id: a.id, session: session.into(), worktree: a.worktree, agent_type: a.agent_type, description: a.description, running: a.running, task: None, conversation: None },
             output,
         ),
         None => {
             let a = d.subagents.lock().unwrap().iter().find(|a| a.id == id && a.session == session).cloned()?;
-            let view = ipc::SubagentView {
-                id: a.id,
-                session: a.session,
-                worktree: Some(a.worktree),
-                agent_type: a.agent_type,
-                description: a.description,
-                running: false,
-                task: None,
-                conversation: None,
-            };
+            let view =
+                ipc::SubagentView { id: a.id, session: a.session, worktree: Some(a.worktree), agent_type: a.agent_type, description: a.description, running: false, task: None, conversation: None };
             (view, None)
         }
     };
@@ -4703,9 +4735,11 @@ fn refresh_prs(d: &Daemon) {
     // steps on, is asked every time.
     let watched: HashSet<(PathBuf, String)> = on
         .iter()
-        .filter(|(s, ..)| old.contains_key(&s.id) || {
-            let a = s.auto.lock().unwrap();
-            a.pr.fix || a.pr.merge
+        .filter(|(s, ..)| {
+            old.contains_key(&s.id) || {
+                let a = s.auto.lock().unwrap();
+                a.pr.fix || a.pr.merge
+            }
         })
         .map(|(_, root, branch)| (root.clone(), branch.clone()))
         .collect();
@@ -5037,7 +5071,8 @@ mod tests {
         assert_eq!(pi_setup_prompt(signed), None);
         assert_eq!(pi_setup_prompt(" ▀▀█  v1.0.1\n hello\n────"), None);
         // Wrapped in a split pane.
-        let narrow = "Warning: No models available. Use /login to log into a\nprovider via OAuth or API key. See:\n\n/x/node_modules/@earendil-works/pi-\ncoding-agent/docs/providers.md\n\n────\nwh\n────";
+        let narrow =
+            "Warning: No models available. Use /login to log into a\nprovider via OAuth or API key. See:\n\n/x/node_modules/@earendil-works/pi-\ncoding-agent/docs/providers.md\n\n────\nwh\n────";
         assert_eq!(pi_setup_prompt(narrow), Some("Connect a provider: type /login in Pi"));
     }
 
@@ -5127,7 +5162,16 @@ mod tests {
     fn shell() -> LauncherInfo {
         // A shell with a line editor, as macOS's /bin/sh (bash) is; Linux's is often dash, which has none.
         let program = if cfg!(target_os = "macos") { "/bin/sh" } else { "/bin/bash" };
-        LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: program.into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false }
+        LauncherInfo {
+            short: "shell".into(),
+            agent_id: "shell".into(),
+            label: "Shell (sh)".into(),
+            program: program.into(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        }
     }
 
     fn shell_daemon() -> Arc<Daemon> {
@@ -5340,7 +5384,16 @@ while (sysread(STDIN, my $c, 1)) {
         let program = dir.join("claude");
         std::fs::write(&program, FAKE_CLAUDE).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let claude = LauncherInfo { short: "claude".into(), agent_id: "claude".into(), label: "Claude Code".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let claude = LauncherInfo {
+            short: "claude".into(),
+            agent_id: "claude".into(),
+            label: "Claude Code".into(),
+            program: program.display().to_string(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let d = test_daemon(vec![claude]);
         let id = spawn(&d, Launch::new("claude", vec![], Some(dir.display().to_string()))).unwrap();
         let s = session(&d, &id);
@@ -5412,7 +5465,16 @@ while (sysread(STDIN, my $c, 1)) {
         let program = dir.join("claude");
         std::fs::write(&program, FAKE_CLAUDE).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let claude = LauncherInfo { short: "claude".into(), agent_id: "claude".into(), label: "Claude Code".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let claude = LauncherInfo {
+            short: "claude".into(),
+            agent_id: "claude".into(),
+            label: "Claude Code".into(),
+            program: program.display().to_string(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let d = test_daemon(vec![claude.clone()]);
         let opus = Controls { model: Some("opus".into()), ..Controls::default() };
         let id = spawn(&d, Launch { controls: opus, ..Launch::new("claude", vec![], Some(dir.display().to_string())) }).unwrap();
@@ -5475,9 +5537,19 @@ while (sysread(STDIN, my $c, 1)) {
         let dir = test_home().join("fake-codex-model");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let meta = |id: &str| format!(r#"{{"timestamp":"2026-10-05T12:00:00.000Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/r","originator":"codex_cli_rs","cli_version":"0.160.0","source":"cli"}}}}"#);
-        let turn = |model: &str| format!(r#"{{"timestamp":"2026-10-05T12:00:01.000Z","type":"turn_context","payload":{{"turn_id":"t1","cwd":"/r","approval_policy":"on-request","model":"{model}","effort":"xhigh","summary":"none"}}}}"#);
-        let switched = |model: &str| format!(r#"{{"timestamp":"2026-10-05T12:00:09.000Z","type":"event_msg","payload":{{"type":"thread_settings_applied","thread_id":"t","thread_settings":{{"model":"{model}","model_provider_id":"openai","approval_policy":"on-request","reasoning_effort":"xhigh"}}}}}}"#);
+        let meta = |id: &str| {
+            format!(r#"{{"timestamp":"2026-10-05T12:00:00.000Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/r","originator":"codex_cli_rs","cli_version":"0.160.0","source":"cli"}}}}"#)
+        };
+        let turn = |model: &str| {
+            format!(
+                r#"{{"timestamp":"2026-10-05T12:00:01.000Z","type":"turn_context","payload":{{"turn_id":"t1","cwd":"/r","approval_policy":"on-request","model":"{model}","effort":"xhigh","summary":"none"}}}}"#
+            )
+        };
+        let switched = |model: &str| {
+            format!(
+                r#"{{"timestamp":"2026-10-05T12:00:09.000Z","type":"event_msg","payload":{{"type":"thread_settings_applied","thread_id":"t","thread_settings":{{"model":"{model}","model_provider_id":"openai","approval_policy":"on-request","reasoning_effort":"xhigh"}}}}}}"#
+            )
+        };
         let prompt = r#"{"timestamp":"2026-10-05T12:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"hi"}}"#;
         // A Codex that holds its rollout open, writing what it's given: `<name>.lines` at once,
         // then whatever `<name>.more` holds once it's there.
@@ -5485,11 +5557,24 @@ while (sysread(STDIN, my $c, 1)) {
             let program = dir.join(name);
             let base = dir.join(name).display().to_string();
             let rollout = dir.join(format!("rollout-2026-10-05T12-00-00-01a0e93b-2fcf-7a20-8efb-{name}.jsonl"));
-            std::fs::write(&program, format!("#!/bin/sh\nexec 3>>'{}'\ncat '{base}.lines' >&3\nwhile [ ! -e '{base}.more' ]; do sleep 0.05; done\ncat '{base}.more' >&3\nexec sleep 600\n", rollout.display())).unwrap();
+            std::fs::write(
+                &program,
+                format!("#!/bin/sh\nexec 3>>'{}'\ncat '{base}.lines' >&3\nwhile [ ! -e '{base}.more' ]; do sleep 0.05; done\ncat '{base}.more' >&3\nexec sleep 600\n", rollout.display()),
+            )
+            .unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
             (program, rollout, base)
         };
-        let launcher = |program: &Path| LauncherInfo { short: "codex".into(), agent_id: "codex".into(), label: "Codex".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let launcher = |program: &Path| LauncherInfo {
+            short: "codex".into(),
+            agent_id: "codex".into(),
+            label: "Codex".into(),
+            program: program.display().to_string(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let more = |base: &str, line: String| {
             std::fs::write(format!("{base}.tmp"), line + "\n").unwrap();
             std::fs::rename(format!("{base}.tmp"), format!("{base}.more")).unwrap();
@@ -5549,7 +5634,16 @@ while (sysread(STDIN, my $c, 1)) {
         let config = dir.join("config");
         let conversation = new_uuid();
         std::fs::create_dir_all(config.join("projects/-w")).unwrap();
-        let claude = LauncherInfo { short: "claude".into(), agent_id: "claude".into(), label: "Claude Code".into(), program: "/usr/bin/true".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let claude = LauncherInfo {
+            short: "claude".into(),
+            agent_id: "claude".into(),
+            label: "Claude Code".into(),
+            program: "/usr/bin/true".into(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let d = test_daemon(vec![claude.clone()]);
         let saved = SavedSession {
             id: "9401".into(),
@@ -5594,15 +5688,28 @@ while (sysread(STDIN, my $c, 1)) {
         let id = "01a0e93b-2fcf-7a20-8efb-cccccccccccc";
         let rollout = day.join(format!("rollout-2026-10-05T12-00-00-{id}.jsonl"));
         let lines = [
-            format!(r#"{{"timestamp":"2026-10-05T12:00:00.000Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}","originator":"codex_cli_rs","cli_version":"0.160.1","source":"cli"}}}}"#, work.display()),
+            format!(
+                r#"{{"timestamp":"2026-10-05T12:00:00.000Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}","originator":"codex_cli_rs","cli_version":"0.160.1","source":"cli"}}}}"#,
+                work.display()
+            ),
             r#"{"timestamp":"2026-10-05T12:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"add a dark mode"}}"#.to_string(),
         ];
         std::fs::write(dir.join("lines"), lines.join("\n") + "\n").unwrap();
         // Its terminal titled with its folder, its rollout held open.
         let program = dir.join("codex");
-        std::fs::write(&program, format!("#!/bin/sh\nprintf '\\033]0;%s\\007' \"$(basename \"$PWD\")\"\nexec 3>>'{}'\ncat '{}' >&3\nexec sleep 600\n", rollout.display(), dir.join("lines").display())).unwrap();
+        std::fs::write(&program, format!("#!/bin/sh\nprintf '\\033]0;%s\\007' \"$(basename \"$PWD\")\"\nexec 3>>'{}'\ncat '{}' >&3\nexec sleep 600\n", rollout.display(), dir.join("lines").display()))
+            .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let codex = LauncherInfo { short: "codex".into(), agent_id: "codex".into(), label: "Codex".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let codex = LauncherInfo {
+            short: "codex".into(),
+            agent_id: "codex".into(),
+            label: "Codex".into(),
+            program: program.display().to_string(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let d = test_daemon(vec![codex]);
         let sid = spawn(&d, Launch::new("codex", vec![], Some(work.display().to_string()))).unwrap();
         let s = session(&d, &sid);
@@ -5639,7 +5746,16 @@ while (sysread(STDIN, my $c, 1)) {
             .replace("my $i = 0;", "push @modes, \"\\x{23F5}\\x{23F5} bypass permissions on (shift+tab to cycle)\" if grep { $_ eq \"--allow-dangerously-skip-permissions\" } @ARGV;\npush @modes, \"\\x{23F5}\\x{23F5} auto mode on (shift+tab to cycle)\";\nmy $i = $#modes;");
         std::fs::write(&program, fake).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let claude = LauncherInfo { short: "claude".into(), agent_id: "claude".into(), label: "Claude Code".into(), program: program.display().to_string(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let claude = LauncherInfo {
+            short: "claude".into(),
+            agent_id: "claude".into(),
+            label: "Claude Code".into(),
+            program: program.display().to_string(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let d = test_daemon(vec![claude]);
         let start = |accepted: bool, id: &str| {
             std::fs::write(config.join("settings.json"), format!(r#"{{"skipDangerousModePermissionPrompt": {accepted}}}"#)).unwrap();
@@ -5957,8 +6073,26 @@ while (sysread(STDIN, my $c, 1)) {
         std::fs::write(repo.join("a.txt"), "one\n").unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "init"]);
-        let shell = LauncherInfo { short: "shell".into(), agent_id: "shell".into(), label: "Shell (sh)".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
-        let agent = LauncherInfo { short: "agent".into(), agent_id: "agent".into(), label: "Agent".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let shell = LauncherInfo {
+            short: "shell".into(),
+            agent_id: "shell".into(),
+            label: "Shell (sh)".into(),
+            program: "/bin/sh".into(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
+        let agent = LauncherInfo {
+            short: "agent".into(),
+            agent_id: "agent".into(),
+            label: "Agent".into(),
+            program: "/bin/sh".into(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let d = test_daemon(vec![shell, agent]);
         let start = || spawn_in_worktree(&d, Launch::new("agent", vec![], Some(repo.display().to_string()))).unwrap();
         let wt_of = |id: &str| d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == real(&session(&d, id).cwd)).cloned().unwrap();
@@ -6076,9 +6210,7 @@ while (sysread(STDIN, my $c, 1)) {
             git(&repo, &["worktree", "add", "-q", "-b", &format!("w{i}"), &wt.to_string_lossy()]);
         }
         let d = shell_daemon();
-        let find = |trees: &[ipc::RepoInfo], wt: &Path| {
-            trees.iter().flat_map(|r| &r.worktrees).find(|w| real(Path::new(&w.path)) == real(wt)).cloned().unwrap()
-        };
+        let find = |trees: &[ipc::RepoInfo], wt: &Path| trees.iter().flat_map(|r| &r.worktrees).find(|w| real(Path::new(&w.path)) == real(wt)).cloned().unwrap();
         let ask = || tree(&d, vec![repo.display().to_string()]);
         // The watch is macOS's: on a busy Mac it can take a while to say.
         let wait_for = |what: &str, mut done: Box<dyn FnMut() -> bool + '_>| {
@@ -6092,19 +6224,27 @@ while (sysread(STDIN, my $c, 1)) {
         // Each step starts once everything seen before it has been read: what the last one set
         // off (late, or in two goes) is never taken for this one's, and a watch macOS was slow to
         // give is up.
-        let settle = || wait_for("everything seen to be read", Box::new(|| {
-            ask();
-            gitstate::settled(&d, &real(&repo))
-        }));
+        let settle = || {
+            wait_for(
+                "everything seen to be read",
+                Box::new(|| {
+                    ask();
+                    gitstate::settled(&d, &real(&repo))
+                }),
+            )
+        };
         let first = ask();
         assert_eq!(counts().0, 30, "each worktree read once");
         assert!(wts.iter().all(|w| find(&first, w).git.is_some_and(|g| g.state == "empty")));
         settle();
-        wait_for("a read with nothing changed to run no git", Box::new(|| {
-            let before = counts();
-            ask();
-            counts() == before
-        }));
+        wait_for(
+            "a read with nothing changed to run no git",
+            Box::new(|| {
+                let before = counts();
+                ask();
+                counts() == before
+            }),
+        );
 
         // Which worktrees were read again since `then`.
         let read_since = |then: Instant| -> Vec<String> {
@@ -6138,7 +6278,16 @@ while (sysread(STDIN, my $c, 1)) {
         let deeper = home.join("Documents");
         std::fs::create_dir_all(&movies).unwrap();
         std::fs::create_dir_all(&deeper).unwrap();
-        let agent = LauncherInfo { short: "agent".into(), agent_id: "agent".into(), label: "Agent".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let agent = LauncherInfo {
+            short: "agent".into(),
+            agent_id: "agent".into(),
+            label: "Agent".into(),
+            program: "/bin/sh".into(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let d = test_daemon(vec![shell(), agent]);
         let shell_id = spawn(&d, Launch::new("shell", vec![], Some(home.display().to_string()))).unwrap();
         let agent_id = spawn(&d, Launch::new("agent", vec![], Some(movies.display().to_string()))).unwrap();
@@ -6235,7 +6384,16 @@ while (sysread(STDIN, my $c, 1)) {
         assert!(fallbacks::chain(&settings, &providers, "claude", None, Some("devbox")).is_none(), "over SSH its traffic isn't dino's");
         assert!(fallbacks::chain(&settings, &providers, "shell", None, None).is_none());
 
-        let sh = |agent: &str| LauncherInfo { short: agent.into(), agent_id: agent.into(), label: agent.into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let sh = |agent: &str| LauncherInfo {
+            short: agent.into(),
+            agent_id: agent.into(),
+            label: agent.into(),
+            program: "/bin/sh".into(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let d = test_daemon(vec![sh("shell"), sh("claude"), sh("codex")]);
         let start = |stay: bool| spawn(&d, Launch { stay, ..Launch::new("claude", vec!["--verbose".into()], Some(test_home().display().to_string())) }).unwrap();
         let first = session(&d, &start(false));
@@ -6283,9 +6441,21 @@ while (sysread(STDIN, my $c, 1)) {
     /// calls not through dino, its own windows say, as before.
     #[test]
     fn claude_is_at_its_limit_only_with_every_account_spent() {
-        use dino_proxy::{Quota, Window, fallback::{Kind, Limited}};
+        use dino_proxy::{
+            Quota, Window,
+            fallback::{Kind, Limited},
+        };
         test_home();
-        let sh = |agent: &str| LauncherInfo { short: agent.into(), agent_id: agent.into(), label: "Claude Code".into(), program: "/bin/sh".into(), knobs: Default::default(), answers_once: false, formats: vec![], forks: false };
+        let sh = |agent: &str| LauncherInfo {
+            short: agent.into(),
+            agent_id: agent.into(),
+            label: "Claude Code".into(),
+            program: "/bin/sh".into(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
         let d = test_daemon(vec![sh("claude")]);
         let claude = d.launcher("claude").unwrap();
         let now = now_secs();
@@ -6305,7 +6475,12 @@ while (sysread(STDIN, my $c, 1)) {
         assert_eq!(at(true), None);
         assert_eq!(at(false), Some(alone.clone()));
         // Its own also refused: still account 2.
-        d.proxy.stats.limited.lock().unwrap().insert("anthropic#own".into(), Limited { name: "Claude".into(), kind: Kind::Quota, said: "spent".into(), resets_at: Some(now + 7200), retry_at: now + 7200 });
+        d.proxy
+            .stats
+            .limited
+            .lock()
+            .unwrap()
+            .insert("anthropic#own".into(), Limited { name: "Claude".into(), kind: Kind::Quota, said: "spent".into(), resets_at: Some(now + 7200), retry_at: now + 7200 });
         d.fallback_seen.lock().unwrap().add("claude", "anthropic#own");
         assert_eq!(at(true), None);
         assert!(fallbacks::limits(&d).is_empty(), "nor do new sessions start with another agent");
@@ -6324,7 +6499,12 @@ while (sysread(STDIN, my $c, 1)) {
         // A refusal says it as well: account 2 refused, its windows forgotten.
         d.proxy.stats.quotas.lock().unwrap().remove(&key);
         assert_eq!(at(true), None);
-        d.proxy.stats.limited.lock().unwrap().insert(key.clone(), Limited { name: "Claude account 2".into(), kind: Kind::Quota, said: "spent".into(), resets_at: Some(sooner), retry_at: sooner });
+        d.proxy
+            .stats
+            .limited
+            .lock()
+            .unwrap()
+            .insert(key.clone(), Limited { name: "Claude account 2".into(), kind: Kind::Quota, said: "spent".into(), resets_at: Some(sooner), retry_at: sooner });
         assert_eq!(at(true), Some(all));
         // Merely down isn't spent.
         d.proxy.stats.limited.lock().unwrap().get_mut(&key).unwrap().kind = Kind::Outage;
@@ -6518,7 +6698,11 @@ while (sysread(STDIN, my $c, 1)) {
         assert_eq!((t.agent.as_str(), t.conversation.as_deref(), t.controls.model.as_deref()), ("codex", Some(conversation), Some("gpt-5.5")));
         // What it said it's on, which `codex` alone wouldn't start it on.
         assert_eq!(typed::command_line(&d, &t).unwrap(), format!("codex resume -m gpt-5.5 {conversation}"));
-        assert_eq!(typed::command_line(&d, &typed::Typed { args: vec!["--search".into(), "go on".into()], ..t.clone() }).unwrap(), format!("codex resume --search -m gpt-5.5 {conversation}"), "a prompt it was typed with isn't given again");
+        assert_eq!(
+            typed::command_line(&d, &typed::Typed { args: vec!["--search".into(), "go on".into()], ..t.clone() }).unwrap(),
+            format!("codex resume --search -m gpt-5.5 {conversation}"),
+            "a prompt it was typed with isn't given again"
+        );
 
         // dinod restarts: the shell comes back with its agent on its way, typed there again on the
         // model it said it's on.
@@ -6619,10 +6803,25 @@ while (sysread(STDIN, my $c, 1)) {
         let d = shell_daemon();
         let id = own_shell(&d, "9604", test_home());
         let s = session(&d, &id);
-        s.pane.write(b"printf '  Would you like to run the following command?\\n\\n  $ touch hello.txt\\n\\n  1. Yes, proceed (y)\\n  3. No, and tell Codex what to do differently (esc)\\n'\r".to_vec());
+        s.pane
+            .write(b"printf '  Would you like to run the following command?\\n\\n  $ touch hello.txt\\n\\n  1. Yes, proceed (y)\\n  3. No, and tell Codex what to do differently (esc)\\n'\r".to_vec());
         wait_for("its dialog", || s.pane.text(0).contains("No, and tell Codex what to do differently (esc)\n"));
         assert_eq!(on_screen(&s, Some("working".into()), false).as_deref(), Some("working"), "a plain shell asks nothing");
-        let codex = FoundSession { source: Source::Running, agent: "codex".into(), session_id: String::new(), title: "Codex".into(), cwd: None, updated_at: 0, pid: Some(1), status: None, terminal: None, args: vec![], url: None, tmux: None, unsure: None };
+        let codex = FoundSession {
+            source: Source::Running,
+            agent: "codex".into(),
+            session_id: String::new(),
+            title: "Codex".into(),
+            cwd: None,
+            updated_at: 0,
+            pid: Some(1),
+            status: None,
+            terminal: None,
+            args: vec![],
+            url: None,
+            tmux: None,
+            unsure: None,
+        };
         s.inside.lock().unwrap().found = Some(codex);
         assert_eq!(on_screen(&s, Some("working".into()), false).as_deref(), Some("needs:Codex asks"));
         assert_eq!(on_screen(&s, None, false).as_deref(), Some("needs:Codex asks"), "before its record says anything");
@@ -6678,7 +6877,11 @@ while (sysread(STDIN, my $c, 1)) {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         // A Codex that takes its time to start: a script until `go` is there, then itself.
-        let script = format!("#!/bin/bash\necho \"$@\" >> '{runs}'\nuntil [ -e '{go}' ]; do /bin/sleep 0.02; done\nexec -a codex /bin/sleep 600\n", runs = dir.join("runs").display(), go = dir.join("go").display());
+        let script = format!(
+            "#!/bin/bash\necho \"$@\" >> '{runs}'\nuntil [ -e '{go}' ]; do /bin/sleep 0.02; done\nexec -a codex /bin/sleep 600\n",
+            runs = dir.join("runs").display(),
+            go = dir.join("go").display()
+        );
         std::fs::write(dir.join("bin/codex"), script).unwrap();
         std::fs::set_permissions(dir.join("bin/codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let d = shell_daemon();

@@ -371,8 +371,28 @@ impl Agent for CodeWhale {
 
     fn value_flags(&self) -> &'static [&'static str] {
         &[
-            "--config", "--profile", "--provider", "--model", "--output-mode", "--verbosity", "--log-level", "--telemetry", "--approval-policy", "--sandbox-mode", "--api-key",
-            "--base-url", "-C", "--workspace", "-w", "-r", "--resume", "--session-id", "-p", "--prompt", "--set", "--max-subagents",
+            "--config",
+            "--profile",
+            "--provider",
+            "--model",
+            "--output-mode",
+            "--verbosity",
+            "--log-level",
+            "--telemetry",
+            "--approval-policy",
+            "--sandbox-mode",
+            "--api-key",
+            "--base-url",
+            "-C",
+            "--workspace",
+            "-w",
+            "-r",
+            "--resume",
+            "--session-id",
+            "-p",
+            "--prompt",
+            "--set",
+            "--max-subagents",
         ]
     }
 

@@ -194,7 +194,10 @@ pub fn listed_models(v: &Value, provider: &str, tools: bool) -> Vec<ProviderMode
 
 /// The models a plan's docs name, for a plan with no list to ask.
 pub fn documented_models(p: &Preset) -> Vec<ProviderModel> {
-    p.documented_models.iter().map(|id| ProviderModel { id: id.clone(), name: id.clone(), provider: p.provider_id(), tools: p.tools.then_some(true), ..Default::default() }).collect()
+    p.documented_models
+        .iter()
+        .map(|id| ProviderModel { id: id.clone(), name: id.clone(), provider: p.provider_id(), tools: p.tools.then_some(true), ..Default::default() })
+        .collect()
 }
 
 #[cfg(test)]

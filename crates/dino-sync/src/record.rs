@@ -107,7 +107,9 @@ pub struct PullResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Nudge {
-    Advanced { seq: u64 },
+    Advanced {
+        seq: u64,
+    },
     /// The account's records were wiped ("Reset sync"): start over from 0.
     Reset,
     /// Anything a newer server sends.
@@ -120,15 +122,29 @@ pub enum Nudge {
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum SyncError {
     /// Its clock is further ahead of the server's than `crate::hlc::MAX_SKEW_MS`.
-    FutureStamp { ahead_ms: u64 },
-    TooLarge { bytes: usize, max: usize },
-    TooManyRecords { count: usize, max: usize },
+    FutureStamp {
+        ahead_ms: u64,
+    },
+    TooLarge {
+        bytes: usize,
+        max: usize,
+    },
+    TooManyRecords {
+        count: usize,
+        max: usize,
+    },
     /// The device was signed out or revoked.
     UnknownDevice,
-    RateLimited { retry_after_s: u64 },
+    RateLimited {
+        retry_after_s: u64,
+    },
     /// The client speaks an older protocol than the server still serves.
-    UpgradeRequired { min: u32 },
-    Malformed { reason: String },
+    UpgradeRequired {
+        min: u32,
+    },
+    Malformed {
+        reason: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -179,7 +195,15 @@ mod tests {
     use super::*;
 
     fn record(value: String) -> Record {
-        Record { id: RecordId::new("agents", "claude.mode"), hlc: Hlc { wall_ms: 1, counter: 0, device: "d".into() }, schema: 1, value: Value::String(value), deleted: false, seq: Some(1), extra: Map::new() }
+        Record {
+            id: RecordId::new("agents", "claude.mode"),
+            hlc: Hlc { wall_ms: 1, counter: 0, device: "d".into() },
+            schema: 1,
+            value: Value::String(value),
+            deleted: false,
+            seq: Some(1),
+            extra: Map::new(),
+        }
     }
 
     #[test]

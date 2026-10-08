@@ -40,11 +40,7 @@ pub(crate) struct GitHub {
 
 impl Default for GitHub {
     fn default() -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .user_agent(concat!("dino/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_default();
+        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).user_agent(concat!("dino/", env!("CARGO_PKG_VERSION"))).build().unwrap_or_default();
         Self { client, token: Mutex::default(), cache: Mutex::default(), until: Mutex::default(), login: Mutex::default() }
     }
 }
@@ -123,7 +119,9 @@ impl GitHub {
             *self.token.lock().unwrap() = None;
             anyhow::bail!("GitHub rejected gh's sign-in: run gh auth login");
         }
-        if matches!(status.as_u16(), 403 | 429) && let Some(secs) = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()) {
+        if matches!(status.as_u16(), 403 | 429)
+            && let Some(secs) = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok())
+        {
             *self.until.lock().unwrap() = Some((Instant::now() + Duration::from_secs(secs.clamp(30, 3600)), "GitHub asked dino to slow down; checking again later".into()));
         }
         let new_etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(String::from);

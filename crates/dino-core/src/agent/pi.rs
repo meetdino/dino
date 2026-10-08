@@ -367,9 +367,32 @@ impl Agent for Pi {
 
     fn value_flags(&self) -> &'static [&'static str] {
         &[
-            "--provider", "--model", "--api-key", "--system-prompt", "--append-system-prompt", "--mode", "--session", "--session-id", "--fork",
-            "--session-dir", "--name", "-n", "--models", "--tools", "-t", "--exclude-tools", "-xt", "--thinking", "--extension", "-e", "--skill",
-            "--prompt-template", "--theme", "--use-theme", "--export", "--tui-mode",
+            "--provider",
+            "--model",
+            "--api-key",
+            "--system-prompt",
+            "--append-system-prompt",
+            "--mode",
+            "--session",
+            "--session-id",
+            "--fork",
+            "--session-dir",
+            "--name",
+            "-n",
+            "--models",
+            "--tools",
+            "-t",
+            "--exclude-tools",
+            "-xt",
+            "--thinking",
+            "--extension",
+            "-e",
+            "--skill",
+            "--prompt-template",
+            "--theme",
+            "--use-theme",
+            "--export",
+            "--tui-mode",
         ]
     }
 
@@ -395,7 +418,15 @@ impl Agent for Pi {
             return None;
         }
         // Offline: its own catalog, without refreshing it from the network.
-        let run = |args: &[&str]| std::process::Command::new(program).args(args).env("PI_OFFLINE", "1").stderr(std::process::Stdio::null()).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        let run = |args: &[&str]| {
+            std::process::Command::new(program)
+                .args(args)
+                .env("PI_OFFLINE", "1")
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        };
         let settings = std::fs::read_to_string(pi_dir().join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
         catalog_in(&run(&["--list-models"])?, &levels_in(&run(&["--help"]).unwrap_or_default()), &settings)
     }
@@ -580,7 +611,8 @@ fn usage_in(jsonl: &str, id: &str) -> Vec<crate::usage::Used> {
         if v["type"] != "message" || m["role"] != "assistant" || !u.is_object() {
             continue;
         }
-        out.push(crate::usage::Used { undated: false,
+        out.push(crate::usage::Used {
+            undated: false,
             id: format!("{id}:{entry}"),
             at_ms: history::ms_of(&v["timestamp"]).or_else(|| history::ms_of(&m["timestamp"])).unwrap_or(0),
             conversation: id.into(),
@@ -620,12 +652,7 @@ mod tests {
     #[test]
     fn its_session_reads_as_turns() {
         let turns: Vec<(String, String)> = turns_in(SESSION).into_iter().map(|t| (t.role, t.text)).collect();
-        let want = [
-            ("user", "Remember the word PELICAN. Reply with only OK."),
-            ("user", "Run ls with your bash tool, then reply DONE."),
-            ("tool", "bash ls"),
-            ("assistant", "DONE"),
-        ];
+        let want = [("user", "Remember the word PELICAN. Reply with only OK."), ("user", "Run ls with your bash tool, then reply DONE."), ("tool", "bash ls"), ("assistant", "DONE")];
         assert_eq!(turns, want.map(|(r, t)| (r.to_string(), t.to_string())));
         assert_eq!(meta_in(SESSION), Meta { title: Some("Remember the word PELICAN. Reply with only OK.".into()), cwd: Some("/private/tmp/r".into()), hidden: false });
     }
@@ -664,7 +691,8 @@ mod tests {
     #[test]
     fn a_providers_model_has_every_field_pi_reads() {
         // From dino's Ollama list for qwen3:4b: its window and thinking, no vision, no output limit.
-        let info = ProviderModel { id: "qwen3:4b".into(), name: "qwen3:4b".into(), provider: "ollama".into(), context: Some(262_144), reasoning: Some(true), local: true, free: true, ..Default::default() };
+        let info =
+            ProviderModel { id: "qwen3:4b".into(), name: "qwen3:4b".into(), provider: "ollama".into(), context: Some(262_144), reasoning: Some(true), local: true, free: true, ..Default::default() };
         let m = pi_model("qwen3:4b", Some(&info));
         assert_eq!(m["input"], serde_json::json!(["text"]));
         assert_eq!(m["reasoning"], true);

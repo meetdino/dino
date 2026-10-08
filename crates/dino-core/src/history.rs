@@ -132,17 +132,9 @@ pub(crate) fn one_line(s: &str) -> Option<String> {
 /// What a person typed, not a slash command's expansion or an injected wrapper.
 pub(crate) fn typed(text: &str) -> Option<&str> {
     let t = text.trim();
-    let wrapper = [
-        "<",
-        "[Request interrupted",
-        "[Image",
-        "# AGENTS.md",
-        "Caveat:",
-        "You've inherited the conversation context",
-        "Your response above was cut off",
-    ]
-    .iter()
-    .any(|w| t.starts_with(w));
+    let wrapper = ["<", "[Request interrupted", "[Image", "# AGENTS.md", "Caveat:", "You've inherited the conversation context", "Your response above was cut off"]
+        .iter()
+        .any(|w| t.starts_with(w));
     (!t.is_empty() && !wrapper).then_some(t)
 }
 
@@ -276,7 +268,8 @@ pub(crate) fn claude_usage_in(jsonl: &str) -> Vec<crate::usage::Used> {
             Some(r) => format!("{mid}:{r}"),
             None => mid.to_string(),
         };
-        let next = crate::usage::Used { undated: false,
+        let next = crate::usage::Used {
+            undated: false,
             id,
             at_ms: ms_of(&v["timestamp"]).unwrap_or(0),
             conversation: v["sessionId"].as_str().unwrap_or_default().to_string(),
@@ -332,7 +325,8 @@ pub(crate) fn codex_usage_in(jsonl: &str, id: &str, model: &mut Option<String>, 
                     continue;
                 }
                 let cached = count(&last["cached_input_tokens"]);
-                out.push(crate::usage::Used { undated: false,
+                out.push(crate::usage::Used {
+                    undated: false,
                     id: call,
                     at_ms: ms_of(&v["timestamp"]).unwrap_or(0),
                     conversation: id.to_string(),
@@ -429,11 +423,7 @@ fn codex_meta_in(jsonl: &str) -> Meta {
 /// The conversation a Claude transcript's first lines say it was forked from (`forkedFrom`, which
 /// `/branch` puts on every entry it copies).
 pub(crate) fn claude_forked_from(jsonl: &str) -> Option<String> {
-    jsonl
-        .lines()
-        .take(50)
-        .filter(|l| l.contains("\"forkedFrom\""))
-        .find_map(|l| serde_json::from_str::<Value>(l).ok()?["forkedFrom"]["sessionId"].as_str().map(String::from))
+    jsonl.lines().take(50).filter(|l| l.contains("\"forkedFrom\"")).find_map(|l| serde_json::from_str::<Value>(l).ok()?["forkedFrom"]["sessionId"].as_str().map(String::from))
 }
 
 /// The conversation a Codex rollout was forked from (`forked_from_id` in its `session_meta`).
@@ -466,21 +456,7 @@ pub(crate) fn modified(p: &Path) -> u64 {
 
 /// A conversation on disk that nothing is running.
 pub(crate) fn recent(agent: &str, session_id: String, title: String, cwd: Option<String>, updated_at: u64) -> FoundSession {
-    FoundSession {
-        source: Source::Recent,
-        agent: agent.into(),
-        session_id,
-        title,
-        cwd,
-        updated_at,
-        pid: None,
-        status: None,
-        terminal: None,
-        args: vec![],
-        url: None,
-        tmux: None,
-        unsure: None,
-    }
+    FoundSession { source: Source::Recent, agent: agent.into(), session_id, title, cwd, updated_at, pid: None, status: None, terminal: None, args: vec![], url: None, tmux: None, unsure: None }
 }
 
 /// The conversations on disk that aren't running (those are in `running`), newest first: the
@@ -831,14 +807,17 @@ mod tests {
         ]
         .join("\n");
         let all = claude_turns(&fork, Some(true));
-        assert_eq!(all, vec![
-            turn("task", "Fix the sidebar."),
-            turn("assistant", "On it."),
-            turn("tool", "Bash swift build"),
-            turn("note", "Context compacted"),
-            turn("user", "also the toolbar"),
-            turn("assistant", "Done."),
-        ]);
+        assert_eq!(
+            all,
+            vec![
+                turn("task", "Fix the sidebar."),
+                turn("assistant", "On it."),
+                turn("tool", "Bash swift build"),
+                turn("note", "Context compacted"),
+                turn("user", "also the toolbar"),
+                turn("assistant", "Done."),
+            ]
+        );
         // Read from somewhere in the middle, nothing is taken for the task.
         assert!(claude_turns(&fork.lines().skip(4).collect::<Vec<_>>().join("\n"), Some(false)).iter().all(|t| t.role != "task"));
         // In its parent's file, a subagent's turns aren't the conversation.

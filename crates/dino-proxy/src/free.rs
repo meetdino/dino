@@ -20,9 +20,24 @@ use crate::catalog::NIM_BASE;
 use crate::{AppState, Call, CallStatus, InFlight, Usage, log, now_ms};
 
 const OPENAI_PARAMS: &[&str] = &[
-    "model", "messages", "tools", "tool_choice", "parallel_tool_calls", "max_tokens", "max_completion_tokens",
-    "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "seed", "n",
-    "frequency_penalty", "presence_penalty", "reasoning_effort",
+    "model",
+    "messages",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "max_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "stop",
+    "stream",
+    "stream_options",
+    "response_format",
+    "seed",
+    "n",
+    "frequency_penalty",
+    "presence_penalty",
+    "reasoning_effort",
 ];
 
 pub(crate) async fn handle(st: AppState, session: String, rest: &str, body: Bytes) -> Response<Body> {
@@ -182,13 +197,7 @@ async fn send(st: &AppState, session: &str, tier: Tier, mut oai: Value, stream: 
         for _ in 0..3 {
             clamp_output(&mut body, limit);
             let started = Instant::now();
-            let sent = st
-                .client()
-                .post(format!("{NIM_BASE}/chat/completions"))
-                .bearer_auth(key)
-                .timeout(Duration::from_secs(if stream { 600 } else { 120 }))
-                .json(&body)
-                .send();
+            let sent = st.client().post(format!("{NIM_BASE}/chat/completions")).bearer_auth(key).timeout(Duration::from_secs(if stream { 600 } else { 120 })).json(&body).send();
             match tokio::time::timeout(Duration::from_secs(25), sent).await {
                 Ok(Ok(r)) if r.status().is_success() => {
                     st.router.record_ok(&model, started.elapsed());
@@ -204,7 +213,9 @@ async fn send(st: &AppState, session: &str, tier: Tier, mut oai: Value, stream: 
                     let status = r.status();
                     let text = r.text().await.unwrap_or_default();
                     log(format_args!("{session} free {tier:?} {} -> {status} {}", model.id, clip(&text, 600)));
-                    if status.as_u16() == 400 && let Some(n) = output_limit(&text, asked_output(&body)) {
+                    if status.as_u16() == 400
+                        && let Some(n) = output_limit(&text, asked_output(&body))
+                    {
                         st.router.learn_max_output(&model, n);
                         limit = Some(n);
                         continue;
@@ -452,12 +463,7 @@ fn stream_back(st: AppState, session: String, resp: reqwest::Response, model: St
         Ok::<Bytes, std::io::Error>(Bytes::from(out))
     });
 
-    Response::builder()
-        .status(200)
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .body(Body::from_stream(events))
-        .unwrap()
+    Response::builder().status(200).header("content-type", "text/event-stream").header("cache-control", "no-cache").body(Body::from_stream(events)).unwrap()
 }
 
 fn stream_error(message: &str) -> String {
@@ -469,11 +475,7 @@ fn stream_error(message: &str) -> String {
 /// so "what model are you?" gets an honest reply.
 fn set_identity(oai: &mut Value, model: &dino_router::Model) {
     const MARK: &str = "[dino] ";
-    let note = format!(
-        "{MARK}Identity: you are {} ({}), served by NVIDIA NIM through dino's free tier. You are not Claude; if asked what model you are, say so plainly.",
-        model.short(),
-        model.id
-    );
+    let note = format!("{MARK}Identity: you are {} ({}), served by NVIDIA NIM through dino's free tier. You are not Claude; if asked what model you are, say so plainly.", model.short(), model.id);
     let Some(msgs) = oai["messages"].as_array_mut() else { return };
     // Replace the note from a previous attempt (fallback to another model) instead of stacking them.
     msgs.retain(|m| !(m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.starts_with(MARK))));
@@ -482,12 +484,7 @@ fn set_identity(oai: &mut Value, model: &dino_router::Model) {
 }
 
 fn record_usage(st: &AppState, session: &str, model: &str, u: &anyllm_translate::anthropic::Usage) {
-    let usage = Usage {
-        input: u.input_tokens as u64,
-        output: u.output_tokens as u64,
-        cache_read: u.cache_read_input_tokens.unwrap_or(0) as u64,
-        cache_write: 0,
-    };
+    let usage = Usage { input: u.input_tokens as u64, output: u.output_tokens as u64, cache_read: u.cache_read_input_tokens.unwrap_or(0) as u64, cache_write: 0 };
     st.stats.update(session, |s| s.metered(Some(&crate::RouteTag { path: "free".into(), name: "free models".into() }), &usage));
     record(st, session, Some(model), usage, CallStatus::Ok);
 }
