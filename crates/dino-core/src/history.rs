@@ -269,6 +269,7 @@ pub(crate) fn claude_usage_in(jsonl: &str) -> Vec<crate::usage::Used> {
             answer: Some(id.clone()),
             // A subagent's own file, or its lines in its parent's (older Claude Codes).
             subagent: v["isSidechain"] == true,
+            subagent_id: v["agentId"].as_str().filter(|_| v["isSidechain"] == true).map(String::from),
             id,
             at_ms: ms_of(&v["timestamp"]).unwrap_or(0),
             conversation: v["sessionId"].as_str().unwrap_or_default().to_string(),
@@ -915,6 +916,7 @@ mod tests {
         assert_eq!(used.len(), 3, "one per answer, not per line; nothing for a synthetic one");
         // The id dino's proxy also knows the answer by, and whose it was.
         assert_eq!((used[0].answer.as_deref(), used[0].subagent), (Some("msg_1:req_1"), false));
+        assert_eq!((used[0].subagent_id.as_deref(), used[2].subagent_id.as_deref()), (None, Some("a1")), "which subagent, from its agentId");
         assert_eq!((used[2].answer.as_deref(), used[2].subagent, used[2].conversation.as_str()), (Some("msg_3:req_3"), true, "s1"), "a subagent's, in its parent's conversation");
         assert_eq!((used[0].id.as_str(), used[0].conversation.as_str(), used[0].cwd.as_deref()), ("msg_1:req_1", "s1", Some("/r")));
         assert_eq!((used[0].input, used[0].cache_write, used[0].output), (2, 640, 182));

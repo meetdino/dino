@@ -277,7 +277,14 @@ struct TerminalEditItems: View {
         Button("Reset Terminal") { LinkTerminalView.current(model)?.resetTerminal(nil) }
         Divider()
         Menu("Find") {
-            Button("Find…") { LinkTerminalView.current(model)?.find(.find) }
+            Button("Find…") {
+                // In Settings, its search: the terminal behind it isn't what you're looking at.
+                if NSApp.keyWindow?.identifier?.rawValue.hasPrefix(SettingsView.windowID) == true {
+                    NotificationCenter.default.post(name: SettingsView.find, object: nil)
+                } else {
+                    LinkTerminalView.current(model)?.find(.find)
+                }
+            }
                 .keyboardShortcut("f")
             Button("Find Next") { LinkTerminalView.current(model)?.find(.next) }
                 .keyboardShortcut("g")

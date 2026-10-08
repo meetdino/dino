@@ -13,26 +13,13 @@ extension DinoSettings {
     }
 }
 
-/// Settings → Workspaces → Worktrees: where they go, trust, archiving after a PR,
-/// and the ones on disk.
+/// Settings → Worktrees: where they go, what their branches are called, trust, and archiving
+/// after a PR.
 struct WorktreesPane: View {
     @EnvironmentObject var store: SettingsStore
     @State private var location = ""
-    @State private var prefix = ""
-    @State private var stored: [StoredWorktree]?
-    @State private var removing: Set<String> = []
-    @State private var error: String?
-    @State private var confirmFree = false
-    @State private var freeing = false
-    @State private var freed: String?
 
     private var current: DinoSettings.Worktrees? { store.settings?.worktrees }
-    private var reclaimable: [StoredWorktree] { (stored ?? []).filter { $0.reclaimable == true && !removing.contains($0.path) } }
-    private var reclaimableSize: String? {
-        let sizes = reclaimable.compactMap(\.size)
-        guard !sizes.isEmpty else { return nil }
-        return ByteCountFormatter.string(fromByteCount: Int64(sizes.reduce(0, +)), countStyle: .file)
-    }
 
     var body: some View {
         Form {
@@ -46,38 +33,134 @@ struct WorktreesPane: View {
                     }
                 }
                 .orgLocked("worktrees.location")
+                .settingAnchor("worktree-location")
+            } footer: {
+                Footnote("A relative location is created inside each repo and kept out of git status. An absolute location gets one folder per repo. Changes apply to new worktrees.")
+            }
+            Section {
+                Toggle(isOn: Binding(
+                    get: { store.settings?.policies.worktree_trust ?? true },
+                    set: { on in store.update { $0.policies.worktree_trust = on } }
+                )) {
+                    Text("Trust worktrees when the repo is trusted")
+                    Text("Claude Code asks whether to trust every new folder. It takes a worktree's trust from its repo, but not a trusted folder inside the repo: dino marks that same folder trusted in each worktree it makes, and removes the mark when the worktree is removed. Codex handles this itself.")
+                }
+                .orgLocked("policies.worktree_trust")
+                .settingAnchor("worktree-trust")
+            }
+            WorktreeStorageSection()
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+        .onAppear { sync() }
+        // Typed but not submitted when the page closes: keep it.
+        .onDisappear {
+            if location != (current?.location ?? DinoSettings.Worktrees.defaultLocation) { saveLocation() }
+        }
+        .onChange(of: current) { _, _ in sync() }
+    }
+
+    private func sync() {
+        location = current?.location ?? DinoSettings.Worktrees.defaultLocation
+    }
+
+    private func saveLocation() {
+        let l = location.trimmingCharacters(in: .whitespaces)
+        store.update { s in
+            var w = s.worktrees ?? .init(location: DinoSettings.Worktrees.defaultLocation, branch_prefix: DinoSettings.Worktrees.defaultPrefix)
+            w.location = l.isEmpty ? DinoSettings.Worktrees.defaultLocation : l
+            s.worktrees = w
+        }
+    }
+
+    private func chooseLocation() {
+        if let url = FolderPanel.choose(in: nil, verb: "Use", message: "dino creates a folder here for each repo's worktrees.") {
+            location = (url.path as NSString).abbreviatingWithTildeInPath
+            saveLocation()
+        }
+    }
+}
+
+/// Settings → Git: what dino's branches are called, and what happens when a session's pull request
+/// closes, as Codex's Git settings hold branch naming and PR behavior.
+struct GitPane: View {
+    @EnvironmentObject var store: SettingsStore
+    @State private var prefix = ""
+
+    private var current: DinoSettings.Worktrees? { store.settings?.worktrees }
+
+    private var prefixShown: String {
+        let p = prefix.trimmingCharacters(in: .whitespaces)
+        return p.isEmpty ? DinoSettings.Worktrees.defaultPrefix : p
+    }
+
+    var body: some View {
+        Form {
+            Section {
                 LabeledContent("Branch prefix") {
                     TextField("", text: $prefix, prompt: Text(DinoSettings.Worktrees.defaultPrefix))
                         .onSubmit { savePrefix() }
                         .frame(width: 140)
                 }
                 .orgLocked("worktrees.branch_prefix")
+                .settingAnchor("branch-prefix")
             } footer: {
-                Footnote("A relative location is created inside each repo and kept out of git status. An absolute location gets one folder per repo. Changes apply to new worktrees. Branches are named like \(prefixShown)claude-3f2a; an automation's runs are named after the automation.")
+                Footnote("Branches dino makes for worktrees are named like \(prefixShown)claude-3f2a; an automation's runs are named after the automation. Applies to new worktrees.")
             }
             Section {
-                Toggle("Trust worktrees when the repo is trusted", isOn: Binding(
-                    get: { store.settings?.policies.worktree_trust ?? true },
-                    set: { on in store.update { $0.policies.worktree_trust = on } }
-                ))
-                .orgLocked("policies.worktree_trust")
-            } header: {
-                Text("Trust")
-            } footer: {
-                Footnote("Claude Code asks whether to trust every new folder. It takes a worktree's trust from its repo, but not a trusted folder inside the repo: dino marks that same folder trusted in each worktree it makes, and removes the mark when the worktree is removed. Codex handles this itself.")
-            }
-            Section {
-                Toggle("Archive sessions after their PR merges or closes", isOn: Binding(
+                Toggle(isOn: Binding(
                     get: { store.settings?.policies.close_merged ?? false },
                     set: { on in store.update { $0.policies.close_merged = on } }
-                ))
+                )) {
+                    Text("Archive sessions after their PR merges or closes")
+                    Text("Once its agent is idle. After a merge, dino also removes the session's worktree if nothing in it would be lost; after a close, the worktree is kept. Unarchive a session to pick up where it left off, worktree included. Sessions outside a dino worktree aren't archived.")
+                }
                 .orgLocked("policies.close_merged")
+                .settingAnchor("close-merged")
             } header: {
                 Text("Pull Requests")
-            } footer: {
-                Footnote("When a session's pull request is merged or closed, dino archives the session once its agent is idle. After a merge, dino also removes the session's worktree if nothing in it would be lost. After a close, the worktree is kept, since the work wasn't merged. Unarchive a session to pick up where it left off, worktree included. Sessions outside a dino worktree aren't archived.")
             }
-            BuildCacheSection()
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+        .onAppear { prefix = current?.branch_prefix ?? DinoSettings.Worktrees.defaultPrefix }
+        .onChange(of: current) { _, c in prefix = c?.branch_prefix ?? DinoSettings.Worktrees.defaultPrefix }
+        // Typed but not submitted when the page closes: keep it.
+        .onDisappear {
+            if prefix != (current?.branch_prefix ?? DinoSettings.Worktrees.defaultPrefix) { savePrefix() }
+        }
+    }
+
+    private func savePrefix() {
+        let p = prefix.trimmingCharacters(in: .whitespaces)
+        store.update { s in
+            var w = s.worktrees ?? .init(location: DinoSettings.Worktrees.defaultLocation, branch_prefix: DinoSettings.Worktrees.defaultPrefix)
+            w.branch_prefix = p.isEmpty ? DinoSettings.Worktrees.defaultPrefix : p
+            s.worktrees = w
+        }
+    }
+
+}
+
+/// Settings → Worktrees: the worktrees dino made, with what they take, as Codex's Worktrees page lists its own.
+private struct WorktreeStorageSection: View {
+    @EnvironmentObject var store: SettingsStore
+    @State private var stored: [StoredWorktree]?
+    @State private var removing: Set<String> = []
+    @State private var error: String?
+    @State private var confirmFree = false
+    @State private var freeing = false
+    @State private var freed: String?
+
+    private var reclaimable: [StoredWorktree] { (stored ?? []).filter { $0.reclaimable == true && !removing.contains($0.path) } }
+    private var reclaimableSize: String? {
+        let sizes = reclaimable.compactMap(\.size)
+        guard !sizes.isEmpty else { return nil }
+        return ByteCountFormatter.string(fromByteCount: Int64(sizes.reduce(0, +)), countStyle: .file)
+    }
+
+    var body: some View {
+        Group {
             Section {
                 if let stored {
                     if stored.isEmpty {
@@ -89,7 +172,7 @@ struct WorktreesPane: View {
                 }
             } header: {
                 HStack {
-                    Text("Storage")
+                    Text("Worktrees on Disk").settingAnchor("worktree-storage")
                     if let total { Text(total).foregroundStyle(.secondary).monospacedDigit() }
                     Spacer()
                     if freeing {
@@ -107,23 +190,14 @@ struct WorktreesPane: View {
                 }
             }
             if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
+                Section { Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout) }
             }
         }
-        .formStyle(.grouped)
-        .disabled(store.settings == nil)
-        .onAppear { sync() }
-        // Typed but not submitted when the pane closes: keep it.
-        .onDisappear {
-            if location != (current?.location ?? DinoSettings.Worktrees.defaultLocation) { saveLocation() }
-            if prefix != (current?.branch_prefix ?? DinoSettings.Worktrees.defaultPrefix) { savePrefix() }
-        }
-        .onChange(of: current) { _, _ in sync() }
         .task {
             // Sizes arrive as dinod measures them, off its main thread.
             while !Task.isCancelled {
                 if let list = try? await Task.detached(operation: { try DinoConnection(path: DinoEnvironment.socketPath).storage() }).value {
-                    stored = list
+                    if list != stored { stored = list }
                     removing.formIntersection(list.map(\.path))
                 }
                 try? await Task.sleep(for: .seconds(2))
@@ -134,11 +208,6 @@ struct WorktreesPane: View {
         } message: {
             Text("No sessions are running in them, and their work is merged or pushed, so nothing is lost. Ended sessions in them are archived. Their merged branches are deleted too.")
         }
-    }
-
-    private var prefixShown: String {
-        let p = prefix.trimmingCharacters(in: .whitespaces)
-        return p.isEmpty ? DinoSettings.Worktrees.defaultPrefix : p
     }
 
     private var total: String? {
@@ -233,35 +302,6 @@ struct WorktreesPane: View {
         }
     }
 
-    private func sync() {
-        location = current?.location ?? DinoSettings.Worktrees.defaultLocation
-        prefix = current?.branch_prefix ?? DinoSettings.Worktrees.defaultPrefix
-    }
-
-    private func saveLocation() {
-        let l = location.trimmingCharacters(in: .whitespaces)
-        store.update { s in
-            var w = s.worktrees ?? .init(location: DinoSettings.Worktrees.defaultLocation, branch_prefix: DinoSettings.Worktrees.defaultPrefix)
-            w.location = l.isEmpty ? DinoSettings.Worktrees.defaultLocation : l
-            s.worktrees = w
-        }
-    }
-
-    private func savePrefix() {
-        let p = prefix.trimmingCharacters(in: .whitespaces)
-        store.update { s in
-            var w = s.worktrees ?? .init(location: DinoSettings.Worktrees.defaultLocation, branch_prefix: DinoSettings.Worktrees.defaultPrefix)
-            w.branch_prefix = p.isEmpty ? DinoSettings.Worktrees.defaultPrefix : p
-            s.worktrees = w
-        }
-    }
-
-    private func chooseLocation() {
-        if let url = FolderPanel.choose(in: nil, verb: "Use", message: "dino creates a folder here for each repo's worktrees.") {
-            location = (url.path as NSString).abbreviatingWithTildeInPath
-            saveLocation()
-        }
-    }
 }
 
 /// Merged, ready, in progress; plus why it's held on to.

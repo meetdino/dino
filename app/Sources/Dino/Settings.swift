@@ -365,224 +365,316 @@ final class SettingsStore: ObservableObject {
     }
 }
 
-/// Settings' sections, in sidebar order: the app and the Mac first, then what agents do.
-enum SettingsPane: String, CaseIterable, Identifiable {
-    case account, general, terminal, tmux, power, agents, models, workspaces, experimental, managed
-    var id: String { rawValue }
-
-    /// A pane remembered from before: Policies was split up, most of it into Agents.
-    init?(rawValue: String) {
-        if rawValue == "policies" {
-            self = .agents
-            return
-        }
-        guard let pane = Self.allCases.first(where: { $0.rawValue == rawValue }) else { return nil }
-        self = pane
-    }
-
-    /// The sidebar's groups, under the account row; what the organization manages only when it does.
-    static func groups(managed: Bool) -> [[SettingsPane]] {
-        [[.general, .terminal, .tmux, .power], [.agents, .models, .workspaces], [.experimental]] + (managed ? [[.managed]] : [])
-    }
-
-    var title: String {
-        switch self {
-        case .account: "Dino Account"
-        case .general: "General"
-        case .terminal: "Terminal"
-        case .tmux: "tmux"
-        case .power: "Power"
-        case .agents: "Agents"
-        case .models: "Models & Providers"
-        case .workspaces: "Workspaces"
-        case .experimental: "Experimental"
-        case .managed: "Managed by your organization"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .account: "person.crop.circle.fill"
-        case .general: "gearshape.fill"
-        case .terminal: "terminal.fill"
-        case .tmux: "rectangle.split.3x1.fill"
-        case .power: "bolt.fill"
-        case .agents: "cpu.fill"
-        case .models: "cube.fill"
-        case .workspaces: "folder.fill"
-        case .experimental: "flask.fill"
-        case .managed: "building.2.fill"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .account: .blue
-        case .general: .gray
-        case .terminal: Color(white: 0.35)
-        case .tmux: .green
-        case .power: .orange
-        case .agents: .purple
-        case .models: .pink
-        case .workspaces: .teal
-        case .experimental: .brown
-        case .managed: .indigo
-        }
-    }
-
-    /// Open Settings at this pane next time it shows.
-    func select() {
-        UserDefaults.standard.set(rawValue, forKey: "settingsTab")
-    }
-
-    /// The parts a pane is split into, shown as tabs at its top; none for a single-part pane.
-    var parts: [SettingsPart] {
-        switch self {
-        case .models: [.providers, .keys]
-        case .workspaces: [.worktrees, .repos, .ssh]
-        default: []
-        }
-    }
-}
-
-/// A part of a Settings pane. The raw values are stable: other places open Settings at one.
-enum SettingsPart: String, Identifiable {
-    case providers, keys, worktrees, repos, ssh
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .providers: "Providers"
-        case .keys: "API Keys"
-        case .worktrees: "Worktrees"
-        case .repos: "Repositories"
-        case .ssh: "SSH Hosts"
-        }
-    }
-
-    var pane: SettingsPane {
-        switch self {
-        case .providers, .keys: .models
-        case .worktrees, .repos, .ssh: .workspaces
-        }
-    }
-
-    /// The defaults key for the part a pane last showed.
-    static func key(_ pane: SettingsPane) -> String { "settingsPart.\(pane.rawValue)" }
-
-    /// Open Settings at this part next time it shows.
-    func select() {
-        pane.select()
-        UserDefaults.standard.set(rawValue, forKey: Self.key(pane))
-    }
-}
-
-/// A System Settings-style window: sections in a sidebar that never collapses, the pane beside it.
-/// A plain Window, since the Settings scene forces centered toolbar tabs.
+/// A System Settings-style window: many small pages in a sidebar that never collapses, with search
+/// over every setting at its top. A plain Window, since the Settings scene forces centered toolbar tabs.
 struct SettingsView: View {
     static let windowID = "settings"
+    /// Edit → Find… (⌘F) while Settings is in front: its search takes the keyboard.
+    static let find = Notification.Name("dino.settings.find")
 
     @StateObject private var store = SettingsStore()
-    /// Settings reopens on the pane you left it at, like the system's.
-    @AppStorage("settingsTab") private var pane: SettingsPane = .general
+    /// Settings reopens on the page you left it at, like the system's.
+    @AppStorage(SettingsPane.storageKey) private var pane: SettingsPane = .general
+    @State private var query = ""
+    /// The result chosen in the list: its page shows, with the control lit up.
+    @State private var picked: String?
+    @State private var highlight: String?
+    @FocusState private var searching: Bool
+    @Environment(\.openWindow) private var openWindow
 
-    /// The pane to show: what the organization manages only while it manages something.
+    private var managed: Bool { !store.locked.isEmpty }
+
+    /// The page to show: what the organization manages only while it manages something.
     private var shown: SettingsPane {
-        pane == .managed && store.settings != nil && store.locked.isEmpty ? .general : pane
+        pane == .managed && store.settings != nil && !managed ? .general : pane
     }
+
+    private var results: [SettingsEntry] { SettingsSearch.results(query, managed: managed) }
 
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
-            List(selection: Binding(get: { shown }, set: { if let p = $0 { pane = p } })) {
-                AccountRow().tag(SettingsPane.account)
-                    .padding(.vertical, 4)
-                ForEach(SettingsPane.groups(managed: !store.locked.isEmpty), id: \.self) { group in
-                    Section {
-                        ForEach(group) { p in
-                            HStack(spacing: 8) {
-                                SettingsIcon(pane: p, size: 22)
-                                Text(p.title)
-                            }
+            VStack(spacing: 0) {
+                SettingsSearchField(text: $query, focused: $searching, move: move, submit: submit)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 2)
+                    .padding(.bottom, 6)
+                if query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    pages
+                } else {
+                    SettingsResults(results: results, picked: $picked)
+                }
+            }
+            .frame(width: 250)
+            .navigationSplitViewColumnWidth(min: 250, ideal: 250, max: 250)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            ScrollViewReader { proxy in
+                VStack(spacing: 0) {
+                    SettingsPageHeader(pane: shown)
+                    SettingsPage(pane: shown)
+                    StoreError()
+                }
+                .environment(\.settingsHighlight, highlight)
+                // On the page just opened: once it's drawn, bring the control into view.
+                .task(id: highlight) {
+                    guard let h = highlight else { return }
+                    try? await Task.sleep(for: .milliseconds(60))
+                    withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(h, anchor: .center) }
+                    try? await Task.sleep(for: .seconds(2.2))
+                    if highlight == h { highlight = nil }
+                }
+            }
+            .navigationTitle("Settings")
+        }
+        .modifier(TerminalChoicesSync())
+        .environmentObject(store)
+        .frame(minWidth: 760, idealWidth: 880, minHeight: 500, idealHeight: 660)
+        .background(FixedMinimum(size: NSSize(width: 760, height: 500)))
+        .onAppear { store.load() }
+        .onChange(of: query) { _, _ in picked = nil }
+        .onChange(of: picked) { _, id in
+            if let e = id.flatMap({ id in SettingsEntry.all.first { $0.id == id } }) { open(e) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Self.find)) { _ in searching = true }
+    }
+
+    private var pages: some View {
+        List(selection: Binding(get: { shown }, set: { if let p = $0 { pane = p } })) {
+            AccountRow().tag(SettingsPane.account)
+                .padding(.vertical, 4)
+            ForEach(SettingsPane.groups(managed: managed), id: \.self) { group in
+                Section {
+                    ForEach(group.panes) { p in
+                        Label { Text(p.title) } icon: { SettingsIcon(pane: p, size: 17) }
                             .tag(p)
+                    }
+                } header: {
+                    if !group.title.isEmpty { Text(group.title) }
+                }
+            }
+            Section {
+                // Usage lives in its own window; reachable from here as Codex's "Usage" page is.
+                Button { openWindow(id: StatsView.windowID) } label: {
+                    Label {
+                        HStack(spacing: 4) {
+                            Text("Usage Stats")
+                            Image(systemName: "arrow.up.forward").font(.caption2).foregroundStyle(.tertiary)
+                        }
+                    } icon: {
+                        Image(systemName: "chart.bar").font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 17)
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("Open Usage Stats (⇧⌘U)")
+            }
+        }
+    }
+
+    /// Shows the entry's page with its control lit up.
+    private func open(_ e: SettingsEntry) {
+        pane = e.pane
+        highlight = nil
+        DispatchQueue.main.async { highlight = e.id }
+    }
+
+    /// ↑ and ↓ in the search field go through the results, as in System Settings.
+    private func move(_ by: Int) {
+        let ids = results.map(\.id)
+        guard !ids.isEmpty else { return }
+        let at = picked.flatMap { ids.firstIndex(of: $0) } ?? (by > 0 ? -1 : ids.count)
+        picked = ids[max(0, min(ids.count - 1, at + by))]
+    }
+
+    /// ⏎: the result chosen, or the first.
+    private func submit() {
+        if let first = results.first, picked == nil { picked = first.id } else if let id = picked, let e = SettingsEntry.all.first(where: { $0.id == id }) { open(e) }
+    }
+}
+
+/// The window's minimum set once, on the window: the hosting view otherwise works out the whole
+/// page's smallest and largest size on every change (a long page, every keystroke) to keep its
+/// window within them.
+private struct FixedMinimum: NSViewRepresentable {
+    let size: NSSize
+
+    func makeNSView(context _: Context) -> NSView { Probe(size: size) }
+    func updateNSView(_: NSView, context _: Context) {}
+
+    final class Probe: NSView {
+        let size: NSSize
+        init(size: NSSize) {
+            self.size = size
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable) required init?(coder _: NSCoder) { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let w = window else { return }
+            var v = w.contentView
+            while let view = v, !(view is HostingSizing) { v = view.subviews.first }
+            (v as? HostingSizing)?.sizingOptions = []
+            w.contentMinSize = size
+        }
+    }
+}
+
+/// Any hosting view's sizing, whatever its root view's type.
+private protocol HostingSizing: AnyObject {
+    var sizingOptions: NSHostingSizingOptions { get set }
+}
+
+extension NSHostingView: HostingSizing {}
+
+/// The page for `pane`.
+private struct SettingsPage: View {
+    let pane: SettingsPane
+
+    var body: some View {
+        switch pane {
+        case .account: AccountPane()
+        case .general: GeneralPane()
+        case .appearance: AppearancePane()
+        case .notifications: NotificationsPane()
+        case .updates: Form { UpdatesSection() }.formStyle(.grouped)
+        case .shell: ShellPane()
+        case .ai: Form { ShellAISection() }.formStyle(.grouped)
+        case .quick: QuickTerminalPane()
+        case .tmux: Form { TmuxSection() }.formStyle(.grouped)
+        case .agents: AgentsPane()
+        case .defaults: AgentDefaultsPane()
+        case .limits: LimitsPane()
+        case .claude: ClaudeCodePane()
+        case .computer: ComputerUsePane()
+        case .providers: ProvidersPane()
+        case .models: ModelBrowser()
+        case .keys: KeysPane()
+        case .git: GitPane()
+        case .worktrees: WorktreesPane()
+        case .repos: ReposPane()
+        case .ssh: EnvironmentsPane()
+        case .power: PowerPane()
+        case .permissions: PermissionsPane()
+        case .experimental: ExperimentalPane()
+        case .managed: ManagedPane()
+        }
+    }
+}
+
+/// The page's title and what it's for, over its sections, as Claude's and Codex's settings pages start.
+private struct SettingsPageHeader: View {
+    let pane: SettingsPane
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(pane.title).font(.title2.weight(.semibold))
+            Text(pane.summary).font(.callout).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 30)
+        .padding(.top, 14)
+        .padding(.bottom, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// The search field at the top of the sidebar.
+private struct SettingsSearchField: View {
+    @Binding var text: String
+    var focused: FocusState<Bool>.Binding
+    let move: (Int) -> Void
+    let submit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary).font(.system(size: 12))
+            TextField("Search", text: $text, prompt: Text("Search settings"))
+                .textFieldStyle(.plain)
+                .focused(focused)
+                .onSubmit(submit)
+                .onKeyPress(.downArrow) { move(1); return .handled }
+                .onKeyPress(.upArrow) { move(-1); return .handled }
+                .onKeyPress(.escape) {
+                    guard !text.isEmpty else { return .ignored }
+                    text = ""
+                    return .handled
+                }
+                .accessibilityLabel("Search settings")
+            if !text.isEmpty {
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain)
+                    .help("Clear the search")
+                    .accessibilityLabel("Clear the search")
+            }
+        }
+        .padding(.horizontal, 7)
+        .frame(height: 26)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(.quaternary.opacity(0.7)))
+        .help("Search every setting (⌘F)")
+    }
+}
+
+/// What the search found, by page: each one opens its page with the control lit up.
+private struct SettingsResults: View {
+    let results: [SettingsEntry]
+    @Binding var picked: String?
+
+    var body: some View {
+        if results.isEmpty {
+            VStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.title2).foregroundStyle(.tertiary)
+                Text("No Results").font(.headline).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List(selection: $picked) {
+                ForEach(Self.byPage(results), id: \.0) { pane, entries in
+                    Section {
+                        ForEach(entries) { e in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(e.title).lineLimit(1)
+                                if !e.detail.isEmpty {
+                                    Text(e.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                            .tag(e.id)
+                        }
+                    } header: {
+                        HStack(spacing: 6) {
+                            SettingsIcon(pane: pane, size: 14)
+                            Text(pane.title)
                         }
                     }
                 }
             }
-            .frame(width: 215)
-            .navigationSplitViewColumnWidth(min: 215, ideal: 215, max: 215)
-            .toolbar(removing: .sidebarToggle)
-        } detail: {
-            VStack(spacing: 0) {
-                switch shown {
-                case .account: AccountPane()
-                case .general: GeneralPane()
-                case .terminal: TerminalSettingsPane()
-                case .tmux: Form { TmuxSection() }.formStyle(.grouped)
-                case .power: PowerPane()
-                case .agents: AgentsPane()
-                case .models, .workspaces: PartedPane(pane: pane)
-                case .experimental: ExperimentalPane()
-                case .managed: ManagedPane()
-                }
-                StoreError()
-            }
-            .navigationTitle(shown.title)
         }
-        .modifier(TerminalChoicesSync())
-        .environmentObject(store)
-        // Resizable: the model list and the storage list use the room.
-        .frame(minWidth: 715, idealWidth: 820, minHeight: 470, idealHeight: 620)
-        .onAppear { store.load() }
+    }
+
+    /// Pages in the order their best result came, each with its results in order.
+    static func byPage(_ results: [SettingsEntry]) -> [(SettingsPane, [SettingsEntry])] {
+        var order: [SettingsPane] = []
+        var by: [SettingsPane: [SettingsEntry]] = [:]
+        for e in results {
+            if by[e.pane] == nil { order.append(e.pane) }
+            by[e.pane, default: []].append(e)
+        }
+        return order.map { ($0, by[$0]!) }
     }
 }
 
-/// A pane made of parts, with tabs to switch between them: each part is a full pane of its own,
-/// so a long list (models, worktrees on disk) never pushes the short ones out of sight.
-private struct PartedPane: View {
-    let pane: SettingsPane
-    @AppStorage private var stored: String
-
-    init(pane: SettingsPane) {
-        self.pane = pane
-        _stored = AppStorage(wrappedValue: pane.parts.first?.rawValue ?? "", SettingsPart.key(pane))
-    }
-
-    private var part: SettingsPart {
-        SettingsPart(rawValue: stored).flatMap { pane.parts.contains($0) ? $0 : nil } ?? pane.parts[0]
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Picker("Show", selection: Binding(get: { part }, set: { stored = $0.rawValue })) {
-                ForEach(pane.parts) { p in Text(p.title).tag(p) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            .padding(.top, 12)
-            .padding(.bottom, 2)
-            switch part {
-            case .providers: ProvidersPane()
-            case .keys: KeysPane()
-            case .worktrees: WorktreesPane()
-            case .repos: ReposPane()
-            case .ssh: EnvironmentsPane()
-            }
-        }
-    }
-}
-
-/// The rounded, colored glyph System Settings gives each section.
-private struct SettingsIcon: View {
+/// A page's outline glyph, in secondary ink, as the Codex app's settings sidebar draws them.
+struct SettingsIcon: View {
     let pane: SettingsPane
     let size: CGFloat
 
     var body: some View {
         Image(systemName: pane.icon)
-            .font(.system(size: size * 0.55, weight: .semibold))
-            .foregroundStyle(.white)
+            .font(.system(size: size * 0.72))
+            .foregroundStyle(.secondary)
             .frame(width: size, height: size)
-            .background(pane.tint.gradient, in: RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
     }
 }
 
@@ -666,139 +758,44 @@ private struct TerminalChoicesSync: ViewModifier {
     }
 }
 
-/// Settings → General: how dino starts and quits, its notifications, updates, the permissions its
-/// terminals get, and where its files are.
+/// Settings → General: how dino starts, quits and closes, the default terminal, and where its files are.
 private struct GeneralPane: View {
     @AppStorage(QuitChoice.key) private var quitChoice = ""
     @AppStorage(StartWith.key) private var startWith = StartWith.last.rawValue
     @AppStorage(DinoModel.askBeforeClosingKey) private var askBeforeClosing = true
-
-    var body: some View {
-        Form {
-            Section {
-                Picker("When dino opens", selection: $startWith) {
-                    Text("Your last session").tag(StartWith.last.rawValue)
-                    Text("A new shell").tag(StartWith.shell.rawValue)
-                }
-                Picker("When you quit with agents running", selection: $quitChoice) {
-                    Text("Ask").tag("")
-                    Text("Keep them running").tag(QuitChoice.keep.rawValue)
-                    Text("Stop them").tag(QuitChoice.stop.rawValue)
-                }
-                Toggle("Ask before ⌘W closes an agent", isOn: $askBeforeClosing)
-            } footer: {
-                Footnote("If there's no last session to open, dino opens a new shell. Quitting dino doesn't stop your agents unless you choose “Stop them”. Stopped agents resume their conversations the next time you open dino. Closing an agent's tab or pane stops it and archives the session, to resume from Archived.")
-            }
-            Section("Notifications") {
-                NeedsYouNotifyToggle(form: true)
-            }
-            UpdatesSection()
-            DinodAgentSection()
-            PermissionsSection()
-            Section {
-                LabeledContent("Settings and keys folder") {
-                    HStack {
-                        Text(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                        Button("Show in Finder") {
-                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: DinoEnvironment.home)
-                        }
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-/// Settings → Terminal: how it looks, the shell, the quick terminal, and opening from other apps.
-private struct TerminalSettingsPane: View {
-    @EnvironmentObject var store: SettingsStore
-    @AppStorage(QuickTerminal.Key.storageKey) private var quickKey = QuickTerminal.Key.commandGrave.rawValue
-    @AppStorage(QuickTerminal.autohideKey) private var quickAutohide = true
-    @AppStorage(Appearance.key) private var appearance = Appearance.system.rawValue
-    @State private var quickTaken = false
     @State private var isDefault = false
     @State private var makingDefault = false
 
-    /// What loads dino's marks in zsh in tmux panes, for the user's .zshrc; dino never writes it there.
-    static let tmuxLine = #"[[ -n $TMUX ]] && source "${DINO_HOME:-$HOME/.config/dino}/shell-integration/zsh/dino-tmux.zsh" 2>/dev/null"#
-
     var body: some View {
         Form {
             Section {
-                Picker("Appearance", selection: Binding(get: { appearance }, set: { (Appearance(rawValue: $0) ?? .system).choose() })) {
-                    ForEach(Appearance.allCases) { Text($0.label).tag($0.rawValue) }
+                Picker(selection: $startWith) {
+                    Text("Your last session").tag(StartWith.last.rawValue)
+                    Text("A new shell").tag(StartWith.shell.rawValue)
+                } label: {
+                    Text("When dino opens")
+                    Text("If there's no last session to open, dino opens a new shell.")
                 }
-                LabeledContent("Ghostty config") {
-                    let files = GhosttyConfig.loaded.map { NSString(string: $0).abbreviatingWithTildeInPath }
-                    Text(files.isEmpty ? "None (Ghostty's defaults)" : files.joined(separator: "\n"))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.trailing)
-                        .textSelection(.enabled)
+                .settingAnchor("start-with")
+                Picker(selection: $quitChoice) {
+                    Text("Ask").tag("")
+                    Text("Keep them running").tag(QuitChoice.keep.rawValue)
+                    Text("Stop them").tag(QuitChoice.stop.rawValue)
+                } label: {
+                    Text("When you quit with agents running")
+                    Text("Quitting doesn't stop your agents unless you choose “Stop them”. Stopped agents resume their conversations the next time you open dino.")
                 }
-                if !GhosttyConfig.skipped.isEmpty {
-                    LabeledContent("Lines not applied") {
-                        Text(GhosttyConfig.skipped.joined(separator: "\n"))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.trailing)
-                            .textSelection(.enabled)
-                    }
+                .settingAnchor("on-quit")
+                Toggle(isOn: $askBeforeClosing) {
+                    Text("Ask before ⌘W closes an agent")
+                    Text("Closing an agent's tab or pane stops it and archives the session, to resume from Archived.")
                 }
+                .settingAnchor("ask-close")
             } header: {
-                Text("Appearance")
-            } footer: {
-                Footnote("Terminals use the font, colors, cursor and key bindings from your Ghostty config, and update when you save it. dino's own shortcuts keep working. Ghostty's command and working-directory options don't apply in dino.")
+                Text("Starting and Quitting")
             }
             Section {
-                Toggle("Shell integration", isOn: Binding(
-                    get: { store.settings?.machine.shell_integration ?? true },
-                    set: { on in store.update { $0.machine.shell_integration = on } }
-                ))
-                .disabled(store.settings == nil)
-                .orgLocked("machine.shell_integration")
-            } header: {
-                Text("Shell")
-            } footer: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Footnote("Lets dino see your prompts and current folder in zsh, bash, fish, elvish and nushell, as Ghostty does, so new tabs open in the same folder and you can jump between prompts. Follows shell-integration and shell-integration-features in your Ghostty config. Your shell startup files aren't changed. Applies to new shells.\n\nA tmux you start runs as in any terminal: its panes load only your own startup files, as in Ghostty. For zsh in tmux panes to tell dino their exit codes and pass on notifications too, add this line to your .zshrc. It also turns on tmux's allow-passthrough for those panes.")
-                    Text(Self.tmuxLine)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.leading)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, 10)
-                }
-            }
-            ShellAISection()
-            Section {
-                Picker("Shortcut", selection: Binding(
-                    get: { quickKey },
-                    set: {
-                        quickKey = $0
-                        QuickTerminal.shared.registerKey()
-                        quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
-                    }
-                )) {
-                    ForEach(QuickTerminal.Key.allCases) { Text($0.label).tag($0.rawValue) }
-                }
-                if quickTaken {
-                    Text("Another app uses this shortcut. Choose a different one.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-                Toggle("Hide it when you click elsewhere", isOn: $quickAutohide)
-                    .disabled(QuickTerminal.shared.place.autohide != nil)
-                    .help(QuickTerminal.shared.place.autohide != nil ? "Set by quick-terminal-autohide in your Ghostty config" : "")
-            } header: {
-                Text("Quick Terminal")
-            } footer: {
-                Footnote("Press the shortcut in any app to drop down a terminal from the top of the screen. Its shell keeps running while it's hidden. To change where it appears and its size, use the quick-terminal settings in your Ghostty config. A global toggle_quick_terminal key binding there also opens it.")
-            }
-            Section {
-                LabeledContent("Default terminal") {
+                LabeledContent {
                     if isDefault {
                         Text("dino").foregroundStyle(.secondary)
                     } else if makingDefault {
@@ -820,16 +817,188 @@ private struct TerminalSettingsPane: View {
                             }
                         }
                     }
+                } label: {
+                    Text("Default terminal")
+                    Text("Scripts (.command and .tool files), programs and man pages you open from the Finder or other apps open in dino. To open a shell in a folder, open the folder with dino, or choose “New dino Shell at Folder” from the Finder's Services menu.")
                 }
-            } footer: {
-                Footnote("When dino is your default terminal, scripts (.command and .tool files), programs and man pages you open from the Finder or other apps open in dino. To open a shell in a folder, open the folder with dino, or choose “New dino Shell at Folder” from the Finder's Services menu.")
+                .settingAnchor("default-terminal")
+            } header: {
+                Text("Opening From Other Apps")
+            }
+            Section {
+                LabeledContent {
+                    HStack {
+                        Text(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: DinoEnvironment.home)
+                        }
+                    }
+                } label: {
+                    Text("Settings and keys folder")
+                    Text("Everything here is kept in settings.toml, which you can also edit by hand. Your API keys are in its keys folder.")
+                }
+                .settingAnchor("settings-folder")
+            } header: {
+                Text("Files")
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            isDefault = Opening.isDefault
-            quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
+        .onAppear { isDefault = Opening.isDefault }
+    }
+}
+
+/// Settings → Appearance: light or dark, and the Ghostty config terminals take their look from.
+private struct AppearancePane: View {
+    @AppStorage(Appearance.key) private var appearance = Appearance.system.rawValue
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Appearance", selection: Binding(get: { appearance }, set: { (Appearance(rawValue: $0) ?? .system).choose() })) {
+                    ForEach(Appearance.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+                .settingAnchor("appearance")
+            }
+            Section {
+                LabeledContent("Ghostty config") {
+                    let files = GhosttyConfig.loaded.map { NSString(string: $0).abbreviatingWithTildeInPath }
+                    Text(files.isEmpty ? "None (Ghostty's defaults)" : files.joined(separator: "\n"))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .textSelection(.enabled)
+                }
+                .settingAnchor("ghostty-config")
+                if !GhosttyConfig.skipped.isEmpty {
+                    LabeledContent("Lines not applied") {
+                        Text(GhosttyConfig.skipped.joined(separator: "\n"))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                            .textSelection(.enabled)
+                    }
+                }
+            } header: {
+                Text("Terminal")
+            } footer: {
+                Footnote("Terminals use the font, colors, cursor and key bindings from your Ghostty config, and update when you save it. dino's own shortcuts keep working. Ghostty's command and working-directory options don't apply in dino.")
+            }
         }
+        .formStyle(.grouped)
+    }
+}
+
+/// Settings → Notifications.
+private struct NotificationsPane: View {
+    var body: some View {
+        Form {
+            Section {
+                NeedsYouNotifyToggle(form: true)
+                    .settingAnchor("notify-needs-you")
+            } footer: {
+                Footnote("dino notifies you when an agent asks a question or for permission while you're looking elsewhere. How an agent using your Mac shows is in Computer Use.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// Settings → Shell: shell integration, and agents typed into a shell.
+private struct ShellPane: View {
+    @EnvironmentObject var store: SettingsStore
+
+    /// What loads dino's marks in zsh in tmux panes, for the user's .zshrc; dino never writes it there.
+    static let tmuxLine = #"[[ -n $TMUX ]] && source "${DINO_HOME:-$HOME/.config/dino}/shell-integration/zsh/dino-tmux.zsh" 2>/dev/null"#
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: Binding(
+                    get: { store.settings?.machine.shell_integration ?? true },
+                    set: { on in store.update { $0.machine.shell_integration = on } }
+                )) {
+                    Text("Shell integration")
+                    Text("Lets dino see your prompts and current folder in zsh, bash, fish, elvish and nushell, as Ghostty does, so new tabs open in the same folder and you can jump between prompts. Follows shell-integration and shell-integration-features in your Ghostty config. Your shell startup files aren't changed. Applies to new shells.")
+                }
+                .disabled(store.settings == nil)
+                .orgLocked("machine.shell_integration")
+                .settingAnchor("shell-integration")
+                Toggle(isOn: Binding(
+                    get: { store.settings?.machine.shell_agents ?? true },
+                    set: { on in store.update { $0.machine.shell_agents = on } }
+                )) {
+                    Text("Show agents started in a shell in the sidebar")
+                    Text("When you run `claude`, `codex` or another agent in a dino shell, it's a session like any dino starts: in the sidebar with its turns, questions and tasks, its mode and model in the toolbar, and back on its conversation when dino restarts. When it exits, the shell is a plain shell again. Requires Shell integration. To keep a shell a plain terminal, choose Keep as Terminal from its menu.")
+                }
+                .disabled(store.settings?.machine.shell_integration == false)
+                .orgLocked("machine.shell_agents")
+                .settingAnchor("shell-agents")
+            }
+            Section {
+                Text(Self.tmuxLine)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .settingAnchor("tmux-zsh")
+            } header: {
+                Text("zsh in tmux")
+            } footer: {
+                Footnote("A tmux you start runs as in any terminal: its panes load only your own startup files, as in Ghostty. For zsh in tmux panes to tell dino their exit codes and pass on notifications too, add this line to your .zshrc. It also turns on tmux's allow-passthrough for those panes.")
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+    }
+}
+
+/// Settings → Quick Terminal.
+private struct QuickTerminalPane: View {
+    @AppStorage(QuickTerminal.Key.storageKey) private var quickKey = QuickTerminal.Key.commandGrave.rawValue
+    @AppStorage(QuickTerminal.autohideKey) private var quickAutohide = true
+    @State private var quickTaken = false
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Shortcut", selection: Binding(
+                    get: { quickKey },
+                    set: {
+                        quickKey = $0
+                        QuickTerminal.shared.registerKey()
+                        quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered
+                    }
+                )) {
+                    ForEach(QuickTerminal.Key.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+                .settingAnchor("quick-key")
+                if quickTaken {
+                    Text("Another app uses this shortcut. Choose a different one.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Toggle("Hide it when you click elsewhere", isOn: $quickAutohide)
+                    .disabled(QuickTerminal.shared.place.autohide != nil)
+                    .help(QuickTerminal.shared.place.autohide != nil ? "Set by quick-terminal-autohide in your Ghostty config" : "")
+                    .settingAnchor("quick-autohide")
+            } footer: {
+                Footnote("Press the shortcut in any app to drop down a terminal from the top of the screen. Its shell keeps running while it's hidden. To change where it appears and its size, use the quick-terminal settings in your Ghostty config. A global toggle_quick_terminal key binding there also opens it.")
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { quickTaken = QuickTerminal.Key.current != .off && !QuickTerminal.shared.registered }
+    }
+}
+
+/// Settings → Permissions: macOS's permissions for what runs in dino's terminals, and the
+/// background service they come through.
+private struct PermissionsPane: View {
+    var body: some View {
+        Form {
+            PermissionsSection()
+            DinodAgentSection()
+        }
+        .formStyle(.grouped)
     }
 }
 
@@ -891,7 +1060,7 @@ private struct ShellAISection: View {
 
     var body: some View {
         Section {
-            Picker("⌘I asks", selection: Binding(
+            Picker(selection: Binding(
                 get: { terminal.ask_agent },
                 set: { id in
                     guard id != terminal.ask_agent else { return }
@@ -904,12 +1073,16 @@ private struct ShellAISection: View {
                 if !terminal.ask_agent.isEmpty, !askers.contains(where: { $0.agent_id == terminal.ask_agent }) {
                     Text("\(terminal.ask_agent) (not on this Mac)").tag(terminal.ask_agent)
                 }
+            } label: {
+                Text("⌘I asks")
+                Text("Type what you want in plain English at a shell prompt; ⌘I turns it into a command and puts it on the line for you to check and run. It can't use tools, so it can't change anything. Only agents that support this are listed.")
             }
             .orgLocked("terminal.ask_agent")
+            .settingAnchor("ask-agent")
             if !terminal.ask_agent.isEmpty, let a = asker, a.knobs?.model == true {
-                model(a)
+                model(a).settingAnchor("ask-model")
             }
-            Picker("⌘⏎ sends to", selection: Binding(
+            Picker(selection: Binding(
                 get: { terminal.handoff_agent },
                 set: { id in if id != terminal.handoff_agent { set { $0.handoff_agent = id } } }
             )) {
@@ -918,12 +1091,14 @@ private struct ShellAISection: View {
                 if !terminal.handoff_agent.isEmpty, !startable.contains(where: { $0.short == terminal.handoff_agent }) {
                     Text("\(terminal.handoff_agent) (not on this Mac)").tag(terminal.handoff_agent)
                 }
+            } label: {
+                Text("⌘⏎ sends to")
+                Text("Sends the line to an agent as a new session.")
             }
             .orgLocked("terminal.handoff_agent")
-        } header: {
-            Text("AI in the Shell")
+            .settingAnchor("handoff-agent")
         } footer: {
-            Footnote("Type what you want in plain English at a shell prompt. ⌘I turns it into a command and puts it on the line for you to check and run. ⌘⏎ sends the line to an agent as a new session. In other terminals with dino's shell integration, use Alt+I and Alt+Enter.\n\nThe agent ⌘I asks can't use tools, so it can't change anything. Only agents that support this are listed. A small, fast model answers sooner.")
+            Footnote("In other terminals with dino's shell integration, use Alt+I and Alt+Enter. A small, fast model answers sooner.")
         }
         .disabled(store.settings == nil)
     }
@@ -936,27 +1111,33 @@ private struct PowerPane: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Keep your Mac awake while agents work", isOn: Binding(
+                Toggle(isOn: Binding(
                     get: { store.settings?.machine.awake_while_working ?? true },
                     set: { on in store.update { $0.machine.awake_while_working = on } }
-                ))
+                )) {
+                    Text("Keep your Mac awake while agents work")
+                    Text("Your Mac won't go to sleep on its own while any agent is working. The display can still turn off. Closing the lid still puts your Mac to sleep, unless you keep agents running with the lid closed.")
+                }
                 .disabled(store.settings == nil)
                 .orgLocked("machine.awake_while_working")
+                .settingAnchor("awake-working")
                 AwakeNow()
             } header: {
                 Text("Staying Awake")
-            } footer: {
-                Footnote("Your Mac won't go to sleep on its own while any agent is working. The display can still turn off. Closing the lid still puts your Mac to sleep, unless you turn on “Keep agents running with the lid closed” below.")
             }
             Section {
-                Toggle("Keep your Mac awake while automations are scheduled", isOn: Binding(
+                Toggle(isOn: Binding(
                     get: { store.settings?.machine.keep_awake ?? false },
                     set: { on in store.update { $0.machine.keep_awake = on } }
-                ))
+                )) {
+                    Text("Keep your Mac awake while automations are scheduled")
+                    Text("So they run on time. Closing the lid still puts your Mac to sleep. An automation that was due while your Mac slept runs once when it wakes.")
+                }
                 .disabled(store.settings == nil)
                 .orgLocked("machine.keep_awake")
-            } footer: {
-                Footnote("Your Mac won't go to sleep on its own while you have scheduled automations, so they run on time. Closing the lid still puts your Mac to sleep. An automation that was due while your Mac slept runs once when it wakes.")
+                .settingAnchor("awake-scheduled")
+            } header: {
+                Text("Automations")
             }
             LidSection()
         }
@@ -984,7 +1165,11 @@ private struct TmuxSection: View {
 
     var body: some View {
         Section {
-            Toggle("Show agents in tmux", isOn: Binding(get: { tmux.show_agents }, set: { on in change { $0.show_agents = on } }))
+            Toggle(isOn: Binding(get: { tmux.show_agents }, set: { on in change { $0.show_agents = on } })) {
+                Text("Show agents in tmux")
+                Text("Each agent appears as a tmux window running `dino attach`, so you can reach it with `tmux attach` from anywhere. Closing the window or quitting tmux doesn't stop the agent, and its window comes back.")
+            }
+            .settingAnchor("tmux-show")
             if tmux.show_agents {
                 Picker("Put agents in", selection: Binding(
                     get: { tmux.session.isEmpty ? "attached" : "named" },
@@ -993,19 +1178,24 @@ private struct TmuxSection: View {
                     Text("Their own tmux session").tag("named")
                     Text("The tmux session you're attached to").tag("attached")
                 }
+                .settingAnchor("tmux-session")
                 if !tmux.session.isEmpty {
                     name("Session", text: $session, field: .session)
                 }
             }
-            Toggle("New tabs open in tmux", isOn: Binding(
+            Toggle(isOn: Binding(
                 get: { !tmux.new_tabs.isEmpty },
                 set: { on in change { $0.new_tabs = on ? (DinoSettings.Tmux.valid(tabs) ? tabs : "main") : "" } }
-            ))
+            )) {
+                Text("New tabs open in tmux")
+                Text("New tabs attach to the tmux session you name, and create it if needed.")
+            }
+            .settingAnchor("tmux-new-tabs")
             if !tmux.new_tabs.isEmpty {
                 name("Session", text: $tabs, field: .tabs)
             }
         } footer: {
-            Footnote("Each agent appears as a tmux window, so you can reach it with `tmux attach` from anywhere. Closing the window or quitting tmux doesn't stop the agent, and its window comes back. dino doesn't start tmux and never changes your tmux config or your own windows. New tabs attach to the tmux session you name, and create it if needed.\n\nTo show your agents in the tmux status bar, add: set -g status-right '#(dino status --tmux)'")
+            Footnote("dino doesn't start tmux and never changes your tmux config or your own windows. To show your agents in the tmux status bar, add: set -g status-right '#(dino status --tmux)'")
         }
         .disabled(store.settings == nil)
         .onAppear {
@@ -1079,9 +1269,11 @@ private struct AgentChoiceSection: View {
                 }
             }
             .orgLocked("policies.default_agent")
-            ForEach(agents) { l in
+            .settingAnchor("default-agent")
+            ForEach(Array(agents.enumerated()), id: \.element.id) { i, l in
                 Toggle(l.label, isOn: allowed(l))
                     .orgLocked("policies.allowed_agents")
+                    .settingAnchor(i == 0 ? "allowed-agents" : "allowed-agents-\(l.short)")
             }
         } header: {
             Text("Agents You Use")
@@ -1097,7 +1289,7 @@ private struct BypassSection: View {
 
     var body: some View {
         Section {
-            Toggle("Allow bypass permissions mode", isOn: Binding(
+            Toggle(isOn: Binding(
                 get: { store.settings?.policies.allow_bypass ?? true },
                 set: { on in
                     store.update {
@@ -1112,12 +1304,14 @@ private struct BypassSection: View {
                         }
                     }
                 }
-            ))
+            )) {
+                Text("Allow bypass permissions mode")
+                Text("In bypass permissions mode, an agent edits files and runs any command without asking you. When this is on and you've accepted Claude Code's own warning about it, Claude Code starts with it in its Shift+Tab cycle, so switching to it needs no restart, and doesn't block edits in plan mode either. When this is off, the mode isn't offered, and no session can start in it or switch to it. Sessions already in it keep running.")
+            }
             .orgLocked("policies.allow_bypass")
+            .settingAnchor("allow-bypass")
         } header: {
             Text("Permissions")
-        } footer: {
-            Footnote("In bypass permissions mode, an agent edits files and runs any command without asking you. When this is on and you've accepted Claude Code's own warning about it, Claude Code starts with it in its Shift+Tab cycle, so switching to it needs no restart. Claude Code then doesn't block edits in plan mode either. When this is off, the mode isn't offered, and no session can start in it or switch to it. Sessions already in it keep running.")
         }
     }
 }
@@ -1130,19 +1324,21 @@ private struct LimitsSection: View {
 
     var body: some View {
         Section {
-            Picker("Tokens per session", selection: Binding(
+            Picker(selection: Binding(
                 get: { store.settings?.policies.session_token_budget ?? 0 },
                 set: { n in store.update { $0.policies.session_token_budget = n } }
             )) {
                 ForEach(budgetChoices, id: \.self) { n in
                     Text(n == 0 ? "No limit" : Self.format(n)).tag(n)
                 }
+            } label: {
+                Text("Tokens per session")
+                Text("Counts input, cached and output tokens, as the sidebar does. Once a session goes over the limit, its next request to the model fails with an error. Applies to sessions whose traffic goes through dino (Settings → Providers), including ones already running.")
             }
             .orgLocked("policies.session_token_budget")
+            .settingAnchor("token-budget")
         } header: {
             Text("Limits")
-        } footer: {
-            Footnote("Counts input, cached and output tokens, as the sidebar does. Once a session goes over the limit, its next request to the model fails with an error. Applies to sessions whose traffic goes through dino (Models & Providers → Providers), including ones already running.")
         }
     }
 
@@ -1159,29 +1355,31 @@ private struct LimitsSection: View {
     }
 }
 
-/// Whether agents' traffic goes through dino: the top of Models & Providers.
+/// Whether agents' traffic goes through dino: the top of Settings → Providers.
 /// Sections only, for the providers' form to hold.
 struct RoutingSections: View {
     @EnvironmentObject var store: SettingsStore
 
     var body: some View {
         Section {
-            Toggle("Route agent traffic through dino", isOn: Binding(
+            Toggle(isOn: Binding(
                 get: { store.settings?.routing.proxy ?? true },
                 set: { on in store.update { $0.routing.proxy = on } }
-            ))
+            )) {
+                Text("Route agent traffic through dino")
+                Text("Lets dino count each session's tokens, apply token limits and fallbacks, and connect agents to the providers below and to the free models pool (Experimental). When this is off, agents connect to their providers directly. Applies to new sessions.")
+            }
             .disabled(store.settings == nil)
             .orgLocked("routing.proxy")
+            .settingAnchor("routing")
         } header: {
             Text("Routing")
-        } footer: {
-            Footnote("Lets dino count each session's tokens, apply token limits and fallbacks, and connect agents to the providers below and to the free models pool (Experimental). When this is off, agents connect to their providers directly. Applies to new sessions.")
         }
     }
 }
 
 /// A feature being tried out: off until turned on.
-private struct ExperimentalFeature: Identifiable {
+struct ExperimentalFeature: Identifiable {
     /// Its name in settings.toml's [experimental], or under [policies] for one that predates it.
     let id: String
     let title: String
@@ -1240,9 +1438,10 @@ private struct ExperimentalPane: View {
                         Text(f.summary)
                     }
                     .orgLocked(f.path)
+                    .settingAnchor(f.id.replacingOccurrences(of: "_", with: "-"))
                     if f.id == "free_models", on(f).wrappedValue {
                         LabeledContent("Models") {
-                            Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (Models & Providers → API Keys)")
+                            Text(has("NVIDIA_API_KEY") ? "NVIDIA NIM" : "Needs an NVIDIA key (Settings → API Keys)")
                                 .foregroundStyle(has("NVIDIA_API_KEY") ? .primary : .secondary)
                         }
                         LabeledContent("Chooses each turn's model with") {
@@ -1272,7 +1471,6 @@ private struct ManagedPane: View {
         let place: String
         /// Where "Show" goes.
         let pane: SettingsPane?
-        let part: SettingsPart?
     }
 
     private var items: [Item] { store.locked.map(item) }
@@ -1298,7 +1496,7 @@ private struct ManagedPane: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(i.title)
                     if let pane = i.pane {
-                        Button("Settings → \(i.place)") { open(pane, i.part) }
+                        Button("Settings → \(i.place)") { pane.select() }
                             .buttonStyle(.link)
                             .font(.callout)
                             .help("Show it in Settings")
@@ -1322,10 +1520,6 @@ private struct ManagedPane: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func open(_ pane: SettingsPane, _ part: SettingsPart?) {
-        if let part { part.select() } else { pane.select() }
-    }
-
     private func agentName(_ id: String) -> String {
         store.agents.first { $0.agent_id == id }?.label ?? store.setup?.first { $0.id == id }?.name ?? id
     }
@@ -1335,51 +1529,59 @@ private struct ManagedPane: View {
         let parts = path.split(separator: ".", maxSplits: 1).map(String.init)
         let head = parts[0]
         let rest = parts.count > 1 ? parts[1] : ""
-        func make(_ title: String, _ place: String, _ pane: SettingsPane?, _ part: SettingsPart? = nil) -> Item {
-            Item(id: path, title: title, place: place, pane: pane, part: part)
+        func make(_ title: String, _ pane: SettingsPane?) -> Item {
+            Item(id: path, title: title, place: pane?.title ?? "Only in settings.toml", pane: pane)
         }
         switch (head, rest) {
-        case ("policies", "default_agent"): return make("⌘N starts", "Agents", .agents)
-        case ("policies", "allowed_agents"): return make("Agents you use", "Agents", .agents)
-        case ("policies", "allow_bypass"): return make("Allow bypass permissions mode", "Agents → Permissions", .agents)
-        case ("policies", "session_token_budget"): return make("Tokens per session", "Agents → Limits", .agents)
-        case ("policies", "fallback_providers"): return make("Providers agents may fall back to", "Agents → Limits", .agents)
-        case ("policies", "session_tools"): return make("Cross-session communication", "Experimental", .experimental)
-        case ("policies", "worktree_trust"): return make("Trust worktrees when the repo is trusted", "Workspaces → Worktrees", .workspaces, .worktrees)
-        case ("policies", "close_merged"): return make("Archive sessions after their PR merges or closes", "Workspaces → Worktrees", .workspaces, .worktrees)
-        case ("routing", "proxy"): return make("Route agent traffic through dino", "Models & Providers → Providers", .models, .providers)
-        case ("machine", "shell_integration"): return make("Shell integration", "Terminal", .terminal)
-        case ("machine", "shell_agents"): return make("Show agents started in a shell in the sidebar", "Agents", .agents)
-        case ("machine", "computer_use"), ("experimental", "computer_use"): return make(ComputerUseCopy.title, "Agents", .agents)
-        case ("machine", "keep_awake"): return make("Keep your Mac awake while automations are scheduled", "Power", .power)
-        case ("machine", "awake_while_working"): return make("Keep your Mac awake while agents work", "Power", .power)
-        case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", "Power", .power)
-        case ("worktrees", "location"): return make("Worktree location", "Workspaces → Worktrees", .workspaces, .worktrees)
-        case ("machine", "build_cache"), ("machine", "build_cache.enabled"): return make("Share one build cache across worktrees", "Workspaces → Worktrees", .workspaces, .worktrees)
-        case ("machine", "build_cache.size_gb"): return make("Build cache size", "Workspaces → Worktrees", .workspaces, .worktrees)
-        case ("worktrees", "branch_prefix"): return make("Branch prefix", "Workspaces → Worktrees", .workspaces, .worktrees)
+        case ("policies", "default_agent"): return make("⌘N starts", .agents)
+        case ("policies", "allowed_agents"): return make("Agents you use", .agents)
+        case ("policies", "allow_bypass"): return make("Allow bypass permissions mode", .defaults)
+        case ("policies", "session_token_budget"): return make("Tokens per session", .limits)
+        case ("policies", "fallback_providers"): return make("Providers agents may fall back to", .limits)
+        case ("policies", "session_tools"): return make("Cross-session communication", .experimental)
+        case ("policies", "worktree_trust"): return make("Trust worktrees when the repo is trusted", .worktrees)
+        case ("policies", "close_merged"): return make("Archive sessions after their PR merges or closes", .git)
+        case ("routing", "proxy"): return make("Route agent traffic through dino", .providers)
+        case ("machine", "shell_integration"): return make("Shell integration", .shell)
+        case ("machine", "shell_agents"): return make("Show agents started in a shell in the sidebar", .shell)
+        case ("machine", "computer_use"), ("experimental", "computer_use"): return make(ComputerUseCopy.title, .computer)
+        case ("machine", "keep_awake"): return make("Keep your Mac awake while automations are scheduled", .power)
+        case ("machine", "awake_while_working"): return make("Keep your Mac awake while agents work", .power)
+        case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", .power)
+        case ("machine", "check_updates"): return make("Check for updates automatically", .updates)
+        case ("machine", let r) where r == "claude_token" || r.hasPrefix("claude_token."): return make("Claude Code subscription token", .claude)
+        case ("worktrees", "location"): return make("Worktree location", .worktrees)
+        case ("machine", "build_cache"), ("machine", "build_cache.enabled"): return make("Share one build cache across worktrees", .repos)
+        case ("machine", "build_cache.size_gb"): return make("Build cache size", .repos)
+        case ("worktrees", "branch_prefix"): return make("Branch prefix", .git)
+        case ("terminal", "ask_agent"): return make("⌘I asks", .ai)
+        case ("terminal", "ask_model"): return make("⌘I model", .ai)
+        case ("terminal", "handoff_agent"): return make("⌘⏎ sends to", .ai)
+        case ("terminal", "appearance"): return make("Appearance", .appearance)
+        case ("terminal", "quick_key"), ("terminal", "quick_autohide"): return make("Quick terminal", .quick)
+        case ("terminal", _): return make(rest, .general)
         case ("experimental", let id):
             let title = ExperimentalFeature.all.first { $0.id == id }?.title ?? id
-            return make(title, "Experimental", .experimental)
+            return make(title, .experimental)
         case ("agents", let r):
             let p = r.split(separator: ".").map(String.init)
             let agent = agentName(p[0])
             let control = p.count > 1 ? ControlKind(rawValue: p[1])?.title ?? p[1] : "Defaults"
-            return make("\(agent): \(control)", "Agents → New \(agent) Sessions", .agents)
+            return make("\(agent): \(control)", .defaults)
         case ("repos", let r):
             // The repo's path has dots of its own: the variable is what follows its last ".env.".
             if let env = r.range(of: ".env.", options: .backwards) {
                 let repo = (String(r[..<env.lowerBound]) as NSString).lastPathComponent
-                return make("\(r[env.upperBound...]) in \(repo)", "Workspaces → Repositories", .workspaces, .repos)
+                return make("\(r[env.upperBound...]) in \(repo)", .repos)
             }
-            return make((r as NSString).lastPathComponent, "Workspaces → Repositories", .workspaces, .repos)
+            return make((r as NSString).lastPathComponent, .repos)
         case ("ssh", let r):
-            return make(r.split(separator: ".").first.map(String.init) ?? r, "Workspaces → SSH Hosts", .workspaces, .ssh)
+            return make(r.split(separator: ".").first.map(String.init) ?? r, .ssh)
         case ("fallbacks", let r):
             let agent = agentName(r.split(separator: ".").first.map(String.init) ?? r)
-            return make("When \(agent) Hits a Limit", "Agents → Limits", .agents)
-        case ("tmux", _): return make(rest, "tmux", .tmux)
-        default: return make(path, "Only in settings.toml", nil)
+            return make("When \(agent) Hits a Limit", .limits)
+        case ("tmux", _): return make(rest, .tmux)
+        default: return make(path, nil)
         }
     }
 
@@ -1435,8 +1637,8 @@ private struct KeysPane: View {
         VStack(spacing: 0) {
             Form {
                 Section {
-                    ForEach(store.keys) { key in
-                        row(key)
+                    ForEach(Array(store.keys.enumerated()), id: \.element.id) { i, key in
+                        row(key).settingAnchor(i == 0 ? "api-keys" : "key-\(key.name)")
                     }
                 } footer: {
                     Footnote("Keys are stored on this Mac in \(NSString(string: DinoEnvironment.home).abbreviatingWithTildeInPath)/keys, readable only by you. dino never shows a key again and never syncs it. Changes take effect immediately.")
@@ -1512,9 +1714,17 @@ private struct KeysPane: View {
     }
 }
 
-/// Every agent dino knows: get it, sign in to it, which ones you use, what their new sessions
-/// start with, and how much a session may use. Installing and signing in run the agent's own
-/// commands in a shell, where you see them and answer them.
+/// Shows `session`, a shell dinod just opened, in the main window, in front.
+@MainActor
+private func showInMainWindow(_ model: DinoModel, _ session: String) {
+    model.pendingSelect = session
+    NSApp.windows.first { w in w.isVisible && !(w.identifier?.rawValue.hasPrefix(SettingsView.windowID) ?? false) && w.canBecomeMain }?
+        .makeKeyAndOrderFront(nil)
+}
+
+/// Settings → Agents: every agent dino knows (get it, sign in to it), which ones you use, and the
+/// one ⌘N starts. Installing and signing in run the agent's own commands in a shell, where you
+/// see them and answer them.
 private struct AgentsPane: View {
     @EnvironmentObject var store: SettingsStore
     @EnvironmentObject var model: DinoModel
@@ -1522,9 +1732,6 @@ private struct AgentsPane: View {
     /// until the agent is installed or signed in.
     @State private var running: [String: (session: String, action: String)] = [:]
     @State private var showMore = false
-    /// Settings → Models & Providers' providers, for the fallbacks.
-    @State private var providers: [ProviderInfo] = []
-    @AppStorage(UsingDisplay.key) private var usingDisplay = UsingDisplay.banner.rawValue
 
     /// The ones dino works with best, in this order; the rest are under More Agents.
     private static let featured = ["claude", "codex", "copilot", "cursor", "amp", "kimi", "qwen", "pi", "hermes", "codewhale", "opencode"]
@@ -1536,25 +1743,6 @@ private struct AgentsPane: View {
         (store.setup ?? []).filter { !Self.featured.contains($0.id) }
     }
 
-    /// One per agent that has controls; the free tier is its own, since it picks models itself.
-    private var agents: [LauncherInfo] {
-        var seen = Set<String>()
-        return store.agents.filter { ($0.knobs?.any ?? false) && seen.insert($0.agent_id).inserted }
-    }
-
-    /// One per agent that can run on another route than its own: those it can fall back to.
-    private var fallbackAgents: [LauncherInfo] {
-        var seen = Set<String>()
-        return store.agents.filter { !($0.formats ?? []).isEmpty && !$0.agent_id.hasSuffix("-free") && seen.insert($0.agent_id).inserted }
-    }
-
-    private func controls(_ agent: String) -> Binding<Controls> {
-        Binding(
-            get: { store.settings?.agents?[agent] ?? Controls() },
-            set: { c in store.update { $0.agents = ($0.agents ?? [:]).merging([agent: c]) { $1 }.filter { $0.value != Controls() } } }
-        )
-    }
-
     var body: some View {
         Form {
             Section {
@@ -1564,7 +1752,10 @@ private struct AgentsPane: View {
                         Text("Looking for agents on this Mac…").foregroundStyle(.secondary)
                     }
                 }
-                ForEach(main) { a in AgentSetupRow(agent: a, running: running[a.id] != nil, act: act) }
+                ForEach(Array(main.enumerated()), id: \.element.id) { i, a in
+                    AgentSetupRow(agent: a, running: running[a.id] != nil, act: act)
+                        .settingAnchor(i == 0 ? "agents-installed" : "agent-\(a.id)")
+                }
                 if !more.isEmpty {
                     DisclosureGroup("More Agents", isExpanded: $showMore) {
                         ForEach(more) { a in AgentSetupRow(agent: a, running: running[a.id] != nil, act: act) }
@@ -1576,68 +1767,10 @@ private struct AgentsPane: View {
                 Footnote("Install and Sign In run the agent's own commands in a new shell, so you can watch them and answer any questions. dino never sees your sign-in details.")
             }
             AgentChoiceSection()
-            Section {
-                Toggle("Show agents started in a shell in the sidebar", isOn: Binding(
-                    get: { store.settings?.machine.shell_agents ?? true },
-                    set: { on in store.update { $0.machine.shell_agents = on } }
-                ))
-                .disabled(store.settings?.machine.shell_integration == false)
-                .orgLocked("machine.shell_agents")
-            } footer: {
-                Footnote("When you run `claude`, `codex` or another agent in a dino shell, it's a session like any dino starts: in the sidebar with its turns, questions and tasks, its mode and model in the toolbar, and back on its conversation when dino restarts. When it exits, the shell is a plain shell again. Requires Shell integration (Terminal). To keep a shell a plain terminal, choose Keep as Terminal from its menu.")
-            }
-            Section {
-                Toggle(isOn: Binding(
-                    get: { store.settings?.computerUse ?? true },
-                    set: { on in store.update { $0.machine.computer_use = on } }
-                )) {
-                    Text(ComputerUseCopy.title)
-                    Text(ComputerUseCopy.summary)
-                }
-                .orgLocked("machine.computer_use")
-                if store.settings?.computerUse == true {
-                    ComputerUseOptions()
-                }
-                Picker("Show when an agent uses your Mac", selection: $usingDisplay) {
-                    ForEach(UsingDisplay.allCases) { Text($0.label).tag($0.rawValue) }
-                }
-            } header: {
-                Text("Computer Use")
-            } footer: {
-                Footnote("Turning it off removes only what dino added. Be careful: anything on screen, such as a web page or a message, could tell an agent to do something you didn't ask for. The banner shows whenever an agent uses your screen, apps or browser, with Stop.")
-            }
-            if store.setup?.contains(where: { $0.id == "claude" && $0.installed }) == true {
-                ClaudeAccountsSection(act: openShell)
-                ClaudeTokenSection(act: openShell)
-            }
-            BypassSection()
-            if agents.isEmpty {
-                Section {
-                    Text("None of your agents has a mode, model or effort to choose.").foregroundStyle(.secondary)
-                }
-            }
-            // The organization may set one control and leave the others: each is locked on its own.
-            ForEach(agents) { l in
-                Section("New \(l.label) Sessions") {
-                    ControlFields(knobs: l.knobs!, controls: controls(l.agent_id), lockPath: "agents.\(l.agent_id)")
-                }
-            }
-            Section {} footer: {
-                Footnote("New sessions start with these unless you pick something else when you start one. Default uses the agent's own settings. To change a running session, use its toolbar, or press ⇧⌘M for mode, ⇧⌘I for model, or ⇧⌘E for effort.")
-            }
-            // Agents → Limits: a session's budget, then where each agent goes at its limit.
-            LimitsSection()
-            ForEach(fallbackAgents) { l in
-                FallbackSection(launcher: l, providers: providers)
-            }
         }
         .formStyle(.grouped)
         .disabled(store.settings == nil)
         .onAppear { store.loadSetup() }
-        .task {
-            let all = await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).providers()) ?? [] }.value
-            if all != providers { providers = all }
-        }
         // Back from the shell: what it did shows here.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
             if (note.object as? NSWindow)?.identifier?.rawValue.hasPrefix(SettingsView.windowID) == true { store.loadSetup() }
@@ -1665,23 +1798,150 @@ private struct AgentsPane: View {
         }
     }
 
-    /// Shows `session`, a shell dinod just opened, in the main window, in front.
-    private func openShell(_ session: String) {
-        model.pendingSelect = session
-        NSApp.windows.first { w in w.isVisible && !(w.identifier?.rawValue.hasPrefix(SettingsView.windowID) ?? false) && w.canBecomeMain }?
-            .makeKeyAndOrderFront(nil)
-    }
-
     /// Runs it in a new shell, shown in the main window, where the user watches and answers it.
     private func act(_ agent: AgentSetupInfo, _ action: String) {
         // Read now, while the view is live: the reply comes after this copy of it is gone.
         let model = model
         store.agentAction(agent.id, action) { session in
             running[agent.id] = (session, action)
-            model.pendingSelect = session
-            NSApp.windows.first { w in w.isVisible && !(w.identifier?.rawValue.hasPrefix(SettingsView.windowID) ?? false) && w.canBecomeMain }?
-                .makeKeyAndOrderFront(nil)
+            showInMainWindow(model, session)
         }
+    }
+}
+
+/// Settings → New Sessions: whether bypass mode is offered, and what each agent's new sessions
+/// start with.
+private struct AgentDefaultsPane: View {
+    @EnvironmentObject var store: SettingsStore
+
+    /// One per agent that has controls; the free tier is its own, since it picks models itself.
+    private var agents: [LauncherInfo] {
+        var seen = Set<String>()
+        return store.agents.filter { ($0.knobs?.any ?? false) && seen.insert($0.agent_id).inserted }
+    }
+
+    private func controls(_ agent: String) -> Binding<Controls> {
+        Binding(
+            get: { store.settings?.agents?[agent] ?? Controls() },
+            set: { c in store.update { $0.agents = ($0.agents ?? [:]).merging([agent: c]) { $1 }.filter { $0.value != Controls() } } }
+        )
+    }
+
+    var body: some View {
+        Form {
+            BypassSection()
+            if agents.isEmpty {
+                Section {
+                    Text(store.settings == nil ? "Loading…" : "None of your agents has a mode, model or effort to choose.")
+                        .foregroundStyle(.secondary)
+                        .settingAnchor("agent-defaults")
+                }
+            }
+            // The organization may set one control and leave the others: each is locked on its own.
+            ForEach(Array(agents.enumerated()), id: \.element.id) { i, l in
+                Section(l.label) {
+                    ControlFields(knobs: l.knobs!, controls: controls(l.agent_id), lockPath: "agents.\(l.agent_id)")
+                }
+                .settingAnchor(i == 0 ? "agent-defaults" : "agent-defaults-\(l.agent_id)")
+            }
+            Section {} footer: {
+                Footnote("New sessions start with these unless you pick something else when you start one. Default uses the agent's own settings. To change a running session, use its toolbar, or press ⇧⌘M for mode, ⇧⌘I for model, or ⇧⌘E for effort.")
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+    }
+}
+
+/// Settings → Limits & Fallbacks: how much a session may use, and where each agent goes at a limit.
+private struct LimitsPane: View {
+    @EnvironmentObject var store: SettingsStore
+    /// Settings → Providers' providers, for the fallbacks.
+    @State private var providers: [ProviderInfo] = []
+
+    /// One per agent that can run on another route than its own: those it can fall back to.
+    private var fallbackAgents: [LauncherInfo] {
+        var seen = Set<String>()
+        return store.agents.filter { !($0.formats ?? []).isEmpty && !$0.agent_id.hasSuffix("-free") && seen.insert($0.agent_id).inserted }
+    }
+
+    var body: some View {
+        Form {
+            LimitsSection()
+            ForEach(Array(fallbackAgents.enumerated()), id: \.element.id) { i, l in
+                FallbackSection(launcher: l, providers: providers)
+                    .settingAnchor(i == 0 ? "fallbacks" : "fallbacks-\(l.agent_id)")
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+        .task {
+            let all = await Task.detached { (try? DinoConnection(path: DinoEnvironment.socketPath).providers()) ?? [] }.value
+            if all != providers { providers = all }
+        }
+    }
+}
+
+/// Settings → Claude Code: your other Claude accounts, and the subscription token.
+private struct ClaudeCodePane: View {
+    @EnvironmentObject var store: SettingsStore
+    @EnvironmentObject var model: DinoModel
+
+    var body: some View {
+        Form {
+            if store.setup?.contains(where: { $0.id == "claude" && $0.installed }) == true {
+                ClaudeAccountsSection(act: { showInMainWindow(model, $0) })
+                    .settingAnchor("claude-accounts")
+                ClaudeTokenSection(act: { showInMainWindow(model, $0) })
+                    .settingAnchor("claude-token")
+            } else {
+                Section {
+                    Text(store.setup == nil ? "Looking for Claude Code on this Mac…" : "Claude Code isn't installed. Install it in Agents.")
+                        .foregroundStyle(.secondary)
+                        .settingAnchor("claude-accounts")
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
+        .onAppear { if store.setup == nil { store.loadSetup() } }
+    }
+}
+
+/// Settings → Computer Use: agents using the Mac's apps, and how dino shows it.
+private struct ComputerUsePane: View {
+    @EnvironmentObject var store: SettingsStore
+    @AppStorage(UsingDisplay.key) private var usingDisplay = UsingDisplay.banner.rawValue
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: Binding(
+                    get: { store.settings?.computerUse ?? true },
+                    set: { on in store.update { $0.machine.computer_use = on } }
+                )) {
+                    Text(ComputerUseCopy.title)
+                    Text(ComputerUseCopy.summary)
+                }
+                .orgLocked("machine.computer_use")
+                .settingAnchor("computer-use")
+                if store.settings?.computerUse == true {
+                    ComputerUseOptions()
+                }
+            } footer: {
+                Footnote("Turning it off removes only what dino added. Be careful: anything on screen, such as a web page or a message, could tell an agent to do something you didn't ask for.")
+            }
+            Section {
+                Picker("Show when an agent uses your Mac", selection: $usingDisplay) {
+                    ForEach(UsingDisplay.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+                .settingAnchor("computer-use-display")
+            } footer: {
+                Footnote("The banner shows whenever an agent uses your screen, apps or browser, with Stop. Whichever you choose, the session's menu says so and has Stop.")
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(store.settings == nil)
     }
 }
 
@@ -1770,7 +2030,7 @@ private struct ReposPane: View {
         Form {
             Section {
             } header: {
-                Text("Environment")
+                Text("Repository Variables").settingAnchor("repo-env")
             } footer: {
                 Footnote("These variables are set for every session in the repo and its worktrees, from the next time a session starts or restarts. They're stored unencrypted, and when you're signed in they sync to your other Macs, matched by the repo's remote. Don't put passwords or tokens here.")
             }
@@ -1819,6 +2079,7 @@ private struct ReposPane: View {
                 }
                 .fixedSize()
             }
+            BuildCacheSection()
         }
         .formStyle(.grouped)
         .disabled(store.settings == nil)
@@ -1906,8 +2167,6 @@ private struct EnvironmentsPane: View {
                 if hosts.isEmpty && !entering {
                     Text("No hosts yet.").foregroundStyle(.secondary)
                 }
-            } header: {
-                Text("SSH Hosts")
             } footer: {
                 Footnote("You can start new sessions on these machines. dino connects with ssh and starts the agent there, so the agent must be installed on that machine. Usernames, keys and ports come from your ~/.ssh/config. The folder is where sessions start if you don't choose one. Leave it empty to use the home folder.")
             }
@@ -1920,6 +2179,7 @@ private struct EnvironmentsPane: View {
                     Button("Enter Host…") { entering = true }
                 }
                 .fixedSize()
+                .settingAnchor("ssh-hosts")
             } footer: {
                 if store.configHosts.isEmpty {
                     Footnote("Hosts in your ~/.ssh/config appear in this menu.")

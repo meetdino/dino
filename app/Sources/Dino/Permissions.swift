@@ -6,7 +6,7 @@ import SwiftUI
 /// The macOS privacy permissions programs and agents in dino's terminals commonly need. They get
 /// dino's (dinod runs as its launch agent), but macOS lists dino under Privacy & Security only once
 /// the app itself has asked: a program in a terminal asking for Screen Recording fails without a
-/// word. So the app asks, from Settings → General → Permissions, never by itself.
+/// word. So the app asks, from Settings → Permissions, never by itself.
 enum Permission: String, CaseIterable, Identifiable {
     case screenRecording = "screen_recording"
     case accessibility
@@ -178,10 +178,8 @@ struct PermissionsSection: View {
     var body: some View {
         Section {
             ForEach(Permission.allCases) { permission in
-                row(permission)
+                row(permission).settingAnchor(permission == Permission.allCases.first ? "permissions" : "permission-\(permission.rawValue)")
             }
-        } header: {
-            Text("Permissions")
         } footer: {
             if let other = permissions.dinodApp {
                 Footnote("Programs and agents in dino's terminals use the permissions of the app running dinod, not their own. Here that's \(other), not \(Permissions.appName), so they need allowing for \(other) too.")

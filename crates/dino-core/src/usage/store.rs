@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS calls (
     -- answer in both is counted once, exactly.
     answer TEXT,
     -- 1: one of the conversation's subagents made it.
-    subagent INTEGER NOT NULL DEFAULT 0
+    subagent INTEGER NOT NULL DEFAULT 0,
+    -- Which subagent, when the call or the record says.
+    subagent_id TEXT
 );
 CREATE INDEX IF NOT EXISTS calls_ts ON calls(ts);
 -- Which conversation a dino session's agent was on: learned late for some agents (Codex).
@@ -119,6 +121,8 @@ pub(crate) struct Row {
     pub undated: bool,
     /// One of the conversation's subagents made it.
     pub subagent: bool,
+    /// Which subagent, when this row or the other source's copy of it says.
+    pub subagent_id: Option<String>,
     /// It has an answer id (`Call::answer`), and the other source has the same answer: the
     /// agent's record has what the proxy carried, or the proxy carried what the record says.
     pub has_answer: bool,
@@ -182,6 +186,11 @@ impl Store {
             match_carried(&tx)?;
             tx.commit()?;
         }
+        if !has(&self.db, "subagent_id")? {
+            // Rows from before keep none: a session's subagents count from the calls and records
+            // read from now on.
+            self.db.execute_batch("ALTER TABLE calls ADD COLUMN subagent_id TEXT")?;
+        }
         self.db.execute_batch("CREATE INDEX IF NOT EXISTS calls_answer ON calls(answer) WHERE answer IS NOT NULL")?;
         Ok(())
     }
@@ -191,8 +200,8 @@ impl Store {
         let tx = self.db.transaction()?;
         {
             let mut ins = tx.prepare_cached(
-                "INSERT INTO calls (source, ts, agent, session, conversation, cwd, route, model, input, cache_read, cache_write, output, ttft_ms, duration_ms, status, fallback, cost, subagent, answer)
-                 VALUES (0, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                "INSERT INTO calls (source, ts, agent, session, conversation, cwd, route, model, input, cache_read, cache_write, output, ttft_ms, duration_ms, status, fallback, cost, subagent, answer, subagent_id)
+                 VALUES (0, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             )?;
             let mut link = tx.prepare_cached("INSERT OR IGNORE INTO links (session, conversation, agent) VALUES (?1, ?2, ?3)")?;
             for c in calls {
@@ -213,8 +222,9 @@ impl Store {
                     c.status.as_str(),
                     c.fallback,
                     c.cost,
-                    c.subagent,
-                    c.answer
+                    c.subagent || c.subagent_id.is_some(),
+                    c.answer,
+                    c.subagent_id
                 ])?;
                 if let Some(conv) = &c.conversation {
                     link.execute(params![c.session, conv, c.agent])?;
@@ -271,13 +281,15 @@ impl Store {
                 // lines can be read across two looks.
                 // Read again, it also learns what it didn't know then: its answer's id, that a
                 // subagent gave it.
-                "INSERT INTO calls (source, key, ts, agent, conversation, cwd, model, input, cache_read, cache_write, output, undated, answer, subagent)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "INSERT INTO calls (source, key, ts, agent, conversation, cwd, model, input, cache_read, cache_write, output, undated, answer, subagent, subagent_id)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(key) DO UPDATE SET input = max(input, excluded.input), cache_read = max(cache_read, excluded.cache_read),
                    cache_write = max(cache_write, excluded.cache_write), output = max(output, excluded.output),
-                   answer = coalesce(answer, excluded.answer), subagent = max(subagent, excluded.subagent)
+                   answer = coalesce(answer, excluded.answer), subagent = max(subagent, excluded.subagent),
+                   subagent_id = coalesce(subagent_id, excluded.subagent_id)
                  WHERE excluded.input > input OR excluded.cache_read > cache_read OR excluded.cache_write > cache_write OR excluded.output > output
-                   OR (answer IS NULL AND excluded.answer IS NOT NULL) OR excluded.subagent > subagent",
+                   OR (answer IS NULL AND excluded.answer IS NOT NULL) OR excluded.subagent > subagent
+                   OR (subagent_id IS NULL AND excluded.subagent_id IS NOT NULL)",
             )?;
             for (agent, u) in used {
                 added += ins.execute(params![
@@ -293,7 +305,8 @@ impl Store {
                     u.output as i64,
                     u.undated,
                     u.answer,
-                    u.subagent
+                    u.subagent || u.subagent_id.is_some(),
+                    u.subagent_id
                 ])?;
             }
         }
@@ -323,7 +336,8 @@ impl Store {
     pub(crate) fn each_row(&self, since: i64, mut f: impl FnMut(Row)) -> anyhow::Result<()> {
         let mut q = self.db.prepare_cached(
             "SELECT source, ts, agent, session, conversation, cwd, route, model, input, cache_read, cache_write, output, ttft_ms, duration_ms, status, fallback, cost, undated,
-               subagent, answer IS NOT NULL, (SELECT MAX(o.subagent) FROM calls o WHERE o.answer = c.answer AND o.source != c.source)
+               subagent, answer IS NOT NULL, (SELECT MAX(o.subagent) FROM calls o WHERE o.answer = c.answer AND o.source != c.source),
+               COALESCE(subagent_id, (SELECT MAX(o.subagent_id) FROM calls o WHERE o.answer = c.answer AND o.source != c.source))
              FROM calls c WHERE ts >= ?1 ORDER BY ts",
         )?;
         let mut rows = q.query(params![since])?;
@@ -351,6 +365,7 @@ impl Store {
                 cost: r.get(16)?,
                 undated: r.get(17)?,
                 subagent: r.get::<_, bool>(18)? || other == Some(true),
+                subagent_id: r.get(21)?,
                 has_answer: r.get(19)?,
                 matched: other.is_some(),
             });

@@ -111,7 +111,7 @@ extension DinoConnection {
     }
 }
 
-/// Settings → Models & Providers' view of dinod: asks now and then while the pane is open.
+/// Settings → Providers' view of dinod: asks now and then while the pane is open.
 @MainActor
 final class ProvidersStore: ObservableObject {
     @Published var providers: [ProviderInfo] = []
@@ -203,84 +203,32 @@ final class ProvidersStore: ObservableObject {
     }
 }
 
-/// OpenRouter and the model servers on this Mac, and every model they serve with the agents it
-/// works in, the one to run it in first.
+/// Settings → Providers: whether traffic goes through dino, OpenRouter, ChatGPT, the model servers
+/// on this Mac, and coding plans. Their models are on their own page (`ModelBrowser`).
 struct ProvidersPane: View {
     @StateObject private var store = ProvidersStore()
-    @State private var search = ""
-    /// Only models this agent can run ("" for any).
-    @State private var worksIn = ""
-    @State private var freeOnly = false
-    @State private var localOnly = false
     /// The coding plan whose key is being pasted.
     @State private var editingPlan: String?
-
-    /// How many rows to draw before asking for a narrower search.
-    private static let shown = 150
-
-    private var rows: [ProviderModel] {
-        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-        let local = Set(store.providers.filter(\.local).map(\.id))
-        return store.providers.flatMap { store.models[$0.id] ?? [] }.filter { m in
-            (q.isEmpty || m.id.lowercased().contains(q) || m.name.lowercased().contains(q))
-                && (!freeOnly || m.free)
-                && (!localOnly || local.contains(m.provider))
-                && (worksIn.isEmpty || m.agents.contains { $0.agent == worksIn && $0.status != "no" })
-        }
-    }
-
-    /// Every agent verdicts mention, in the order dinod gives them for the first model.
-    private var agents: [(id: String, name: String)] {
-        var seen = Set<String>()
-        return store.models.values.lazy.flatMap { $0 }.first.map { m in
-            m.agents.sorted { $0.name < $1.name }.filter { seen.insert($0.agent).inserted }.map { ($0.agent, $0.name) }
-        } ?? []
-    }
 
     var body: some View {
         Form {
             RoutingSections()
             Section {
-                ForEach(store.providers.filter { $0.plan == nil }) { p in
+                ForEach(Array(store.providers.filter { $0.plan == nil }.enumerated()), id: \.element.id) { i, p in
                     ProviderRow(provider: p, count: store.models[p.id]?.count, loading: store.loading.contains(p.id), error: store.errors[p.id] ?? p.error,
                                 connecting: store.connecting.contains(p.id), connect: { store.connect(p.id) }, disconnect: { store.disconnect(p.id) })
+                        .settingAnchor(i == 0 ? "providers-list" : "provider-\(p.id)")
+                }
+                if store.providers.isEmpty {
+                    Text("Asking dinod…").foregroundStyle(.secondary).settingAnchor("providers-list")
                 }
             } header: {
                 Text("Providers")
             } footer: {
-                Footnote("Connect signs you in to OpenRouter in your browser and creates a key in your account (see openrouter.ai/keys). The key stays on this Mac. Sign in with ChatGPT lets your agents use your ChatGPT plan, up to the weekly cap you set for dino in ChatGPT. Nothing is billed beyond that cap. Model servers running on this Mac are found automatically.")
+                Footnote("Connect signs you in to OpenRouter in your browser and creates a key in your account (see openrouter.ai/keys). The key stays on this Mac. Sign in with ChatGPT lets your agents use your ChatGPT plan, up to the weekly cap you set for dino in ChatGPT. Nothing is billed beyond that cap. Model servers running on this Mac are found automatically. Their models are in Models.")
             }
             CodingPlans(store: store, editing: $editingPlan)
-            Section {
-                HStack(spacing: 8) {
-                    TextField("Search models", text: $search, prompt: Text("Search models"))
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                    Picker("Works in", selection: $worksIn) {
-                        Text("Any agent").tag("")
-                        ForEach(agents, id: \.id) { a in Text(a.name).tag(a.id) }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    Toggle("Free", isOn: $freeOnly).toggleStyle(.button)
-                    Toggle("Local", isOn: $localOnly).toggleStyle(.button)
-                }
-                let rows = rows
-                if rows.isEmpty {
-                    Text(store.models.isEmpty ? "Asking providers for their models…" : "No models match")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(rows.prefix(Self.shown)) { m in ModelRowView(model: m, highlight: worksIn) }
-                if rows.count > Self.shown {
-                    Text("Showing \(Self.shown) of \(rows.count). Search or filter to narrow it down.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("Models")
-            } footer: {
-                Footnote("Each model lists the agents it works with, recommended first: ✓ works, ~ works with caveats (hover for details), ✗ doesn't work. Where a provider doesn't say, dino uses its own notes and shows their sources.")
-            }
+                .settingAnchor("coding-plans")
         }
         .formStyle(.grouped)
         .onAppear { store.load() }
@@ -291,6 +239,149 @@ struct ProvidersPane: View {
                 store.load()
             }
         }
+    }
+}
+
+/// A model as the browser shows and searches it: what its row says, worked out once per list
+/// rather than on every keystroke and redraw.
+struct ModelItem: Identifiable, Equatable {
+    let model: ProviderModel
+    let id: String
+    /// Lowercased id and name, for search.
+    let haystack: String
+    let local: Bool
+    let facts: String
+
+    init(_ m: ProviderModel, local: Bool) {
+        model = m
+        id = m.provider + "\u{0}" + m.id
+        haystack = (m.id + " " + m.name).lowercased()
+        self.local = local
+        var parts: [String] = []
+        if let c = m.context { parts.append("\(Self.tokens(c)) context") }
+        if m.tools == false { parts.append("no tools") }
+        if m.local {
+            parts.append("Local")
+        } else if m.free {
+            parts.append("Free")
+        } else if let i = m.price_in, let o = m.price_out {
+            parts.append(String(format: "$%.2f / $%.2f per M", i, o))
+        }
+        facts = parts.joined(separator: " · ")
+    }
+
+    static func tokens(_ n: UInt64) -> String {
+        n >= 1_000_000 && n % 1_000_000 == 0 ? "\(n / 1_000_000)M" : "\((n + 512) / 1024)k"
+    }
+}
+
+/// Settings → Models: every model the providers serve, searchable, with the agents each works in.
+/// A lazy list on a page of its own: only the rows on screen exist, each redrawn only when its own
+/// model changes, so typing in the search stays immediate however many models there are.
+struct ModelBrowser: View {
+    @EnvironmentObject var settings: SettingsStore
+    @StateObject private var store = ProvidersStore()
+    @State private var search = ""
+    /// Only models this agent can run ("" for any).
+    @State private var worksIn = ""
+    @State private var freeOnly = false
+    @State private var localOnly = false
+    /// Every model, worked out once per list.
+    @State private var items: [ModelItem] = []
+
+    private var rows: [ModelItem] {
+        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty || freeOnly || localOnly || !worksIn.isEmpty else { return items }
+        return items.filter { m in
+            (q.isEmpty || m.haystack.contains(q))
+                && (!freeOnly || m.model.free)
+                && (!localOnly || m.local)
+                && (worksIn.isEmpty || m.model.agents.contains { $0.agent == worksIn && $0.status != "no" })
+        }
+    }
+
+    /// Every agent verdicts mention, by name.
+    private var agents: [(id: String, name: String)] {
+        var seen = Set<String>()
+        return (items.first?.model.agents ?? []).sorted { $0.name < $1.name }.filter { seen.insert($0.agent).inserted }.map { ($0.agent, $0.name) }
+    }
+
+    /// Agents that can start here: installed and allowed.
+    private var startable: Set<String> {
+        Set(settings.agents.filter { settings.settings?.policies.allows($0.short) ?? true }.map(\.agent_id))
+    }
+
+    var body: some View {
+        let rows = rows
+        let startable = startable
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                HStack(spacing: 5) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary).font(.system(size: 12))
+                    TextField("Search models", text: $search, prompt: Text("Search models"))
+                        .textFieldStyle(.plain)
+                }
+                .padding(.horizontal, 7)
+                .frame(height: 26)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(.quaternary.opacity(0.7)))
+                Picker("Works in", selection: $worksIn) {
+                    Text("Any agent").tag("")
+                    ForEach(agents, id: \.id) { a in Text(a.name).tag(a.id) }
+                }
+                .labelsHidden()
+                .fixedSize()
+                Toggle("Free", isOn: $freeOnly).toggleStyle(.button)
+                Toggle("Local", isOn: $localOnly).toggleStyle(.button)
+            }
+            .padding(.horizontal, 30)
+            .padding(.vertical, 10)
+            .settingAnchor("model-browser")
+            HStack {
+                Text(items.isEmpty ? "" : rows.count == items.count ? "\(items.count) models" : "\(rows.count) of \(items.count) models")
+                Spacer()
+                Text("✓ works · ~ with caveats · ✗ doesn't · hover for why")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 32)
+            .padding(.bottom, 6)
+            Divider()
+            if rows.isEmpty {
+                ContentUnavailableView {
+                    Label(items.isEmpty ? "Asking providers for their models…" : "No models match", systemImage: items.isEmpty ? "hourglass" : "magnifyingglass")
+                } description: {
+                    Text(items.isEmpty ? "OpenRouter's list is public. Connect a provider in Providers for its own." : "Try fewer words, or turn off Free or Local.")
+                }
+                .frame(maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(rows) { m in
+                            ModelRowView(item: m, highlight: worksIn, startable: startable)
+                                .equatable()
+                            Divider().padding(.leading, 30)
+                        }
+                    }
+                    .padding(.bottom, 12)
+                }
+            }
+        }
+        .onAppear { store.load() }
+        .onChange(of: store.models) { _, _ in rebuild() }
+        .onChange(of: store.providers) { _, _ in rebuild() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(store.loading.isEmpty ? 10 : 1))
+                store.load()
+            }
+        }
+    }
+
+    /// What the rows show, from the lists as dinod last sent them; nothing changes if they didn't.
+    private func rebuild() {
+        let local = Set(store.providers.filter(\.local).map(\.id))
+        let next = store.providers.flatMap { store.models[$0.id] ?? [] }.map { ModelItem($0, local: local.contains($0.provider)) }
+        if next != items { items = next }
     }
 }
 
@@ -483,190 +574,159 @@ func formatName(_ f: String) -> String {
     }
 }
 
-private struct ModelRowView: View {
-    @EnvironmentObject var dino: DinoModel
-    let model: ProviderModel
+/// One model: its name and id, what it costs, the agent to run it in, and every agent's verdict.
+/// Equatable: a redraw of the list skips rows whose model didn't change.
+private struct ModelRowView: View, Equatable {
+    let item: ModelItem
     /// The agent the list is filtered to, shown first.
     let highlight: String
+    /// Agents that can start here.
+    let startable: Set<String>
+
+    private var model: ProviderModel { item.model }
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.item == b.item && a.highlight == b.highlight && a.startable == b.startable
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(model.name).lineLimit(1)
                     Text(model.id).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
                 }
                 Spacer()
-                Text(facts).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
+                Text(item.facts).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
             }
-            if let r = model.recommended {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Button { run(r) } label: {
-                        Label("Run in \(r.name)", systemImage: "play.fill")
+            HStack(alignment: .center, spacing: 10) {
+                if let r = model.recommended {
+                    let others = model.agents.filter { !$0.recommended && $0.status != "no" }
+                    HStack(spacing: 2) {
+                        Button { run(r) } label: { Label("Run in \(r.name)", systemImage: "play.fill") }
+                            .disabled(why(r) != nil)
+                            .help(why(r) ?? "Start \(r.name) on \(model.name), through dino")
+                        // The other agents' menu, made when it's opened: a Menu in every row cost
+                        // the list a pop-up button per row.
+                        if !others.isEmpty {
+                            Button { otherAgents(others) } label: { Image(systemName: "chevron.down").font(.caption2.weight(.semibold)) }
+                                .help("Run in another agent it works in")
+                                .accessibilityLabel("Run in another agent")
+                        }
                     }
                     .controlSize(.small)
-                    .disabled(why(r) != nil)
-                    .help(why(r) ?? "Start \(r.name) on \(model.name), through dino")
-                    let others = model.agents.filter { !$0.recommended && $0.status != "no" }
-                    if !others.isEmpty {
-                        Menu("Other agents") {
-                            ForEach(others) { v in
-                                Button("\(v.status == "works" ? "✓" : "~") \(v.name)\(v.reasons.first.map { " — \($0.text)" } ?? "")") { run(v) }
-                                    .disabled(why(v) != nil)
-                            }
-                        }
-                        .menuStyle(.borderlessButton)
-                        .controlSize(.small)
-                        .fixedSize()
-                    }
-                    Text(r.reasons.first?.text ?? "Recommended")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .help(r.reasons.first?.source ?? "")
+                    .fixedSize()
                 }
-            }
-            Wrap(spacing: 5) {
-                ForEach(chips) { v in VerdictChip(verdict: v) }
+                // One line of verdicts, their reasons in one tooltip for the row.
+                Text(verdicts)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(reasons)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 30)
+        // One height for every row: the lazy list places rows without measuring them.
+        .frame(height: Self.height)
+        .contentShape(Rectangle())
+    }
+
+    static let height: CGFloat = 66
+
+    /// The other agents it works in, as a menu at the mouse.
+    private func otherAgents(_ others: [Verdict]) {
+        let menu = NSMenu()
+        for v in others {
+            let item = NSMenuItem(title: "\(Verdict.mark(v.status)) \(v.name)\(v.reasons.first.map { " — \($0.text)" } ?? "")", action: nil, keyEquivalent: "")
+            item.isEnabled = why(v) == nil
+            item.target = MenuAction.shared
+            item.action = #selector(MenuAction.perform(_:))
+            item.representedObject = MenuAction.Box { run(v) }
+            menu.addItem(item)
+        }
+        menu.autoenablesItems = false
+        if let e = NSApp.currentEvent, let w = e.window, let v = w.contentView {
+            menu.popUp(positioning: nil, at: v.convert(e.locationInWindow, from: nil), in: v)
+        }
     }
 
     /// Why `v` can't be started from here, if it can't.
     private func why(_ v: Verdict) -> String? {
-        if dino.launchers.first(where: { $0.agent_id == v.agent }) == nil { return "\(v.name) isn't installed. Install it in Settings → Agents." }
+        if !startable.contains(v.agent) { return "\(v.name) isn't installed. Install it in Settings → Agents." }
         if v.translated { return "\(v.name) can't use this provider's API yet" }
         return nil
     }
 
-    /// A new session of `v`'s agent on this model, shown in the main window.
+    /// A new session of `v`'s agent on this model, shown in the main window. The app's model is
+    /// asked only now: the rows don't watch it, or every session change would redraw them.
     private func run(_ v: Verdict) {
-        guard let l = dino.launchers.first(where: { $0.agent_id == v.agent }) else { return }
+        guard let dino = (NSApp.delegate as? AppDelegate)?.model,
+              let l = dino.launchers.first(where: { $0.agent_id == v.agent }) else { return }
         dino.newSessionHere(l, route: ProviderRoute(provider: model.provider, model: model.id))
         NSApp.windows.first { w in w.isVisible && !(w.identifier?.rawValue.hasPrefix(SettingsView.windowID) ?? false) && w.canBecomeMain }?
             .makeKeyAndOrderFront(nil)
     }
 
-    /// The recommended agent first, then the rest as dinod ranked them; ones that can't, last.
-    private var chips: [Verdict] {
+    /// The highlighted agent first, then the rest as dinod ranked them.
+    private var ordered: [Verdict] {
         model.agents.filter { $0.agent == highlight } + model.agents.filter { $0.agent != highlight }
     }
 
-    private var facts: String {
-        var parts: [String] = []
-        if let c = model.context { parts.append("\(tokens(c)) context") }
-        if model.tools == false { parts.append("no tools") }
-        if model.local {
-            parts.append("Local")
-        } else if model.free {
-            parts.append("Free")
-        } else if let i = model.price_in, let o = model.price_out {
-            parts.append(String(format: "$%.2f / $%.2f per M", i, o))
+    /// "✓ Claude Code   ✓ Codex   ~ OpenCode   ✗ Pi", the recommended one in bold.
+    private var verdicts: AttributedString {
+        var out = AttributedString()
+        for (i, v) in ordered.enumerated() {
+            if i > 0 { out += AttributedString("   ") }
+            var mark = AttributedString(Verdict.mark(v.status) + " ")
+            mark.foregroundColor = Verdict.color(v.status)
+            mark.font = .caption.weight(.semibold)
+            var name = AttributedString(v.name)
+            if v.recommended { name.font = .caption.weight(.semibold) }
+            out += mark + name
         }
-        return parts.joined(separator: " · ")
+        return out
     }
 
-    private func tokens(_ n: UInt64) -> String {
-        n >= 1_000_000 && n % 1_000_000 == 0 ? "\(n / 1_000_000)M" : "\((n + 512) / 1024)k"
+    private var reasons: String {
+        ordered.map { v in
+            var line = "\(Verdict.mark(v.status)) \(v.name)"
+            if let r = v.reasons.first { line += ": \(r.text)\(r.source.map { " (\($0))" } ?? "")" }
+            if let via = v.via { line += " · \(formatName(via)) API\(v.translated ? ", translated by dino" : "")" }
+            return line
+        }.joined(separator: "\n")
     }
 }
 
-/// One agent's verdict on a model: ✓, ~ or ✗ with its name, the reasons on hover.
-private struct VerdictChip: View {
-    let verdict: Verdict
-
-    var body: some View {
-        HStack(spacing: 3) {
-            Text(mark).fontWeight(.semibold)
-            Text(verdict.name)
-        }
-        .lineLimit(1)
-        .fixedSize()
-        .font(.caption)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 2)
-        .foregroundStyle(color)
-        .background(color.opacity(verdict.recommended ? 0.2 : 0.1), in: Capsule())
-        .overlay(Capsule().strokeBorder(color.opacity(verdict.recommended ? 0.6 : 0), lineWidth: 1))
-        .help(help)
-    }
-
-    private var mark: String {
-        switch verdict.status {
+extension Verdict {
+    static func mark(_ status: String) -> String {
+        switch status {
         case "works": "✓"
         case "caveat": "~"
         default: "✗"
         }
     }
 
-    private var color: Color {
-        switch verdict.status {
+    static func color(_ status: String) -> Color {
+        switch status {
         case "works": .green
         case "caveat": .orange
         default: .secondary
         }
     }
-
-    private var help: String {
-        var lines = verdict.reasons.map { r in r.source.map { "\(r.text) (\($0))" } ?? r.text }
-        if let via = verdict.via { lines.append("Uses the \(formatName(via)) API\(verdict.translated ? ", translated by dino" : "")") }
-        return lines.isEmpty ? "\(verdict.name) works with it" : lines.joined(separator: "\n")
-    }
 }
 
-/// Its children in rows, as many to a row as fit.
-private struct Wrap: Layout {
-    var spacing: CGFloat = 5
+/// The target of menu items made in code that run a closure.
+@MainActor
+final class MenuAction: NSObject {
+    static let shared = MenuAction()
 
-    /// Each child's size, measured once per change rather than on every layout pass: a list of
-    /// models lays out many rows of these.
-    func makeCache(subviews: Subviews) -> [CGSize] {
-        subviews.map { $0.sizeThatFits(.unspecified) }
+    final class Box {
+        let run: () -> Void
+        init(_ run: @escaping () -> Void) { self.run = run }
     }
 
-    func updateCache(_ cache: inout [CGSize], subviews: Subviews) {
-        cache = makeCache(subviews: subviews)
-    }
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) -> CGSize {
-        let rows = rows(width: proposal.width ?? .infinity, cache)
-        var height: CGFloat = 0
-        var width: CGFloat = 0
-        for (n, row) in rows.enumerated() {
-            let tallest: CGFloat = row.map { $0.1.height }.max() ?? 0
-            height += tallest + (n > 0 ? spacing : 0)
-            var w: CGFloat = 0
-            for (i, item) in row.enumerated() { w += item.1.width + (i > 0 ? spacing : 0) }
-            width = max(width, w)
-        }
-        return CGSize(width: min(width, proposal.width ?? width), height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) {
-        var y = bounds.minY
-        for row in rows(width: bounds.width, cache) {
-            var x = bounds.minX
-            let height = row.map { $0.1.height }.max() ?? 0
-            for (i, size) in row {
-                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-                x += size.width + spacing
-            }
-            y += height + spacing
-        }
-    }
-
-    private func rows(width: CGFloat, _ sizes: [CGSize]) -> [[(Int, CGSize)]] {
-        var rows: [[(Int, CGSize)]] = [[]]
-        var x: CGFloat = 0
-        for (i, size) in sizes.enumerated() {
-            if x > 0, x + size.width > width {
-                rows.append([])
-                x = 0
-            }
-            rows[rows.count - 1].append((i, size))
-            x += size.width + spacing
-        }
-        return rows
+    @objc func perform(_ item: NSMenuItem) {
+        (item.representedObject as? Box)?.run()
     }
 }

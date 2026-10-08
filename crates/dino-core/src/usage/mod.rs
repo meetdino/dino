@@ -88,6 +88,9 @@ pub struct Call {
     /// Made by one of the conversation's subagents (Claude's Agent tool), as the call said.
     #[serde(default)]
     pub subagent: bool,
+    /// Which subagent, as the call said (Claude Code's `x-claude-code-agent-id`).
+    #[serde(default)]
+    pub subagent_id: Option<String>,
     /// The answer's id as the agent's own record keeps it (`Used::answer`): Claude Code's calls.
     #[serde(default)]
     pub answer: Option<String>,
@@ -116,6 +119,8 @@ pub struct Used {
     pub answer: Option<String>,
     /// A subagent's answer (Claude's Agent tool), in its parent conversation.
     pub subagent: bool,
+    /// Which subagent, as the record says (Claude's `agentId`, the call's `x-claude-code-agent-id`).
+    pub subagent_id: Option<String>,
 }
 
 /// What has been read of agents' records already, so each look reads only what's new: byte

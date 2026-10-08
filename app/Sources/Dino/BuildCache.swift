@@ -89,6 +89,7 @@ struct BuildCacheSection: View {
                 Text("For Rust projects, using sccache")
             }
             .orgLocked("machine.build_cache.enabled")
+            .settingAnchor("build-cache")
             if current.enabled {
                 if let info, info.sccache == nil {
                     LabeledContent {
@@ -125,6 +126,7 @@ struct BuildCacheSection: View {
                     }
                 }
                 .orgLocked("machine.build_cache.size_gb")
+                .settingAnchor("build-cache-size")
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)

@@ -773,11 +773,8 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    /// docs/settings.md documents every key, in its table's section, and nothing that isn't one.
-    #[test]
-    fn settings_reference_lists_every_key() {
-        let doc = include_str!("../../../docs/settings.md");
-        // Every optional value and map filled in, so that each key is written.
+    /// Settings with every optional value and map filled in, so that each key is written.
+    fn filled() -> Settings {
         let mut s = Settings::default();
         s.policies.default_agent = Some("claude".into());
         s.machine.computer_use = Some(true);
@@ -788,6 +785,44 @@ mod tests {
         let step = FallbackStep { provider: "openrouter".into(), model: "m".into(), extra: Extra::default() };
         let switch = AgentSwitch { agent: "codex".into(), model: Some("m".into()), extra: Extra::default() };
         s.fallbacks.insert("claude".into(), Fallback { steps: vec![step], new_sessions: Some(switch), ..Default::default() });
+        s
+    }
+
+    /// settings-keys.txt lists every key's path, a map's own keys as `*` (`agents.*.model`): the
+    /// app's Settings search is tested against it (SettingsIndexTests), so no setting can be added
+    /// without a control search finds. `DINO_UPDATE_KEYS=1 cargo test` writes it.
+    #[test]
+    fn settings_keys_file_lists_every_key() {
+        fn walk(v: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(m) if !m.is_empty() => {
+                    for (k, v) in m {
+                        // Keyed by agent, path or host, and a repo's own variable names.
+                        let map = ["agents", "repos", "ssh", "fallbacks"].contains(&path) || path.ends_with(".env");
+                        let k = if map { "*" } else { k.as_str() };
+                        walk(v, &if path.is_empty() { k.to_string() } else { format!("{path}.{k}") }, out);
+                    }
+                }
+                _ => out.push(path.to_string()),
+            }
+        }
+        let mut keys = vec![];
+        walk(&serde_json::to_value(filled()).unwrap(), "", &mut keys);
+        keys.sort();
+        keys.dedup();
+        let text = keys.join("\n") + "\n";
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/settings-keys.txt");
+        if std::env::var_os("DINO_UPDATE_KEYS").is_some() {
+            std::fs::write(file, &text).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(file).unwrap_or_default(), text, "settings-keys.txt is stale: run DINO_UPDATE_KEYS=1 cargo test -p dino-core settings_keys");
+    }
+
+    /// docs/settings.md documents every key, in its table's section, and nothing that isn't one.
+    #[test]
+    fn settings_reference_lists_every_key() {
+        let doc = include_str!("../../../docs/settings.md");
+        let s = filled();
         // Each key as (the table whose section documents it, the key, directly in that table).
         fn keys(v: &serde_json::Value, table: &str, direct: bool, out: &mut Vec<(String, String, bool)>) {
             let serde_json::Value::Object(m) = v else { return };
