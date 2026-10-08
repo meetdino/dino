@@ -131,6 +131,7 @@ struct ReviewPanel: View {
                 Button { model.cancelReview(session.id) } label: { Image(systemName: "stop.circle") }
                     .buttonStyle(.borderless)
                     .help("Stop the review")
+                    .accessibilityLabel("Stop the review")
             }
             .help("Claude is reviewing the changes. This can take a few minutes.")
         } else {
@@ -164,6 +165,7 @@ struct ReviewPanel: View {
             Button { model.reviews[session.id] = nil } label: { Image(systemName: "xmark.circle.fill") }
                 .buttonStyle(.borderless).foregroundStyle(.tertiary)
                 .help("Hide")
+                .accessibilityLabel("Hide")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
@@ -334,6 +336,7 @@ private struct FileHeader: View {
                     Button { open(nil) } label: { Image(systemName: "doc.text") }
                         .buttonStyle(.borderless)
                         .help("Open \((file.path as NSString).lastPathComponent)")
+                        .accessibilityLabel("Open \((file.path as NSString).lastPathComponent)")
                 }
             }
             .font(.callout.monospacedDigit())
@@ -490,6 +493,7 @@ private struct CommentCard: View {
                 Button(action: onDelete) { Image(systemName: "trash") }
                     .buttonStyle(.borderless).foregroundStyle(.secondary)
                     .help("Delete comment")
+                    .accessibilityLabel("Delete comment")
             }
         }
         .padding(8)
