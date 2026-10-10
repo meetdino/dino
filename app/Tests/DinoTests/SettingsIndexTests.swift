@@ -55,6 +55,19 @@ final class SettingsIndexTests: XCTestCase {
         XCTAssertFalse(SettingsSearch.results("organization").contains { $0.pane == .managed }, "the Managed page only while something is managed")
     }
 
+    /// One way to sign in to a Claude account: Accounts → Add Account… → Sign in with Claude, which
+    /// adds an account. Settings once had a second browser sign-in (the subscription token's
+    /// Create…) that looked the same but kept the token for SSH hosts and added no account.
+    func testOneWayToSignInToAClaudeAccount() {
+        XCTAssertEqual(SettingsPane.claude.title, "Accounts")
+        XCTAssertEqual(SettingsPane(rawValue: "claude"), .claude, "the page's raw value stays, so links to it still open")
+        let source = Self.sources
+        XCTAssertEqual(source.components(separatedBy: "call(\"login\"").count - 1, 1, "one place starts a browser sign-in")
+        XCTAssertFalse(source.contains("claudeToken(\"create\"") || source.contains("call(\"create\""), "no other sign-in that runs claude setup-token")
+        XCTAssertFalse(source.contains("claudeToken(\"set\""), "no second place to paste a token")
+        XCTAssertEqual(source.components(separatedBy: "Button(\"Sign in with Claude\")").count - 1, 1)
+    }
+
     func testOldPageNamesStillOpen() {
         XCTAssertEqual(SettingsPane(rawValue: "terminal"), .shell)
         XCTAssertEqual(SettingsPane(rawValue: "workspaces"), .worktrees)

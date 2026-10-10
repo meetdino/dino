@@ -406,6 +406,9 @@ pub struct Stats {
     refusals: Mutex<HashMap<String, Refusal>>,
     /// Model calls not yet taken by dinod for usage statistics.
     calls: Mutex<Vec<Call>>,
+    /// The organization Anthropic said answered a subscription's calls, by the same key as
+    /// `quotas`: which Claude account a token is, without asking anything more of Anthropic.
+    orgs: Mutex<HashMap<String, String>>,
 }
 
 impl Stats {
@@ -590,6 +593,11 @@ impl Stats {
         self.quotas.lock().unwrap().get(provider).cloned()
     }
 
+    /// The organization that last answered a subscription's call kept under `key` (see `quotas`).
+    pub fn org(&self, key: &str) -> Option<String> {
+        self.orgs.lock().unwrap().get(key).cloned()
+    }
+
     /// The agent a shell ran has exited: what it said of itself (its turn, tasks, mode, error,
     /// context), through its hooks or its own record, goes with it, so the shell is a plain shell
     /// again. What it cost stays counted. True when it had said anything.
@@ -679,6 +687,7 @@ impl Proxy {
             upstream: Arc::default(),
             router: Arc::default(),
             keys: keys.clone(),
+            checking: Arc::default(),
             plans: Arc::default(),
             chains: Arc::default(),
             budget: budget.clone(),
@@ -771,6 +780,23 @@ impl Proxy {
         let mut out = vec![(1, own, self.stats.quota("anthropic"))];
         out.extend(others.iter().zip(spent).map(|((n, t), l)| (*n, l, self.stats.quota(&accounts::key(t)))));
         Some(out)
+    }
+
+    /// Claude account `token`'s organization and windows (Claude Code's own sign-in for `None`),
+    /// as Anthropic last said on a call it signed.
+    pub fn claude_account_seen(&self, token: Option<&str>) -> (Option<String>, Option<Quota>) {
+        let key = token.map_or_else(|| "anthropic".to_string(), accounts::key);
+        (self.stats.org(&key), self.stats.quota(&key))
+    }
+
+    /// While the guard lives, a call signed with `token` (a Claude account dino is checking before
+    /// it keeps it) is that token's own, as an added account's is: what Anthropic says of it is
+    /// kept by the token, and no other account answers for it. The token isn't one of the user's
+    /// accounts meanwhile: nothing else is signed with it, and no list shows it.
+    pub fn checking(&self, token: &str) -> Checking {
+        let t = token.trim().to_string();
+        self.state.checking.write().unwrap().push(t.clone());
+        Checking { list: self.state.checking.clone(), token: t }
     }
 
     /// The coding plans to serve at `plan/<id>`, from the next request on.
@@ -886,6 +912,21 @@ fn clean_path(rest: &str) -> Option<&str> {
     (segments && chars).then_some(rest)
 }
 
+/// See `Proxy::checking`.
+pub struct Checking {
+    list: Arc<RwLock<Vec<String>>>,
+    token: String,
+}
+
+impl Drop for Checking {
+    fn drop(&mut self) {
+        let mut l = self.list.write().unwrap();
+        if let Some(i) = l.iter().position(|t| *t == self.token) {
+            l.remove(i);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     /// The free tier is turned on (see `Proxy::set_free_models`).
@@ -896,6 +937,8 @@ pub(crate) struct AppState {
     upstream: Arc<upstream::Upstream>,
     router: Arc<dino_router::Router>,
     keys: Arc<RwLock<HashMap<String, String>>>,
+    /// Claude account tokens being checked before they're kept (see `Proxy::checking`).
+    checking: Arc<RwLock<Vec<String>>>,
     /// Coding plans, by id (see `plan`).
     plans: Arc<RwLock<plan::Plans>>,
     /// What each session falls back to, by session id (see `fallback`).
@@ -1061,6 +1104,19 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
         };
         Primary { key: fallback::route_key(&path, &parts.headers), tag: RouteTag { path, name } }
     });
+    // Signed by one of the user's other Claude accounts itself (dino checking one it just added,
+    // with Claude Code): the call is that account's alone. What Anthropic says of it (its windows,
+    // a limit) is that account's, and no other account answers for it.
+    let subscription = provider == "anthropic" && is_model_call && parts.headers.get("authorization").and_then(|v| v.to_str().ok()).is_some_and(fallback::is_claude_subscription);
+    let signed_as = subscription.then(|| parts.headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|a| a.strip_prefix("Bearer ")).map(str::trim)).flatten().and_then(|t| {
+        let kept = accounts::others(&st.keys.read().unwrap()).into_iter().find(|(_, kept)| kept == t);
+        // One being checked before it's kept: its own, under no number yet.
+        kept.or_else(|| st.checking.read().unwrap().iter().any(|c| c == t).then(|| (0, t.to_string())))
+    });
+    let primary = match (&signed_as, primary) {
+        (Some((n, t)), Some(p)) => Some(Primary { key: accounts::key(t), tag: RouteTag { path: p.tag.path, name: accounts::name(*n) } }),
+        (_, p) => p,
+    };
     if is_model_call {
         st.stats.update(&session, |s| {
             s.requests += 1;
@@ -1080,11 +1136,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
 
     // The user's other Claude accounts, for Claude Code's own calls to Anthropic signed in with a
     // subscription: while the one it signed in with is spent, the first that isn't answers.
-    let accounts = if provider == "anthropic" && is_model_call && parts.headers.get("authorization").and_then(|v| v.to_str().ok()).is_some_and(fallback::is_claude_subscription) {
-        accounts::others(&st.keys.read().unwrap())
-    } else {
-        vec![]
-    };
+    let accounts = if subscription && signed_as.is_none() { accounts::others(&st.keys.read().unwrap()) } else { vec![] };
 
     // What the session falls back to, if anything: only for the APIs that answer a turn, and not
     // for an agent that wanted the ChatGPT plan's stream put together.
@@ -1239,7 +1291,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
                 let (key, name) = signer(current);
                 st.stats.mark_limited(&key, &name, &t);
                 st.stats.refusals.lock().unwrap().insert(key.clone(), Refusal { status, headers: headers.clone(), text: text.clone() });
-                record_quota(&st.stats, &quota_key(&provider, account.as_ref()), &headers);
+                record_quota(&st.stats, &quota_key(&provider, account.as_ref().or(signed_as.as_ref())), &headers);
                 let own = (current.is_some() && st.stats.limited(&p.key).is_none()).then_some(None);
                 let others = accounts.iter().filter(|(n, _)| Some(*n) != current && spare(*n)).map(Some);
                 for next in own.into_iter().chain(others) {
@@ -1274,7 +1326,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
             }
             log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
             // Each Claude account's windows are its own: kept by the account that signed the call.
-            record_quota(&st.stats, &quota_key(&provider, account.as_ref()), &headers);
+            record_quota(&st.stats, &quota_key(&provider, account.as_ref().or(signed_as.as_ref())), &headers);
             // Spent: known as such (for new sessions, and the other sessions on it), and with a
             // chain, answered by it. Down, for a chain that counts outages, once it goes on.
             if let Some(p) = &primary {
@@ -1356,7 +1408,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
             .collect();
         log(format_args!("  headers: {}", names.join(" ")));
     }
-    record_quota(&st.stats, &quota_key(&provider, account.as_ref()), resp.headers());
+    record_quota(&st.stats, &quota_key(&provider, account.as_ref().or(signed_as.as_ref())), resp.headers());
     if !status.is_success() && is_model_call {
         st.stats.update(&session, |s| s.errors += 1);
     } else if is_model_call {
@@ -2021,6 +2073,9 @@ fn record_quota(stats: &Stats, provider: &str, headers: &HeaderMap) {
     const PREFIX: &str = "anthropic-ratelimit-unified-";
     if !headers.keys().any(|n| n.as_str().starts_with(PREFIX)) {
         return;
+    }
+    if let Some(org) = headers.get("anthropic-organization-id").and_then(|v| v.to_str().ok()).filter(|o| !o.is_empty()) {
+        stats.orgs.lock().unwrap().insert(provider.to_string(), org.to_string());
     }
     // On top of what was known: a refusal may say only which window refused, not the others' use.
     let mut windows: HashMap<String, Window> = stats.quotas.lock().unwrap().get(provider).map(|q| q.windows.iter().cloned().collect()).unwrap_or_default();
@@ -2715,6 +2770,83 @@ mod tests {
         send("acct-api", "sk-ant-api03-a-key");
         assert_eq!(auth_of(&from.recv_timeout(wait()).unwrap()), "bearer sk-ant-api03-a-key");
         assert!(from.recv_timeout(std::time::Duration::from_millis(300)).is_err());
+    }
+
+    /// A call Claude Code signs with one of the other accounts' own tokens (dino checking an account
+    /// it just added) tells that account's organization and windows, not those of Claude Code's own
+    /// sign-in, and nothing signs it but that token: spent, it's that account that is, and no
+    /// other account answers for it.
+    #[test]
+    fn a_call_signed_by_an_account_itself_is_that_accounts() {
+        use std::io::{Read, Write};
+        let reset = fallback::now() + 3600;
+        let (anthropic, from) = stand_in(move |req| {
+            if req.contains("authorization: bearer sk-ant-oat01-spent") {
+                return claude_spent(reset).replacen("Content-Type", "anthropic-organization-id: org-spent\r\nContent-Type", 1);
+            }
+            let (org, used) = if req.contains("authorization: bearer sk-ant-oat01-two") { ("org-two", "0.27") } else { ("org-own", "0.5") };
+            let h = format!(
+                "anthropic-organization-id: {org}\r\nanthropic-ratelimit-unified-status: allowed\r\nanthropic-ratelimit-unified-5h-utilization: {used}\r\nanthropic-ratelimit-unified-5h-reset: {}\r\n",
+                fallback::now() + 600
+            );
+            streamed("claude-haiku", "OK").replacen("Content-Type", &format!("{h}Content-Type"), 1)
+        });
+        let base = anthropic.trim_end_matches("/api/anthropic").to_string();
+        for s in ["self-signed-check", "self-signed-own", "self-signed-spent"] {
+            STAND_INS.lock().unwrap().push((s.into(), "anthropic".into(), base.clone()));
+        }
+        let proxy = Proxy::start(HashMap::from([("CLAUDE_ACCOUNT_2".to_string(), "sk-ant-oat01-two".to_string()), ("CLAUDE_ACCOUNT_3".to_string(), "sk-ant-oat01-spent".to_string())])).unwrap();
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let send = |session: &str, token: &str| {
+            let path = proxy.base_url(session, "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+            let body = json!({"model": "claude-haiku", "max_tokens": 10, "stream": true, "messages": [{"role": "user", "content": "hi"}]}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer {token}\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                .unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        assert!(send("self-signed-check", "sk-ant-oat01-two").contains("OK"));
+        let asked = from.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(asked.contains("authorization: bearer sk-ant-oat01-two"), "signed as it came");
+        let (org, quota) = proxy.claude_account_seen(Some("sk-ant-oat01-two"));
+        assert_eq!(org.as_deref(), Some("org-two"));
+        assert_eq!(quota.unwrap().windows[0].1.utilization, 0.27);
+        let (org, quota) = proxy.claude_account_seen(None);
+        assert!(org.is_none() && quota.is_none(), "Claude Code's own: nothing yet");
+        // Not a fallback: the session wasn't moved off its own account.
+        assert!(proxy.stats.session("self-signed-check").fallback.is_none());
+
+        assert!(send("self-signed-own", "sk-ant-oat01-own").contains("OK"));
+        assert!(from.recv_timeout(std::time::Duration::from_secs(5)).unwrap().contains("authorization: bearer sk-ant-oat01-own"));
+        let (org, quota) = proxy.claude_account_seen(None);
+        assert_eq!(org.as_deref(), Some("org-own"));
+        assert_eq!(quota.unwrap().windows[0].1.utilization, 0.5);
+        assert_eq!(proxy.claude_account_seen(Some("sk-ant-oat01-two")).0.as_deref(), Some("org-two"));
+
+        // Account 3 is at its limit: the agent gets its refusal, account 2 isn't asked instead,
+        // and it's account 3 that's spent, not Claude Code's own sign-in.
+        let out = send("self-signed-spent", "sk-ant-oat01-spent");
+        assert!(out.starts_with("HTTP/1.1 429"), "{out}");
+        assert!(from.recv_timeout(std::time::Duration::from_secs(5)).unwrap().contains("authorization: bearer sk-ant-oat01-spent"));
+        assert!(from.recv_timeout(std::time::Duration::from_millis(500)).is_err(), "no other account asked");
+        assert_eq!(proxy.claude_account_seen(Some("sk-ant-oat01-spent")).0.as_deref(), Some("org-spent"));
+        let (own, others) = proxy.claude_accounts(&["sk-ant-oat01-two", "sk-ant-oat01-spent"]);
+        assert!(own.is_none(), "Claude Code's own isn't spent: {own:?}");
+        assert!(others[0].is_none());
+        assert_eq!(others[1].as_ref().and_then(|l| l.resets_at), Some(reset));
+        assert!(proxy.stats.session("self-signed-spent").fallback.is_none());
+
+        // A token being checked, not kept yet: its call is its own too, while the check lasts.
+        let check = proxy.checking("sk-ant-oat01-new");
+        send("self-signed-check", "sk-ant-oat01-new");
+        assert!(from.recv_timeout(std::time::Duration::from_secs(5)).unwrap().contains("authorization: bearer sk-ant-oat01-new"));
+        assert!(from.recv_timeout(std::time::Duration::from_millis(500)).is_err(), "no other account asked");
+        assert_eq!(proxy.claude_account_seen(Some("sk-ant-oat01-new")).0.as_deref(), Some("org-own"));
+        assert_eq!(proxy.claude_account_seen(None).0.as_deref(), Some("org-own"), "Claude Code's own as it was");
+        drop(check);
+        assert!(proxy.state.checking.read().unwrap().is_empty());
     }
 
     /// Every Claude account spent: the agent is given the refusal of the account back first, not

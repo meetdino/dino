@@ -122,7 +122,7 @@ const COMMANDS: &[Command] = &[
             ("create", "run `claude setup-token` and keep the token"),
             ("set", "read a token from stdin"),
             ("remove", "forget the token"),
-            ("add-account", "read another account's token from stdin"),
+            ("add-account", "add another Claude account: sign in in the browser"),
             ("remove-account", "forget an account"),
         ])],
     },

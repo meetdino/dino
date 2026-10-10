@@ -22,6 +22,28 @@ struct ClaudeAccountInfo: Codable, Equatable, Identifiable {
     var isOwn: Bool { number == 1 }
     /// The sidebar's footer calls the sign-in account 1, so Settings does too.
     var name: String { isOwn ? "Account 1 · your signed-in account" : "Account \(number)" }
+    /// "5h 27% · 7d 98% used", as Anthropic last reported them; nil until a call did.
+    var usage: String? {
+        let w = (windows ?? []).filter { $0.isWindow && !$0.isPast }
+        guard !w.isEmpty else { return nil }
+        return w.map { "\($0.name) \(Int((Double($0.utilization) * 100).rounded()))%" }.joined(separator: " · ") + " used"
+    }
+}
+
+/// Adding an account by signing in to it in the browser: dinod runs Claude Code's own
+/// `claude setup-token` out of sight and adds the token it prints. Never the token.
+struct ClaudeLoginInfo: Codable, Equatable {
+    var id: UInt64
+    /// `starting`, `browser`, `checking`, `added`, `failed` or `cancelled`.
+    var stage: String
+    /// claude.ai's sign-in page, for another browser or a private window: it ends on a code to paste.
+    var url: String?
+    var account: UInt32?
+    var error: String?
+    /// Failed because that account is here already: its number (1 for Claude Code's own).
+    var duplicate: UInt32?
+
+    var underWay: Bool { ["starting", "browser", "checking"].contains(stage) }
 }
 
 struct ClaudeAccountsInfo: Codable, Equatable {
@@ -30,6 +52,8 @@ struct ClaudeAccountsInfo: Codable, Equatable {
     /// The shell running `claude setup-token`.
     var creating: String?
     var error: String?
+    /// The browser sign-in under way, or how the last one ended.
+    var login: ClaudeLoginInfo?
 }
 
 private struct ClaudeAccountsResponse: Decodable {
@@ -37,7 +61,8 @@ private struct ClaudeAccountsResponse: Decodable {
 }
 
 extension DinoConnection {
-    /// `status`, `add` (`value`: a token), `create`, `remove` (`account`) or `order` (`order`).
+    /// `status`, `add` (`value`: a token), `login` (sign in in the browser), `login_code` (`value`:
+    /// the code claude.ai showed), `login_cancel`, `remove` (`account`) or `order` (`order`).
     func claudeAccounts(_ action: String, value: String? = nil, account: UInt32? = nil, order: [UInt32] = []) throws -> ClaudeAccountsInfo {
         var body: [String: Any] = ["type": "claude_accounts", "action": action]
         if let value { body["value"] = value }
@@ -47,16 +72,16 @@ extension DinoConnection {
     }
 }
 
-/// Settings → Agents: your other Claude accounts, which Claude Code goes on with when the one it
-/// signed in with is at its limit. Which answers now, and when a spent one resets.
+/// Settings → Accounts: your Claude accounts, which Claude Code goes on with when the one it
+/// signed in with is at its limit. Which answers now, how much each has used, and when a spent one
+/// resets. Add Account… signs in to another in the browser: the one way to add one.
 struct ClaudeAccountsSection: View {
-    /// Show a shell dinod opened, in the main window.
-    let act: (String) -> Void
     @State private var info: ClaudeAccountsInfo?
     @State private var adding = false
     @State private var error: String?
 
     private var others: [ClaudeAccountInfo] { info?.accounts.filter { !$0.isOwn } ?? [] }
+    private var signingIn: Bool { info?.login?.underWay == true }
 
     var body: some View {
         // One row holding them all: the grouped form is a list, which lost row views when an
@@ -70,17 +95,9 @@ struct ClaudeAccountsSection: View {
                 }
             }
         } header: {
-            Text("Claude Code Accounts")
+            Text("Claude Accounts")
         } footer: {
             VStack(alignment: .leading, spacing: 8) {
-                if info?.creating != nil {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Waiting for you to sign in with the other account in your browser…")
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
-                    .padding(.leading, 10)
-                }
                 if let e = error ?? info?.error {
                     Text(e).font(.callout).foregroundStyle(.red).padding(.leading, 10)
                 }
@@ -92,22 +109,19 @@ struct ClaudeAccountsSection: View {
             }
         }
         .task { refresh() }
-        // What the proxy finds (a limit, a reset) shows while this is on screen; while setup-token
-        // runs, sooner, until its token is in.
-        .task(id: info?.creating) {
+        // What the proxy finds (a limit, a reset) shows while this is on screen; while a sign-in
+        // runs, much sooner, so the sheet follows it.
+        .task(id: signingIn) {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(info?.creating != nil ? 1 : 5))
+                try? await Task.sleep(for: signingIn ? .milliseconds(500) : .seconds(5))
                 refresh()
             }
         }
         .sheet(isPresented: $adding) {
             AddClaudeAccountSheet(
-                add: { token, done in call("add", value: token, then: done) },
-                create: {
-                    adding = false
-                    call("create") { r in if case .success(let i) = r, let shell = i.creating { act(shell) } }
-                },
-                cancel: { adding = false }
+                info: info,
+                call: { action, value, done in call(action, value: value, then: done) },
+                close: { adding = false }
             )
         }
     }
@@ -124,6 +138,10 @@ struct ClaudeAccountsSection: View {
                 HStack(spacing: 5) {
                     Circle().fill(s.color).frame(width: 7, height: 7)
                     Text(s.text)
+                    if let u = a.usage {
+                        Text("·")
+                        Text(u).monospacedDigit()
+                    }
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -173,8 +191,8 @@ struct ClaudeAccountsSection: View {
                 }
             } catch {
                 await MainActor.run {
-                    // A sheet says what's wrong with what was pasted itself.
-                    if action != "add" { self.error = error.localizedDescription }
+                    // The sheet says what's wrong with what it was given itself.
+                    if !["add", "login", "login_code", "login_cancel"].contains(action) { self.error = error.localizedDescription }
                     then(.failure(error))
                 }
             }
@@ -205,52 +223,256 @@ struct ClaudeAccountsSection: View {
     }
 }
 
-/// Add Account…: paste the token `claude setup-token` printed, or have dino run it in a new tab.
+/// Add Account…: one way in. "Sign in with Claude" runs Claude Code's own `claude setup-token`
+/// in dinod, which opens claude.ai in the browser; once the user signs in there, the account is
+/// checked and added. A small link pastes a token instead. Every state says plainly where it is:
+/// signing in, checking, added, already added (which account), or failed (why, and Try Again).
 private struct AddClaudeAccountSheet: View {
-    let add: (String, @escaping @MainActor (Result<ClaudeAccountsInfo, Error>) -> Void) -> Void
-    let create: () -> Void
-    let cancel: () -> Void
+    /// What dinod says now, polled by the section while a sign-in runs.
+    let info: ClaudeAccountsInfo?
+    /// A `claude_accounts` action, with its value; the answer to `done`.
+    let call: (String, String?, @escaping @MainActor (Result<ClaudeAccountsInfo, Error>) -> Void) -> Void
+    let close: () -> Void
+
+    /// The sign-in this sheet started, by its id.
+    @State private var login: UInt64?
+    @State private var pasting = false
+    @State private var otherBrowser = false
     @State private var token = ""
+    @State private var code = ""
     @State private var error: String?
     @State private var busy = false
 
+    private var current: ClaudeLoginInfo? {
+        guard let l = info?.login, l.id == login else { return nil }
+        return l
+    }
+    private var added: ClaudeAccountInfo? {
+        guard let n = current?.account, current?.stage == "added" else { return nil }
+        return info?.accounts.first { $0.number == n }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("Add a Claude Account").font(.headline)
-            Text("Run `claude setup-token`, sign in with that account, and paste the token it prints.")
+            if pasting {
+                pasteToken
+            } else {
+                switch current?.stage {
+                case "starting", "browser": signingIn
+                case "checking": checking
+                case "added": done
+                case "failed" where current?.duplicate != nil: already
+                case "failed": failed
+                default: start
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+        .onAppear {
+            if let l = info?.login, l.underWay { login = l.id }
+        }
+        .onChange(of: current?.stage) { _, stage in
+            busy = false
+            if stage == "cancelled" { login = nil }
+        }
+    }
+
+    // MARK: States
+
+    private var start: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Your browser opens on claude.ai. Sign in with the account you want to add, and it shows up in the list.")
+                .fixedSize(horizontal: false, vertical: true)
+            failure(error)
+            HStack {
+                link("Paste a token instead") { error = nil; pasting = true }
+                Spacer()
+                Button("Cancel") { close() }.keyboardShortcut(.cancelAction)
+                Button("Sign in with Claude") { signIn() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(busy || info == nil)
+            }
+        }
+    }
+
+    private var signingIn: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            progress("Signing in… Finish in your browser.")
+            if otherBrowser, let url = current?.url {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Open this sign-in in a browser that's on the right account, or a private window, then paste the code claude.ai shows at the end.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        link("Copy the sign-in link") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(url, forType: .string)
+                        }
+                        Spacer()
+                    }
+                    HStack {
+                        TextField("Code from claude.ai", text: $code)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit(sendCode)
+                        Button("Continue") { sendCode() }
+                            .disabled(busy || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    failure(error)
+                }
+            }
+            HStack {
+                if !otherBrowser, current?.url != nil {
+                    link("Browser on a different account?") { otherBrowser = true }
+                }
+                Spacer()
+                Button("Cancel") { cancel() }.keyboardShortcut(.cancelAction)
+            }
+        }
+    }
+
+    private var checking: some View {
+        progress("Signed in. Checking the account with Anthropic…")
+            .padding(.bottom, 8)
+    }
+
+    private var done: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            outcome("checkmark.circle.fill", .green, "Account \(current?.account ?? 0) added", added?.usage.map { "Signed in · \($0)" } ?? "Signed in")
+            if let note = current?.error {
+                Text(note).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button("Done") { close() }.keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+
+    private var already: some View {
+        let n = current?.duplicate ?? 0
+        let which = n == 1 ? "Account 1, the one Claude Code is signed in with" : "Account \(n)"
+        return VStack(alignment: .leading, spacing: 14) {
+            outcome("person.crop.circle.badge.checkmark", .secondary, "Already added", "You signed in to \(which).")
+            Text("To add another account, switch to it on claude.ai in your browser first (or sign out there), then sign in again.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { close() }.keyboardShortcut(.cancelAction)
+                Button("Sign in Again") { signIn() }.keyboardShortcut(.defaultAction).disabled(busy)
+            }
+        }
+    }
+
+    private var failed: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            outcome("exclamationmark.triangle.fill", .orange, "Couldn't add the account", current?.error ?? "The sign-in didn't finish.")
+            HStack {
+                link("Paste a token instead") { error = nil; pasting = true }
+                Spacer()
+                Button("Cancel") { close() }.keyboardShortcut(.cancelAction)
+                Button("Try Again") { signIn() }.keyboardShortcut(.defaultAction).disabled(busy)
+            }
+        }
+    }
+
+    private var pasteToken: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Paste the token `claude setup-token` printed for the account. It starts with sk-ant-oat.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             SecureField("sk-ant-oat01-…", text: $token)
-                .frame(width: 400)
                 .onSubmit(keep)
-            if let error {
-                Text(error).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
-            }
+            failure(error)
             HStack {
-                Button("Run in New Tab") { create() }
-                    .help("Runs claude setup-token in a new tab. Sign in with that account in your browser, and dino adds the token.")
+                link("Sign in with Claude instead") { token = ""; error = nil; pasting = false }
                 Spacer()
-                Button("Cancel") { token = ""; cancel() }.keyboardShortcut(.cancelAction)
+                Button("Cancel") { token = ""; close() }.keyboardShortcut(.cancelAction)
                 Button("Add Account") { keep() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(busy || token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(20)
-        .frame(width: 440)
+    }
+
+    // MARK: Parts
+
+    @ViewBuilder
+    private func failure(_ text: String?) -> some View {
+        if let text {
+            Text(text).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func outcome(_ symbol: String, _ color: Color, _ title: String, _ detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol).foregroundStyle(color).font(.title2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail).font(.callout).foregroundStyle(.secondary).monospacedDigit().fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func progress(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(text)
+        }
+    }
+
+    private func link(_ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(title, action: action).buttonStyle(.link).font(.callout)
+    }
+
+    // MARK: Actions
+
+    private func signIn() {
+        busy = true
+        error = nil
+        code = ""
+        otherBrowser = false
+        call("login", nil) { r in
+            switch r {
+            case .success(let i): login = i.login?.id
+            case .failure(let e): error = e.localizedDescription
+            }
+            busy = false
+        }
+    }
+
+    private func sendCode() {
+        let value = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !busy else { return }
+        busy = true
+        error = nil
+        call("login_code", value) { r in
+            busy = false
+            if case .failure(let e) = r { error = e.localizedDescription } else { code = "" }
+        }
+    }
+
+    private func cancel() {
+        call("login_cancel", nil) { _ in }
+        login = nil
+        close()
     }
 
     private func keep() {
         let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, !busy else { return }
         busy = true
-        add(value) { r in
+        call("add", value) { r in
             busy = false
             switch r {
             case .success:
                 token = ""
-                cancel()
+                close()
             case .failure(let e):
                 error = e.localizedDescription
             }

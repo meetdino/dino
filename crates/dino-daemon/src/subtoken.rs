@@ -77,7 +77,8 @@ pub(crate) fn start() {
 /// Ask Claude Code (without any token in its environment) whether it's signed in, and note it for
 /// dinod and `dino` commands. Only while a token is kept: otherwise nothing reads the answer.
 fn check_signed_in() {
-    let kept = dino_core::load_keys().get(KEY).is_some_and(|t| token::valid(t));
+    // Or an added account, which signs in where the token would (see `token::for_launch`).
+    let kept = dino_core::load_keys().get(KEY).is_some_and(|t| token::valid(t)) || !dino_core::account_store::load().kept.is_empty();
     if !kept {
         let _ = std::fs::remove_file(token::signed_in_file());
         return;
@@ -111,17 +112,29 @@ fn check_signed_in() {
     let _ = child.kill();
 }
 
+/// Look again at whether Claude Code here is signed in (an account was just added, which stands in
+/// for the token where it isn't); a session asked for meanwhile waits for the answer.
+pub(crate) fn recheck() {
+    let check = Check::begin();
+    std::thread::spawn(move || {
+        check_signed_in();
+        drop(check);
+    });
+}
+
 pub(crate) fn info() -> ClaudeTokenInfo {
     let keys = dino_core::load_keys();
     let kept = keys.get(KEY).filter(|t| token::valid(t));
     let created = kept.and(keys.get(CREATED_KEY)).and_then(|c| c.parse::<u64>().ok());
+    let account = if kept.is_some() { None } else { dino_core::account_store::load().kept.first().map(|(n, _)| *n) };
     let s = STATE.lock().unwrap();
     ClaudeTokenInfo {
+        account,
         set: kept.is_some(),
         masked: kept.map(|t| token::masked(t)),
         created,
         expires: created.map(|c| c + LIFETIME_SECS),
-        signed_in: kept.and(token::signed_in()),
+        signed_in: if kept.is_some() || account.is_some() { token::signed_in() } else { None },
         creating: s.creating.clone(),
         error: s.error.clone(),
     }

@@ -12,6 +12,8 @@ struct ClaudeTokenInfo: Codable, Equatable {
     /// The shell running `claude setup-token`.
     var creating: String?
     var error: String?
+    /// Without a token of its own: the account Claude Code signs in with instead.
+    var account: UInt32?
 }
 
 private struct ClaudeTokenResponse: Decodable {
@@ -27,15 +29,12 @@ extension DinoConnection {
     }
 }
 
-/// Settings → Agents: the token `claude setup-token` makes, for Claude Code where it can't sign
-/// in in a browser. Only the Claude Code dino starts gets it.
+/// Settings → Accounts: which Claude account Claude Code signs in with on SSH hosts (and on this
+/// Mac where it isn't signed in): the first added account, or a token kept from before. No sign-in
+/// of its own: accounts are added in one place, the list above.
 struct ClaudeTokenSection: View {
     @EnvironmentObject var store: SettingsStore
-    /// Show a shell dinod opened, in the main window.
-    let act: (String) -> Void
     @State private var info: ClaudeTokenInfo?
-    @State private var pasting = false
-    @State private var pasted = ""
     @State private var error: String?
 
     private var use: Binding<DinoSettings.ClaudeTokenUse> {
@@ -45,27 +44,21 @@ struct ClaudeTokenSection: View {
         )
     }
 
+    private var signsIn: Bool { info?.set == true || info?.account != nil }
+
     var body: some View {
         Section {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Subscription token")
-                    Text(detail).font(.callout).foregroundStyle(.secondary)
+                    Text(title)
+                    if let d = detail { Text(d).font(.callout).foregroundStyle(.secondary) }
                 }
                 Spacer()
-                if info?.creating != nil {
-                    ProgressView().controlSize(.small).help("Waiting for claude setup-token to finish in the main window")
-                }
                 if info?.set == true {
                     Button("Remove…", role: .destructive) { confirmRemove() }
-                } else {
-                    Button("Paste…") { pasting = true }
-                    Button("Create…") { create() }
-                        .disabled(info?.creating != nil)
-                        .help("Runs claude setup-token in a new shell. Sign in with your browser, and dino saves the token.")
                 }
             }
-            if info?.set == true {
+            if signsIn {
                 Toggle("Use on SSH hosts", isOn: use.ssh)
                 Toggle("Use on this Mac, even when Claude Code is signed in", isOn: use.local)
             }
@@ -73,56 +66,39 @@ struct ClaudeTokenSection: View {
                 Text(e).font(.callout).foregroundStyle(.red)
             }
         } header: {
-            Text("Claude Code Subscription Token")
+            Text("Claude Code on SSH Hosts")
         } footer: {
-            Footnote("Lets Claude Code use your Claude plan where it can't sign in through a browser, such as on SSH hosts. The token comes from claude setup-token and lasts a year. Only Claude Code sessions that dino starts use it, never other agents. On this Mac, it's used only while Claude Code isn't signed in, unless you turn on “Use on this Mac, even when Claude Code is signed in”. The token stays on this Mac and never syncs.")
+            Footnote("Claude Code on SSH hosts can't sign in through a browser, so dino signs it in with one of your accounts. On this Mac, only while Claude Code isn't signed in here, unless you turn that on. Only Claude Code sessions that dino starts use it.")
         }
-        .task { refresh() }
-        // While setup-token runs, look until the token is in.
-        .task(id: info?.creating) {
-            while info?.creating != nil, !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
+        // Which account signs in follows the list above as accounts are added and removed.
+        .task {
+            while !Task.isCancelled {
                 refresh()
+                try? await Task.sleep(for: .seconds(2))
             }
         }
-        .sheet(isPresented: $pasting) { pasteSheet }
     }
 
-    private var detail: String {
-        guard let info, info.set else {
-            if info?.creating != nil { return "Waiting for you to sign in with your browser…" }
-            return "Not set. Claude Code on SSH hosts uses its own sign-in."
-        }
-        var parts = [info.masked ?? "Set"]
-        if let expires = info.expires {
-            parts.append("expires \(Date(timeIntervalSince1970: TimeInterval(expires)).formatted(date: .abbreviated, time: .omitted))")
-        }
-        if info.signed_in == false {
-            parts.append("also used on this Mac, where Claude Code isn't signed in")
-        }
-        return parts.joined(separator: " · ")
+    private var title: String {
+        guard let info else { return "Looking…" }
+        if info.set { return "Signs in with a token you added before" }
+        if let n = info.account { return "Signs in with Account \(n)" }
+        return "Add a Claude account above to use Claude Code on SSH hosts"
     }
 
-    private var pasteSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Paste a Claude Code subscription token").font(.headline)
-            Text("Paste the token that claude setup-token printed. It starts with sk-ant-oat.").font(.callout).foregroundStyle(.secondary)
-            SecureField("sk-ant-oat01-…", text: $pasted).frame(width: 380)
-            HStack {
-                Spacer()
-                Button("Cancel") { pasted = ""; pasting = false }.keyboardShortcut(.cancelAction)
-                Button("Save") { keep() }.keyboardShortcut(.defaultAction).disabled(pasted.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-        }
-        .padding(20)
+    private var detail: String? {
+        guard let info, info.set else { return nil }
+        let instead = "Remove it to sign in with your first account instead."
+        guard let expires = info.expires else { return instead }
+        return "Expires \(Date(timeIntervalSince1970: TimeInterval(expires)).formatted(date: .abbreviated, time: .omitted)). \(instead)"
     }
 
-    private func call(_ action: String, value: String? = nil, then: @escaping @MainActor (ClaudeTokenInfo) -> Void = { _ in }) {
+    private func call(_ action: String, then: @escaping @MainActor (ClaudeTokenInfo) -> Void = { _ in }) {
         Task.detached {
             do {
-                let i = try DinoConnection(path: DinoEnvironment.socketPath).claudeToken(action, value: value)
+                let i = try DinoConnection(path: DinoEnvironment.socketPath).claudeToken(action)
                 await MainActor.run {
-                    info = i
+                    if info != i { info = i }
                     error = nil
                     then(i)
                 }
@@ -136,23 +112,10 @@ struct ClaudeTokenSection: View {
         call("status")
     }
 
-    private func create() {
-        call("create") { i in
-            if let shell = i.creating { act(shell) }
-        }
-    }
-
-    private func keep() {
-        let value = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
-        pasted = ""
-        pasting = false
-        call("set", value: value) { _ in store.load() }
-    }
-
     private func confirmRemove() {
         let alert = NSAlert()
-        alert.messageText = "Remove the Claude subscription token?"
-        alert.informativeText = "Claude Code on SSH hosts will need to sign in on its own. The token stays valid until it expires or you revoke it."
+        alert.messageText = "Remove the token you added before?"
+        alert.informativeText = "Claude Code on SSH hosts will sign in with your first Claude account instead, if you've added one. The token stays valid until it expires or you revoke it."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
