@@ -6630,7 +6630,11 @@ while (sysread(STDIN, my $c, 1)) {
         let id = spawn(&d, Launch::new("shell", vec![], Some(test_home().display().to_string()))).unwrap();
         let s = session(&d, &id);
         s.pane.write(b"echo kept-$((6*7))\r".to_vec());
-        wait_for("the output", || s.pane.text(0).contains("kept-42") && s.last_output.lock().unwrap().is_some());
+        // Back at its prompt: after the output the shell still marks the command's end, sets the
+        // title and draws the prompt, each a write of its own, and the prompt is the last of them.
+        // A screen saved before that changed after, and is rightly written again.
+        let at_prompt = || s.pane.text(0).split_once("\nkept-42\n").is_some_and(|(_, prompt)| !prompt.trim().is_empty());
+        wait_for("the prompt after the output", || at_prompt() && s.last_output.lock().unwrap().is_some());
         save_live_screens(&d, true);
         let file = live_screens_dir(&d.home).join(&id);
         assert!(file.exists());
