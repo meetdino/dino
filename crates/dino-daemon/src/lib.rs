@@ -3881,6 +3881,10 @@ fn watch_shells(d: &Daemon) {
     let settings = Settings::load();
     for s in shells {
         let fg = s.pane.foreground().filter(|fg| Some(*fg) != s.pane.pid());
+        // In the middle of exec it's neither what it was nor what it will be: looked at once it is.
+        if fg.is_some_and(dino_core::procinfo::execing) {
+            continue;
+        }
         // Asked before anything is looked at, and at each look: a child the shell has forked is
         // named for the shell until it execs the command, which keeps its pid. Another name is
         // another program, looked at again then, not at the next recheck.
