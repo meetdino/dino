@@ -123,6 +123,7 @@ const COMMANDS: &[Command] = &[
             ("set", "read a token from stdin"),
             ("remove", "forget the token"),
             ("add-account", "add another Claude account: sign in in the browser"),
+            ("rename-account", "name an account: rename-account <n> <name>"),
             ("remove-account", "forget an account"),
         ])],
     },

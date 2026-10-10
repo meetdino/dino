@@ -1593,6 +1593,9 @@ pub struct ClaudeTokenInfo {
     /// (the first in the list), on SSH hosts and where it isn't signed in here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<u32>,
+    /// That account's name, if the user gave it one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
 }
 
 /// Your Claude accounts as dinod holds them: never their tokens.
@@ -1658,6 +1661,28 @@ pub struct ClaudeAccountInfo {
     /// until it signed one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<WindowInfo>,
+    /// What it's called: the name the user gave it, else for account 1 the email Claude Code is
+    /// signed in with (`claude auth status`); `None` for "Account <n>" (see `label`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Account 1's email and plan ("max", "pro"), as `claude auth status` says. Never known for
+    /// the others: a `claude setup-token` token can only make model calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+}
+
+impl ClaudeAccountInfo {
+    /// As dino says it: its name, or "Account 2".
+    pub fn label(&self) -> String {
+        account_label(self.number, self.name.as_deref())
+    }
+}
+
+/// A Claude account as dino says it: `name`, or "Account <n>" without one.
+pub fn account_label(n: u32, name: Option<&str>) -> String {
+    name.map(str::to_string).unwrap_or_else(|| format!("Account {n}"))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -276,7 +276,7 @@ struct FallbackChip: View {
 
     static func detail(_ f: FallbackInfo, _ usage: [RouteUsage]) -> String {
         // Another Claude account answers for Claude Code's own sign-in: account 1.
-        let from = f.isAccount ? "Claude account 1" : f.from
+        let from = f.isAccount ? ClaudeAccountInfo.ownShort : f.from
         var lines = ["\(f.isModel ? f.name : from) said: \(f.said)", "Answering: \(f.name) · \(f.model), since \(Clock.short(f.since))"]
         if let r = f.retry_at {
             lines.append("Switches back to \(from) at the first turn after \(Clock.short(r))")
@@ -287,7 +287,7 @@ struct FallbackChip: View {
         if f.isModel {
             lines.append("dino asks for \(f.from) again within the hour")
         } else {
-            lines.append(f.isAccount ? "Manage accounts in Settings → Agents → Claude Code Accounts" : "Set fallbacks in Settings → Agents")
+            lines.append(f.isAccount ? "Name and manage accounts in Settings → Accounts" : "Set fallbacks in Settings → Agents")
         }
         return lines.joined(separator: "\n")
     }

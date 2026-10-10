@@ -12,8 +12,9 @@ struct ClaudeTokenInfo: Codable, Equatable {
     /// The shell running `claude setup-token`.
     var creating: String?
     var error: String?
-    /// Without a token of its own: the account Claude Code signs in with instead.
+    /// Without a token of its own: the account Claude Code signs in with instead, and its name.
     var account: UInt32?
+    var account_name: String?
 }
 
 private struct ClaudeTokenResponse: Decodable {
@@ -82,7 +83,7 @@ struct ClaudeTokenSection: View {
     private var title: String {
         guard let info else { return "Looking…" }
         if info.set { return "Signs in with a token you added before" }
-        if let n = info.account { return "Signs in with Account \(n)" }
+        if let n = info.account { return "Signs in with \(info.account_name ?? "Account \(n)")" }
         return "Add a Claude account above to use Claude Code on SSH hosts"
     }
 

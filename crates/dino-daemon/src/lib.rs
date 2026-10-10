@@ -397,6 +397,7 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     let free_tier = free_tier(&keys);
     let plans = providers::plan_routes(&keys);
     let proxy = Proxy::start(dino_core::account_store::with_accounts(keys))?;
+    proxy.set_account_names(claude_accounts::proxy_names());
     proxy.set_plans(plans);
     proxy.set_budget(Settings::load().policies.session_token_budget);
     proxy.set_free_models(Settings::load().experimental.free_models);
@@ -857,6 +858,7 @@ pub(crate) fn keys_changed(d: &Daemon) {
     d.proxy.set_plans(providers::plan_routes(&keys));
     // With your other Claude accounts' tokens, from the Keychain, in memory only.
     d.proxy.set_keys(dino_core::account_store::with_accounts(keys));
+    d.proxy.set_account_names(claude_accounts::proxy_names());
     std::thread::spawn(|| providers::refresh(true));
 }
 
@@ -6545,7 +6547,11 @@ while (sysread(STDIN, my $c, 1)) {
         quotas(&key, full(sooner));
         let all = at(true).expect("every account spent");
         let clock = schedule::clock(sooner);
-        assert_eq!(all, format!("Claude Code is at its limit on both Claude accounts until {clock}, when the first resets"));
+        assert_eq!(all, format!("Claude Code is at its limit on both Claude accounts until {clock}, when Account 2 resets"));
+        // Named, it says the name.
+        d.proxy.set_account_names(HashMap::from([(two.to_string(), "Spare".to_string())]));
+        assert_eq!(at(true).unwrap(), format!("Claude Code is at its limit on both Claude accounts until {clock}, when Spare resets"));
+        d.proxy.set_account_names(HashMap::new());
         assert_eq!(fallbacks::limits(&d).len(), 1, "new sessions see the limit too");
         // A refusal says it as well: account 2 refused, its windows forgotten.
         d.proxy.stats.quotas.lock().unwrap().remove(&key);

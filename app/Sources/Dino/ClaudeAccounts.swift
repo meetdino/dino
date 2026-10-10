@@ -13,15 +13,28 @@ struct ClaudeAccountInfo: Codable, Equatable, Identifiable {
     var retry_at: UInt64?
     /// Its usage windows as Anthropic last reported them on a call it signed; nil until then.
     var windows: [WindowInfo]?
+    /// The name the user gave it, else for account 1 the email Claude Code is signed in with; nil
+    /// for "Account 2". From an older dinod, always nil.
+    var name: String?
+    /// Account 1's email and plan ("max"), as `claude auth status` says; never known for the others.
+    var email: String?
+    var plan: String?
 
     var id: UInt32 { number }
-    /// As the sidebar says it: "Claude account 1" is the one Claude Code signed in with.
-    var short: String { "Claude account \(number)" }
+    /// What it's called: "Work", "you@example.com", "Account 2".
+    var label: String { name ?? "Account \(number)" }
+    /// As the sidebar says it: "Work", or "Claude account 2" with no name. The same as the proxy
+    /// names a session on it, so the two can be matched.
+    var short: String { name ?? "Claude account \(number)" }
     /// When it can answer again: its reset, or else when dino tries it again.
     var backAt: UInt64? { resets_at ?? retry_at }
     var isOwn: Bool { number == 1 }
-    /// The sidebar's footer calls the sign-in account 1, so Settings does too.
-    var name: String { isOwn ? "Account 1 · your signed-in account" : "Account \(number)" }
+    /// Its plan as Anthropic names it: "Max", "Pro".
+    var planName: String? { plan.map { $0.prefix(1).uppercased() + $0.dropFirst() } }
+
+    /// Account 1 as the state last named it: for what doesn't hold the list, such as a session's
+    /// "On Work · you@example.com back at 14:00". Set by the model as the state comes in.
+    static var ownShort = "Claude account 1"
     /// "5h 27% · 7d 98% used", as Anthropic last reported them; nil until a call did.
     var usage: String? {
         let w = (windows ?? []).filter { $0.isWindow && !$0.isPast }
@@ -62,7 +75,8 @@ private struct ClaudeAccountsResponse: Decodable {
 
 extension DinoConnection {
     /// `status`, `add` (`value`: a token), `login` (sign in in the browser), `login_code` (`value`:
-    /// the code claude.ai showed), `login_cancel`, `remove` (`account`) or `order` (`order`).
+    /// the code claude.ai showed), `login_cancel`, `rename` (`account`, `value`: its name, empty
+    /// for none), `remove` (`account`) or `order` (`order`).
     func claudeAccounts(_ action: String, value: String? = nil, account: UInt32? = nil, order: [UInt32] = []) throws -> ClaudeAccountsInfo {
         var body: [String: Any] = ["type": "claude_accounts", "action": action]
         if let value { body["value"] = value }
@@ -78,6 +92,7 @@ extension DinoConnection {
 struct ClaudeAccountsSection: View {
     @State private var info: ClaudeAccountsInfo?
     @State private var adding = false
+    @State private var renaming: ClaudeAccountInfo?
     @State private var error: String?
 
     private var others: [ClaudeAccountInfo] { info?.accounts.filter { !$0.isOwn } ?? [] }
@@ -120,9 +135,18 @@ struct ClaudeAccountsSection: View {
         .sheet(isPresented: $adding) {
             AddClaudeAccountSheet(
                 info: info,
-                call: { action, value, done in call(action, value: value, then: done) },
+                call: { action, value, account, done in call(action, value: value, account: account, then: done) },
                 close: { adding = false }
             )
+        }
+        .sheet(item: $renaming) { a in
+            NameClaudeAccount(account: a, initial: a.label, title: "Rename \(a.label)", skip: "Cancel", standalone: true) { name in
+                call("rename", value: name, account: a.number) { r in
+                    if case .success = r { renaming = nil }
+                }
+            } close: {
+                renaming = nil
+            }
         }
     }
 
@@ -133,7 +157,12 @@ struct ClaudeAccountsSection: View {
                 .foregroundStyle(.secondary)
                 .symbolRenderingMode(.hierarchical)
             VStack(alignment: .leading, spacing: 2) {
-                Text(a.name)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(a.label).lineLimit(1).truncationMode(.middle)
+                    if let about = about(a) {
+                        Text(about).font(.callout).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                    }
+                }
                 let s = status(a)
                 HStack(spacing: 5) {
                     Circle().fill(s.color).frame(width: 7, height: 7)
@@ -147,28 +176,41 @@ struct ClaudeAccountsSection: View {
                 .foregroundStyle(.secondary)
             }
             Spacer()
-            if !a.isOwn {
-                Menu {
-                    menuItems(a)
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Move or remove \(a.name)")
+            Menu {
+                menuItems(a)
+            } label: {
+                Image(systemName: "ellipsis.circle")
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(a.isOwn ? "Rename \(a.label)" : "Rename, move or remove \(a.label)")
         }
-        .contextMenu { if !a.isOwn { menuItems(a) } }
+        .contextMenu { menuItems(a) }
+    }
+
+    /// Beside its name: which it is, where the name doesn't say. Account 1 is Claude Code's own
+    /// sign-in (with its email, once it has a name of its own, and its plan); a named one keeps
+    /// its number, as `dino claude-token` knows it.
+    private func about(_ a: ClaudeAccountInfo) -> String? {
+        if a.isOwn {
+            let email = a.email.flatMap { $0 == a.name ? nil : $0 }
+            return (["Claude Code's sign-in", email, a.planName]).compactMap { $0 }.joined(separator: " · ")
+        }
+        return a.name == nil ? nil : "Account \(a.number)"
     }
 
     @ViewBuilder
     private func menuItems(_ a: ClaudeAccountInfo) -> some View {
-        let at = others.firstIndex(of: a) ?? 0
-        Button("Move Up") { reorder(a, by: -1) }.disabled(at == 0)
-        Button("Move Down") { reorder(a, by: 1) }.disabled(at == others.count - 1)
-        Divider()
-        Button("Remove…", role: .destructive) { confirmRemove(a) }
+        Button("Rename…") { renaming = a }
+        if !a.isOwn {
+            let at = others.firstIndex(of: a) ?? 0
+            Divider()
+            Button("Move Up") { reorder(a, by: -1) }.disabled(at == 0)
+            Button("Move Down") { reorder(a, by: 1) }.disabled(at == others.count - 1)
+            Divider()
+            Button("Remove…", role: .destructive) { confirmRemove(a) }
+        }
     }
 
     /// "Answering now", "Ready", "At its limit until 14:00".
@@ -192,7 +234,7 @@ struct ClaudeAccountsSection: View {
             } catch {
                 await MainActor.run {
                     // The sheet says what's wrong with what it was given itself.
-                    if !["add", "login", "login_code", "login_cancel"].contains(action) { self.error = error.localizedDescription }
+                    if !["add", "login", "login_code", "login_cancel", "rename"].contains(action) { self.error = error.localizedDescription }
                     then(.failure(error))
                 }
             }
@@ -212,7 +254,7 @@ struct ClaudeAccountsSection: View {
 
     private func confirmRemove(_ a: ClaudeAccountInfo) {
         let alert = NSAlert()
-        alert.messageText = "Remove Claude \(a.name.lowercased())?"
+        alert.messageText = "Remove \(a.label)?"
         alert.informativeText = "Claude Code will no longer switch to this account when another reaches its limit. The token stays valid until it expires or you revoke it."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
@@ -230,8 +272,8 @@ struct ClaudeAccountsSection: View {
 private struct AddClaudeAccountSheet: View {
     /// What dinod says now, polled by the section while a sign-in runs.
     let info: ClaudeAccountsInfo?
-    /// A `claude_accounts` action, with its value; the answer to `done`.
-    let call: (String, String?, @escaping @MainActor (Result<ClaudeAccountsInfo, Error>) -> Void) -> Void
+    /// A `claude_accounts` action, with its value and account; the answer to `done`.
+    let call: (String, String?, UInt32?, @escaping @MainActor (Result<ClaudeAccountsInfo, Error>) -> Void) -> Void
     let close: () -> Void
 
     /// The sign-in this sheet started, by its id.
@@ -242,20 +284,30 @@ private struct AddClaudeAccountSheet: View {
     @State private var code = ""
     @State private var error: String?
     @State private var busy = false
+    /// The account a pasted token just added.
+    @State private var pasted: UInt32?
 
     private var current: ClaudeLoginInfo? {
         guard let l = info?.login, l.id == login else { return nil }
         return l
     }
-    private var added: ClaudeAccountInfo? {
+    /// The account just added, by signing in or from a pasted token.
+    private var addedNumber: UInt32? {
+        if let pasted { return pasted }
         guard let n = current?.account, current?.stage == "added" else { return nil }
+        return n
+    }
+    private var added: ClaudeAccountInfo? {
+        guard let n = addedNumber else { return nil }
         return info?.accounts.first { $0.number == n }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Add a Claude Account").font(.headline)
-            if pasting {
+            if addedNumber != nil {
+                done
+            } else if pasting {
                 pasteToken
             } else {
                 switch current?.stage {
@@ -338,22 +390,29 @@ private struct AddClaudeAccountSheet: View {
             .padding(.bottom, 8)
     }
 
+    /// Added: the account, then its name, asked at once, while the user knows which they signed in to.
     private var done: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            outcome("checkmark.circle.fill", .green, "Account \(current?.account ?? 0) added", added?.usage.map { "Signed in · \($0)" } ?? "Signed in")
-            if let note = current?.error {
+        let n = addedNumber ?? 0
+        return VStack(alignment: .leading, spacing: 14) {
+            outcome("checkmark.circle.fill", .green, "Account \(n) added", added?.usage.map { "Signed in · \($0)" } ?? "Signed in")
+            if let note = pasted == nil ? current?.error : nil {
                 Text(note).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            HStack {
-                Spacer()
-                Button("Done") { close() }.keyboardShortcut(.defaultAction)
+            Divider()
+            NameClaudeAccount(account: added, initial: added?.email ?? "Account \(n)", title: "Name this account", skip: "Skip") { name in
+                call("rename", name, n) { r in
+                    if case .success = r { close() }
+                }
+            } close: {
+                close()
             }
         }
     }
 
     private var already: some View {
         let n = current?.duplicate ?? 0
-        let which = n == 1 ? "Account 1, the one Claude Code is signed in with" : "Account \(n)"
+        let name = info?.accounts.first { $0.number == n }?.label ?? "Account \(n)"
+        let which = n == 1 ? "\(name), the one Claude Code is signed in with" : name
         return VStack(alignment: .leading, spacing: 14) {
             outcome("person.crop.circle.badge.checkmark", .secondary, "Already added", "You signed in to \(which).")
             Text("To add another account, switch to it on claude.ai in your browser first (or sign out there), then sign in again.")
@@ -437,7 +496,7 @@ private struct AddClaudeAccountSheet: View {
         error = nil
         code = ""
         otherBrowser = false
-        call("login", nil) { r in
+        call("login", nil, nil) { r in
             switch r {
             case .success(let i): login = i.login?.id
             case .failure(let e): error = e.localizedDescription
@@ -451,14 +510,14 @@ private struct AddClaudeAccountSheet: View {
         guard !value.isEmpty, !busy else { return }
         busy = true
         error = nil
-        call("login_code", value) { r in
+        call("login_code", value, nil) { r in
             busy = false
             if case .failure(let e) = r { error = e.localizedDescription } else { code = "" }
         }
     }
 
     private func cancel() {
-        call("login_cancel", nil) { _ in }
+        call("login_cancel", nil, nil) { _ in }
         login = nil
         close()
     }
@@ -467,15 +526,67 @@ private struct AddClaudeAccountSheet: View {
         let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, !busy else { return }
         busy = true
-        call("add", value) { r in
+        call("add", value, nil) { r in
             busy = false
             switch r {
-            case .success:
+            case .success(let i):
                 token = ""
-                close()
+                // Named next, as one signed in to is.
+                if let n = i.added { pasted = n } else { close() }
             case .failure(let e):
                 error = e.localizedDescription
             }
+        }
+    }
+}
+
+/// "Name this account": a name for one of the user's Claude accounts, so they can tell them apart
+/// ("Work", "Personal"). Anthropic tells dino nothing of whose an added account is (its token can
+/// only make model calls), so the user names it; account 1 starts as Claude Code's email. Asked
+/// right after an account is added, and from a row's Rename….
+struct NameClaudeAccount: View {
+    let account: ClaudeAccountInfo?
+    /// What the field starts with: the account's email when known, else "Account 3".
+    let initial: String
+    let title: String
+    /// The button that leaves it as it is: "Skip" after adding, "Cancel" from Rename….
+    let skip: String
+    /// A sheet of its own (Rename…), not a part of Add Account's.
+    var standalone = false
+    let save: (String) -> Void
+    let close: () -> Void
+
+    @State private var name = ""
+    @State private var started = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.headline)
+            Text(account?.isOwn == true
+                 ? "Shown in the account list, the sidebar and when sessions switch accounts. Leave it empty to use Claude Code's email."
+                 : "Shown in the account list, the sidebar and when sessions switch accounts. Anthropic doesn't tell dino whose account a sign-in is, so name it while you know.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("Work, Personal…", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($focused)
+                .onSubmit { save(name) }
+                .accessibilityLabel("Account name")
+            HStack {
+                Spacer()
+                Button(skip) { close() }.keyboardShortcut(.cancelAction)
+                Button("Save") { save(name) }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(standalone ? 20 : 0)
+        .frame(width: standalone ? 400 : nil)
+        .onAppear {
+            guard !started else { return }
+            started = true
+            name = initial
+            focused = true
         }
     }
 }

@@ -635,9 +635,9 @@ impl Stats {
     }
 }
 
-/// A Claude account as calls find it: its number, whether it's spent until when, and its windows
-/// (`Proxy::claude_accounts_now`).
-pub type AccountNow = (u32, Option<fallback::Limited>, Option<Quota>);
+/// A Claude account as calls find it: its number, whether it's spent until when, its windows, and
+/// the name the user gave it (`Proxy::claude_accounts_now`).
+pub type AccountNow = (u32, Option<fallback::Limited>, Option<Quota>, Option<String>);
 
 pub struct Proxy {
     pub port: u16,
@@ -688,6 +688,7 @@ impl Proxy {
             router: Arc::default(),
             keys: keys.clone(),
             checking: Arc::default(),
+            account_names: Arc::default(),
             plans: Arc::default(),
             chains: Arc::default(),
             budget: budget.clone(),
@@ -777,9 +778,19 @@ impl Proxy {
         }
         let tokens: Vec<&str> = others.iter().map(|(_, t)| t.as_str()).collect();
         let (own, spent) = self.claude_accounts(&tokens);
-        let mut out = vec![(1, own, self.stats.quota("anthropic"))];
-        out.extend(others.iter().zip(spent).map(|((n, t), l)| (*n, l, self.stats.quota(&accounts::key(t)))));
+        let names = self.state.account_names.read().unwrap();
+        let mut out = vec![(1, own, self.stats.quota("anthropic"), None)];
+        out.extend(others.iter().zip(spent).map(|((n, t), l)| {
+            let k = accounts::key(t);
+            (*n, l, self.stats.quota(&k), names.get(&k).cloned())
+        }));
         Some(out)
+    }
+
+    /// What the user named their other Claude accounts, by token: a session one of them answers
+    /// says so by that name ("On Work"), from its next switch on; one with none is "Claude account 3".
+    pub fn set_account_names(&self, names: HashMap<String, String>) {
+        *self.state.account_names.write().unwrap() = names.into_iter().map(|(t, n)| (accounts::key(&t), n)).collect();
     }
 
     /// Claude account `token`'s organization and windows (Claude Code's own sign-in for `None`),
@@ -939,6 +950,9 @@ pub(crate) struct AppState {
     keys: Arc<RwLock<HashMap<String, String>>>,
     /// Claude account tokens being checked before they're kept (see `Proxy::checking`).
     checking: Arc<RwLock<Vec<String>>>,
+    /// The names the user gave their other Claude accounts, by `accounts::key` (see
+    /// `Proxy::set_account_names`).
+    account_names: Arc<RwLock<HashMap<String, String>>>,
     /// Coding plans, by id (see `plan`).
     plans: Arc<RwLock<plan::Plans>>,
     /// What each session falls back to, by session id (see `fallback`).
@@ -957,6 +971,11 @@ impl AppState {
     fn client(&self) -> reqwest::Client {
         self.upstream.client(false)
     }
+}
+
+/// Account `n`, signing with `token`, by the name the user gave it, or "Claude account 3".
+fn account_name(st: &AppState, n: u32, token: &str) -> String {
+    st.account_names.read().unwrap().get(&accounts::key(token)).cloned().unwrap_or_else(|| accounts::name(n))
 }
 
 /// Most of a request (or an upstream answer) held at once. Generous: requests carry images.
@@ -1114,7 +1133,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
         kept.or_else(|| st.checking.read().unwrap().iter().any(|c| c == t).then(|| (0, t.to_string())))
     });
     let primary = match (&signed_as, primary) {
-        (Some((n, t)), Some(p)) => Some(Primary { key: accounts::key(t), tag: RouteTag { path: p.tag.path, name: accounts::name(*n) } }),
+        (Some((n, t)), Some(p)) => Some(Primary { key: accounts::key(t), tag: RouteTag { path: p.tag.path, name: account_name(&st, *n, t) } }),
         (_, p) => p,
     };
     if is_model_call {
@@ -1285,7 +1304,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
             {
                 let current = account.as_ref().map(|a| a.0);
                 let signer = |a: Option<u32>| match a {
-                    Some(n) => (key_of(n), accounts::name(n)),
+                    Some(n) => (key_of(n), accounts.iter().find(|a| a.0 == n).map_or_else(|| accounts::name(n), |a| account_name(&st, n, &a.1))),
                     None => (p.key.clone(), p.tag.name.clone()),
                 };
                 let (key, name) = signer(current);
@@ -1428,7 +1447,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
             s.outages = (0, 0);
             // Answered by another of the user's Claude accounts: shown, and noticed once, as a
             // fallback; back on its own account, as any.
-            let other = account.as_ref().zip(primary.as_ref()).map(|((n, _), p)| (accounts::name(*n), p));
+            let other = account.as_ref().zip(primary.as_ref()).map(|((n, t), p)| (account_name(&st, *n, t), p));
             match other {
                 Some((name, p)) if s.fallback.as_ref().is_none_or(|f| f.name != name) => {
                     let spent = st.stats.limited(&p.key);
@@ -2702,6 +2721,8 @@ mod tests {
             ("CLAUDE_ACCOUNT_5".to_string(), "sk-ant-api03-not-an-account".to_string()),
         ]);
         let proxy = Proxy::start(keys).unwrap();
+        // Account 3 is named; account 2 isn't.
+        proxy.set_account_names(HashMap::from([("sk-ant-oat01-fourth".to_string(), "Work".to_string())]));
         let here = format!("127.0.0.1:{}", proxy.port);
         let turn = json!([{"role": "user", "content": "hi"}]);
         let tool = json!([{"role": "user", "content": "hi"}, {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}]);
@@ -2727,7 +2748,9 @@ mod tests {
         assert!(from.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "not the key that isn't an account");
         let s = proxy.stats.session("acct");
         let f = s.fallback.clone().expect("says which account answers");
-        assert_eq!((f.name.as_str(), f.from_name.as_str(), f.resets_at), ("Claude account 3", "Claude", Some(spent_until)));
+        assert_eq!((f.name.as_str(), f.from_name.as_str(), f.resets_at), ("Work", "Claude", Some(spent_until)), "by the name the user gave it");
+        let spent2 = proxy.stats.limited_routes().into_iter().find(|(k, _)| accounts::is_key(k)).map(|(_, l)| l.name);
+        assert_eq!(spent2.as_deref(), Some("Claude account 2"), "one with no name, by its number");
         assert_eq!((s.last_error, s.limit_error), (None, None), "the turn didn't fail");
         let own = proxy.stats.limited_routes().into_iter().find(|(k, _)| k.starts_with("anthropic#") && !k.contains("account")).unwrap().0;
         assert!(proxy.stats.limited(&own).is_some() && proxy.spent(&own, true).is_none() && proxy.spent(&own, false).is_some(), "Claude Code isn't at its limit while another account answers");
@@ -2744,7 +2767,7 @@ mod tests {
         assert_eq!(window(3), Some(vec![("5h".to_string(), 0.07)]));
         assert_eq!(window(1).map(|w| w.into_iter().map(|(n, _)| n).collect::<Vec<_>>()), Some(vec!["5h".to_string()]));
         assert!(proxy.stats.quota("anthropic").unwrap().windows.iter().all(|(_, w)| w.utilization != 0.07));
-        assert_eq!(now.iter().map(|a| (a.0, a.1.is_some())).collect::<Vec<_>>(), [(1, true), (2, true), (3, false)]);
+        assert_eq!(now.iter().map(|a| (a.0, a.1.is_some(), a.3.as_deref())).collect::<Vec<_>>(), [(1, true, None), (2, true, None), (3, false, Some("Work"))]);
 
         // The next call goes straight to account 3.
         assert!(send("acct", "sk-ant-oat01-own").contains("OTHER"));
