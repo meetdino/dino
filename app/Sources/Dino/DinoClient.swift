@@ -68,6 +68,9 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var inside: FoundSession?
     /// The agent's own conversation id: one conversation is one row.
     var conversation: String?
+    /// The name its agent answers to when another session of that agent messages it (Claude
+    /// Code's `SendMessage`), while it runs on this Mac; nil for agents that have none.
+    var peer_name: String?
     /// A shell's, from its shell integration: where it is now (`cwd` is where it started), and
     /// how its last command ended.
     var shell_cwd: String?

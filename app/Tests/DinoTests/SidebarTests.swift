@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import Dino
@@ -213,5 +214,51 @@ final class AgentCronTests: XCTestCase {
         let date = Date(timeIntervalSince1970: TimeInterval(far))
         XCTAssertEqual(cronWhen(far, now: now),
                        "\(date.formatted(.dateTime.month(.abbreviated).day())) \(date.formatted(date: .omitted, time: .shortened))")
+    }
+}
+
+/// A session row's Copy items: dino's id always, the agent's conversation and messaging name only
+/// when dinod knows them, each copied as plain text.
+final class SessionCopyTests: XCTestCase {
+    private func titles(_ s: SessionInfo) -> [String] { SessionCopy.of(s).map(\.title) }
+    private func value(_ title: String, _ s: SessionInfo) -> String? { SessionCopy.of(s).first { $0.title == title }?.value }
+
+    func testDinoIDAlwaysTheRestOnlyWhenKnown() {
+        let bare = session("7", "Faster CI")
+        XCTAssertEqual(titles(bare), ["Copy Session ID"])
+        XCTAssertEqual(value("Copy Session ID", bare), "7", "what dino attach takes")
+
+        let claude = session("7", "Faster CI", ["conversation": "0b5c-uuid", "peer_name": "acme-api-3f"])
+        XCTAssertEqual(titles(claude), ["Copy Session ID", "Copy Conversation ID", "Copy Agent Name"])
+        XCTAssertEqual(value("Copy Conversation ID", claude), "0b5c-uuid")
+        XCTAssertEqual(value("Copy Agent Name", claude), "acme-api-3f")
+        XCTAssertTrue(SessionCopy.of(claude)[1].help.contains("claude --resume"))
+
+        let blank = session("7", "Faster CI", ["conversation": "", "peer_name": " "])
+        XCTAssertEqual(titles(blank), ["Copy Session ID"], "nothing empty is offered")
+    }
+
+    /// A shell with an agent typed into it: that agent's conversation.
+    func testAShellsTypedAgentsConversation() {
+        let inside: [String: Any] = ["source": "running", "agent": "codex", "session_id": "019a-thread", "title": "", "updated_at": 0, "args": [String]()]
+        let shell = session("9", "zsh", ["agent_id": "shell", "inside": inside])
+        XCTAssertEqual(value("Copy Conversation ID", shell), "019a-thread")
+        XCTAssertTrue(SessionCopy.of(shell)[1].help.contains("codex queue --thread"))
+        XCTAssertEqual(titles(session("9", "zsh", ["agent_id": "shell"])), ["Copy Session ID"])
+    }
+
+    /// Copying replaces what the pasteboard held with the value as plain text (a private
+    /// pasteboard here, never the user's clipboard).
+    func testCopyPutsThePlainValueOnThePasteboard() {
+        let board = NSPasteboard(name: NSPasteboard.Name("dino-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.setString("something else", forType: .string)
+        let s = session("42", "Faster CI", ["conversation": "0b5c-uuid", "peer_name": "api-worker"])
+        for item in SessionCopy.of(s) {
+            item.copy(to: board)
+            XCTAssertEqual(board.string(forType: .string), item.value, item.title)
+            XCTAssertEqual(board.types?.first, .string, "plain text only")
+        }
     }
 }

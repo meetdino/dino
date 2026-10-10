@@ -495,6 +495,8 @@ struct SessionMenu: View {
                 .help(link.help)
         }
         Divider()
+        CopyItems(session: session)
+        Divider()
         let pinned = session.pinned == true
         Button(pinned ? "Unpin" : "Pin") { model.pin(session.id, !pinned) }
             .help(pinned ? "Sort it with the other sessions again" : "Keep it at the top of its group and never archive it automatically")

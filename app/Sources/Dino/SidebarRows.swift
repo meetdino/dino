@@ -253,7 +253,7 @@ struct SessionRow: View {
         .help(facts.help)
         .modifier(RowAccessibility(on: !renaming, label: facts.accessibility, archive: model.canArchive(session.id) ? { model.archive(session.id) } : nil, rename: {
             model.renaming = Renaming(id: session.id, place: .sidebar)
-        }))
+        }, copies: SessionCopy.of(session)))
         .background(CostAnchor(holder: anchor))
         .onHover {
             hovering = $0
@@ -397,26 +397,26 @@ extension DinoModel {
     }
 }
 
-/// The row as one element for VoiceOver, saying everything the tooltip says, with Archive and
-/// Rename as its actions; while it's being renamed, its text field is reachable instead.
+/// The row as one element for VoiceOver, saying everything the tooltip says, with Archive,
+/// Rename and its Copy items as its actions; while it's being renamed, its text field is
+/// reachable instead.
 private struct RowAccessibility: ViewModifier {
     let on: Bool
     let label: String
     let archive: (() -> Void)?
     let rename: () -> Void
+    var copies: [SessionCopy] = []
 
     func body(content: Content) -> some View {
-        if on, let archive {
+        if on {
             content
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(label)
                 .accessibilityAction(named: "Rename", rename)
-                .accessibilityAction(named: "Archive", archive)
-        } else if on {
-            content
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(label)
-                .accessibilityAction(named: "Rename", rename)
+                .accessibilityActions {
+                    if let archive { Button("Archive", action: archive) }
+                    ForEach(copies, id: \.title) { c in Button(c.title) { c.copy() } }
+                }
         } else {
             content
         }

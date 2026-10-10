@@ -390,6 +390,12 @@ impl Agent for Claude {
         live(pid)?["sessionId"].as_str().map(String::from)
     }
 
+    // Its live session file names it as `ListAgents` lists it and `SendMessage` addresses it: the
+    // `--name` or `/rename` given, else the one Claude Code made (`<folder>-3f`, a plan's title).
+    fn peer_name(&self, pid: u32) -> Option<String> {
+        live(pid)?["name"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(String::from)
+    }
+
     fn statusline(&self) -> bool {
         true
     }
@@ -657,6 +663,33 @@ mod tests {
         assert!(usage.contains(&transcript) && usage.contains(&subagent));
         assert_eq!(claude.conversation_of(pid).as_deref(), Some(uuid.as_str()));
         assert_eq!(claude.busy(pid), Some(true));
+        std::fs::remove_dir_all(&config).unwrap();
+    }
+
+    /// The name other Claude sessions message it by is its session file's, as it is now: the one
+    /// Claude Code made, then a `/rename`. None for a session that isn't interactive.
+    #[test]
+    fn the_name_other_sessions_message_it_by_is_its_live_session_files() {
+        let config = std::env::temp_dir().join(format!("dino-claude-peer-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        claude_config::note(&config);
+        let pid = 6_000_000 + std::process::id();
+        let file = config.join(format!("sessions/{pid}.json"));
+        let write = |extra: &str| std::fs::write(&file, format!(r#"{{"pid":{pid},"sessionId":"s1","kind":"interactive"{extra}}}"#)).unwrap();
+        let claude = Claude { free: false };
+
+        assert_eq!(claude.peer_name(pid), None, "no session file");
+        write("");
+        assert_eq!(claude.peer_name(pid), None, "an older Claude Code names none");
+        write(r#","name":"acme-api-3f","nameSource":"derived""#);
+        assert_eq!(claude.peer_name(pid).as_deref(), Some("acme-api-3f"));
+        write(r#","name":"api-worker","nameSource":"user""#);
+        assert_eq!(claude.peer_name(pid).as_deref(), Some("api-worker"), "renamed");
+        write(r#","name":"  ""#);
+        assert_eq!(claude.peer_name(pid), None);
+        std::fs::write(&file, format!(r#"{{"pid":{pid},"sessionId":"s1","kind":"print","name":"worker"}}"#)).unwrap();
+        assert_eq!(claude.peer_name(pid), None, "not an interactive session");
         std::fs::remove_dir_all(&config).unwrap();
     }
 
