@@ -1549,7 +1549,7 @@ private struct ManagedPane: View {
         case ("machine", "awake_while_working"): return make("Keep your Mac awake while agents work", .power)
         case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", .power)
         case ("machine", "check_updates"): return make("Check for updates automatically", .updates)
-        case ("machine", let r) where r == "claude_token" || r.hasPrefix("claude_token."): return make("Claude Code subscription token", .claude)
+        case ("machine", let r) where r == "claude_token" || r.hasPrefix("claude_token."): return make("Claude Code on SSH hosts", .claude)
         case ("worktrees", "location"): return make("Worktree location", .worktrees)
         case ("machine", "build_cache"), ("machine", "build_cache.enabled"): return make("Share one build cache across worktrees", .repos)
         case ("machine", "build_cache.size_gb"): return make("Build cache size", .repos)
@@ -1882,7 +1882,7 @@ private struct LimitsPane: View {
     }
 }
 
-/// Settings → Claude Code: your other Claude accounts, and the subscription token.
+/// Settings → Accounts: your Claude accounts, and which one Claude Code on SSH hosts signs in with.
 private struct ClaudeCodePane: View {
     @EnvironmentObject var store: SettingsStore
     @EnvironmentObject var model: DinoModel
@@ -1890,9 +1890,9 @@ private struct ClaudeCodePane: View {
     var body: some View {
         Form {
             if store.setup?.contains(where: { $0.id == "claude" && $0.installed }) == true {
-                ClaudeAccountsSection(act: { showInMainWindow(model, $0) })
+                ClaudeAccountsSection()
                     .settingAnchor("claude-accounts")
-                ClaudeTokenSection(act: { showInMainWindow(model, $0) })
+                ClaudeTokenSection()
                     .settingAnchor("claude-token")
             } else {
                 Section {

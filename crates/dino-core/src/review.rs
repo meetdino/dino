@@ -111,7 +111,9 @@ pub(crate) fn headless(key: &str, dir: &Path, args: &[String], input: String, ti
     // to use it here); never one the environment happened to hold.
     cmd.env_remove(crate::claude_token::KEY);
     let headless = crate::claude_token::Launch::Headless;
-    if let Some(t) = crate::claude_token::for_launch("claude", headless, false, &crate::settings::Settings::load(), &crate::load_keys(), crate::claude_token::signed_in()) {
+    if let Some(t) =
+        crate::claude_token::for_launch("claude", headless, false, &crate::settings::Settings::load(), &crate::account_store::with_accounts(crate::load_keys()), crate::claude_token::signed_in())
+    {
         cmd.env(crate::claude_token::KEY, t);
     }
     let mut child = cmd

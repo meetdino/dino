@@ -31,6 +31,7 @@ mod awake;
 mod build_cache;
 mod chatgpt;
 mod claude_accounts;
+mod claude_login;
 mod clients;
 mod cloud;
 mod codex;
@@ -388,10 +389,14 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     let home = dino_core::config_dir();
     let saved = load_saved(&home);
 
+    // Your other Claude accounts' tokens into the Keychain, should the key file still hold some.
+    if let Err(e) = dino_core::account_store::migrate() {
+        eprintln!("claude accounts: not moved into the Keychain yet: {e}");
+    }
     let keys = load_keys();
     let free_tier = free_tier(&keys);
     let plans = providers::plan_routes(&keys);
-    let proxy = Proxy::start(keys)?;
+    let proxy = Proxy::start(dino_core::account_store::with_accounts(keys))?;
     proxy.set_plans(plans);
     proxy.set_budget(Settings::load().policies.session_token_budget);
     proxy.set_free_models(Settings::load().experimental.free_models);
@@ -414,6 +419,7 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     restore(&daemon, saved);
     lid::start(daemon.clone());
     subtoken::start();
+    claude_accounts::start(&daemon);
     update::start(daemon.clone());
     tmux_mirror::start(daemon.clone());
     // Computer use as its switch says: added to agents installed since, or removed when it was
@@ -849,7 +855,8 @@ pub(crate) fn keys_changed(d: &Daemon) {
     let keys = load_keys();
     *d.launchers.write().unwrap() = launchers(free_tier(&keys));
     d.proxy.set_plans(providers::plan_routes(&keys));
-    d.proxy.set_keys(keys);
+    // With your other Claude accounts' tokens, from the Keychain, in memory only.
+    d.proxy.set_keys(dino_core::account_store::with_accounts(keys));
     std::thread::spawn(|| providers::refresh(true));
 }
 
@@ -2235,7 +2242,7 @@ fn local_spec(
     if l.agent_id == "claude" && route.is_none() {
         subtoken::settled();
     }
-    if let Some(t) = claude_token::for_launch(&l.agent_id, claude_token::Launch::Local, route.is_some(), settings, &load_keys(), claude_token::signed_in()) {
+    if let Some(t) = claude_token::for_launch(&l.agent_id, claude_token::Launch::Local, route.is_some(), settings, &dino_core::account_store::with_accounts(load_keys()), claude_token::signed_in()) {
         env.insert(claude_token::KEY.into(), t);
     }
     // An agent started by hand keeps the account it had there (another account's token, its
@@ -2388,7 +2395,7 @@ fn remote_spec(
     std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let mut env = HashMap::from([("DINO_SESSION".to_string(), id.to_string())]);
     // The Claude subscription token rides in ssh's environment, for Claude Code there alone.
-    let token = claude_token::for_launch(&l.agent_id, claude_token::Launch::Remote, false, settings, &load_keys(), None);
+    let token = claude_token::for_launch(&l.agent_id, claude_token::Launch::Remote, false, settings, &dino_core::account_store::with_accounts(load_keys()), None);
     let send_token = token.is_some();
     if let Some(t) = token {
         env.insert(ssh::TOKEN_ENV.into(), t);
@@ -5167,6 +5174,8 @@ mod tests {
             unsafe {
                 std::env::set_var("DINO_HOME", &home);
                 std::env::set_var("CLAUDE_CONFIG_DIR", &home);
+                // Never the user's Keychain: Claude accounts in the test folder's key file.
+                std::env::set_var("DINO_CLAUDE_ACCOUNT_STORE", "file");
             }
             home
         })
@@ -5198,6 +5207,16 @@ mod tests {
 
     fn shell_daemon() -> Arc<Daemon> {
         test_daemon(vec![shell()])
+    }
+
+    pub(crate) fn shell_daemon_for_accounts() -> Arc<Daemon> {
+        shell_daemon()
+    }
+
+    /// The Claude accounts are kept in one key file for every test: one test at a time looks at them.
+    pub(crate) fn claude_accounts_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ONE: Mutex<()> = Mutex::new(());
+        ONE.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// `d`'s dinod started again: a new daemon on the same files.
@@ -5242,12 +5261,13 @@ mod tests {
     /// Code's own first, answering while nothing is spent, and never with a token.
     #[test]
     fn claude_accounts_are_added_ordered_and_removed() {
+        let _one = claude_accounts_lock();
         let d = shell_daemon();
         let a = "sk-ant-oat01-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         let b = "sk-ant-oat01-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
         let serve = |action: &str, value: Option<&str>, account: Option<u32>, order: Vec<u32>| claude_accounts::serve(&d, action, value.map(String::from), account, order);
         let numbers = |i: &dino_core::ipc::ClaudeAccountsInfo| i.accounts.iter().map(|a| (a.number, a.answering, a.spent)).collect::<Vec<_>>();
-        let kept = || dino_core::claude_token::accounts(&load_keys());
+        let kept = || dino_core::account_store::load().kept;
 
         assert!(serve("add", Some("not a token"), None, vec![]).unwrap_err().to_string().contains("isn't a Claude token"));
         let i = serve("add", Some(&format!("Your OAuth token (valid for 1 year):\n\n{a}\n\nStore this token securely.")), None, vec![]).unwrap();

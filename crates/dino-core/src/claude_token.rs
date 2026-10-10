@@ -77,19 +77,51 @@ pub fn find(text: &str) -> Option<String> {
     valid(&token).then_some(token)
 }
 
+/// The sign-in link `claude setup-token` shows for a browser it couldn't open, or that's signed in
+/// to another account (its "Browser didn't open? Use the url below to sign in"): claude.ai's own
+/// page, which ends on a code to paste back (see [`is_sign_in_code`]).
+pub fn find_sign_in_url(text: &str) -> Option<String> {
+    text.split_whitespace().filter(|w| w.starts_with("https://")).find(|w| w.contains("/oauth/authorize?")).and_then(|w| {
+        let host = w.trim_start_matches("https://").split('/').next()?;
+        // Anthropic's own sign-in only: claude.com, claude.ai, platform.claude.com.
+        let ours = ["claude.com", "claude.ai"].iter().any(|d| host == *d || host.ends_with(&format!(".{d}")));
+        ours.then(|| w.to_string())
+    })
+}
+
+/// What went wrong, when `claude setup-token` shows an error and waits for Enter to try again
+/// ("OAuth error: …" above "Press Enter to retry.").
+pub fn setup_token_error(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let at = lines.iter().rposition(|l| l.starts_with("Press Enter to retry"))?;
+    let said: Vec<&str> = lines[..at].iter().rev().skip_while(|l| l.is_empty()).take_while(|l| !l.is_empty()).copied().collect();
+    let said = said.into_iter().rev().collect::<Vec<_>>().join(" ");
+    Some(if said.is_empty() { "Claude Code couldn't finish the sign-in".into() } else { said.trim_start_matches("OAuth error: ").to_string() })
+}
+
+/// Whether `code` looks like the one claude.ai's page shows to paste back: `<code>#<state>`.
+pub fn is_sign_in_code(code: &str) -> bool {
+    let c = code.trim();
+    let ok = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'));
+    c.len() < 2048 && c.split_once('#').is_some_and(|(a, b)| ok(a) && ok(b))
+}
+
 /// The token for a Claude Code session of `agent_id` started as `launch`, if it should get one:
 /// only the real Claude Code (not the free tier's, not one on a provider's model), and on this Mac
 /// only when Settings say so or Claude Code here isn't signed in (`signed_in`, as last checked).
+/// The subscription token, or else the first of your added Claude accounts (`keys` with them, see
+/// `account_store::with_accounts`): one sign-in for both.
 pub fn for_launch(agent_id: &str, launch: Launch, routed: bool, settings: &Settings, keys: &HashMap<String, String>, signed_in: Option<bool>) -> Option<String> {
     if agent_id != "claude" || routed {
         return None;
     }
-    let token = keys.get(KEY).map(|t| t.trim()).filter(|t| valid(t))?;
+    let first = accounts(keys).into_iter().next().map(|(_, t)| t);
+    let token = keys.get(KEY).map(|t| t.trim().to_string()).filter(|t| valid(t)).or(first.filter(|t| valid(t)))?;
     let wanted = match launch {
         Launch::Remote => settings.machine.claude_token.ssh,
         Launch::Local | Launch::Headless => settings.machine.claude_token.local || signed_in == Some(false),
     };
-    wanted.then(|| token.to_string())
+    wanted.then_some(token)
 }
 
 /// Where dinod notes whether Claude Code on this Mac is signed in, for `dino` commands to read.
@@ -134,6 +166,31 @@ mod tests {
         assert_eq!(find("sk-ant-oat01-short"), None);
     }
 
+    /// What `claude setup-token` 2.1.294 shows while it waits, and when it fails.
+    #[test]
+    fn reads_setup_tokens_screen() {
+        let url = "https://claude.com/cai/oauth/authorize?code=true&client_id=x&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=abc&code_challenge_method=S256&state=xyz";
+        let waiting = format!(
+            "This will guide you through long-lived (1-year) auth token setup for your Claude account.\n\nBrowser didn't open? Use the url below to sign in\n{url}\n\nPaste code here if prompted > "
+        );
+        assert_eq!(find_sign_in_url(&waiting).as_deref(), Some(url));
+        assert_eq!(find_sign_in_url("Opening browser to sign in…"), None);
+        // Nobody else's page passes for it.
+        assert_eq!(find_sign_in_url("https://claude.com.evil.example/oauth/authorize?x=1"), None);
+        assert_eq!(find_sign_in_url("https://evilclaude.com/oauth/authorize?x=1"), None);
+        assert_eq!(setup_token_error(&waiting), None);
+
+        let failed = "Paste code here if prompted >\n\nOAuth error: Failed to exchange authorization code for access token. Please try again.\n\nPress Enter to retry.";
+        assert_eq!(setup_token_error(failed).as_deref(), Some("Failed to exchange authorization code for access token. Please try again."));
+
+        assert!(is_sign_in_code("AbC-123_x#St4te-xyz"));
+        assert!(is_sign_in_code("  AbC#xyz \n"));
+        assert!(!is_sign_in_code("AbC123"));
+        assert!(!is_sign_in_code("#xyz"));
+        assert!(!is_sign_in_code("abc#xyz; rm -rf ~"));
+        assert!(!is_sign_in_code("abc#x\ny"));
+    }
+
     #[test]
     fn other_accounts_in_order() {
         let keys: HashMap<String, String> = [
@@ -171,6 +228,16 @@ mod tests {
         assert_eq!(for_launch("claude", Launch::Local, false, &s, &keys(), Some(true)).as_deref(), Some(T));
         s.machine.claude_token.ssh = false;
         assert_eq!(for_launch("claude", Launch::Remote, false, &s, &keys(), Some(false)), None);
+        // No subscription token: the first added account signs in, as it would for the token.
+        let added: HashMap<String, String> = [("CLAUDE_ACCOUNT_3", "sk-ant-oat01-three-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), ("CLAUDE_ACCOUNT_2", T)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert_eq!(for_launch("claude", Launch::Local, false, &s, &added, Some(false)).as_deref(), Some(T));
+        assert_eq!(for_launch("codex", Launch::Remote, false, &s, &added, Some(false)), None);
+        let mut both = added.clone();
+        both.insert(KEY.into(), "sk-ant-oat01-the-own-token-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into());
+        assert_eq!(for_launch("claude", Launch::Local, false, &s, &both, Some(false)).as_deref(), Some("sk-ant-oat01-the-own-token-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"), "its own token first");
         // Something that isn't a setup-token token is never handed on.
         let bad = HashMap::from([(KEY.to_string(), "sk-ant-api03-whatever-this-is-an-api-key-0000000000".to_string())]);
         assert_eq!(for_launch("claude", Launch::Local, false, &s, &bad, Some(false)), None);
