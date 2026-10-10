@@ -348,7 +348,10 @@ final class DinoModel: ObservableObject {
                     let leftovers = resp.leftovers ?? []
                     if leftovers != self.leftovers { self.leftovers = leftovers }
                     let accounts = resp.claude_accounts ?? []
-                    if accounts != self.claudeAccounts { self.claudeAccounts = accounts }
+                    if accounts != self.claudeAccounts {
+                        self.claudeAccounts = accounts
+                        ClaudeAccountInfo.ownShort = accounts.first(where: \.isOwn)?.short ?? "Claude account 1"
+                    }
                     self.stateSeen = resp.version
                     self.poll()
                 } else if refused {

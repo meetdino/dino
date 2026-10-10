@@ -2,10 +2,12 @@
 //! see `dino_core::account_store`), added by signing in to them in the browser (see
 //! `claude_login`) or from a pasted `claude setup-token` token, removed and reordered; listed with
 //! which one answers Claude Code now, its usage windows, and when a spent one resets, as the proxy
-//! found them. Never their tokens.
+//! found them; named as the user names them (see `names`), account 1 by its email until then.
+//! Never their tokens.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use dino_core::account_store as store;
 use dino_core::claude_token as token;
@@ -14,7 +16,7 @@ use dino_proxy::Quota;
 use dino_proxy::fallback::Limited;
 
 use crate::Daemon;
-use crate::claude_login::{self, Checked};
+use crate::claude_login::{self, Checked, OwnLogin};
 
 /// The proxy session the check's call goes through: no session of the user's.
 const CHECK_SESSION: &str = "claude-account-check";
@@ -40,6 +42,12 @@ pub(crate) fn serve(d: &Arc<Daemon>, action: &str, value: Option<String>, accoun
             store::set(&[(n, None)])?;
             crate::keys_changed(d);
             forget_orgs();
+            forget_names();
+        }
+        "rename" => {
+            let n = account.ok_or_else(|| anyhow::anyhow!("which account?"))?;
+            rename(n, value.as_deref().unwrap_or_default())?;
+            d.proxy.set_account_names(proxy_names());
         }
         "order" => {
             let have = accounts();
@@ -68,8 +76,8 @@ fn accounts() -> Vec<(u32, String)> {
 /// Keep `t` as the first number free, unless it's one already.
 fn add(d: &Daemon, t: &str) -> anyhow::Result<u32> {
     let have = accounts();
-    if let Some((n, _)) = have.iter().find(|(_, kept)| kept == t) {
-        anyhow::bail!("that's Account {n} already");
+    if let Some((n, kept)) = have.iter().find(|(_, kept)| kept == t) {
+        anyhow::bail!("that's {} already", label(*n, Some(kept)));
     }
     let all = store::load();
     let n = (2..).find(|n| !all.taken(*n)).unwrap_or(2);
@@ -98,14 +106,14 @@ fn add_checked_with(d: &Daemon, t: &str, check: impl FnOnce(&str) -> (Checked, O
     if !token::valid(t) {
         return Err("Claude Code didn't print a token dino can use".to_string().into());
     }
-    if let Some((n, _)) = accounts().into_iter().find(|(_, k)| k == t) {
-        return Err(claude_login::Failed { said: format!("that's Account {n} already"), duplicate: Some(n) });
+    if let Some((n, k)) = accounts().into_iter().find(|(_, k)| k == t) {
+        return Err(claude_login::Failed { said: format!("that's {} already", label(n, Some(&k))), duplicate: Some(n) });
     }
     let (checked, org) = check(t);
     if let Some(org) = &org
         && let Some(same) = same_account(d, 0, org)
     {
-        let name = if same == 1 { "Account 1, the one Claude Code is signed in with".to_string() } else { format!("Account {same}") };
+        let name = if same == 1 { format!("{}, the one Claude Code is signed in with", label(1, None)) } else { label(same, accounts().iter().find(|(m, _)| *m == same).map(|(_, t)| t.as_str())) };
         return Err(claude_login::Failed { said: format!("That's {name}, already added. Switch to another Claude account in your browser, then try again."), duplicate: Some(same) });
     }
     let note = match checked {
@@ -184,12 +192,14 @@ fn forget_orgs() {
 }
 
 pub(crate) fn info(d: &Daemon) -> ClaudeAccountsInfo {
+    own_soon();
     let have = accounts();
     let tokens: Vec<&str> = have.iter().map(|(_, t)| t.as_str()).collect();
     let (own, others) = d.proxy.claude_accounts(&tokens);
     let numbers = std::iter::once(1).chain(have.iter().map(|(n, _)| *n));
     let windows = std::iter::once(None).chain(tokens.iter().map(|t| Some(*t))).map(|t| d.proxy.claude_account_seen(t).1);
-    let accounts = rows(numbers.zip(std::iter::once(own).chain(others)).zip(windows).map(|((n, l), q)| (n, l, q)));
+    let names = std::iter::once(None).chain(have.iter().map(|(n, t)| name(*n, Some(t))));
+    let accounts = rows(numbers.zip(std::iter::once(own).chain(others)).zip(windows).zip(names).map(|(((n, l), q), name)| (n, l, q, name)));
     let kept = store::load();
     let error = store::problem().map(|p| format!("dino can't read your other Claude accounts from the Keychain now: {p}.")).or_else(|| {
         let n: Vec<String> = kept.unreadable.iter().map(|n| format!("Account {n}")).collect();
@@ -205,13 +215,19 @@ pub(crate) fn now(d: &Daemon) -> Option<Vec<ClaudeAccountInfo>> {
 }
 
 /// Each account as it stands, in the order they're tried: the first that isn't spent answers.
-fn rows(accounts: impl Iterator<Item = (u32, Option<Limited>, Option<Quota>)>) -> Vec<ClaudeAccountInfo> {
+/// Named as the user named it; account 1 (`name` `None`) by its own, or else its email.
+fn rows(accounts: impl Iterator<Item = (u32, Option<Limited>, Option<Quota>, Option<String>)>) -> Vec<ClaudeAccountInfo> {
     let mut answering = false;
+    let me = own();
     accounts
-        .map(|(number, spent, quota)| {
+        .map(|(number, spent, quota, name)| {
             let first = spent.is_none() && !answering;
             answering |= first;
+            let me = me.as_ref().filter(|_| number == 1);
             ClaudeAccountInfo {
+                name: if number == 1 { self::name(1, None) } else { name },
+                email: me.and_then(|m| m.email.clone()),
+                plan: me.and_then(|m| m.plan.clone()),
                 number,
                 answering: first,
                 spent: spent.is_some(),
@@ -227,13 +243,15 @@ fn rows(accounts: impl Iterator<Item = (u32, Option<Limited>, Option<Quota>)>) -
 /// can't be read (locked) or the file still holds some, trying again every minute, and the proxy
 /// told once what it can read changed.
 pub(crate) fn start(d: &Arc<Daemon>) {
+    // Account 1's email, for the list and the state, asked once now rather than as they're shown.
+    refresh_own();
     let d = Arc::downgrade(d);
     std::thread::Builder::new()
         .name("claude-accounts".into())
         .spawn(move || {
             let mut seen = store::load();
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(60));
+                std::thread::sleep(Duration::from_secs(60));
                 let Some(d) = d.upgrade() else { return };
                 let _ = store::migrate();
                 let now = store::load();
@@ -244,6 +262,165 @@ pub(crate) fn start(d: &Arc<Daemon>) {
             }
         })
         .ok();
+}
+
+// Names.
+
+/// The names the user gave their Claude accounts (Settings → Accounts → Rename…), in
+/// `claude-account-names.json` beside their organizations (mode 600), never in a repo or synced.
+/// An added account's under a fingerprint of its token, as there, so the name follows the account
+/// when the list is reordered and goes with it when it's removed. Account 1's under the email
+/// Claude Code is signed in with ("own:<email>"), or "own" while that isn't known, so signing
+/// Claude Code in as someone else doesn't hand them the name. Read once and kept in memory: the
+/// state names the accounts many times a second.
+fn names_file() -> std::path::PathBuf {
+    dino_core::config_dir().join("claude-account-names.json")
+}
+
+/// The names as kept, by the file they were read from (tests change folders).
+static NAMES: Mutex<Option<(std::path::PathBuf, HashMap<String, String>)>> = Mutex::new(None);
+
+fn names() -> HashMap<String, String> {
+    let path = names_file();
+    let mut kept = NAMES.lock().unwrap();
+    if let Some((p, m)) = kept.as_ref()
+        && *p == path
+    {
+        return m.clone();
+    }
+    let m: HashMap<String, String> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    *kept = Some((path, m.clone()));
+    m
+}
+
+fn write_names(m: &HashMap<String, String>) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = names_file();
+    let tmp = path.with_extension("tmp");
+    std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).and_then(|mut f| f.write_all(&serde_json::to_vec_pretty(m)?))?;
+    std::fs::rename(&tmp, &path)?;
+    *NAMES.lock().unwrap() = Some((path, m.clone()));
+    Ok(())
+}
+
+/// Where account `n`'s name is kept: by its token's fingerprint, or account 1's by `email`.
+fn name_key(n: u32, token: Option<&str>, email: Option<&str>) -> Option<String> {
+    if n == 1 {
+        return Some(email.map_or_else(|| "own".to_string(), |e| format!("own:{}", e.to_lowercase())));
+    }
+    token.map(fingerprint)
+}
+
+/// The name account `n` (signing with `token`) was given, if any.
+fn given(m: &HashMap<String, String>, n: u32, token: Option<&str>, email: Option<&str>) -> Option<String> {
+    let mine = name_key(n, token, email).and_then(|k| m.get(&k).cloned());
+    // Named before Claude Code's email was known.
+    mine.or_else(|| (n == 1).then(|| m.get("own").cloned()).flatten())
+}
+
+/// What account `n` is called: the name given, or account 1's email; `None` for "Account <n>".
+pub(crate) fn name(n: u32, token: Option<&str>) -> Option<String> {
+    let email = (n == 1).then(own).flatten().and_then(|o| o.email);
+    given(&names(), n, token, email.as_deref()).or(email)
+}
+
+/// As dino says it: "Work", "you@example.com", "Account 3".
+pub(crate) fn label(n: u32, token: Option<&str>) -> String {
+    dino_core::ipc::account_label(n, name(n, token).as_deref())
+}
+
+/// The name typed, as kept: on one line, trimmed, at most 60 characters. `None` (no name of its
+/// own) for nothing, or for what it'd be called anyway: "Account 3", which would go wrong once
+/// the list is reordered, or account 1's email, which follows Claude Code's sign-in.
+fn tidy(typed: &str, email: Option<&str>) -> anyhow::Result<Option<String>> {
+    let one_line: String = typed.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let name = one_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    anyhow::ensure!(name.chars().count() <= 60, "keep the name to 60 characters");
+    let numbered = name.strip_prefix("Account ").or_else(|| name.strip_prefix("account ")).is_some_and(|n| n.parse::<u32>().is_ok());
+    let email = email.is_some_and(|e| e.eq_ignore_ascii_case(&name));
+    Ok((!name.is_empty() && !numbered && !email).then_some(name))
+}
+
+/// Call account `n` `typed`; nothing clears its name.
+fn rename(n: u32, typed: &str) -> anyhow::Result<()> {
+    let email = (n == 1).then(own).flatten().and_then(|o| o.email);
+    let token = if n == 1 { None } else { Some(accounts().into_iter().find(|(m, _)| *m == n).map(|(_, t)| t).ok_or_else(|| anyhow::anyhow!("there's no Account {n} to rename"))?) };
+    let name = tidy(typed, email.as_deref())?;
+    let key = name_key(n, token.as_deref(), email.as_deref()).ok_or_else(|| anyhow::anyhow!("there's no Account {n} to rename"))?;
+    let mut m = names();
+    if n == 1 {
+        // One name for Claude Code's sign-in: this one's.
+        m.remove("own");
+    }
+    match name {
+        Some(name) => m.insert(key, name),
+        None => m.remove(&key),
+    };
+    write_names(&m)
+}
+
+/// Only the names of accounts still here (and account 1's).
+fn forget_names() {
+    let mut m = names();
+    let have: Vec<String> = accounts().iter().map(|(_, t)| fingerprint(t)).collect();
+    let before = m.len();
+    m.retain(|k, _| k == "own" || k.starts_with("own:") || have.contains(k));
+    if m.len() != before {
+        let _ = write_names(&m);
+    }
+}
+
+/// Each added account's name, by its token, for the proxy: what a session on it says ("On Work").
+pub(crate) fn proxy_names() -> HashMap<String, String> {
+    let m = names();
+    accounts().into_iter().filter_map(|(n, t)| given(&m, n, Some(&t), None).map(|name| (t, name))).collect()
+}
+
+/// Account 1 as `claude auth status` last said, and when.
+static OWN: Mutex<Option<(Instant, Option<OwnLogin>)>> = Mutex::new(None);
+static ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What `claude auth status` just said of Claude Code's sign-in.
+pub(crate) fn own_seen(login: Option<OwnLogin>) {
+    *OWN.lock().unwrap() = Some((Instant::now(), login));
+}
+
+/// Account 1 as last seen. Never asked from here: the state names it many times a second, and
+/// `claude auth status` is a process of its own.
+fn own() -> Option<OwnLogin> {
+    OWN.lock().unwrap().clone().and_then(|(_, o)| o)
+}
+
+/// Ask again, out of the way, once what was seen is a minute old: as the list is looked at
+/// (Settings → Accounts, `dino claude-token`), so a new sign-in shows soon after.
+fn own_soon() {
+    if OWN.lock().unwrap().as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(60)) {
+        refresh_own();
+    }
+}
+
+/// Ask `claude auth status` again, on a thread of its own; once at a time.
+fn refresh_own() {
+    // Tests say who account 1 is (`own_seen`), never a late answer of Claude Code's.
+    if cfg!(test) || ASKING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let asked = std::thread::Builder::new().name("claude-auth-status".into()).spawn(|| {
+        let started = Instant::now();
+        let _ = claude_login::own_login();
+        // No answer (it took too long): what was seen before stands, for another minute.
+        let mut seen = OWN.lock().unwrap();
+        if seen.as_ref().is_none_or(|(at, _)| *at < started) {
+            let before = seen.take().and_then(|(_, o)| o);
+            *seen = Some((Instant::now(), before));
+        }
+        drop(seen);
+        ASKING.store(false, std::sync::atomic::Ordering::Release);
+    });
+    if asked.is_err() {
+        ASKING.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +481,88 @@ mod tests {
 
         serve(&d, "remove", None, Some(n), vec![]).unwrap();
         assert!(store::load().kept.is_empty());
+    }
+
+    /// The founder's accounts were "Account 1, 2, 3, 4": now each can be named, and the name
+    /// follows its account. Account 1 is called by Claude Code's email until named. A name kept
+    /// by the token's fingerprint goes with the account when the list is reordered, and away with
+    /// it when it's removed; nothing in the file is a token. Accounts never named keep their numbers.
+    #[test]
+    fn accounts_are_named_and_the_name_follows_the_account() {
+        let _one = crate::tests::claude_accounts_lock();
+        let d = crate::tests::shell_daemon_for_accounts();
+        let a = "sk-ant-oat01-NAMEDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let b = "sk-ant-oat01-NAMEDBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        let _ = std::fs::remove_file(names_file());
+        *NAMES.lock().unwrap() = None;
+        own_seen(Some(OwnLogin { org: Some("org-own".into()), email: Some("me@example.com".into()), plan: Some("max".into()) }));
+        let listed = |i: &dino_core::ipc::ClaudeAccountsInfo| i.accounts.iter().map(|a| (a.number, a.label())).collect::<Vec<_>>();
+        let state = |d: &Daemon| now(d).unwrap().iter().map(|a| (a.number, a.label())).collect::<Vec<_>>();
+
+        assert_eq!(serve(&d, "add", Some(a.into()), None, vec![]).unwrap().added, Some(2));
+        let i = serve(&d, "add", Some(b.into()), None, vec![]).unwrap();
+        // Unnamed: account 1 by its email (and its plan), the others by number, as before.
+        assert_eq!(listed(&i), [(1, "me@example.com".into()), (2, "Account 2".into()), (3, "Account 3".into())]);
+        assert_eq!((i.accounts[0].email.as_deref(), i.accounts[0].plan.as_deref()), (Some("me@example.com"), Some("max")));
+        assert_eq!((i.accounts[1].email.as_ref(), i.accounts[1].name.as_ref()), (None, None), "nothing known of an added account");
+
+        let i = serve(&d, "rename", Some("  Work\n laptop ".into()), Some(3), vec![]).unwrap();
+        assert_eq!(listed(&i)[2], (3, "Work laptop".into()), "on one line, trimmed");
+        serve(&d, "rename", Some("Personal".into()), Some(1), vec![]).unwrap();
+        assert_eq!(state(&d), [(1, "Personal".into()), (2, "Account 2".into()), (3, "Work laptop".into())], "the state, as the sidebar shows them");
+        assert_eq!(d.proxy.claude_accounts_now().unwrap()[2].3.as_deref(), Some("Work laptop"), "the proxy names a session on it");
+        assert!(serve(&d, "add", Some(b.into()), None, vec![]).unwrap_err().to_string().contains("Work laptop already"));
+        let file = std::fs::read_to_string(names_file()).unwrap();
+        assert!(!file.contains("sk-ant") && file.contains(&fingerprint(b)), "kept by fingerprint: {file}");
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(names_file()).unwrap().permissions()) & 0o777, 0o600);
+
+        // Reordered: the name goes with its account to its new number.
+        let i = serve(&d, "order", None, None, vec![3, 2]).unwrap();
+        assert_eq!(listed(&i), [(1, "Personal".into()), (2, "Work laptop".into()), (3, "Account 3".into())]);
+        // Read again from the file, as by a dinod started again.
+        *NAMES.lock().unwrap() = None;
+        assert_eq!(label(2, Some(b)), "Work laptop");
+
+        // Its number, or account 1's email, as a name is no name: those follow the list and the sign-in.
+        serve(&d, "rename", Some("Account 3".into()), Some(3), vec![]).unwrap();
+        serve(&d, "rename", Some("ME@example.com".into()), Some(1), vec![]).unwrap();
+        assert_eq!(listed(&info(&d)), [(1, "me@example.com".into()), (2, "Work laptop".into()), (3, "Account 3".into())]);
+        assert!(serve(&d, "rename", Some("x".repeat(61)), Some(2), vec![]).is_err(), "too long");
+        assert!(serve(&d, "rename", Some("Nine".into()), Some(9), vec![]).is_err(), "no such account");
+
+        // Account 1 named, then Claude Code signed in as someone else: theirs is their email.
+        serve(&d, "rename", Some("Personal".into()), Some(1), vec![]).unwrap();
+        own_seen(Some(OwnLogin { email: Some("other@example.com".into()), ..Default::default() }));
+        assert_eq!(label(1, None), "other@example.com");
+        // Signed out, or a token Claude Code can't say whose it is: "Account 1".
+        own_seen(None);
+        assert_eq!(label(1, None), "Account 1");
+
+        // Removed: its name goes with it, the others' stay.
+        serve(&d, "remove", None, Some(2), vec![]).unwrap();
+        let file = std::fs::read_to_string(names_file()).unwrap();
+        assert!(!file.contains("Work laptop") && file.contains("Personal"), "{file}");
+        // Added again, it's a new account with no name.
+        assert_eq!(serve(&d, "add", Some(b.into()), None, vec![]).unwrap().accounts.iter().find(|a| a.number == 2).unwrap().label(), "Account 2");
+        for n in [2, 3] {
+            serve(&d, "remove", None, Some(n), vec![]).unwrap();
+        }
+        let _ = std::fs::remove_file(names_file());
+        *NAMES.lock().unwrap() = None;
+        *OWN.lock().unwrap() = None;
+    }
+
+    /// What `claude auth status --json` (2.1.296) says: a claude.ai sign-in has an email,
+    /// organization and plan; a `CLAUDE_CODE_OAUTH_TOKEN` (what `claude setup-token` makes) says
+    /// nothing of whose it is, and nor does an API key or being signed out.
+    #[test]
+    fn account_1_is_who_claude_auth_status_says() {
+        let signed_in = br#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"me@example.com","orgId":"org-1","orgName":"Me","subscriptionType":"max"}"#;
+        assert_eq!(claude_login::parse_auth_status(signed_in), Some(OwnLogin { org: Some("org-1".into()), email: Some("me@example.com".into()), plan: Some("max".into()) }));
+        let token = br#"{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty","analyticsDisabled":false,"configDirectory":"/tmp/x"}"#;
+        assert_eq!(claude_login::parse_auth_status(token), None);
+        assert_eq!(claude_login::parse_auth_status(br#"{"loggedIn":false,"authMethod":"none"}"#), None);
+        assert_eq!(claude_login::parse_auth_status(b"not json"), None);
     }
 
     #[test]
