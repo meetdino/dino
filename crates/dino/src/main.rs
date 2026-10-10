@@ -74,7 +74,7 @@ Setup
   dino login [--email | --device] | logout | sync [status|now|resolve|undo]
   dino login openrouter|chatgpt     connect a provider in your browser
   dino login <plan> [--base <url>]  connect a coding plan; reads its API key from stdin
-  dino claude-token [status|create|set|remove|add-account|remove-account <n>]
+  dino claude-token [status|create|set|remove|add-account [--browser]|remove-account <n>]
   dino fallback [<agent> [<provider>:<model>... | off] [--outages] [--new-sessions <agent>[:<model>]]]
                                     choose what an agent switches to when it hits a limit
   dino power [status|setup|remove]  see what keeps your Mac awake; run agents with the lid closed
@@ -113,7 +113,7 @@ const COMMAND_USAGE: &[(&str, &str)] = &[
     ("continue", "dino continue <id>"),
     ("logout", "dino logout [<provider>]"),
     ("sync", "dino sync [status|now|resolve|undo]"),
-    ("claude-token", "dino claude-token [status|create|set|remove|add-account|remove-account <n>]"),
+    ("claude-token", "dino claude-token [status|create|set|remove|add-account [--browser]|remove-account <n>]"),
     ("power", "dino power [status|setup|remove]"),
     ("permissions", "dino permissions [--json]"),
     ("init", "dino init zsh|bash|fish"),
@@ -1023,14 +1023,15 @@ fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
     }
     if !matches!(action, "status" | "create" | "set" | "remove") {
         println!(
-            "usage: dino claude-token [status|create|set|remove|add-account|remove-account <n>]\n\n\
+            "usage: dino claude-token [status|create|set|remove|add-account [--browser]|remove-account <n>]\n\n\
              A Claude subscription token lets Claude Code use your Claude plan on SSH hosts, and on this Mac\n\
              when Claude Code isn't signed in here (Settings → Agents). No other agent gets it.\n\n\
              \x20 create              run `claude setup-token` in a dino shell and keep the token it prints\n\
              \x20 set                 read a token from stdin\n\
              \x20 remove              forget the token\n\
-             \x20 add-account         read a token for another of your Claude accounts from stdin; when one\n\
-             \x20                     account hits its limit, Claude Code switches to the next until it resets\n\
+             \x20 add-account         add another of your Claude accounts: sign in to it in your browser (or\n\
+             \x20                     pipe in a token claude setup-token printed); when one account hits its\n\
+             \x20                     limit, Claude Code switches to the next until it resets\n\
              \x20 remove-account <n>  forget account <n>"
         );
         return Ok(());
@@ -1099,6 +1100,13 @@ fn account_state(a: &dino_core::ipc::ClaudeAccountInfo) -> String {
 /// `dino claude-token add-account` (token on stdin) and `remove-account <n>`: your other Claude
 /// accounts, which dinod keeps in its key store as `CLAUDE_ACCOUNT_<n>`, never synced or shown.
 fn cmd_claude_account(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
+    // At a terminal, nothing piped in: sign in in the browser.
+    if action == "add-account" && (arg == Some("--browser") || (arg.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdin()))) {
+        return add_claude_account_in_browser();
+    }
+    if action == "add-account" && arg.is_some_and(|a| a != "--paste") {
+        anyhow::bail!("usage: dino claude-token add-account [--browser | --paste < token]");
+    }
     let (action, value, account) = if action == "add-account" {
         let mut t = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)?;
@@ -1118,6 +1126,88 @@ fn cmd_claude_account(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// `dino claude-token add-account` at a terminal: dinod runs Claude Code's own `claude setup-token`,
+/// the browser opens on claude.ai, and the account is added once the user signs in there. Where
+/// the browser can't open (SSH) or is signed in to another account, the link is printed, and the
+/// code claude.ai shows at the end is pasted here.
+fn add_claude_account_in_browser() -> anyhow::Result<()> {
+    static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    extern "C" fn stop(_: libc::c_int) {
+        STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let ask = |action: &str, value: Option<String>| match client::request(&Request::ClaudeAccounts { action: action.into(), value, account: None, order: vec![] })? {
+        Response::ClaudeAccounts { accounts } => Ok(accounts),
+        Response::Error { message } => Err(hinted(message)),
+        _ => Err(unexpected()),
+    };
+    let started = ask("login", None)?.login.ok_or_else(unexpected)?;
+    // Ctrl-C stops the sign-in too, not only this command.
+    unsafe {
+        libc::signal(libc::SIGINT, stop as extern "C" fn(libc::c_int) as libc::sighandler_t);
+    }
+    println!("Opening your browser on claude.ai. Sign in with the Claude account you want to add.");
+    // A pasted code, read off the terminal while dinod waits.
+    let (tx, codes) = std::sync::mpsc::channel::<String>();
+    let mut shown_url = None;
+    loop {
+        if STOP.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = ask("login_cancel", None);
+            println!();
+            anyhow::bail!("Cancelled.");
+        }
+        if let Ok(code) = codes.try_recv()
+            && !code.trim().is_empty()
+            && let Err(e) = ask("login_code", Some(code))
+        {
+            eprint!("{e}\nCode: ");
+        }
+        let info = ask("status", None)?;
+        let Some(l) = info.login.filter(|l| l.id == started.id) else { anyhow::bail!("Another sign-in took this one's place.") };
+        match l.stage.as_str() {
+            "browser" if l.url.is_some() && shown_url != l.url => {
+                let first = shown_url.is_none();
+                shown_url = l.url.clone();
+                println!(
+                    "\nBrowser didn't open, or it's signed in to a different account? Open this link in a browser\n\
+                     signed in to the account you want (a private window works), then paste the code it shows:\n\n{}\n",
+                    printable(l.url.as_deref().unwrap_or_default())
+                );
+                print!("Code: ");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                if first {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        for line in std::io::stdin().lines().map_while(Result::ok) {
+                            if tx.send(line).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+            }
+            "checking" if shown_url.is_some() => {
+                shown_url = None;
+                println!("\nSigned in. Checking the account…");
+            }
+            "added" => {
+                let n = l.account.unwrap_or_default();
+                if let Some(note) = &l.error {
+                    println!("{}", printable(note));
+                }
+                let row = info.accounts.iter().find(|a| a.number == n);
+                let windows = row.map(|a| a.windows.iter().map(|w| format!("{} {:.0}% used", w.name, w.utilization * 100.0)).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                let windows = if windows.is_empty() { String::new() } else { format!(" ({windows})") };
+                println!("Account {n} added{windows}. When an account hits its limit, Claude Code switches to the next one until the limit resets.");
+                return Ok(());
+            }
+            "failed" => anyhow::bail!("{}", printable(l.error.as_deref().unwrap_or("The sign-in failed."))),
+            "cancelled" => anyhow::bail!("The sign-in was cancelled."),
+            _ => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
 }
 
 const RM_HELP: &str = "usage: dino rm [--force] <id>

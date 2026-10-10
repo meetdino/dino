@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod account_store;
 pub mod agent;
 pub mod agent_mcp;
 pub mod ask;

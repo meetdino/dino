@@ -386,8 +386,9 @@ pub enum Request {
     },
     /// Your other Claude accounts, which Claude Code goes on with when the one it signed in with
     /// is at its limit: `status`, `add` (`value`: a token `claude setup-token` printed, or text
-    /// holding one), `create` (runs `claude setup-token` in a new shell and adds the token it
-    /// prints), `remove` (`account`: its number) or `order` (`order`: every account's number, in
+    /// holding one), `login` (signs in in the browser: runs `claude setup-token` out of sight and
+    /// adds the token it prints; `create` is the same), `login_code` (`value`: the code claude.ai
+    /// showed, for a sign-in in another browser), `login_cancel`, `remove` (`account`: its number) or `order` (`order`: every account's number, in
     /// the order to try them). Replies `ClaudeAccounts`; never with a token.
     ClaudeAccounts {
         action: String,
@@ -1584,6 +1585,10 @@ pub struct ClaudeTokenInfo {
     pub creating: Option<String>,
     /// What went wrong with the last attempt.
     pub error: Option<String>,
+    /// Without a token of its own: the added Claude account Claude Code signs in with instead
+    /// (the first in the list), on SSH hosts and where it isn't signed in here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<u32>,
 }
 
 /// Your Claude accounts as dinod holds them: never their tokens.
@@ -1600,6 +1605,34 @@ pub struct ClaudeAccountsInfo {
     /// What went wrong with the last `create`.
     #[serde(default)]
     pub error: Option<String>,
+    /// The browser sign-in `login` started: under way, or how it ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<ClaudeLoginInfo>,
+}
+
+/// Adding a Claude account by signing in to it in the browser: dinod runs Claude Code's own
+/// `claude setup-token` out of sight, the browser opens on claude.ai, and the token it prints is
+/// kept, checked and added. Never the token itself.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct ClaudeLoginInfo {
+    /// Which sign-in this is: a new one gets a new number.
+    pub id: u64,
+    /// `starting`, `browser` (waiting for the user there), `checking` (a token came back; asking
+    /// Anthropic whose it is and how much is left), `added`, `failed` or `cancelled`.
+    pub stage: String,
+    /// claude.ai's sign-in page, to open in another browser or a private window; it ends on a code
+    /// to paste back (`login_code`).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The account it added.
+    #[serde(default)]
+    pub account: Option<u32>,
+    /// What went wrong (`failed`), or what couldn't be checked (`added`).
+    #[serde(default)]
+    pub error: Option<String>,
+    /// `failed` because that account is here already: its number (1 for Claude Code's own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<u32>,
 }
 
 /// One of your Claude accounts.
