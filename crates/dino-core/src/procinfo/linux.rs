@@ -164,6 +164,13 @@ pub fn args_and_env(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     Some((nul_separated(&args), nul_separated(&env).into_iter().filter(|e| !e.is_empty()).collect()))
 }
 
+/// A process in the middle of exec: its arguments are gone and its name is still the program
+/// before's (a script named `claude` exec'ing `perl` is still `claude`), so neither says what it
+/// is. Not a zombie, nor a kernel thread (kthreadd's children), whose arguments are empty too.
+pub fn execing(pid: u32) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|a| a.is_empty()) && Stat::read(pid).is_some_and(|s| !matches!(s.state, b'Z' | b'X') && s.ppid != 2 && pid != 2)
+}
+
 /// What a process costs, as `top` counts it: its resident memory and CPU time.
 pub fn rusage(pid: u32) -> Option<Rusage> {
     let stat = Stat::read(pid)?;
@@ -258,5 +265,24 @@ mod tests {
         // A Node CLI that set its title ("pi"): the rest of its arguments' room zeroed.
         assert_eq!(nul_separated(b"pi\0\0\0"), vec!["pi".to_string(), String::new(), String::new()]);
         assert!(nul_separated(b"").is_empty());
+    }
+
+    /// Only a process between programs is: a running one, a zombie and a kernel thread, whose
+    /// arguments are empty too, aren't.
+    #[test]
+    fn a_process_is_execing_only_between_programs() {
+        assert!(!execing(std::process::id()));
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        while Stat::read(pid).is_some_and(|s| s.state != b'Z') {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!execing(pid), "a zombie");
+        child.wait().unwrap();
+        assert!(!execing(2), "kthreadd");
+        // kthreadd's children, the kernel threads.
+        if let Some(k) = all_pids().into_iter().find(|&p| Stat::read(p as u32).is_some_and(|s| s.ppid == 2)) {
+            assert!(!execing(k as u32));
+        }
     }
 }
