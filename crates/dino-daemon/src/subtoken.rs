@@ -102,6 +102,10 @@ fn check_signed_in() {
         if let Ok(Some(_)) = child.try_wait() {
             let out = child.wait_with_output().map(|o| o.stdout).unwrap_or_default();
             let signed_in = serde_json::from_slice::<serde_json::Value>(&out).ok().and_then(|v| v["loggedIn"].as_bool());
+            // Who it's signed in as, too: account 1's email, without asking again.
+            if signed_in.is_some() {
+                crate::claude_accounts::own_seen(crate::claude_login::parse_auth_status(&out));
+            }
             if let Some(s) = signed_in {
                 let _ = std::fs::write(token::signed_in_file(), if s { "yes\n" } else { "no\n" });
             }
@@ -126,10 +130,12 @@ pub(crate) fn info() -> ClaudeTokenInfo {
     let keys = dino_core::load_keys();
     let kept = keys.get(KEY).filter(|t| token::valid(t));
     let created = kept.and(keys.get(CREATED_KEY)).and_then(|c| c.parse::<u64>().ok());
-    let account = if kept.is_some() { None } else { dino_core::account_store::load().kept.first().map(|(n, _)| *n) };
+    let first = if kept.is_some() { None } else { dino_core::account_store::load().kept.into_iter().next() };
+    let account = first.as_ref().map(|(n, _)| *n);
     let s = STATE.lock().unwrap();
     ClaudeTokenInfo {
         account,
+        account_name: first.and_then(|(n, t)| crate::claude_accounts::name(n, Some(&t))),
         set: kept.is_some(),
         masked: kept.map(|t| token::masked(t)),
         created,

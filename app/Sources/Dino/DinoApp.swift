@@ -1378,7 +1378,7 @@ struct UsagePanel: View {
                                 Text("Claude back \(Clock.short(back))").font(.caption).foregroundStyle(SessionStatus.exited.color).lineLimit(1)
                             } else {
                                 if let answering, answering.number != 1 {
-                                    Text("account \(answering.number)").font(.caption).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                                    Text(answering.name ?? "account \(answering.number)").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                                 }
                                 if let fullest {
                                     let pct = Double(fullest.window.utilization)
@@ -1434,7 +1434,7 @@ struct UsagePanel: View {
         .overlay(alignment: .top) { if colorScheme == .light { Divider() } }
     }
 
-    /// The collapsed line in words: "Claude account 2 in use, Claude 5h 12% used".
+    /// The collapsed line in words: "Work in use, Claude 5h 12% used".
     private func summary(answering: ClaudeAccountInfo?, fullest: (label: String, window: WindowInfo)?) -> String {
         var parts: [String] = []
         if let answering, answering.number != 1 { parts.append("\(answering.short) in use") }
@@ -1487,7 +1487,7 @@ struct ClaudeAccountsUsage: View {
         VStack(alignment: .leading, spacing: 6) {
             if let answering {
                 HStack(spacing: 5) {
-                    Text(answering.short).font(.caption.weight(.semibold))
+                    Text(answering.short).font(.caption.weight(.semibold)).lineLimit(1).truncationMode(.middle)
                     Spacer()
                     Text("in use").font(.caption).foregroundStyle(Color(nsColor: .systemGreen))
                 }
@@ -1507,7 +1507,7 @@ struct ClaudeAccountsUsage: View {
             ForEach(accounts.filter { !$0.answering }) { a in
                 HStack(spacing: 5) {
                     Circle().fill(a.spent ? Color.orange : Color.secondary.opacity(0.5)).frame(width: 6, height: 6)
-                    Text(a.short)
+                    Text(a.short).lineLimit(1).truncationMode(.middle)
                     Spacer()
                     if a.spent {
                         Text(a.backAt.map { "back at \(Clock.short($0))" } ?? "at its limit").foregroundStyle(.secondary)
@@ -1539,7 +1539,7 @@ struct ClaudeAccountsUsage: View {
         let elsewhere = sessions.filter { s in s.fallback.map { $0.isAccount && $0.name != answering?.short } ?? false }
         if let answering, !elsewhere.isEmpty {
             let n = elsewhere.count
-            return "\(n == 1 ? "1 session" : "\(n) sessions") on another account \(n == 1 ? "moves" : "move") to account \(answering.number) at \(n == 1 ? "its" : "their") next turn."
+            return "\(n == 1 ? "1 session" : "\(n) sessions") on another account \(n == 1 ? "moves" : "move") to \(answering.name ?? "account \(answering.number)") at \(n == 1 ? "its" : "their") next turn."
         }
         guard let answering else {
             // Every one spent: Claude Code's calls are turned down until the first is back.
@@ -1547,7 +1547,7 @@ struct ClaudeAccountsUsage: View {
             return "Every Claude account is at its limit" + (back.map { ": the first is back at \(Clock.short($0))." } ?? ".")
         }
         guard answering.number != 1, let own = accounts.first(where: \.isOwn), own.spent, let back = own.backAt else { return nil }
-        return "Sessions go back to account 1 at their next turn after \(Clock.short(back))."
+        return "Sessions go back to \(own.name ?? "account 1") at their next turn after \(Clock.short(back))."
     }
 }
 

@@ -294,6 +294,14 @@ fn run_check(claude: &Path, dir: &Path, base_url: &str, token: &str) -> Checked 
 /// The organization of the account Claude Code on this Mac is signed in with, as
 /// `claude auth status` says (a claude.ai sign-in only): which account the user has already.
 pub(crate) fn own_org() -> Option<String> {
+    own_login().and_then(|o| o.org)
+}
+
+/// Who Claude Code on this Mac is signed in as, as `claude auth status --json` says for a
+/// claude.ai sign-in (its email, organization and plan). `None` for anything else: signed out, an
+/// API key, or a `CLAUDE_CODE_OAUTH_TOKEN`, which it reports with nothing of whose it is. Also
+/// kept as account 1's (see `claude_accounts::own`).
+pub(crate) fn own_login() -> Option<OwnLogin> {
     let claude = dino_core::which("claude")?;
     let mut child = Command::new(claude)
         .args(["auth", "status", "--json"])
@@ -309,12 +317,31 @@ pub(crate) fn own_org() -> Option<String> {
     while started.elapsed() < Duration::from_secs(5) {
         if let Ok(Some(_)) = child.try_wait() {
             let out = child.wait_with_output().ok()?.stdout;
-            let v: serde_json::Value = serde_json::from_slice(&out).ok()?;
-            return (v["authMethod"].as_str() == Some("claude.ai")).then(|| v["orgId"].as_str().map(str::to_string)).flatten();
+            let login = parse_auth_status(&out);
+            crate::claude_accounts::own_seen(login.clone());
+            return login;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = child.kill();
     let _ = child.wait();
     None
+}
+
+/// Account 1 as `claude auth status` reports a claude.ai sign-in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct OwnLogin {
+    pub org: Option<String>,
+    pub email: Option<String>,
+    /// "max", "pro", "team"…
+    pub plan: Option<String>,
+}
+
+pub(crate) fn parse_auth_status(out: &[u8]) -> Option<OwnLogin> {
+    let v: serde_json::Value = serde_json::from_slice(out).ok()?;
+    if v["loggedIn"].as_bool() != Some(true) || v["authMethod"].as_str() != Some("claude.ai") {
+        return None;
+    }
+    let text = |k: &str| v[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    Some(OwnLogin { org: text("orgId"), email: text("email"), plan: text("subscriptionType") })
 }

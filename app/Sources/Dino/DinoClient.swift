@@ -138,24 +138,25 @@ struct FallbackInfo: Codable, Equatable {
     var retry_at: UInt64?
     var since: UInt64
 
-    /// Answered by another of the user's Claude accounts ("Claude account 2"), not a fallback route.
+    /// Answered by another of the user's Claude accounts ("Work", "Claude account 2"), not a fallback route.
     var isAccount: Bool { provider == "anthropic" && !isModel }
 
     /// Answered by another model of the same account, the one asked for being rejected.
     var isModel: Bool { reason == "unavailable" }
 
     /// What the session shows: "On fallback: GLM Coding Plan · Claude limit resets 14:00", for
-    /// another Claude account "On Claude account 2 · account 1 back at 14:00" (the reset is the
-    /// spent account's, Claude Code's own sign-in), for another model "gpt-5.5 unavailable ·
-    /// using gpt-5.4".
+    /// another Claude account "On Work · you@example.com back at 14:00" (the reset is the spent
+    /// account's, Claude Code's own sign-in; each by the name the user knows it by, else "Claude
+    /// account 2"), for another model "gpt-5.5 unavailable · using gpt-5.4".
     var label: String {
         if isModel { return "\(why) · using \(model)" }
         guard isAccount else { return "On fallback: \(name) · \(why)" }
-        if let t = resets_at { return "On \(name) · account 1 back at \(Clock.short(t))" }
-        return "On \(name) · account 1 at its limit"
+        let own = ClaudeAccountInfo.ownShort
+        if let t = resets_at { return "On \(name) · \(own) back at \(Clock.short(t))" }
+        return "On \(name) · \(own) at its limit"
     }
 
-    /// The sidebar row's, short: "On Claude account 3"; the footer says when account 1 is back.
+    /// The sidebar row's, short: "On Work"; the footer says when account 1 is back.
     var rowLabel: String { isAccount ? "On \(name)" : label }
 
     /// "Claude limit resets 14:00", "GLM out of balance", "Claude down".

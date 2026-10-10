@@ -588,9 +588,13 @@ pub(crate) fn at_limit(d: &Daemon, l: &LauncherInfo) -> Option<String> {
 pub(crate) fn at_limit_routed(d: &Daemon, l: &LauncherInfo, routed: impl FnOnce() -> bool) -> Option<String> {
     let accounts = (l.agent_id == "claude").then(|| d.proxy.claude_accounts_now()).flatten().filter(|_| routed());
     if let Some(accounts) = &accounts
-        && let Some(first) = dino_proxy::accounts::all_spent(accounts.iter().map(|(_, l, q)| (l.as_ref(), q.as_ref())), now_secs())
+        && let Some(first) = dino_proxy::accounts::all_spent(accounts.iter().map(|(_, l, q, _)| (l.as_ref(), q.as_ref())), now_secs())
     {
-        let until = first.resets_at.map(|r| format!(" until {}, when the first resets", clock(r))).unwrap_or_default();
+        // Which one is back first, by the name the user knows it by.
+        let now = now_secs();
+        let back = accounts.iter().find(|(_, l, q, _)| dino_proxy::accounts::spent(l.as_ref(), q.as_ref(), now).is_some_and(|s| s.resets_at == first.resets_at));
+        let which = back.map(|(n, _, _, name)| if *n == 1 { crate::claude_accounts::label(1, None) } else { dino_core::ipc::account_label(*n, name.as_deref()) });
+        let until = first.resets_at.map(|r| format!(" until {}, when {} resets", clock(r), which.unwrap_or_else(|| "the first".into()))).unwrap_or_default();
         let all = if accounts.len() == 2 { "both".to_string() } else { format!("all {}", accounts.len()) };
         return Some(format!("{} is at its limit on {all} Claude accounts{until}", l.label));
     }

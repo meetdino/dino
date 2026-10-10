@@ -310,8 +310,8 @@ extension SettingsEntry {
               keys: ["fallbacks.*.steps", "fallbacks.*.on_outage", "fallbacks.*.new_sessions.agent", "fallbacks.*.new_sessions.model", "policies.fallback_providers"]),
 
         // Accounts
-        .init(id: "claude-accounts", pane: .claude, title: "Claude accounts", detail: "Sign in with more Claude accounts. Claude Code switches to the next when one reaches its usage limit.",
-              synonyms: ["accounts", "add account", "sign in", "log in", "login", "subscription", "max", "pro", "switch account", "limit", "claude code"]),
+        .init(id: "claude-accounts", pane: .claude, title: "Claude accounts", detail: "Sign in with more Claude accounts and name them. Claude Code switches to the next when one reaches its usage limit.",
+              synonyms: ["accounts", "add account", "sign in", "log in", "login", "subscription", "max", "pro", "switch account", "limit", "claude code", "rename", "account name", "email"]),
         .init(id: "claude-token", pane: .claude, title: "Claude Code on SSH hosts", detail: "Claude Code on SSH hosts signs in with your first Claude account.",
               synonyms: ["setup-token", "oauth", "ssh", "token", "subscription token"], keys: ["machine.claude_token.ssh", "machine.claude_token.local"]),
 

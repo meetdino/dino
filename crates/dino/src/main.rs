@@ -212,7 +212,7 @@ fn dino() -> anyhow::Result<()> {
         }
         #[cfg(target_os = "linux")]
         Some("service") => return systemd::run(&cli[1..]),
-        Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status"), cli.get(2).map(String::as_str)),
+        Some("claude-token") => return cmd_claude_token(cli.get(1).map(String::as_str).unwrap_or("status"), cli.get(2).map(String::as_str), cli.get(3..).unwrap_or_default()),
         Some("fallback") => return cmd_fallback(&cli[1..]),
         Some("attach") => {
             let fresh = cli.iter().any(|a| a == "--fresh");
@@ -1016,14 +1016,14 @@ fn show_fallback(settings: &dino_core::settings::Settings, agent: &str, provider
 
 /// The Claude subscription token (`claude setup-token`), for the Claude Code dino starts where it
 /// isn't signed in. `set` reads the token from stdin, so it never sits on a command line.
-fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
+fn cmd_claude_token(action: &str, arg: Option<&str>, rest: &[String]) -> anyhow::Result<()> {
     // Another of your Claude accounts, for when the one Claude Code signed in with is at its limit.
-    if action == "add-account" || action == "remove-account" {
-        return cmd_claude_account(action, arg);
+    if action == "add-account" || action == "remove-account" || action == "rename-account" {
+        return cmd_claude_account(action, arg, rest);
     }
     if !matches!(action, "status" | "create" | "set" | "remove") {
         println!(
-            "usage: dino claude-token [status|create|set|remove|add-account [--browser]|remove-account <n>]\n\n\
+            "usage: dino claude-token [status|create|set|remove|add-account [--browser]|rename-account <n> <name>|remove-account <n>]\n\n\
              A Claude subscription token lets Claude Code use your Claude plan on SSH hosts, and on this Mac\n\
              when Claude Code isn't signed in here (Settings → Agents). No other agent gets it.\n\n\
              \x20 create              run `claude setup-token` in a dino shell and keep the token it prints\n\
@@ -1032,6 +1032,8 @@ fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
              \x20 add-account         add another of your Claude accounts: sign in to it in your browser (or\n\
              \x20                     pipe in a token claude setup-token printed); when one account hits its\n\
              \x20                     limit, Claude Code switches to the next until it resets\n\
+             \x20 rename-account <n> <name>\n\
+             \x20                     call account <n> <name> (no name: back to \"Account <n>\")\n\
              \x20 remove-account <n>  forget account <n>"
         );
         return Ok(());
@@ -1075,7 +1077,7 @@ fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
         Ok(Response::ClaudeAccounts { accounts }) if accounts.accounts.len() > 1 => accounts.accounts,
         _ => vec![],
     };
-    let names: Vec<String> = accounts.iter().map(|a| if a.number == 1 { "Your Claude Code login".to_string() } else { format!("Account {}", a.number) }).collect();
+    let names: Vec<String> = accounts.iter().map(account_row_name).collect();
     for (a, name) in accounts.iter().zip(&names) {
         rows.push((name.as_str(), account_state(a)));
     }
@@ -1084,6 +1086,18 @@ fn cmd_claude_token(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
         println!("\nWhen an account hits its limit, Claude Code switches to the next one until the limit resets.");
     }
     Ok(())
+}
+
+/// A Claude account as `dino claude-token` lists it: "Work (2)", "you@example.com (your Claude
+/// Code login)", "Account 3".
+fn account_row_name(a: &dino_core::ipc::ClaudeAccountInfo) -> String {
+    let name = a.name.as_deref().map(printable);
+    match (a.number, name) {
+        (1, Some(n)) => format!("{n} (your Claude Code login)"),
+        (1, None) => "Your Claude Code login".into(),
+        (n, Some(name)) => format!("{name} ({n})"),
+        (n, None) => format!("Account {n}"),
+    }
 }
 
 /// What a Claude account is doing now: "answering now", "ready", "at its limit until today 14:00".
@@ -1099,7 +1113,7 @@ fn account_state(a: &dino_core::ipc::ClaudeAccountInfo) -> String {
 
 /// `dino claude-token add-account` (token on stdin) and `remove-account <n>`: your other Claude
 /// accounts, which dinod keeps in its key store as `CLAUDE_ACCOUNT_<n>`, never synced or shown.
-fn cmd_claude_account(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
+fn cmd_claude_account(action: &str, arg: Option<&str>, rest: &[String]) -> anyhow::Result<()> {
     // At a terminal, nothing piped in: sign in in the browser.
     if action == "add-account" && (arg == Some("--browser") || (arg.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdin()))) {
         return add_claude_account_in_browser();
@@ -1107,25 +1121,45 @@ fn cmd_claude_account(action: &str, arg: Option<&str>) -> anyhow::Result<()> {
     if action == "add-account" && arg.is_some_and(|a| a != "--paste") {
         anyhow::bail!("usage: dino claude-token add-account [--browser | --paste < token]");
     }
-    let (action, value, account) = if action == "add-account" {
+    let ask = |action: &str, value: Option<String>, account: Option<u32>| match client::request(&Request::ClaudeAccounts { action: action.into(), value, account, order: vec![] })? {
+        Response::ClaudeAccounts { accounts } => Ok(accounts),
+        Response::Error { message } => Err(hinted(message)),
+        _ => Err(unexpected()),
+    };
+    if action == "add-account" {
         let mut t = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)?;
-        ("add", Some(t), None)
+        let info = ask("add", Some(t), None)?;
+        if let Some(n) = info.added {
+            println!("{} added. When an account hits its limit, Claude Code switches to the next one until the limit resets.", added_name(&info, n));
+            println!("{}", name_hint(n));
+        }
+        return Ok(());
+    }
+    let usage = if action == "rename-account" { "usage: dino claude-token rename-account <n> <name>" } else { "usage: dino claude-token remove-account <n>" };
+    let n: u32 = arg.and_then(|a| a.parse().ok()).ok_or_else(|| anyhow::anyhow!(usage))?;
+    // As the user knows it, before it changes.
+    let before = ask("status", None, None)?.accounts.into_iter().find(|a| a.number == n).map(|a| a.label()).unwrap_or_else(|| format!("Account {n}"));
+    if action == "rename-account" {
+        let name = rest.join(" ");
+        let info = ask("rename", Some(name), Some(n))?;
+        let after = info.accounts.iter().find(|a| a.number == n).map(|a| a.label()).unwrap_or_else(|| format!("Account {n}"));
+        println!("{} is now called {}.", printable(&before), printable(&after));
     } else {
-        let n: u32 = arg.and_then(|a| a.parse().ok()).ok_or_else(|| anyhow::anyhow!("usage: dino claude-token remove-account <n>"))?;
-        ("remove", None, Some(n))
-    };
-    let info = match client::request(&Request::ClaudeAccounts { action: action.into(), value, account, order: vec![] })? {
-        Response::ClaudeAccounts { accounts } => accounts,
-        Response::Error { message } => return Err(hinted(message)),
-        _ => return Err(unexpected()),
-    };
-    match (info.added, account) {
-        (Some(n), _) => println!("Account {n} added. When an account hits its limit, Claude Code switches to the next one until the limit resets."),
-        (None, Some(n)) => println!("Account {n} removed."),
-        _ => {}
+        ask("remove", None, Some(n))?;
+        println!("{} removed.", printable(&before));
     }
     Ok(())
+}
+
+/// The account `info` just added, as the user will know it: "Account 3" until they name it.
+fn added_name(info: &dino_core::ipc::ClaudeAccountsInfo, n: u32) -> String {
+    printable(&info.accounts.iter().find(|a| a.number == n).map_or_else(|| format!("Account {n}"), |a| a.label()))
+}
+
+/// How to name account `n`: Anthropic tells dino nothing of whose an added account is.
+fn name_hint(n: u32) -> String {
+    format!("Name it so you know which it is: dino claude-token rename-account {n} \"Work\"")
 }
 
 /// `dino claude-token add-account` at a terminal: dinod runs Claude Code's own `claude setup-token`,
@@ -1164,7 +1198,7 @@ fn add_claude_account_in_browser() -> anyhow::Result<()> {
             eprint!("{e}\nCode: ");
         }
         let info = ask("status", None)?;
-        let Some(l) = info.login.filter(|l| l.id == started.id) else { anyhow::bail!("Another sign-in took this one's place.") };
+        let Some(l) = info.login.clone().filter(|l| l.id == started.id) else { anyhow::bail!("Another sign-in took this one's place.") };
         match l.stage.as_str() {
             "browser" if l.url.is_some() && shown_url != l.url => {
                 let first = shown_url.is_none();
@@ -1199,7 +1233,8 @@ fn add_claude_account_in_browser() -> anyhow::Result<()> {
                 let row = info.accounts.iter().find(|a| a.number == n);
                 let windows = row.map(|a| a.windows.iter().map(|w| format!("{} {:.0}% used", w.name, w.utilization * 100.0)).collect::<Vec<_>>().join(", ")).unwrap_or_default();
                 let windows = if windows.is_empty() { String::new() } else { format!(" ({windows})") };
-                println!("Account {n} added{windows}. When an account hits its limit, Claude Code switches to the next one until the limit resets.");
+                println!("{} added{windows}. When an account hits its limit, Claude Code switches to the next one until the limit resets.", added_name(&info, n));
+                println!("{}", name_hint(n));
                 return Ok(());
             }
             "failed" => anyhow::bail!("{}", printable(l.error.as_deref().unwrap_or("The sign-in failed."))),
