@@ -914,7 +914,8 @@ private struct HoursChart: View {
     var body: some View {
         // Hours as categories, so each gets its own band (a width ratio means nothing on a
         // continuous scale, where the bars came out zero wide).
-        Chart(hours, id: \.hour) { h in
+        // Only hours its domain holds: Swift Charts traps on a value outside it.
+        Chart(hours.filter { (0..<24).contains($0.hour) }, id: \.hour) { h in
             BarMark(x: .value("Hour", StatsFormat.hour(Int(h.hour))), y: .value("Requests", Double(h.requests)), width: .ratio(0.7))
                 .foregroundStyle(Brand.green)
                 .clipShape(UnevenRoundedRectangle(topLeadingRadius: 3, topTrailingRadius: 3))
@@ -1061,12 +1062,20 @@ enum ModelColors {
         })
     }
 
-    /// Names in the daily chart's order, and their colours ("Other" grey).
+    /// The daily chart's series, as it labels them (`shortModel`), in its order, each once, and
+    /// their colours ("Other" grey). Each mark's label is in it, and no label twice (two models can
+    /// share a short name): Swift Charts traps on a label its scale's domain doesn't hold.
     static func scale(_ r: StatsReport) -> (domain: [String], range: [Color]) {
         var names: [String] = []
-        for d in r.daily_models where !names.contains(d.model) { names.append(d.model) }
+        var colors: [Color] = []
         let order = r.models.map(\.model)
-        return (names, names.map { n in n == "Other" ? .gray : slot(order.firstIndex(of: n) ?? 99) })
+        for d in r.daily_models {
+            let name = shortModel(d.model)
+            guard !names.contains(name) else { continue }
+            names.append(name)
+            colors.append(d.model == "Other" ? .gray : slot(order.firstIndex(of: d.model) ?? 99))
+        }
+        return (names, colors)
     }
 }
 
@@ -1098,7 +1107,7 @@ private struct ModelsPane: View {
                             }
                     }
                 }
-                .chartForegroundStyleScale(domain: scale.domain.map { shortModel($0) }, range: scale.range)
+                .chartForegroundStyleScale(domain: scale.domain, range: scale.range)
                 .chartXSelection(value: $picked)
                 .chartYAxis { AxisMarks { v in AxisGridLine().foregroundStyle(.quaternary); AxisValueLabel { if let n = v.as(Double.self) { Text(tokens(UInt64(n))) } } } }
                 .chartLegend(position: .bottom, alignment: .leading)
@@ -1194,28 +1203,20 @@ private struct AgentsPane: View {
     let r: StatsReport
     let size: StatsSize
 
-    /// Each agent's tokens by part; one plain bar where dinod doesn't split them.
-    private var bars: [(agent: String, part: StatsPart?, tokens: UInt64)] {
-        r.agents.flatMap { a -> [(String, StatsPart?, UInt64)] in
-            guard let p = a.parts, !p.isEmpty else { return [(a.agent, nil, a.tokens.total)] }
-            return StatsPart.allCases.map { (a.agent, $0, $0.of(p)) }.filter { $0.2 > 0 }
-        }
-    }
-
     var body: some View {
-        let split = r.agents.contains { $0.parts.map { !$0.isEmpty } ?? false }
+        let chart = AgentBars(r.agents)
+        let split = chart.split
         VStack(alignment: .leading, spacing: 16) {
             StatsCard(title: "Tokens by agent", note: split ? "conversations, subagents and side requests" : nil) {
-                Chart(Array(bars.enumerated()), id: \.offset) { _, b in
+                Chart(Array(chart.bars.enumerated()), id: \.offset) { _, b in
                     BarMark(x: .value("Tokens", Double(b.tokens)), y: .value("Agent", AgentNames.of(b.agent)), height: .fixed(18))
-                        .foregroundStyle(by: .value("Part", b.part?.title ?? "Tokens"))
+                        .foregroundStyle(by: .value("Part", b.key))
                 }
-                .chartForegroundStyleScale(domain: split ? StatsPart.allCases.map(\.title) : ["Tokens"],
-                                           range: split ? StatsPart.allCases.map(\.color) : [Brand.green])
+                .chartForegroundStyleScale(domain: chart.keys, range: chart.colors)
                 .chartLegend(split ? .visible : .hidden)
                 .chartLegend(position: .top, alignment: .leading)
                 .chartXAxis { AxisMarks { v in AxisGridLine().foregroundStyle(.quaternary); AxisValueLabel { if let n = v.as(Double.self) { Text(tokens(UInt64(n))) } } } }
-                .frame(height: CGFloat(max(r.agents.count, 1)) * 34 + (split ? 56 : 30))
+                .frame(height: CGFloat(max(chart.rows, 1)) * 34 + (split ? 56 : 30))
                 .accessibilityLabel("Tokens by agent")
             }
             StatsCard(title: "Every agent", note: "routed through dino, and from each agent's own history") {
@@ -1404,6 +1405,45 @@ private struct RouteCard: View {
     }
 }
 
+/// The Tokens by agent chart's bars and colour scale. Swift Charts traps when a mark's
+/// `foregroundStyle(by:)` value isn't in `chartForegroundStyleScale`'s domain, so the domain is
+/// made from the bars themselves: an agent dinod doesn't split (nil or all-zero parts, as a plain
+/// shell's calls are) next to one it does gets a plain "Tokens" bar, and "Tokens" its key.
+struct AgentBars {
+    struct Bar: Equatable {
+        let agent: String
+        /// A part's title, or "Tokens" where the agent isn't split.
+        let key: String
+        let tokens: UInt64
+    }
+
+    static let unsplit = "Tokens"
+
+    let bars: [Bar]
+    /// Every key a bar has, each once: the parts in their order, then "Tokens".
+    let keys: [String]
+    let colors: [Color]
+    /// Whether any agent is split by part (the legend shows then).
+    let split: Bool
+    /// Agents drawn, one row each.
+    let rows: Int
+
+    init(_ agents: [StatsAgent]) {
+        // Nothing to draw for an agent that used no tokens (a shell's calls).
+        bars = agents.filter { $0.tokens.total > 0 || ($0.parts?.total ?? 0) > 0 }.flatMap { a -> [Bar] in
+            guard let p = a.parts, !p.isEmpty else { return [Bar(agent: a.agent, key: Self.unsplit, tokens: a.tokens.total)] }
+            return StatsPart.allCases.filter { $0.of(p) > 0 }.map { Bar(agent: a.agent, key: $0.title, tokens: $0.of(p)) }
+        }
+        let used = Set(bars.map(\.key))
+        let parts = StatsPart.allCases.filter { used.contains($0.title) }
+        split = !parts.isEmpty
+        keys = parts.map(\.title) + (used.contains(Self.unsplit) ? [Self.unsplit] : [])
+        colors = parts.map(\.color) + (used.contains(Self.unsplit) ? [split ? Color.gray : Brand.green] : [])
+        var seen = Set<String>()
+        rows = bars.filter { seen.insert($0.agent).inserted }.count
+    }
+}
+
 // MARK: - Speed
 
 private struct SpeedPane: View {
@@ -1559,9 +1599,12 @@ enum StatsFormat {
         date(s)?.formatted(date: style, time: .omitted) ?? s
     }
 
+    /// An hour of the day as the locale writes it ("14", "2 PM"). Taken from a day in a zone with
+    /// no daylight saving, so each of the 24 is there and different: the hours chart's domain.
     static func hour(_ h: Int) -> String {
-        let d = Calendar.current.date(bySettingHour: h, minute: 0, second: 0, of: Date()) ?? Date()
-        return d.formatted(.dateTime.hour())
+        var style = Date.FormatStyle.dateTime.hour()
+        style.timeZone = TimeZone(identifier: "UTC")!
+        return Date(timeIntervalSinceReferenceDate: Double(h) * 3600).formatted(style)
     }
 
     static func duration(_ ms: Int64) -> String {
