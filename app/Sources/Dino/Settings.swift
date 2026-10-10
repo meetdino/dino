@@ -429,7 +429,7 @@ struct SettingsView: View {
         .modifier(TerminalChoicesSync())
         .environmentObject(store)
         .frame(minWidth: 760, idealWidth: 880, minHeight: 500, idealHeight: 660)
-        .background(FixedMinimum(size: NSSize(width: 760, height: 500)))
+        .background(SettingsWindowSetup(minimum: NSSize(width: 760, height: 500)))
         .onAppear { store.load() }
         .onChange(of: query) { _, _ in picked = nil }
         .onChange(of: picked) { _, id in
@@ -491,23 +491,29 @@ struct SettingsView: View {
     }
 }
 
-/// The window's minimum set once, on the window: the hosting view otherwise works out the whole
-/// page's smallest and largest size on every change (a long page, every keystroke) to keep its
-/// window within them.
-private struct FixedMinimum: NSViewRepresentable {
-    let size: NSSize
+/// What the Settings window needs of AppKit, set once on the window:
+/// - its minimum: the hosting view otherwise works out the whole page's smallest and largest size
+///   on every change (a long page, every keystroke) to keep its window within them;
+/// - where the keyboard starts: here, not on the window's first key view, the search field.
+///   A text field taking it at open made macOS set up its text input for a search nobody asked
+///   for: TextInputUI's 500×500 `TUINSWindow` and AutoFill's `SPRoundedWindow`, two hidden windows
+///   beside Settings. Search takes the keyboard on a click, ⇥ or ⌘F.
+struct SettingsWindowSetup: NSViewRepresentable {
+    let minimum: NSSize
 
-    func makeNSView(context _: Context) -> NSView { Probe(size: size) }
+    func makeNSView(context _: Context) -> NSView { Probe(minimum: minimum) }
     func updateNSView(_: NSView, context _: Context) {}
 
     final class Probe: NSView {
-        let size: NSSize
-        init(size: NSSize) {
-            self.size = size
+        let minimum: NSSize
+        init(minimum: NSSize) {
+            self.minimum = minimum
             super.init(frame: .zero)
         }
 
         @available(*, unavailable) required init?(coder _: NSCoder) { nil }
+
+        override var acceptsFirstResponder: Bool { true }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -515,7 +521,8 @@ private struct FixedMinimum: NSViewRepresentable {
             var v = w.contentView
             while let view = v, !(view is HostingSizing) { v = view.subviews.first }
             (v as? HostingSizing)?.sizingOptions = []
-            w.contentMinSize = size
+            w.contentMinSize = minimum
+            w.initialFirstResponder = self
         }
     }
 }
