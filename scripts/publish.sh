@@ -8,23 +8,18 @@
 #   scripts/publish.sh              # do it (asks first)
 #
 #   RELEASES_REPO   default meetdino/dino
-#   BRIDGE_REPO     default meetdino/dino-releases; empty for none
+#   BRIDGE_REPO     empty (none) unless set
 #   TAP_REPO        default meetdino/homebrew-tap
 # Needs `gh` signed in as an account that can push to all three.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="${DIST:-$ROOT/dist}"
 RELEASES_REPO="${RELEASES_REPO:-meetdino/dino}"
-# TEMPORARY, the bridge (https://github.com/meetdino/dino/issues/63, "Retire dino-releases"). dino
-# 0.1.5 and older, the app and an install.sh `dino` alike, read their feed from
-# https://github.com/asdf9384/dino-releases/releases/latest/download/appcast.xml, which GitHub
-# redirects to meetdino/dino-releases. So each release goes there too, as its latest: those installs
-# find it, and the version they update to reads its feed from RELEASES_REPO. The appcast's downloads
-# point at RELEASES_REPO either way; the copies there keep old links to its files working.
-# Remove this, and the step below, once most installs are on a release published with it (the issue
-# says how to tell); then archive meetdino/dino-releases. Never delete it, and never create a
-# repository by that name or as asdf9384/dino-releases: either strands every install still on 0.1.5.
-BRIDGE_REPO="${BRIDGE_REPO-meetdino/dino-releases}"
+# The bridge to meetdino/dino-releases (issue #63) is retired: that repository is archived, so
+# installs of 0.1.5 and older stay on 0.1.10, the last release published there. Never delete it, and
+# never create a repository by that name or as asdf9384/dino-releases: either strands those installs.
+# BRIDGE_REPO stays for a one-off copy to another repository; it's empty unless set.
+BRIDGE_REPO="${BRIDGE_REPO-}"
 TAP_REPO="${TAP_REPO:-meetdino/homebrew-tap}"
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
