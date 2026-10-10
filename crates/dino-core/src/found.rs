@@ -209,12 +209,15 @@ pub fn inside(fg: u32) -> Option<FoundSession> {
     // Each process, parents first, with its command as `ps -o comm` names it (its first argument,
     // or the kernel's name for one this user can't read) and its arguments: asked of the kernel,
     // microseconds each. A `ps` of every process cost tens of milliseconds at each new foreground.
+    // One in the middle of exec is left out: its name is the program before's, and its flags are
+    // gone (a script named `claude` exec'ing another program would be Claude with none).
     let procs: Vec<(u32, String, Vec<String>)> = crate::procinfo::tree(fg)
         .into_iter()
         .take(64)
-        .map(|(pid, _)| match crate::procinfo::args_and_env(pid) {
-            Some((mut args, _)) if !args.is_empty() => (pid, args.remove(0).trim_end().to_string(), args),
-            _ => (pid, crate::procinfo::name(pid).unwrap_or_default(), vec![]),
+        .filter_map(|(pid, _)| match crate::procinfo::args_and_env(pid) {
+            Some((mut args, _)) if !args.is_empty() => Some((pid, args.remove(0).trim_end().to_string(), args)),
+            _ if crate::procinfo::execing(pid) => None,
+            _ => Some((pid, crate::procinfo::name(pid).unwrap_or_default(), vec![])),
         })
         .collect();
     for (pid, comm, args) in &procs {

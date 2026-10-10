@@ -9,7 +9,7 @@ use std::mem::{size_of, size_of_val};
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{alive, args_and_env, children_of, cwd_of, exe_of, now_ns, open_fds, open_file, parent_of, process, rusage, started};
+pub use linux::{alive, args_and_env, children_of, cwd_of, exe_of, execing, now_ns, open_fds, open_file, parent_of, process, rusage, started};
 #[cfg(target_os = "linux")]
 use linux::{all_pids, name_of};
 
@@ -166,6 +166,13 @@ pub fn exe_of(pid: u32) -> Option<String> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let n = unsafe { libc::proc_pidpath(pid as libc::c_int, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
     (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+/// A process in the middle of exec, whose arguments and name aren't its new program's yet: on
+/// macOS a look sees it before or after, never between.
+#[cfg(target_os = "macos")]
+pub fn execing(_pid: u32) -> bool {
+    false
 }
 
 /// A process's arguments (its own name first) and environment, as the kernel keeps them, like
