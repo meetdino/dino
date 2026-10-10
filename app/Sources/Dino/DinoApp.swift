@@ -186,6 +186,10 @@ struct DinoApp: App {
                         .disabled(model.selectedSession == nil || model.selectedSession?.exited == true)
                     Button("Rename…") { if let id = model.selectedSession?.id { model.renaming = Renaming(id: id, place: .tab) } }
                         .disabled(model.selectedSession == nil)
+                    if let s = model.selectedSession {
+                        Divider()
+                        CopyItems(session: s)
+                    }
                     Divider()
                     Button("Archive") { if let id = model.selectedSession?.id { model.archive(id) } }
                         .keyboardShortcut("a", modifiers: [.command, .shift])

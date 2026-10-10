@@ -1160,6 +1160,10 @@ pub struct SessionInfo {
     /// The agent's own conversation id, when dino knows it: one conversation is one session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// The name its agent answers to when another session of that agent messages it (Claude
+    /// Code's `SendMessage`), while it runs on this Mac; `None` for agents that have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
     /// Where a shell with shell integration says it is now (`cwd` is where it started), and the
     /// exit code of the last command it ran.
     #[serde(default)]

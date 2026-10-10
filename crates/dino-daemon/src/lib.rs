@@ -2994,6 +2994,7 @@ fn state(d: &Daemon) -> Response {
             let pending = s.pending.lock().unwrap().clone();
             let messaged_by = s.messaged_by.lock().unwrap().clone();
             let conversation = s.agent_session.lock().unwrap().clone();
+            let peer_name = peer_name_of(s);
             let shell_cwd = s.pane.shared.cwd.lock().unwrap().clone();
             let last_exit = *s.pane.shared.last_exit.lock().unwrap();
             // What its agent's records call its conversation (Codex's), over its terminal's title.
@@ -3049,6 +3050,7 @@ fn state(d: &Daemon) -> Response {
                 tasks,
                 inside,
                 conversation,
+                peer_name,
                 running,
                 foreground,
                 password: s.host.is_none() && !s.pane.is_exited() && *s.pane.shared.password.lock().unwrap(),
@@ -3572,6 +3574,11 @@ fn prompt_args(agent_id: &str, prompt: String) -> Vec<String> {
 /// The conversation `s`'s agent is on, looked at now, for agents that name it only as they go.
 fn conversation_of(s: &Session) -> Option<String> {
     s.host.is_none().then(|| s.adapter()?.conversation_of(s.agent_pid()?)).flatten()
+}
+
+/// What another session of its agent messages it by (see `Agent::peer_name`), while it runs here.
+fn peer_name_of(s: &Session) -> Option<String> {
+    (s.host.is_none() && !s.pane.is_exited()).then(|| s.adapter()?.peer_name(s.agent_pid()?)).flatten()
 }
 
 /// `s` is on this Mac, and dino follows its agent's own record of its turns (see `codex`).

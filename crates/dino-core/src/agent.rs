@@ -315,6 +315,11 @@ pub trait Agent: Sync {
     fn conversation_of(&self, _pid: u32) -> Option<String> {
         None
     }
+    /// The name process `pid` of it answers to when another of its sessions messages it, for
+    /// agents that message each other by name (Claude Code's `ListAgents` and `SendMessage`).
+    fn peer_name(&self, _pid: u32) -> Option<String> {
+        None
+    }
     /// The file conversation `session` is written to as it goes (`StatusSource::Log`).
     fn log_path(&self, _session: &str) -> Option<PathBuf> {
         None
