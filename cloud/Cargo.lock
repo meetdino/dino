@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "dino-sync"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "serde",
  "serde_json",
