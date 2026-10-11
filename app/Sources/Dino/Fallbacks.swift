@@ -264,7 +264,7 @@ struct FallbackChip: View {
 
     var body: some View {
         if fallback.isAccount {
-            Text(fallback.name)
+            Text(fallback.accountName)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -291,9 +291,11 @@ struct FallbackChip: View {
     }
 
     static func detail(_ f: FallbackInfo, _ usage: [RouteUsage]) -> String {
-        // Another Claude account answers for Claude Code's own sign-in: account 1.
-        let from = f.isAccount ? ClaudeAccountInfo.ownShort : f.from
-        var lines = ["\(f.isModel ? f.name : from) said: \(f.said)", "Answering: \(f.name) · \(f.model), since \(Clock.short(f.since))"]
+        // Another Claude account answers for the spent one: Claude Code's own sign-in, or the one
+        // chosen to go first.
+        let from = f.isAccount ? f.accountFrom : f.from
+        let name = f.isAccount ? f.accountName : f.name
+        var lines = ["\(f.isModel ? f.name : from) said: \(f.said)", "Answering: \(name) · \(f.model), since \(Clock.short(f.since))"]
         if let r = f.retry_at {
             lines.append("Switches back to \(from) at the first turn after \(Clock.short(r))")
         }

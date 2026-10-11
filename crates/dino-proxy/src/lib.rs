@@ -181,6 +181,9 @@ pub struct SessionStats {
     pub by_route: Vec<RouteUsage>,
     /// The route its model calls go to, by key (see `fallback::route_key`), and its name.
     pub primary: Option<(String, String)>,
+    /// The Claude account that answered its last call, by key (see `fallback::route_key` and
+    /// `accounts::key`): one turn stays on one account, unless that one is spent.
+    pub(crate) signer: Option<String>,
     /// Server errors from it in a row, and when the last came (Unix seconds).
     pub(crate) outages: (u32, u64),
     /// A fallback answered part of the conversation: what it thought stays behind when the first
@@ -634,6 +637,7 @@ impl Stats {
         s.computer = None;
         s.fallback = None;
         s.substitute = None;
+        s.signer = None;
         s.outages = (0, 0);
         true
     }
@@ -697,6 +701,7 @@ impl Proxy {
             keys: keys.clone(),
             checking: Arc::default(),
             account_names: Arc::default(),
+            chosen: Arc::default(),
             plans: Arc::default(),
             chains: Arc::default(),
             budget: budget.clone(),
@@ -747,32 +752,41 @@ impl Proxy {
         self.state.free_wake.notify_one();
     }
 
-    /// Route `key` is spent (or down) and nothing of the user's own stands in: for Claude Code's
-    /// subscription, none of their other Claude accounts has room (see `accounts::spent`).
-    /// `switch`: its calls go through here, where another account can sign them.
+    /// Route `key` is spent (or down) and nothing of the user's own stands in: for the Claude
+    /// account Claude Code's calls go to first (its own sign-in, or the one chosen), none of their
+    /// other Claude accounts has room (see `accounts::spent`). `switch`: its calls go through
+    /// here, where another account can sign them.
     pub fn spent(&self, key: &str, switch: bool) -> Option<fallback::Limited> {
         let l = self.stats.limited(key)?;
-        let subscription = switch && key.starts_with("anthropic#") && l.name == fallback::CLAUDE;
+        let chosen = self.state.chosen.read().unwrap().clone();
+        let others = accounts::others(&self.keys.read().unwrap());
+        let own = key.starts_with("anthropic#") && !accounts::is_key(key) && l.name == fallback::CLAUDE;
+        let first = own || chosen.is_some_and(|c| accounts::key(&c) == key && others.iter().any(|(_, t)| *t == c));
+        if !switch || !first {
+            return Some(l);
+        }
         let now = fallback::now();
-        let spare = subscription
-            && accounts::others(&self.keys.read().unwrap()).iter().any(|(_, t)| {
-                let k = accounts::key(t);
-                accounts::spent(self.stats.limited(&k).as_ref(), self.stats.quota(&k).as_ref(), now).is_none()
-            });
-        (!spare).then_some(l)
+        let room = |limited: Option<fallback::Limited>, quota: Option<Quota>| accounts::spent(limited.as_ref(), quota.as_ref(), now).is_none();
+        // Room on another: one of the added accounts, or Claude Code's own when another goes first.
+        let other = others.iter().map(|(_, t)| accounts::key(t)).any(|k| k != key && room(self.stats.limited(&k), self.stats.quota(&k)));
+        let own_room = !own && room(self.own_limited(), self.stats.quota("anthropic"));
+        (!other && !own_room).then_some(l)
+    }
+
+    /// Claude Code's own sign-in, spent until when, if a call found it so.
+    fn own_limited(&self) -> Option<fallback::Limited> {
+        self.stats
+            .limited_routes()
+            .into_iter()
+            .filter(|(k, l)| k.starts_with("anthropic#") && !accounts::is_key(k) && l.name == fallback::CLAUDE)
+            .filter_map(|(k, _)| self.stats.limited(&k))
+            .max_by_key(|l| l.retry_at)
     }
 
     /// The user's Claude accounts as they stand: Claude Code's own (signed in with a
     /// subscription), spent until when, if it was found so; and each other account's, by token.
     pub fn claude_accounts(&self, tokens: &[&str]) -> (Option<fallback::Limited>, Vec<Option<fallback::Limited>>) {
-        let own = self
-            .stats
-            .limited_routes()
-            .into_iter()
-            .filter(|(k, l)| k.starts_with("anthropic#") && !accounts::is_key(k) && l.name == fallback::CLAUDE)
-            .filter_map(|(k, _)| self.stats.limited(&k))
-            .max_by_key(|l| l.retry_at);
-        (own, tokens.iter().map(|t| self.stats.limited(&accounts::key(t))).collect())
+        (self.own_limited(), tokens.iter().map(|t| self.stats.limited(&accounts::key(t))).collect())
     }
 
     /// The user's Claude accounts as calls find them, for the state: each one's number (1 for
@@ -799,6 +813,20 @@ impl Proxy {
     /// says so by that name ("On Work"), from its next switch on; one with none is "Claude account 3".
     pub fn set_account_names(&self, names: HashMap<String, String>) {
         *self.state.account_names.write().unwrap() = names.into_iter().map(|(t, n)| (accounts::key(&t), n)).collect();
+    }
+
+    /// The Claude account Claude Code's calls go to first, by its token: one of the other accounts
+    /// (see `accounts`), which then signs them instead of Claude Code's own sign-in, from each
+    /// session's next turn. `None` (or a token that's no account) for its own sign-in. While it's
+    /// spent, the accounts after it answer, then Claude Code's own and the ones before it.
+    pub fn set_chosen_account(&self, token: Option<&str>) {
+        *self.state.chosen.write().unwrap() = token.map(|t| t.trim().to_string());
+    }
+
+    /// The account chosen (see `set_chosen_account`), by its number, while it's one of the others.
+    pub fn chosen_account(&self) -> Option<u32> {
+        let chosen = self.state.chosen.read().unwrap().clone()?;
+        accounts::others(&self.keys.read().unwrap()).into_iter().find(|(_, t)| *t == chosen).map(|(n, _)| n)
     }
 
     /// Claude account `token`'s organization and windows (Claude Code's own sign-in for `None`),
@@ -961,6 +989,8 @@ pub(crate) struct AppState {
     /// The names the user gave their other Claude accounts, by `accounts::key` (see
     /// `Proxy::set_account_names`).
     account_names: Arc<RwLock<HashMap<String, String>>>,
+    /// The token of the Claude account chosen to answer first (see `Proxy::set_chosen_account`).
+    chosen: Arc<RwLock<Option<String>>>,
     /// Coding plans, by id (see `plan`).
     plans: Arc<RwLock<plan::Plans>>,
     /// What each session falls back to, by session id (see `fallback`).
@@ -1144,6 +1174,31 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
         (Some((n, t)), Some(p)) => Some(Primary { key: accounts::key(t), tag: RouteTag { path: p.tag.path, name: account_name(&st, *n, t) } }),
         (_, p) => p,
     };
+
+    // The user's other Claude accounts, for Claude Code's own calls to Anthropic signed in with a
+    // subscription: one signs them when it's the one chosen, or while the ones tried before it are
+    // spent.
+    let accounts = if subscription && signed_as.is_none() { accounts::others(&st.keys.read().unwrap()) } else { vec![] };
+    // The one the user chose to answer first, when it's one of them (see `Proxy::set_chosen_account`):
+    // the call's route is that account's, signed with its token, and Claude Code's own sign-in is
+    // one it goes on with while it's spent. `None`: Claude Code's own, as it signed the call.
+    let home: Signer = st.chosen.read().unwrap().as_ref().and_then(|c| accounts.iter().find(|(_, t)| t == c).cloned());
+    // Every account that can sign the call, in the order they're tried: the first, the ones after
+    // it, then from the top (Claude Code's own) to the ones before it.
+    let order: Vec<Signer> = {
+        let all: Vec<Signer> = std::iter::once(None).chain(accounts.iter().cloned().map(Some)).collect();
+        let at = all.iter().position(|s| *s == home).unwrap_or(0);
+        all[at..].iter().chain(&all[..at]).cloned().collect()
+    };
+    let own_key = primary.as_ref().map(|p| p.key.clone()).unwrap_or_default();
+    let primary = match (&home, primary) {
+        (Some((n, t)), Some(p)) => Some(Primary { key: accounts::key(t), tag: RouteTag { path: p.tag.path, name: account_name(&st, *n, t) } }),
+        (_, p) => p,
+    };
+    // Each account as fallbacks track it, and as the session names it: Claude Code's own as "Claude".
+    let key_of = |s: &Signer| s.as_ref().map_or_else(|| own_key.clone(), |(_, t)| accounts::key(t));
+    let name_of = |s: &Signer| s.as_ref().map_or_else(|| fallback::CLAUDE.to_string(), |(n, t)| account_name(&st, *n, t));
+    let spare = |s: &Signer| st.stats.limited(&key_of(s)).is_none();
     if is_model_call {
         st.stats.update(&session, |s| {
             s.requests += 1;
@@ -1161,32 +1216,18 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
     }
     let mut guard = is_model_call.then(|| InFlight { stats: st.stats.clone(), session: session.clone() });
 
-    // The user's other Claude accounts, for Claude Code's own calls to Anthropic signed in with a
-    // subscription: while the one it signed in with is spent, the first that isn't answers.
-    let accounts = if subscription && signed_as.is_none() { accounts::others(&st.keys.read().unwrap()) } else { vec![] };
-
     // What the session falls back to, if anything: only for the APIs that answer a turn, and not
     // for an agent that wanted the ChatGPT plan's stream put together.
     let api = if is_model_call && !collect { fallback::Api::of(&rest) } else { None };
 
-    // Which account signs the call: its own while that isn't spent; one turn stays on one account.
-    let key_of = |n: u32| accounts.iter().find(|a| a.0 == n).map(|a| accounts::key(&a.1)).unwrap_or_default();
-    let spare = |n: u32| st.stats.limited(&key_of(n)).is_none();
-    let mut account: Option<(u32, String)> = None;
-    if let Some(p) = &primary
-        && !accounts.is_empty()
-    {
-        let mut on = None;
-        st.stats.update(&session, |s| on = s.fallback.as_ref().filter(|f| f.from == p.key).and_then(|f| f.account));
-        let mid_turn = on.filter(|_| api.is_some_and(|a| !fallback::turn_start(a, &body)));
-        let pick = if let Some(n) = mid_turn.filter(|n| spare(*n)) {
-            Some(n)
-        } else if st.stats.limited(&p.key).is_some() {
-            accounts.iter().map(|a| a.0).find(|n| spare(*n))
-        } else {
-            None
-        };
-        account = pick.and_then(|n| accounts.iter().find(|a| a.0 == n).cloned());
+    // Which account signs the call: the first while that isn't spent, else the next in order that
+    // isn't; one turn stays on one account, so a choice made mid-turn waits for the next.
+    let mut account: Signer = home.clone();
+    if primary.is_some() && !accounts.is_empty() {
+        let mut last = None;
+        st.stats.update(&session, |s| last = s.signer.clone());
+        let mid_turn = last.filter(|_| api.is_some_and(|a| !fallback::turn_start(a, &body))).and_then(|k| order.iter().find(|s| key_of(s) == k));
+        account = mid_turn.filter(|s| spare(s)).or_else(|| order.iter().find(|s| spare(s))).unwrap_or(&home).clone();
     }
     let chain = api.and_then(|_| st.chains.read().unwrap().get(&session).cloned());
     let query_ref = query.as_str();
@@ -1195,7 +1236,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
     if let (Some(chain), Some(api), Some(p)) = (&chain, api, &primary) {
         // Spent (or down, when that counts), or back from a fallback but in the middle of a turn:
         // the chain answers, without asking the route that can't.
-        if account.is_none()
+        if account == home
             && let Some(why) = skip_primary(&st.stats, &session, &p.key, chain.on_outage, api, &body)
         {
             if let Some(r) = steps(&st, &session, chain, api, &body, &parts.headers, &parts.method, query_ref, p, &why, &mut guard).await {
@@ -1304,38 +1345,31 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
                     }
                 }
             }
-            // The account that signed it is spent: its own, when another answered and its own
-            // isn't known spent, then the user's other Claude accounts in order, until one answers.
+            // The account that signed it is spent: the others that aren't, in order (the first,
+            // when another answered and it isn't known spent), until one answers.
             if !accounts.is_empty()
-                && let Some(p) = &primary
+                && primary.is_some()
                 && let Some(t) = fallback::classify(status.as_u16(), &headers, &text).filter(|t| t.kind == fallback::Kind::Quota)
             {
-                let current = account.as_ref().map(|a| a.0);
-                let signer = |a: Option<u32>| match a {
-                    Some(n) => (key_of(n), accounts.iter().find(|a| a.0 == n).map_or_else(|| accounts::name(n), |a| account_name(&st, n, &a.1))),
-                    None => (p.key.clone(), p.tag.name.clone()),
-                };
-                let (key, name) = signer(current);
+                let (key, name) = (key_of(&account), name_of(&account));
                 st.stats.mark_limited(&key, &name, &t);
                 st.stats.refusals.lock().unwrap().insert(key.clone(), Refusal { status, headers: headers.clone(), text: text.clone() });
                 record_quota(&st.stats, &quota_key(&provider, account.as_ref().or(signed_as.as_ref())), &headers);
-                let own = (current.is_some() && st.stats.limited(&p.key).is_none()).then_some(None);
-                let others = accounts.iter().filter(|(n, _)| Some(*n) != current && spare(*n)).map(Some);
-                for next in own.into_iter().chain(others) {
-                    let (next_key, next_name) = signer(next.map(|a| a.0));
-                    match send(body.clone(), next.map(|a| a.1.as_str())).await {
+                for next in order.iter().filter(|s| **s != account && spare(s)) {
+                    let (next_key, next_name) = (key_of(next), name_of(next));
+                    match send(body.clone(), next.as_ref().map(|a| a.1.as_str())).await {
                         Ok(r) if r.status().is_success() => {
                             log(format_args!("{session} {name} is spent; {next_name} answers"));
                             // The refusal is a call of its own, for statistics.
                             failed(CallStatus::Limit, model.clone());
-                            account = next.cloned();
+                            account = next.clone();
                             break 'retry r;
                         }
                         Ok(r) => {
                             let (s2, h2) = (r.status(), r.headers().clone());
                             let t2 = read_capped(r, MAX_BODY).await.unwrap_or_default();
                             log(format_args!("{session} {next_name} -> {s2}"));
-                            record_quota(&st.stats, &quota_key(&provider, next), &h2);
+                            record_quota(&st.stats, &quota_key(&provider, next.as_ref()), &h2);
                             if let Some(tr) = fallback::classify(s2.as_u16(), &h2, &t2) {
                                 st.stats.mark_limited(&next_key, &next_name, &tr);
                                 if tr.kind == fallback::Kind::Quota {
@@ -1348,7 +1382,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
                 }
                 // Every account is spent: the agent waits for the one back first, not for the
                 // last one asked (Claude Code says when it goes on from the refusal it gets).
-                let keys: Vec<String> = std::iter::once(p.key.clone()).chain(accounts.iter().map(|(n, _)| key_of(*n))).collect();
+                let keys: Vec<String> = order.iter().map(key_of).collect();
                 first_back = st.stats.first_back(&keys).filter(|(k, _)| *k != key).map(|(_, r)| r);
             }
             log(format_args!("{session} {provider} {method} /{rest} -> {status}"));
@@ -1363,9 +1397,9 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
                         if let Some((id, plan)) = &coding_plan {
                             st.stats.plan_errors.lock().unwrap().insert(id.clone(), plan::refused(&plan.name, status.as_u16(), &error_message(&text)));
                         }
-                        // Signed by another Claude account, spent too: its own stays as it was
-                        // found, or else as that account is.
-                        let other = account.as_ref().and_then(|(n, _)| st.stats.limited(&p.key).or_else(|| st.stats.limited(&key_of(*n))));
+                        // Signed by another Claude account than the first, spent too: the first
+                        // stays as it was found, or else as that account is.
+                        let other = (account != home).then(|| st.stats.limited(&p.key).or_else(|| st.stats.limited(&key_of(&account)))).flatten();
                         Some(other.unwrap_or_else(|| st.stats.mark_limited(&p.key, &p.tag.name, &t)))
                     }
                     None if fallback::is_outage(status.as_u16()) && chain.as_ref().is_some_and(|c| c.on_outage) => {
@@ -1403,7 +1437,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
                     s.limit_error = Some(msg.clone());
                 }
                 // Its own route answered, if with a refusal: whatever fallback it was on, it isn't now.
-                if account.is_none() && primary.as_ref().is_some_and(|p| s.fallback.as_ref().is_some_and(|f| f.from == p.key)) {
+                if account == home && primary.as_ref().is_some_and(|p| s.fallback.as_ref().is_some_and(|f| f.from == p.key)) {
                     s.fallback = None;
                 }
                 s.call_failed(msg);
@@ -1442,9 +1476,10 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
         if let Some((id, _)) = &coding_plan {
             st.stats.plan_errors.lock().unwrap().remove(id);
         }
-        // Answered by another Claude account: its own is still spent.
-        if let Some(p) = primary.as_ref().filter(|_| account.is_none()) {
-            st.stats.not_limited(&p.key);
+        // The account that answered isn't spent. Another Claude account answering leaves the first
+        // as it was found.
+        if primary.is_some() {
+            st.stats.not_limited(&key_of(&account));
         }
         st.stats.update(&session, |s| {
             s.call_error = None;
@@ -1453,12 +1488,15 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
                 s.last_error = None;
             }
             s.outages = (0, 0);
-            // Answered by another of the user's Claude accounts: shown, and noticed once, as a
-            // fallback; back on its own account, as any.
-            let other = account.as_ref().zip(primary.as_ref()).map(|((n, t), p)| (account_name(&st, *n, t), p));
+            if !accounts.is_empty() {
+                s.signer = Some(key_of(&account));
+            }
+            // Answered by another of the user's Claude accounts than the first, that one spent:
+            // shown, and noticed once, as a fallback; back on the first, as any. (Not spent: a turn
+            // ending on the account it began on, another chosen meanwhile.)
+            let other = primary.as_ref().filter(|_| account != home).map(|p| (name_of(&account), p, st.stats.limited(&p.key)));
             match other {
-                Some((name, p)) if s.fallback.as_ref().is_none_or(|f| f.name != name) => {
-                    let spent = st.stats.limited(&p.key);
+                Some((name, p, Some(spent))) if s.fallback.as_ref().is_none_or(|f| f.name != name) => {
                     s.fallback = Some(fallback::OnFallback {
                         route: "anthropic".into(),
                         name,
@@ -1466,18 +1504,18 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
                         from: p.key.clone(),
                         from_name: p.tag.name.clone(),
                         kind: fallback::Kind::Quota,
-                        said: spent.as_ref().map(|l| l.said.clone()).unwrap_or_default(),
-                        resets_at: spent.as_ref().and_then(|l| l.resets_at),
-                        retry_at: spent.as_ref().map_or(0, |l| l.retry_at),
+                        said: spent.said,
+                        resets_at: spent.resets_at,
+                        retry_at: spent.retry_at,
                         since: fallback::now(),
                         step: 0,
-                        account: account.as_ref().map(|a| a.0),
+                        account: Some(account.as_ref().map_or(1, |a| a.0)),
                     });
                 }
-                // Still on it: when its own account is back is as that's found now (it may have
-                // been found spent again, until a later reset).
-                Some((_, p)) => {
-                    if let (Some(f), Some(l)) = (s.fallback.as_mut(), st.stats.limited(&p.key)) {
+                // Still on it: when the first is back is as that's found now (it may have been
+                // found spent again, until a later reset).
+                Some((_, _, spent)) => {
+                    if let (Some(f), Some(l)) = (s.fallback.as_mut(), spent) {
                         f.resets_at = l.resets_at;
                         f.retry_at = l.retry_at;
                     }
@@ -1550,6 +1588,10 @@ fn tapped(resp: reqwest::Response, mut tap: Tap) -> Body {
         chunk
     }))
 }
+
+/// Who signs a call of Claude Code's to Anthropic: another of the user's Claude accounts, by its
+/// number and token, or (`None`) Claude Code's own sign-in, the call passed on as it came.
+type Signer = Option<(u32, String)>;
 
 /// The route a model call is for: its key (see `fallback::route_key`), its path and name.
 pub(crate) struct Primary {
@@ -2965,6 +3007,129 @@ mod tests {
         let out = send();
         assert_eq!(reset(&out), Some(own_back), "{out}");
         assert_eq!(asked(), ["sk-ant-oat01-own"]);
+    }
+
+    /// Another Claude account chosen (`set_chosen_account`): Claude Code's calls are signed with its
+    /// token alone from each session's next turn, while Claude Code's own sign-in still has room,
+    /// and the session isn't on a fallback. Spent, the accounts after it answer, then from the top
+    /// (Claude Code's own first) the ones before it; it's back once it resets, as a turn starts.
+    /// Claude Code's own chosen again (or a token that's no account), its calls go on as they came.
+    #[test]
+    fn a_chosen_claude_account_answers_first() {
+        use std::io::{Read, Write};
+        let until = fallback::now() + 3600;
+        let spent: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+        let refuse = spent.clone();
+        let (anthropic, from) = stand_in(move |req| {
+            let token = req.lines().find_map(|l| l.strip_prefix("authorization: bearer sk-ant-oat01-")).unwrap_or_default().trim().to_string();
+            if refuse.lock().unwrap().contains(&token.as_str()) { claude_spent(until) } else { streamed("claude-opus-5-5", &token.to_uppercase()) }
+        });
+        let base = anthropic.trim_end_matches("/api/anthropic").to_string();
+        STAND_INS.lock().unwrap().push(("chosen".into(), "anthropic".into(), base));
+        let keys = HashMap::from([
+            ("CLAUDE_ACCOUNT_2".to_string(), "sk-ant-oat01-two".to_string()),
+            ("CLAUDE_ACCOUNT_3".to_string(), "sk-ant-oat01-three".to_string()),
+            ("CLAUDE_ACCOUNT_4".to_string(), "sk-ant-oat01-four".to_string()),
+        ]);
+        let proxy = Proxy::start(keys).unwrap();
+        proxy.set_account_names(HashMap::from([("sk-ant-oat01-three".to_string(), "Work".to_string())]));
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let turn = json!([{"role": "user", "content": "hi"}]);
+        let tool = json!([{"role": "user", "content": "hi"}, {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}]);
+        // As Claude Code sends it: signed with its own sign-in.
+        let ask = |messages: &Value| {
+            let path = proxy.base_url("chosen", "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+            let body = json!({"model": "claude-opus-5-5", "max_tokens": 10, "stream": true, "messages": messages}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(
+                c,
+                "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-own\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out
+        };
+        // Which accounts Anthropic was asked with, in order; each request carries one only.
+        let asked = || {
+            let mut v = vec![];
+            while let Ok(r) = from.recv_timeout(std::time::Duration::from_millis(500)) {
+                let auth: Vec<&str> = r.lines().filter_map(|l| l.strip_prefix("authorization: bearer sk-ant-oat01-")).collect();
+                assert_eq!(auth.len(), 1, "{r}");
+                assert!(!r.contains("sk-ant-oat01-own") || auth[0] == "own", "Claude Code's own token went along: {r}");
+                v.push(auth[0].trim().to_string());
+            }
+            v
+        };
+        let fallback = || proxy.stats.session("chosen").fallback.map(|f| (f.name, f.from_name, f.account, f.resets_at));
+
+        // Nothing chosen: Claude Code's own sign-in, as it came.
+        assert!(ask(&turn).contains("OWN"));
+        assert_eq!(asked(), ["own"]);
+
+        // Account 3 chosen: the next turn is signed with its token, Claude Code's own still with room.
+        proxy.set_chosen_account(Some("sk-ant-oat01-three"));
+        assert_eq!(proxy.chosen_account(), Some(3));
+        assert!(ask(&turn).contains("THREE"));
+        assert_eq!(asked(), ["three"]);
+        assert_eq!(fallback(), None, "the account chosen isn't a fallback");
+        assert_eq!(proxy.stats.session("chosen").primary.map(|p| p.1).as_deref(), Some("Work"));
+
+        // Another chosen mid-turn: the turn ends on the account it began on, the next is the new one's.
+        proxy.set_chosen_account(Some("sk-ant-oat01-four"));
+        assert!(ask(&tool).contains("THREE"));
+        assert_eq!(asked(), ["three"]);
+        assert_eq!(fallback(), None, "nor is the one a turn ends on");
+        assert!(ask(&turn).contains("FOUR"));
+        assert_eq!(asked(), ["four"]);
+        proxy.set_chosen_account(Some("sk-ant-oat01-three"));
+        assert!(ask(&turn).contains("THREE"));
+        assert_eq!(asked(), ["three"]);
+
+        // Account 3 at its limit, and 4 after it: Claude Code's own answers, the first from the top.
+        spent.lock().unwrap().extend(["three", "four"]);
+        let out = ask(&turn);
+        assert!(out.starts_with("HTTP/1.1 200") && out.contains("OWN"), "{out}");
+        assert_eq!(asked(), ["three", "four", "own"]);
+        assert_eq!(fallback(), Some(("Claude".into(), "Work".into(), Some(1), Some(until))), "on Claude Code's own, until Work is back");
+        // Claude Code isn't at its limit while an account has room, by the chosen one's key too.
+        let three = accounts::key("sk-ant-oat01-three");
+        assert!(proxy.spent(&three, true).is_none() && proxy.spent(&three, false).is_some());
+
+        // Its own spent too: account 2, the one before the chosen one, last. The ones known spent
+        // aren't asked again.
+        spent.lock().unwrap().push("own");
+        assert!(ask(&turn).contains("TWO"));
+        assert_eq!(asked(), ["own", "two"]);
+        assert_eq!(fallback(), Some(("Claude account 2".into(), "Work".into(), Some(2), Some(until))));
+        assert!(proxy.spent(&three, true).is_none());
+        let now = proxy.claude_accounts_now().unwrap();
+        assert_eq!(now.iter().map(|a| (a.0, a.1.is_some())).collect::<Vec<_>>(), [(1, true), (2, false), (3, true), (4, true)]);
+
+        // Account 3 resets: mid-turn, the turn stays on account 2; back on 3 as the next starts.
+        spent.lock().unwrap().retain(|t| *t != "three");
+        proxy.stats.limited.lock().unwrap().get_mut(&three).unwrap().retry_at = 0;
+        assert!(ask(&tool).contains("TWO"));
+        assert_eq!(asked(), ["two"]);
+        assert!(ask(&turn).contains("THREE"));
+        assert_eq!(asked(), ["three"]);
+        assert_eq!(fallback(), None, "back on the chosen one");
+
+        // Claude Code's own chosen again, back from its limit: its calls go on as they came.
+        spent.lock().unwrap().clear();
+        let own = proxy.stats.limited_routes().into_iter().find(|(k, _)| k.starts_with("anthropic#") && !accounts::is_key(k)).unwrap().0;
+        proxy.stats.limited.lock().unwrap().get_mut(&own).unwrap().retry_at = 0;
+        proxy.set_chosen_account(None);
+        assert_eq!(proxy.chosen_account(), None);
+        assert!(ask(&turn).contains("OWN"));
+        assert_eq!(asked(), ["own"]);
+        assert_eq!(fallback(), None);
+        // A token that's no account of the user's (one removed) is no choice.
+        proxy.set_chosen_account(Some("sk-ant-oat01-gone"));
+        assert_eq!(proxy.chosen_account(), None);
+        assert!(ask(&turn).contains("OWN"));
+        assert_eq!(asked(), ["own"]);
     }
 
     /// Claude Code's one-token check as it starts, which Anthropic answers with a bare 429 when

@@ -124,6 +124,7 @@ const COMMANDS: &[Command] = &[
             ("remove", "forget the token"),
             ("add-account", "add another Claude account: sign in in the browser"),
             ("rename-account", "name an account: rename-account <n> <name>"),
+            ("use-account", "send Claude Code's calls to an account first: use-account <n>"),
             ("remove-account", "forget an account"),
         ])],
     },

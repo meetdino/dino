@@ -7,6 +7,10 @@ struct ClaudeAccountInfo: Codable, Equatable, Identifiable {
     var number: UInt32
     /// Claude Code's calls go to this one now.
     var answering: Bool
+    /// The one Claude Code's calls go to first: the one chosen with Use This Account, else account
+    /// 1. While it's at its limit, the accounts after it answer, then the ones before it. Nil from
+    /// an older dinod, which has no choice.
+    var chosen: Bool?
     /// Found at its subscription limit, and not tried again yet.
     var spent: Bool
     var resets_at: UInt64?
@@ -29,6 +33,9 @@ struct ClaudeAccountInfo: Codable, Equatable, Identifiable {
     /// When it can answer again: its reset, or else when dino tries it again.
     var backAt: UInt64? { resets_at ?? retry_at }
     var isOwn: Bool { number == 1 }
+    var isChosen: Bool { chosen == true }
+    /// Chosen with Use This Account: another account than the one Claude Code signed in with.
+    var chosenByYou: Bool { isChosen && !isOwn }
     /// Its plan as Anthropic names it: "Max", "Pro".
     var planName: String? { plan.map { $0.prefix(1).uppercased() + $0.dropFirst() } }
 
@@ -76,7 +83,8 @@ private struct ClaudeAccountsResponse: Decodable {
 extension DinoConnection {
     /// `status`, `add` (`value`: a token), `login` (sign in in the browser), `login_code` (`value`:
     /// the code claude.ai showed), `login_cancel`, `rename` (`account`, `value`: its name, empty
-    /// for none), `remove` (`account`) or `order` (`order`).
+    /// for none), `remove` (`account`), `order` (`order`) or `use` (`account`: the one Claude
+    /// Code's calls go to first, 1 for its own sign-in).
     func claudeAccounts(_ action: String, value: String? = nil, account: UInt32? = nil, order: [UInt32] = []) throws -> ClaudeAccountsInfo {
         var body: [String: Any] = ["type": "claude_accounts", "action": action]
         if let value { body["value"] = value }
@@ -86,17 +94,24 @@ extension DinoConnection {
     }
 }
 
-/// Settings → Accounts: your Claude accounts, which Claude Code goes on with when the one it
-/// signed in with is at its limit. Which answers now, how much each has used, and when a spent one
-/// resets. Add Account… signs in to another in the browser: the one way to add one.
+/// Settings → Accounts: your Claude accounts, the one Claude Code's calls go to (Use This Account),
+/// and the others it goes on with when that one is at its limit. Which answers now, how much each
+/// has used, and when a spent one resets. Add Account… signs in to another in the browser: the one
+/// way to add one.
 struct ClaudeAccountsSection: View {
     @State private var info: ClaudeAccountsInfo?
     @State private var adding = false
     @State private var renaming: ClaudeAccountInfo?
     @State private var error: String?
+    /// The account just chosen with Use This Account, said once while this is on screen: sessions
+    /// move at their next turn, and that answer can't use the prompt cache.
+    @State private var switched: ClaudeAccountInfo?
 
     private var others: [ClaudeAccountInfo] { info?.accounts.filter { !$0.isOwn } ?? [] }
     private var signingIn: Bool { info?.login?.underWay == true }
+    /// dinod can choose an account: one from before that says nothing of it.
+    private var choosing: Bool { info?.accounts.contains { $0.chosen != nil } == true }
+    private var chosenByYou: ClaudeAccountInfo? { info?.accounts.first(where: \.chosenByYou) }
 
     var body: some View {
         // One row holding them all: the grouped form is a list, which lost row views when an
@@ -116,8 +131,21 @@ struct ClaudeAccountsSection: View {
                 if let e = error ?? info?.error {
                     Text(e).font(.callout).foregroundStyle(.red).padding(.leading, 10)
                 }
+                if let s = switched {
+                    Text(s.isOwn
+                         ? "Sessions go back to \(s.label) at their next turn."
+                         : "Sessions move to \(s.label) at their next turn. That first answer can't use the prompt cache, so it's slower and uses more of \(s.label)'s limit.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 10)
+                }
                 HStack(alignment: .firstTextBaseline) {
-                    Footnote("When an account reaches its usage limit, Claude Code switches to the next account in the list until the limit resets.")
+                    if let c = chosenByYou {
+                        Footnote("Claude Code uses \(c.label), as you chose. When it reaches its usage limit, Claude Code switches to the accounts after it, then the ones above it, until the limit resets.")
+                    } else {
+                        Footnote("When an account reaches its usage limit, Claude Code switches to the next account in the list until the limit resets.")
+                    }
                     Button("Add Account…") { adding = true }
                         .disabled(info == nil)
                 }
@@ -167,6 +195,10 @@ struct ClaudeAccountsSection: View {
                 HStack(spacing: 5) {
                     Circle().fill(s.color).frame(width: 7, height: 7)
                     Text(s.text)
+                    if a.chosenByYou {
+                        Text("·")
+                        Text("Chosen")
+                    }
                     if let u = a.usage {
                         Text("·")
                         Text(u).monospacedDigit()
@@ -184,7 +216,7 @@ struct ClaudeAccountsSection: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help(a.isOwn ? "Rename \(a.label)" : "Rename, move or remove \(a.label)")
+            .help(a.isOwn ? "Use or rename \(a.label)" : "Use, rename, move or remove \(a.label)")
         }
         .contextMenu { menuItems(a) }
     }
@@ -202,6 +234,10 @@ struct ClaudeAccountsSection: View {
 
     @ViewBuilder
     private func menuItems(_ a: ClaudeAccountInfo) -> some View {
+        if choosing {
+            Button("Use This Account") { use(a) }.disabled(a.isChosen)
+            Divider()
+        }
         Button("Rename…") { renaming = a }
         if !a.isOwn {
             let at = others.firstIndex(of: a) ?? 0
@@ -245,6 +281,13 @@ struct ClaudeAccountsSection: View {
         call("status")
     }
 
+    /// Claude Code's calls go to `a` first, from each session's next turn.
+    private func use(_ a: ClaudeAccountInfo) {
+        call("use", account: a.number) { r in
+            if case .success = r { switched = a }
+        }
+    }
+
     private func reorder(_ a: ClaudeAccountInfo, by step: Int) {
         var numbers = others.map(\.number)
         guard let at = numbers.firstIndex(of: a.number), numbers.indices.contains(at + step) else { return }
@@ -255,7 +298,9 @@ struct ClaudeAccountsSection: View {
     private func confirmRemove(_ a: ClaudeAccountInfo) {
         let alert = NSAlert()
         alert.messageText = "Remove \(a.label)?"
-        alert.informativeText = "Claude Code will no longer switch to this account when another reaches its limit. The token stays valid until it expires or you revoke it."
+        alert.informativeText = a.chosenByYou
+            ? "Claude Code's calls go back to the account it signed in with, and no longer switch to this one. The token stays valid until it expires or you revoke it."
+            : "Claude Code will no longer switch to this account when another reaches its limit. The token stays valid until it expires or you revoke it."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true

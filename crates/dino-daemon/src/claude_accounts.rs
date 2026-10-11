@@ -1,9 +1,9 @@
 //! Your other Claude accounts in dinod: their tokens kept in the Keychain (the key file on Linux,
 //! see `dino_core::account_store`), added by signing in to them in the browser (see
-//! `claude_login`) or from a pasted `claude setup-token` token, removed and reordered; listed with
-//! which one answers Claude Code now, its usage windows, and when a spent one resets, as the proxy
-//! found them; named as the user names them (see `names`), account 1 by its email until then.
-//! Never their tokens.
+//! `claude_login`) or from a pasted `claude setup-token` token, removed and reordered; one chosen
+//! for Claude Code's calls to go to first (see `chosen`); listed with which one answers Claude
+//! Code now, its usage windows, and when a spent one resets, as the proxy found them; named as the
+//! user names them (see `names`), account 1 by its email until then. Never their tokens.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use dino_core::account_store as store;
 use dino_core::claude_token as token;
 use dino_core::ipc::{ClaudeAccountInfo, ClaudeAccountsInfo, WindowInfo};
+use dino_core::settings::Settings;
 use dino_proxy::Quota;
 use dino_proxy::fallback::Limited;
 
@@ -40,6 +41,10 @@ pub(crate) fn serve(d: &Arc<Daemon>, action: &str, value: Option<String>, accoun
             let n = account.ok_or_else(|| anyhow::anyhow!("which account?"))?;
             anyhow::ensure!(store::load().taken(n), "there's no Account {n}");
             store::set(&[(n, None)])?;
+            // The chosen one gone: Claude Code's own sign-in again.
+            if chosen() == Some(n) {
+                choose(1)?;
+            }
             crate::keys_changed(d);
             forget_orgs();
             forget_names();
@@ -60,7 +65,25 @@ pub(crate) fn serve(d: &Arc<Daemon>, action: &str, value: Option<String>, accoun
             let tokens: Vec<&str> = order.iter().filter_map(|n| have.iter().find(|(h, _)| h == n).map(|(_, t)| t.as_str())).collect();
             let changes: Vec<(u32, Option<&str>)> = numbers.iter().copied().zip(tokens.into_iter().map(Some)).collect();
             store::set(&changes)?;
+            // The chosen one stays chosen, under the number it moved to.
+            if let Some(c) = chosen()
+                && let Some(at) = order.iter().position(|n| *n == c)
+            {
+                choose(numbers[at])?;
+            }
             crate::keys_changed(d);
+        }
+        "use" => {
+            let n = account.unwrap_or(1);
+            if n != 1 {
+                anyhow::ensure!(accounts().iter().any(|(m, _)| *m == n), "there's no Account {n}");
+                anyhow::ensure!(
+                    Settings::load().routing.proxy,
+                    "Claude Code's calls go through dino only with Route agent traffic through dino on (Settings → Providers): turn it on to choose an account"
+                );
+            }
+            choose(n)?;
+            d.proxy.set_chosen_account(chosen_token().as_deref());
         }
         _ => anyhow::bail!("unknown action {action}"),
     }
@@ -81,6 +104,10 @@ fn add(d: &Daemon, t: &str) -> anyhow::Result<u32> {
     }
     let all = store::load();
     let n = (2..).find(|n| !all.taken(*n)).unwrap_or(2);
+    // The chosen number free, its account gone other than by `remove`: the new one isn't chosen.
+    if chosen() == Some(n) {
+        choose(1)?;
+    }
     store::set(&[(n, Some(t))])?;
     crate::keys_changed(d);
     crate::subtoken::recheck();
@@ -199,7 +226,7 @@ pub(crate) fn info(d: &Daemon) -> ClaudeAccountsInfo {
     let numbers = std::iter::once(1).chain(have.iter().map(|(n, _)| *n));
     let windows = std::iter::once(None).chain(tokens.iter().map(|t| Some(*t))).map(|t| d.proxy.claude_account_seen(t).1);
     let names = std::iter::once(None).chain(have.iter().map(|(n, t)| name(*n, Some(t))));
-    let accounts = rows(numbers.zip(std::iter::once(own).chain(others)).zip(windows).zip(names).map(|(((n, l), q), name)| (n, l, q, name)));
+    let accounts = rows(numbers.zip(std::iter::once(own).chain(others)).zip(windows).zip(names).map(|(((n, l), q), name)| (n, l, q, name)), d.proxy.chosen_account());
     let kept = store::load();
     let error = store::problem().map(|p| format!("dino can't read your other Claude accounts from the Keychain now: {p}.")).or_else(|| {
         let n: Vec<String> = kept.unreadable.iter().map(|n| format!("Account {n}")).collect();
@@ -211,25 +238,29 @@ pub(crate) fn info(d: &Daemon) -> ClaudeAccountsInfo {
 /// For the state: every account with its windows, once there's more than one (see
 /// `Proxy::claude_accounts_now`).
 pub(crate) fn now(d: &Daemon) -> Option<Vec<ClaudeAccountInfo>> {
-    Some(rows(d.proxy.claude_accounts_now()?.into_iter()))
+    Some(rows(d.proxy.claude_accounts_now()?.into_iter(), d.proxy.chosen_account()))
 }
 
-/// Each account as it stands, in the order they're tried: the first that isn't spent answers.
-/// Named as the user named it; account 1 (`name` `None`) by its own, or else its email.
-fn rows(accounts: impl Iterator<Item = (u32, Option<Limited>, Option<Quota>, Option<String>)>) -> Vec<ClaudeAccountInfo> {
-    let mut answering = false;
+/// Each account as it stands, listed by number: the first that isn't spent answers, tried from
+/// the one `chosen` (else account 1) on, then from the top. Named as the user named it; account 1
+/// (`name` `None`) by its own, or else its email.
+fn rows(accounts: impl Iterator<Item = (u32, Option<Limited>, Option<Quota>, Option<String>)>, chosen: Option<u32>) -> Vec<ClaudeAccountInfo> {
+    let accounts: Vec<_> = accounts.collect();
+    let first = chosen.filter(|c| accounts.iter().any(|a| a.0 == *c)).unwrap_or(1);
+    let at = accounts.iter().position(|a| a.0 == first).unwrap_or(0);
+    let answering = accounts[at..].iter().chain(&accounts[..at]).find(|a| a.1.is_none()).map(|a| a.0);
     let me = own();
     accounts
+        .into_iter()
         .map(|(number, spent, quota, name)| {
-            let first = spent.is_none() && !answering;
-            answering |= first;
             let me = me.as_ref().filter(|_| number == 1);
             ClaudeAccountInfo {
                 name: if number == 1 { self::name(1, None) } else { name },
                 email: me.and_then(|m| m.email.clone()),
                 plan: me.and_then(|m| m.plan.clone()),
                 number,
-                answering: first,
+                answering: Some(number) == answering,
+                chosen: number == first,
                 spent: spent.is_some(),
                 resets_at: spent.as_ref().and_then(|l| l.resets_at),
                 retry_at: spent.as_ref().map(|l| l.retry_at),
@@ -262,6 +293,40 @@ pub(crate) fn start(d: &Arc<Daemon>) {
             }
         })
         .ok();
+}
+
+// The chosen account.
+
+/// The account Claude Code's calls go to first, as settings.toml keeps it (`machine.claude_account`):
+/// `None` for account 1, Claude Code's own sign-in.
+fn chosen() -> Option<u32> {
+    Settings::load().machine.claude_account.filter(|n| *n != 1)
+}
+
+/// Make account `n` the one Claude Code's calls go to first (1: its own sign-in), in settings.toml.
+fn choose(n: u32) -> anyhow::Result<()> {
+    let mut s = Settings::load();
+    let n = (n != 1).then_some(n);
+    if s.machine.claude_account != n {
+        s.machine.claude_account = n;
+        s.save()?;
+    }
+    Ok(())
+}
+
+/// `s`, a client's whole settings document, with the chosen account as settings.toml has it: only
+/// `use` changes it, never a client that doesn't know it (an older app) or holds a stale copy.
+pub(crate) fn with_chosen(mut s: Settings) -> Settings {
+    s.machine.claude_account = Settings::load().machine.claude_account;
+    s
+}
+
+/// The chosen account's token, for the proxy to sign Claude Code's calls with (see
+/// `dino_proxy::Proxy::set_chosen_account`): `None` for Claude Code's own sign-in, or when the
+/// chosen number holds no account.
+pub(crate) fn chosen_token() -> Option<String> {
+    let n = chosen()?;
+    accounts().into_iter().find(|(m, _)| *m == n).map(|(_, t)| t)
 }
 
 // Names.

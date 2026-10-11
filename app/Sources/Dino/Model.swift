@@ -73,7 +73,7 @@ final class DinoModel: ObservableObject {
     /// A session on another Claude account that the sidebar's footer names already: the one in use
     /// now. Only a session on a different one says so in its row.
     func saysInFooter(_ f: FallbackInfo) -> Bool {
-        f.isAccount && claudeAccounts.first(where: \.answering)?.short == f.name
+        f.isAccount && claudeAccounts.first(where: \.answering)?.short == f.accountName
     }
     /// Agents at their limit, and what new sessions start with meanwhile (Settings → Agents).
     @Published var limits: [AgentLimit] = []
@@ -476,7 +476,7 @@ final class DinoModel: ObservableObject {
                 if f.isModel {
                     Notifier.post(session: s, title: "\(s.display) switched to \(f.model)", body: "\(f.name) rejects \(f.from) for your account: \(f.said)")
                 } else if f.isAccount {
-                    Notifier.post(session: s, title: "\(s.display) switched to \(f.name)", body: "\(f.why). \(f.name) answers until then.")
+                    Notifier.post(session: s, title: "\(s.display) switched to \(f.accountName)", body: "\(f.why). \(f.accountName) answers until then.")
                 } else {
                     Notifier.post(session: s, title: "\(s.display) switched to \(f.name)", body: "\(f.why). \(f.name) answers with \(f.model) until then.")
                 }
