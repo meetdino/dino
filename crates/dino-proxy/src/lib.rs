@@ -98,6 +98,11 @@ impl Usage {
     pub fn total_input(&self) -> u64 {
         self.input + self.cache_read + self.cache_write
     }
+
+    /// What the model read that the prompt cache didn't hold: fresh input and what's newly cached.
+    pub(crate) fn new_input(&self) -> u64 {
+        self.input + self.cache_write
+    }
 }
 
 /// What the agent itself reported via hooks (Claude Code HTTP hooks POST to `/s/<session>/hook`).
@@ -1537,6 +1542,9 @@ fn tapped(resp: reqwest::Response, mut tap: Tap) -> Body {
             tap.meter.feed(bytes);
             if tap.call.is_some() && tap.meter.sse == Some(true) {
                 tap.stats.rate.chunk(&mut tap.meter.live, bytes.len());
+                if let Some(u) = &tap.meter.seen {
+                    tap.stats.rate.input(&mut tap.meter.live, u.new_input());
+                }
             }
         }
         chunk
@@ -1806,7 +1814,8 @@ impl Drop for Tap {
         }
         let subagent = self.call.as_ref().is_some_and(|c| c.subagent.is_some());
         if self.call.is_some() {
-            self.stats.rate.ended(&mut self.meter.live, self.meter.seen.as_ref().map_or(0, |u| u.output));
+            let seen = self.meter.seen.as_ref();
+            self.stats.rate.ended(&mut self.meter.live, seen.map_or(0, |u| u.output), seen.map_or(0, Usage::new_input));
         }
         if let Some(mut call) = self.call.take() {
             call.session = self.session.clone();
@@ -2579,9 +2588,11 @@ mod tests {
         // And the live rate: 21 tokens in a few ms, over its 10 s, once their second is over.
         let mut rate = 0;
         while rate < 2 && since.elapsed() < std::time::Duration::from_secs(5) {
-            rate = proxy.stats.rate.changed(Some(rate), std::time::Duration::from_secs(3));
+            rate = proxy.stats.rate.changed(Some(rate), None, std::time::Duration::from_secs(3)).0;
         }
         assert_eq!(rate, 2);
+        // And the new input: 3 fresh tokens a call, the cache reads not counted.
+        assert_eq!(proxy.stats.rate.per_second().1, 1, "9 tokens over 10 s");
     }
 
     /// A session that was on a fallback goes back to its own route at a turn's start. When that

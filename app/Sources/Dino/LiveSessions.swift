@@ -77,14 +77,17 @@ struct Live<Content: View>: View {
     var body: some View { content(live.info) }
 }
 
-/// Output tokens per second across every agent, over dinod's last 10 s, for the usage panel. dinod
-/// answers once the rate differs from the one shown, so while no agent writes nothing is asked,
-/// woken or redrawn; while one does, at most once a second. Watched only while the panel shows it.
+/// Output tokens per second across every agent, over dinod's last 10 s, for the usage panel, and the
+/// new input: what agents sent that the prompt cache didn't hold. dinod answers once either differs
+/// from the one shown, so while no agent writes nothing is asked, woken or redrawn; while one does,
+/// at most once a second. Watched only while the panel shows it.
 @MainActor
 final class OutputRate: ObservableObject {
     static let shared = OutputRate()
 
     @Published private(set) var perSecond: UInt32 = 0
+    /// Nil from a dinod older than the input rate.
+    @Published private(set) var inputPerSecond: UInt32?
     private var watchers = 0
     private var running = false
 
@@ -98,28 +101,34 @@ final class OutputRate: ObservableObject {
 
     func unwatch() { watchers = max(0, watchers - 1) }
 
-    /// Shows `rate`; whether it's still wanted. Ends the watch if not, or if dinod `refused` it.
-    private func shown(_ rate: UInt32, refused: Bool) -> Bool {
+    /// Shows `rate` and `input`; whether it's still wanted. Ends the watch if not, or if dinod
+    /// `refused` it.
+    private func shown(_ rate: UInt32, _ input: UInt32?, refused: Bool) -> Bool {
         if perSecond != rate { perSecond = rate }
+        if inputPerSecond != input { inputPerSecond = input }
         if watchers == 0 || refused { running = false }
         return running
     }
 
-    private struct Answer: Decodable { var tokens_per_second: UInt32? }
+    private struct Answer: Decodable { var tokens_per_second: UInt32?, input_tokens_per_second: UInt32? }
 
     nonisolated private static func follow() {
         var connection: DinoConnection?
-        var seen: UInt32?
+        var seen: UInt32?, seenInput: UInt32?
         while true {
             var rate: UInt32 = 0
+            var input: UInt32?
             var refused = false
             do {
                 if connection == nil { connection = try DinoConnection(path: DinoEnvironment.socketPath) }
                 var body: [String: Any] = ["type": "output_rate"]
                 body["seen"] = seen
-                let data = try connection!.send(body)
-                rate = try JSONDecoder().decode(Answer.self, from: data).tokens_per_second ?? 0
+                body["seen_input"] = seenInput
+                let answer = try JSONDecoder().decode(Answer.self, from: connection!.send(body))
+                rate = answer.tokens_per_second ?? 0
+                input = answer.input_tokens_per_second
                 seen = rate
+                seenInput = input
             } catch DinoError.daemon {
                 // A dinod older than this app: nothing shown until the panel opens again.
                 refused = true
@@ -127,9 +136,10 @@ final class OutputRate: ObservableObject {
                 // dinod went: asked again once it's back.
                 connection = nil
                 seen = nil
+                seenInput = nil
                 Thread.sleep(forTimeInterval: 5)
             }
-            let wanted = DispatchQueue.main.sync { MainActor.assumeIsolated { shared.shown(rate, refused: refused) } }
+            let wanted = DispatchQueue.main.sync { MainActor.assumeIsolated { shared.shown(rate, input, refused: refused) } }
             if !wanted { return }
         }
     }
@@ -141,11 +151,22 @@ struct OutputRateText: View {
     @ObservedObject private var rate = OutputRate.shared
 
     var body: some View {
-        if rate.perSecond > 0 {
-            Text("\(tokens(UInt64(rate.perSecond))) tok/s")
+        if let text = Self.text(output: rate.perSecond, input: rate.inputPerSecond) {
+            // On one line, ahead of Usage Stats beside it: in the narrowest sidebar the label gives way.
+            Text(text)
                 .font(.caption.monospacedDigit())
-                .help("Output tokens per second across every agent, over the last 10 seconds. Only traffic routed through dino is counted.")
-                .accessibilityLabel("\(rate.perSecond) output tokens per second")
+                .lineLimit(1)
+                .layoutPriority(1)
+                .help("Tokens per second across every agent, over the last 10 seconds: what they write (out), and what they send that the prompt cache didn't already hold (in). Each call sends the whole conversation again, mostly read back from the cache; those reads aren't counted. Only traffic routed through dino is counted.")
+                .accessibilityLabel("\(rate.perSecond) output tokens per second" + (rate.inputPerSecond.map { ", \($0) new input tokens per second" } ?? ""))
         }
+    }
+
+    /// "2.0k out · 16.4k in tok/s", what's not 0 of the two; "2.0k tok/s" from a dinod older than the
+    /// input rate; nil while neither moves.
+    static func text(output: UInt32, input: UInt32?) -> String? {
+        guard let input else { return output > 0 ? "\(tokens(UInt64(output))) tok/s" : nil }
+        let parts = [(output, "out"), (input, "in")].filter { $0.0 > 0 }.map { "\(tokens(UInt64($0.0))) \($0.1)" }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ") + " tok/s"
     }
 }

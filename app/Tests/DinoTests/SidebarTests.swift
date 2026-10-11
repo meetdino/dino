@@ -261,4 +261,15 @@ final class SessionCopyTests: XCTestCase {
             XCTAssertEqual(board.types?.first, .string, "plain text only")
         }
     }
+
+    /// The live rate says what moves: output and new input, either alone, or the output alone from
+    /// an older dinod; nothing while neither does.
+    func testTheLiveRateSaysOutputAndNewInput() {
+        XCTAssertEqual(OutputRateText.text(output: 2_012, input: 16_400), "2.0k out · 16.4k in tok/s")
+        XCTAssertEqual(OutputRateText.text(output: 0, input: 16_400), "16.4k in tok/s")
+        XCTAssertEqual(OutputRateText.text(output: 640, input: 0), "640 out tok/s")
+        XCTAssertNil(OutputRateText.text(output: 0, input: 0))
+        XCTAssertEqual(OutputRateText.text(output: 2_012, input: nil), "2.0k tok/s", "an older dinod")
+        XCTAssertNil(OutputRateText.text(output: 0, input: nil))
+    }
 }
