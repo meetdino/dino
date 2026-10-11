@@ -14,10 +14,12 @@ fi
 
 # The dev profile: a check needs what compiles and what passes, not the shipping profile's full
 # LTO on one codegen unit (app/build.sh and scripts/release.sh build that), and cargo test reuses
-# what cargo build compiled.
+# what cargo build compiled. Every test runs in a home folder of its own, never yours
+# (scripts/test-home.sh): cargo's through its runner, the app's once SwiftPM has built them with
+# your caches.
 cargo build
 cargo test --workspace
-(cd app && swift build && swift test)
+(cd app && swift build && swift build --build-tests && ../scripts/test-home.sh --swift swift test --skip-build)
 scripts/lint.sh
 # cloud/ builds crates/dino-sync, whose version is the workspace's: a version bump has to reach
 # cloud/Cargo.lock too, or cloud's --locked builds (CI, its Docker image) refuse to start.

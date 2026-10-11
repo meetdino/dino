@@ -88,6 +88,11 @@ It runs `cargo build`, `cargo test --workspace` and the app's `swift build` (the
 to build; releases build the shipping one), refuses code marked `TEST-ONLY` and Rust code
 `cargo fmt` would change (`scripts/lint.sh`), and checks that `cloud/Cargo.lock` is current.
 
+Tests run in a home folder of their own, never yours: `scripts/test-home.sh` makes one for each test
+program, and `.cargo/config.toml` makes it cargo's runner, so a plain `cargo test` here does too. A
+shell or an agent a test starts reads and writes there, not your startup files and history, and
+dinod's tests fail a session that would start in your home.
+
 CI runs on every pull request, from a fork too (a first-time contributor's waits for a
 maintainer to approve the run). Each of these has to pass before it merges:
 

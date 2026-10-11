@@ -1987,7 +1987,11 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         subs.lock().unwrap().retain(|(_, tx)| tx.send(bytes.to_vec()).is_ok());
     };
     let pane = match spec {
-        Some(spec) => Pane::spawn(spec, cols.max(20), rows.max(5), tap)?,
+        Some(spec) => {
+            #[cfg(test)]
+            tests::away_from_your_home(&spec.env);
+            Pane::spawn(spec, cols.max(20), rows.max(5), tap)?
+        }
         None => Pane::ended(&load_screen(&d.home, &id), cols.max(20), rows.max(5), ended.and_then(|r| r.exit_code)),
     };
     // Resumed after dinod stopped or crashed: what its pane showed then, above the agent's resume.
@@ -5182,6 +5186,9 @@ mod tests {
     fn test_home() -> &'static Path {
         static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
         HOME.get_or_init(|| {
+            // What this crate's tests start (a shell, an agent, `claude auth status`) gets this
+            // process's home folder: never the user's own.
+            away_from_your_home(&HashMap::new());
             let home = std::env::temp_dir().join(format!("dino-daemon-test-{}", std::process::id()));
             std::fs::create_dir_all(&home).unwrap();
             // SAFETY: set once, before this crate's tests start any thread that reads them. Claude's
@@ -5194,6 +5201,50 @@ mod tests {
             }
             home
         })
+    }
+
+    /// Fails a test whose session, with `env` on top of this process's environment, would run in
+    /// the user's own home folder: its shell would read their startup files and write its commands
+    /// into their history, cut to the 500 lines bash keeps by default (the founder's
+    /// ~/.bash_history was), and an agent would write its settings there. dinod checks each
+    /// session it starts in a test; scripts/test-home.sh, cargo's runner here, gives each test
+    /// program a home of its own.
+    pub(crate) fn away_from_your_home(env: &HashMap<String, String>) {
+        let Some(yours) = users_home() else { return };
+        let var = |k: &str| env.get(k).cloned().or_else(|| std::env::var(k).ok()).filter(|v| !v.is_empty());
+        let real = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+        let home = var("HOME").map(|h| real(&h));
+        assert!(
+            home.as_ref().is_some_and(|h| *h != yours),
+            "a test would start something in your home folder ({}): run the tests with cargo from the repository, whose runner \
+             (scripts/test-home.sh) gives each a home of its own, or set HOME to an empty folder",
+            yours.display()
+        );
+        // A shell's own files, set apart from HOME, must not lead back to yours either.
+        for k in ["ZDOTDIR", "HISTFILE"] {
+            if let Some(v) = var(k) {
+                let p = real(&v);
+                assert!(!p.starts_with(&yours) || home.as_ref().is_some_and(|h| p.starts_with(h)), "a test's shell would use {k}={v}, in your home folder");
+            }
+        }
+    }
+
+    /// The user's home folder as the system knows it, whatever `$HOME` says.
+    fn users_home() -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        // SAFETY: all zeros is a valid passwd (null pointers, zero ids), filled in below.
+        let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut buf: Vec<libc::c_char> = vec![0; 16 * 1024];
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: getpwuid_r fills `pw`, its strings in `buf`; both outlive the reads below.
+        let dir = unsafe {
+            if libc::getpwuid_r(libc::getuid(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut found) != 0 || found.is_null() || pw.pw_dir.is_null() {
+                return None;
+            }
+            std::ffi::OsStr::from_bytes(std::ffi::CStr::from_ptr(pw.pw_dir).to_bytes()).to_owned()
+        };
+        let dir = PathBuf::from(dir);
+        Some(std::fs::canonicalize(&dir).unwrap_or(dir))
     }
 
     /// A daemon with files of its own (sessions, screens, worktrees, ...): tests run at once, and
@@ -5388,6 +5439,31 @@ mod tests {
         assert!(!serde_json::to_string(&sessions).unwrap().contains("second-account-42"));
         kill(&d, &id);
         save(&d);
+    }
+
+    /// A test never starts a session in your home folder: one that would (its HOME yours, or its
+    /// shell's history or startup files in it) fails before anything runs. This test program's
+    /// own home is a folder of its own.
+    #[test]
+    fn a_session_in_your_home_fails_its_test() {
+        let yours = users_home().unwrap().display().to_string();
+        let fails = |env: &[(&str, String)]| {
+            let env: HashMap<String, String> = env.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+            std::panic::catch_unwind(|| away_from_your_home(&env)).is_err()
+        };
+        assert!(!fails(&[]), "this test program runs in your home folder");
+        assert!(fails(&[("HOME", yours.clone())]));
+        assert!(fails(&[("HOME", format!("{yours}/"))]));
+        assert!(fails(&[("HISTFILE", format!("{yours}/.bash_history"))]));
+        assert!(fails(&[("ZDOTDIR", yours.clone())]));
+        assert!(!fails(&[("HISTFILE", "/dev/null".into())]));
+
+        // Through dinod: a shell whose environment would put it in your home never starts.
+        let d = shell_daemon();
+        let saved = SavedSession { account: vec![("HOME".into(), yours)], ..saved_on("9201", "conv-your-home", 1) };
+        let start = std::panic::AssertUnwindSafe(|| spawn(&d, Launch { restore: Some(saved), ..Launch::new("shell", vec![], None) }));
+        assert!(std::panic::catch_unwind(start).is_err(), "started in your home folder");
+        assert!(d.sessions.lock().unwrap().is_empty());
     }
 
     /// Waiting to continue a conversation can be cancelled until it's done waiting, not after.

@@ -112,6 +112,8 @@ pub(crate) fn start(got: impl FnOnce(u64, String) + Send + 'static) -> anyhow::R
     let mut args: Vec<String> = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"].iter().flat_map(|v| ["-u".to_string(), v.to_string()]).collect();
     args.extend([claude.display().to_string(), "setup-token".into()]);
     let spec = SpawnSpec { program: "/usr/bin/env".into(), args, cwd: Some(dir.clone()), env: [("CLAUDE_CONFIG_DIR".to_string(), dir.join("config").display().to_string())].into() };
+    #[cfg(test)]
+    crate::tests::away_from_your_home(&spec.env);
     let pane = match Pane::spawn(spec, COLS, 50, |_| {}) {
         Ok(p) => p,
         Err(e) => {
