@@ -78,6 +78,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "attach", about: "open a session here", flags: &[HELP], args: &[Kind::Sessions] },
     Command { name: "resume", about: "resume an ended session", flags: &[HELP], args: &[Kind::Sessions] },
     Command { name: "kill", about: "close a session", flags: &[HELP], args: &[Kind::Sessions] },
+    Command { name: "tui", about: "open dino-tui, dino's terminal UI, here", flags: &[HELP], args: &[] },
     Command {
         name: "fork",
         about: "start a new session on a copy of a session's conversation",
@@ -580,6 +581,7 @@ mod tests {
             "attach",
             "resume",
             "kill",
+            "tui",
             "fork",
             "rm",
             "found",

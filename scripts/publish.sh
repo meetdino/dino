@@ -1,8 +1,8 @@
 #!/bin/bash
 # Publish what scripts/release.sh built in dist/: a GitHub release in this repository, tagged at the
-# commit it was built from, with the DMG, the CLI tarball, SHA256SUMS and the update files; the same
-# release in the old releases repository, for the installs that still look there (the bridge,
-# below); then the cask and formula in the tap.
+# commit it was built from, with the DMG, the CLI tarballs (the Mac's and Linux's), SHA256SUMS and
+# the update files; the same release in the old releases repository, for the installs that still
+# look there (the bridge, below); then the cask and formula in the tap.
 #
 #   scripts/publish.sh --dry-run    # print what it would do
 #   scripts/publish.sh              # do it (asks first)
@@ -32,6 +32,10 @@ VERSION="$(cat "$DIST/download/dino/latest" 2>/dev/null)" || { echo "error: no r
 TAG="v$VERSION"
 DMG="$(ls "$DIST"/Dino-"$VERSION"-*.dmg)"
 TAR="$(ls "$DIST"/dino-"$VERSION"-darwin-*.tar.gz)"
+# dino for Linux, which release.sh had GitHub build (LINUX=0: none).
+LINUX_TARS=()
+for f in "$DIST"/dino-"$VERSION"-linux-*.tar.gz; do [ -f "$f" ] && LINUX_TARS+=("$f"); done
+[ "${#LINUX_TARS[@]}" -gt 0 ] || echo "warning: no Linux build (dino-$VERSION-linux-*.tar.gz): install.sh on Linux can't install this release, and Linux installs won't update to it."
 # The update files, when the release was built with the release key.
 UPDATES=()
 if [ -f "$DIST/appcast.xml" ]; then
@@ -53,7 +57,9 @@ if ! codesign --verify --strict "$DIST/Dino.app" 2>/dev/null || ! spctl --assess
 fi
 
 echo "Publishing dino $VERSION"
-echo "  release $TAG in $RELEASES_REPO at ${COMMIT:0:9}: $(basename "$DMG"), $(basename "$TAR"), SHA256SUMS${UPDATES[*]:+, $(basename "${UPDATES[0]}"), appcast.xml}, Dino.dmg"
+LINUX_NAMES=""
+for f in ${LINUX_TARS[@]+"${LINUX_TARS[@]}"}; do LINUX_NAMES="$LINUX_NAMES, $(basename "$f")"; done
+echo "  release $TAG in $RELEASES_REPO at ${COMMIT:0:9}: $(basename "$DMG"), $(basename "$TAR")$LINUX_NAMES, SHA256SUMS${UPDATES[*]:+, $(basename "${UPDATES[0]}"), appcast.xml}, Dino.dmg"
 [ -z "$BRIDGE_REPO" ] || echo "  the same in $BRIDGE_REPO, for installs of 0.1.5 and older (temporary)"
 echo "  tap $TAP_REPO: Casks/dino.rb, Formula/dino-cli.rb"
 if [ "$DRY" = 0 ]; then
@@ -78,7 +84,7 @@ trap 'rm -rf "$WORK"' EXIT
 # The same DMG under a name that never changes, for the website's releases/latest/download link.
 STABLE="$WORK/Dino.dmg"
 [ "$DRY" = 1 ] || cp "$DMG" "$STABLE"
-FILES=("$DMG" "$TAR" "$DIST/SHA256SUMS" ${UPDATES[@]+"${UPDATES[@]}"} "$STABLE")
+FILES=("$DMG" "$TAR" ${LINUX_TARS[@]+"${LINUX_TARS[@]}"} "$DIST/SHA256SUMS" ${UPDATES[@]+"${UPDATES[@]}"} "$STABLE")
 # --latest, always: the feed and the download link are this release's only while it's the latest.
 # gh publishes it once every file is up, so neither is ever missing from the latest.
 NOTES="dino $VERSION. Install with \`brew install meetdino/tap/dino\`, or the command line alone with \`curl -fsSL https://meetdino.com/install.sh | sh\`."
