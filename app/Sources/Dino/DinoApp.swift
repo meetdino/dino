@@ -1414,15 +1414,20 @@ struct UsagePanel: View {
                     Text("No quota data yet").font(.caption).foregroundStyle(.tertiary)
                 }
                 SessionTokenLines()
-                Button { openWindow(id: StatsView.windowID) } label: {
-                    Label("Usage Stats", systemImage: "chart.bar.xaxis")
-                        .font(.caption)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+                HStack(spacing: 6) {
+                    Button { openWindow(id: StatsView.windowID) } label: {
+                        Label("Usage Stats", systemImage: "chart.bar.xaxis")
+                            .font(.caption)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Tokens, models, agents, projects, routes and speed over time (⇧⌘U)")
+                    OutputRateText()
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("Tokens, models, agents, projects, routes and speed over time (⇧⌘U)")
+                .onAppear { OutputRate.shared.watch() }
+                .onDisappear { OutputRate.shared.unwatch() }
             }
         }
         .padding(.horizontal, 14)
