@@ -9,7 +9,7 @@ which the About window shows) and in the CLI tarball beside LICENSE.
                                       # fail if the app links a library this file doesn't name
 
 The Rust crates in the dino binary come from cargo-about (CARGO_ABOUT below), with
-packaging/licenses/about.toml: the crates Cargo.lock resolves for dino on macOS, without dev and
+packaging/licenses/about.toml: the crates Cargo.lock resolves for dino on macOS and Linux, without dev and
 build dependencies, and the license files each crate carries.
 
 Everything else is listed by hand in NATIVE, with its license texts in packaging/licenses/native/.

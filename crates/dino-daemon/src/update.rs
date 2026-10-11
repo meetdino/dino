@@ -1,9 +1,9 @@
-//! Keeping a `dino` installed with install.sh up to date. Once a day dinod reads the release feed
-//! (the appcast the app's Sparkle reads too), and when it names a newer dino it downloads this
-//! Mac's tarball, checks it against the SHA-256 and the release key's Ed25519 signature in the
-//! feed, and puts the new binary in place of its own. dinod keeps running the old one until no
-//! agent is working and no shell is running a command, then restarts into the new one; sessions
-//! resume, as after `dino stop`.
+//! Keeping a `dino` installed with install.sh up to date, on a Mac or on Linux. Once a day dinod
+//! reads the release feed (the appcast the app's Sparkle reads too), and when it names a newer dino
+//! it downloads this machine's tarball, checks it against the SHA-256 and the release key's Ed25519
+//! signature in the feed, and puts the new binary in place of its own. dinod keeps running the old
+//! one until no agent is working and no shell is running a command, then restarts into the new one;
+//! sessions resume, as after `dino stop`.
 //!
 //! The `dino` inside Dino.app updates with the app, and Homebrew's with `brew upgrade`: neither is
 //! touched here. Nor is a build without the release key, so development builds never update.
@@ -36,10 +36,6 @@ pub(crate) fn installed() -> Option<String> {
 
 /// Look now and then; restart into what was installed once nothing is busy.
 pub(crate) fn start(d: Arc<Daemon>) {
-    // The feed has only macOS builds so far: a Linux dino updates the way it was installed.
-    if !cfg!(target_os = "macos") {
-        return;
-    }
     let Some(exe) = std::env::current_exe().ok().filter(|e| updates_itself(e)) else { return };
     let key = PUBLIC_KEY.and_then(|k| base64::engine::general_purpose::STANDARD.decode(k.trim()).ok());
     let Some(key) = key.filter(|k| k.len() == 32) else { return };
@@ -120,6 +116,23 @@ struct Cli {
     signature: String,
 }
 
+/// This machine's builds as the feed names them, the one to take first: `arm64` or `x86_64` (or
+/// `universal`, both in one) for a Mac, `linux-x64` or `linux-arm64` for Linux. A dino from before
+/// the Linux builds looks for its own names only, so it never takes one of them.
+fn wanted() -> &'static [&'static str] {
+    match (cfg!(target_os = "linux"), cfg!(target_arch = "aarch64")) {
+        (true, true) => &["linux-arm64"],
+        (true, false) => &["linux-x64"],
+        (false, true) => &["arm64", "universal"],
+        (false, false) => &["x86_64", "universal"],
+    }
+}
+
+/// Of the feed's builds, the first of `wanted` it has.
+fn pick<'a>(clis: &'a [Cli], wanted: &[&str]) -> Option<&'a Cli> {
+    wanted.iter().find_map(|w| clis.iter().find(|c| c.arch == *w))
+}
+
 /// The newest item's version and CLI builds.
 fn parse(feed: &str) -> Option<(String, Vec<Cli>)> {
     let item = &feed[feed.find("<item>")?..];
@@ -167,8 +180,7 @@ fn check(feed: &str, key: &[u8], exe: &Path) -> anyhow::Result<Option<String>> {
     if !newer(&version, env!("CARGO_PKG_VERSION")) {
         return Ok(None);
     }
-    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
-    let cli = clis.iter().find(|c| c.arch == arch).or_else(|| clis.iter().find(|c| c.arch == "universal")).ok_or_else(|| anyhow::anyhow!("dino {version} has no build for {arch}"))?;
+    let cli = pick(&clis, wanted()).ok_or_else(|| anyhow::anyhow!("dino {version} has no build for {}", wanted()[0]))?;
     let bytes = client.get(&cli.url).send()?.error_for_status()?.bytes()?;
     let sum = hex::encode(sha2::Sha256::digest(&bytes));
     anyhow::ensure!(sum.eq_ignore_ascii_case(&cli.sha256), "dino {version}'s download doesn't match its SHA-256");
@@ -188,7 +200,8 @@ fn replace(exe: &Path, tarball: &[u8]) -> anyhow::Result<()> {
     std::fs::create_dir(&tmp)?;
     let result = (|| {
         std::fs::write(tmp.join("dino.tar.gz"), tarball)?;
-        let ok = std::process::Command::new("/usr/bin/tar").arg("-xzf").arg(tmp.join("dino.tar.gz")).arg("-C").arg(&tmp).arg("dino").status()?.success();
+        let tar = if Path::new("/usr/bin/tar").exists() { "/usr/bin/tar" } else { "tar" };
+        let ok = std::process::Command::new(tar).arg("-xzf").arg(tmp.join("dino.tar.gz")).arg("-C").arg(&tmp).arg("dino").status()?.success();
         anyhow::ensure!(ok, "couldn't unpack the download");
         let new = tmp.join("dino");
         std::fs::set_permissions(&new, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
@@ -219,6 +232,24 @@ mod tests {
         assert_eq!(clis.len(), 2);
         assert_eq!(clis[0], Cli { arch: "arm64".into(), url: "https://x/a.tar.gz?a=1&b=2".into(), sha256: "ab".into(), signature: "cd".into() });
         assert!(parse("<rss></rss>").is_none());
+    }
+
+    /// Each machine takes its own build: a Mac its architecture's or the universal one, Linux its
+    /// own, never the other system's.
+    #[test]
+    fn each_machine_takes_its_own_build() {
+        let cli = |arch: &str| Cli { arch: arch.into(), url: format!("https://x/{arch}"), sha256: String::new(), signature: String::new() };
+        let all = [cli("universal"), cli("linux-x64"), cli("linux-arm64"), cli("arm64")];
+        let took = |wanted: &[&str]| pick(&all, wanted).map(|c| c.arch.clone());
+        assert_eq!(took(&["arm64", "universal"]).as_deref(), Some("arm64"));
+        assert_eq!(took(&["x86_64", "universal"]).as_deref(), Some("universal"));
+        assert_eq!(took(&["linux-x64"]).as_deref(), Some("linux-x64"));
+        assert_eq!(took(&["linux-arm64"]).as_deref(), Some("linux-arm64"));
+        // A release with no Linux build: nothing for Linux, not a Mac's.
+        assert_eq!(pick(&[cli("arm64"), cli("universal")], &["linux-x64"]), None);
+        // This build's own names.
+        let own = wanted();
+        assert_eq!(own[0].starts_with("linux-"), cfg!(target_os = "linux"));
     }
 
     #[test]

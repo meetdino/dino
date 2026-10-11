@@ -49,7 +49,7 @@ Written by scripts/third-party.py from packaging/licenses/ and Cargo.lock; don't
 - Sparkle 2.10.0, MIT AND BSD-2-Clause AND Zlib. https://github.com/sparkle-project/Sparkle
   The app's updater: Contents/Frameworks/Sparkle.framework. Includes bsdiff, sais-lite, orlp/ed25519 and SUSignatureVerifier, whose notices are in its license.
 
-## Rust crates in the dino binary (189)
+## Rust crates in the dino binary (192)
 
 The dino binary is the dino command and dinod, in Contents/Helpers of the app and alone
 in the CLI tarball.
@@ -138,6 +138,7 @@ in the CLI tarball.
 - itoa 1.0.18, MIT OR Apache-2.0. https://github.com/dtolnay/itoa
 - libc 0.2.189, MIT OR Apache-2.0. https://github.com/rust-lang/libc
 - libsqlite3-sys 0.35.0, MIT. https://github.com/rusqlite/rusqlite
+- linux-raw-sys 0.12.1, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT. https://github.com/sunfishcode/linux-raw-sys
 - litemap 0.8.3, Unicode-3.0. https://github.com/unicode-org/icu4x
 - litrs 1.0.0, MIT OR Apache-2.0. https://github.com/LukasKalbertodt/litrs
 - lock_api 0.4.14, MIT OR Apache-2.0. https://github.com/Amanieu/parking_lot
@@ -148,6 +149,7 @@ in the CLI tarball.
 - mio 1.2.3, MIT. https://github.com/tokio-rs/mio
 - nix 0.28.0, MIT. https://github.com/nix-rust/nix
 - once_cell 1.21.4, MIT OR Apache-2.0. https://github.com/matklad/once_cell
+- openssl-probe 0.2.1, MIT OR Apache-2.0. https://github.com/rustls/openssl-probe
 - parking_lot 0.12.5, MIT OR Apache-2.0. https://github.com/Amanieu/parking_lot
 - parking_lot_core 0.9.12, MIT OR Apache-2.0. https://github.com/Amanieu/parking_lot
 - percent-encoding 2.3.2, MIT OR Apache-2.0. https://github.com/servo/rust-url/
@@ -168,6 +170,7 @@ in the CLI tarball.
 - rustix 1.1.5, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT. https://github.com/bytecodealliance/rustix
 - rustix-openpty 0.2.0, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT. https://github.com/sunfishcode/rustix-openpty
 - rustls 0.23.45, Apache-2.0 OR ISC OR MIT. https://github.com/rustls/rustls
+- rustls-native-certs 0.8.4, Apache-2.0 OR ISC OR MIT. https://github.com/rustls/rustls-native-certs
 - rustls-pki-types 1.15.1, MIT OR Apache-2.0. https://github.com/rustls/pki-types
 - rustls-platform-verifier 0.7.1, MIT OR Apache-2.0. https://github.com/rustls/rustls-platform-verifier
 - rustls-webpki 0.103.15, ISC. https://github.com/rustls/webpki
@@ -2565,7 +2568,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### MIT License
 
-Used by cfg-if 1.0.5, socket2 0.6.5.
+Used by cfg-if 1.0.5, openssl-probe 0.2.1, socket2 0.6.5.
 
 ```text
 Copyright (c) 2014 Alex Crichton
@@ -2979,7 +2982,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### MIT License
 
-Used by hyper-rustls 0.27.10, rustls 0.23.45.
+Used by hyper-rustls 0.27.10, rustls 0.23.45, rustls-native-certs 0.8.4.
 
 ```text
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
@@ -5181,7 +5184,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by anyhow 1.0.104, atomic-waker 1.1.2, displaydoc 0.2.7, home 0.5.12, itoa 1.0.18, once_cell 1.21.4, pin-project-lite 0.2.17, polling 3.11.0, proc-macro2 1.0.107, quote 1.0.47, rustix 1.1.5, rustix-openpty 0.2.0, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.151, syn 2.0.119, syn 3.0.6, thiserror 1.0.69, thiserror 2.0.21, thiserror-impl 1.0.69, thiserror-impl 2.0.21, unicode-ident 1.0.26, zmij 1.0.23.
+Used by anyhow 1.0.104, atomic-waker 1.1.2, displaydoc 0.2.7, home 0.5.12, itoa 1.0.18, linux-raw-sys 0.12.1, once_cell 1.21.4, pin-project-lite 0.2.17, polling 3.11.0, proc-macro2 1.0.107, quote 1.0.47, rustix 1.1.5, rustix-openpty 0.2.0, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.151, syn 2.0.119, syn 3.0.6, thiserror 1.0.69, thiserror 2.0.21, thiserror-impl 1.0.69, thiserror-impl 2.0.21, unicode-ident 1.0.26, zmij 1.0.23.
 
 ```text
 Permission is hereby granted, free of charge, to any
