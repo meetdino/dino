@@ -1,0 +1,109 @@
+name: Linux release
+
+# dino for Linux: the command line, which is also dinod, as dino-<version>-linux-x64.tar.gz and
+# dino-<version>-linux-arm64.tar.gz, each with dino, LICENSE and THIRD_PARTY_NOTICES.md at its top,
+# as the Mac's tarball has. Built on Ubuntu 22.04, the oldest Ubuntu GitHub runs, so glibc 2.35 and
+# newer runs them (as dino-tui's release does).
+#
+# scripts/release.sh starts this for the commit it builds, with the release key's public half, which
+# dinod checks its updates with (compiled in, as on the Mac). It waits for the run and takes the
+# tarballs from its artifacts. It signs them with the release key, which never leaves the Mac, and
+# puts them in SHA256SUMS and the update feed. Nothing here publishes anything.
+# .github/workflows/linux-install.yml calls it too, with a throwaway key.
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "The commit to build (default: the branch's)"
+        type: string
+        required: false
+      public_key:
+        description: "The release key's public half, base64 (none: the build doesn't update itself)"
+        type: string
+        required: false
+      feed_url:
+        description: "Where the build looks for updates (default: the newest release's appcast.xml)"
+        type: string
+        required: false
+      id:
+        description: "A name for the run, so release.sh finds it"
+        type: string
+        required: false
+  workflow_call:
+    inputs:
+      commit:
+        type: string
+        required: false
+      public_key:
+        type: string
+        required: false
+      feed_url:
+        type: string
+        required: false
+      id:
+        type: string
+        required: false
+
+run-name: Linux release ${{ inputs.id }}
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: linux-x64
+          - runner: ubuntu-22.04-arm
+            target: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+      # rusqlite links the system SQLite.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libsqlite3-dev
+      # rust-toolchain.toml picks the version.
+      - run: rustup toolchain install --no-self-update
+      - name: Build
+        env:
+          DINO_UPDATE_PUBLIC_KEY: ${{ inputs.public_key }}
+          DINO_UPDATE_FEED_URL: ${{ inputs.feed_url }}
+        run: |
+          # What wasn't given isn't compiled in: set but empty, it would be, as empty.
+          [ -n "$DINO_UPDATE_PUBLIC_KEY" ] || unset DINO_UPDATE_PUBLIC_KEY
+          [ -n "$DINO_UPDATE_FEED_URL" ] || unset DINO_UPDATE_FEED_URL
+          DINO_BUILD="$(git rev-parse --short=9 HEAD)"
+          export DINO_BUILD
+          # No build machine paths (home folder, checkout) in what ships, as scripts/release.sh.
+          RUSTFLAGS="--remap-path-prefix=$HOME/.cargo=cargo --remap-path-prefix=$PWD=dino" cargo build --release --locked -p dino
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          name="dino-$version-$TARGET"
+          mkdir pkg
+          cp target/release/dino LICENSE THIRD_PARTY_NOTICES.md pkg/
+          tar -C pkg -czf "$name.tar.gz" dino LICENSE THIRD_PARTY_NOTICES.md
+          pkg/dino --version
+          # What it links, and the newest glibc it needs: 2.35 at most, Ubuntu 22.04's.
+          ldd pkg/dino
+          need="$(objdump -T pkg/dino | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
+          echo "needs $need"
+          [ "$(printf '%s\nGLIBC_2.35\n' "$need" | sort -V | tail -n 1)" = GLIBC_2.35 ] || { echo "::error::$name needs $need, newer than Ubuntu 22.04's"; exit 1; }
+          sha256sum "$name.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: dino-*-linux-*.tar.gz
+          if-no-files-found: error

@@ -1,6 +1,6 @@
 # cargo-about's settings for the Rust crates in the dino binary (scripts/third-party.py).
-# dino ships for macOS; the crates only other platforms pull in aren't in it.
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+# dino ships for macOS and Linux (x86_64, arm64); the crates only other platforms pull in aren't in it.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 ignore-dev-dependencies = true
 ignore-build-dependencies = true
 private = { ignore = true }

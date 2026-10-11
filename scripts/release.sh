@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build a dino release into dist/ ($DIST to build elsewhere): Dino.app (with the dino CLI and dinod inside), a DMG, a CLI
-# tarball, SHA-256 sums, Homebrew cask/formula files, and a download/ tree laid out the way
-# scripts/install.sh fetches it. Nothing is uploaded.
+# tarball, the CLI's Linux tarballs, SHA-256 sums, Homebrew cask/formula files, and a download/ tree
+# laid out the way scripts/install.sh fetches it. Nothing is uploaded.
 #
 #   scripts/release.sh                 # host architecture
 #   ARCHS="arm64 x86_64" scripts/release.sh   # universal, when both Rust targets are installed
@@ -26,6 +26,12 @@
 #                      signed; without it the build doesn't update itself, and there's no appcast.
 #   DINO_FEED_URL      where builds look for the appcast (default: the newest release's, in RELEASES_REPO)
 #   DINO_UPDATE_BASE   where the appcast says the files are (default: this release's downloads)
+#
+# dino for Linux (x86_64, arm64) is built on GitHub, by .github/workflows/release-linux.yml, from the
+# commit this builds, which has to be on GitHub; it runs while the Mac's build runs here. Its
+# tarballs come back into dist/, signed here with the release key like the Mac's, in SHA256SUMS and
+# the update feed. It needs `gh`, signed in to an account that can run workflows in RELEASES_REPO.
+#   LINUX=0            a release without Linux builds
 #
 # A second, isolated dino (testing a release build beside the real one):
 #   DINO_BUNDLE_ID     the app's bundle identifier (default dev.dino.app), which names its launch agent
@@ -75,6 +81,20 @@ rm -rf "$DIST"
 mkdir -p "$DIST"
 
 say "dino $VERSION ($BUILD) for $ARCHS"
+
+# dino for Linux, built on GitHub meanwhile (see above): started now, collected before the sums.
+LINUX="${LINUX:-1}"
+LINUX_ID=""
+if [ "$LINUX" = 1 ]; then
+    case "$BUILD_ID" in ""|*-dirty*) echo "error: the Linux build is of a commit, and this tree has changes that aren't one (LINUX=0 releases without it)" >&2; exit 1 ;; esac
+    command -v gh >/dev/null || { echo "error: the Linux build runs on GitHub, through gh (LINUX=0 releases without it)" >&2; exit 1; }
+    COMMIT="$(git rev-parse HEAD)"
+    gh api "repos/$RELEASES_REPO/commits/$COMMIT" --silent 2>/dev/null || { echo "error: $COMMIT isn't on GitHub in $RELEASES_REPO, where the Linux build runs: push it first (LINUX=0 releases without it)" >&2; exit 1; }
+    LINUX_ID="$VERSION ${COMMIT:0:9} $(date +%s)"
+    say "Linux: building on GitHub (Linux release $LINUX_ID)"
+    gh workflow run release-linux.yml --repo "$RELEASES_REPO" --ref main \
+        -f commit="$COMMIT" -f public_key="$PUBKEY" -f feed_url="$FEED_URL" -f id="$LINUX_ID"
+fi
 
 # What ships has its licenses in THIRD_PARTY_NOTICES.md, as Cargo.lock and app/Package.swift have it.
 scripts/third-party.py --check
@@ -183,7 +203,34 @@ cp LICENSE THIRD_PARTY_NOTICES.md "$CLI/"
 tar -C "$CLI" -czf "$DIST/$TAR" dino LICENSE THIRD_PARTY_NOTICES.md
 rm -rf "$CLI"
 
-(cd "$DIST" && shasum -a 256 "$(basename "$DMG")" "$TAR" > SHA256SUMS)
+# dino for Linux, from its run on GitHub (started above): the run's tarballs, built from this commit.
+LINUX_TARS=()
+if [ "$LINUX" = 1 ]; then
+    say "Linux: waiting for the build on GitHub"
+    run_id=""
+    for _ in $(seq 60); do
+        run_id="$(gh run list --repo "$RELEASES_REPO" --workflow release-linux.yml --event workflow_dispatch --limit 30 \
+            --json databaseId,displayTitle --jq ".[] | select(.displayTitle == \"Linux release $LINUX_ID\") | .databaseId" | head -n 1)"
+        [ -n "$run_id" ] && break
+        sleep 5
+    done
+    [ -n "$run_id" ] || { echo "error: the Linux build didn't start on GitHub (Linux release $LINUX_ID)" >&2; exit 1; }
+    gh run watch "$run_id" --repo "$RELEASES_REPO" --exit-status >/dev/null \
+        || { echo "error: the Linux build failed: gh run view $run_id --repo $RELEASES_REPO --log-failed" >&2; exit 1; }
+    rm -rf "$DIST/linux"
+    gh run download "$run_id" --repo "$RELEASES_REPO" -D "$DIST/linux"
+    for t in linux-x64 linux-arm64; do
+        f="dino-$VERSION-$t.tar.gz"
+        [ -f "$DIST/linux/$t/$f" ] || { echo "error: the Linux build has no $f" >&2; exit 1; }
+        mv "$DIST/linux/$t/$f" "$DIST/$f"
+        LINUX_TARS+=("$f")
+    done
+    rm -rf "$DIST/linux"
+else
+    say "LINUX=0: no Linux build in this release"
+fi
+
+(cd "$DIST" && shasum -a 256 "$(basename "$DMG")" "$TAR" ${LINUX_TARS[@]+"${LINUX_TARS[@]}"} > SHA256SUMS)
 DMG_SHA="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
 TAR_SHA="$(shasum -a 256 "$DIST/$TAR" | cut -d' ' -f1)"
 
@@ -195,6 +242,15 @@ if [ -n "$KEY" ]; then
     ditto -c -k --sequesterRsrc --keepParent "$APP" "$DIST/$ZIP"
     ZIP_SIG="$(swift scripts/release-key.swift sign "$KEY" "$DIST/$ZIP")"
     TAR_SIG="$(swift scripts/release-key.swift sign "$KEY" "$DIST/$TAR")"
+    # The Linux tarballs, each its own line, by the name dinod on Linux looks for (linux-x64,
+    # linux-arm64); a Mac's dinod looks for its own and passes them by.
+    LINUX_CLI=""
+    for f in ${LINUX_TARS[@]+"${LINUX_TARS[@]}"}; do
+        t="${f#dino-"$VERSION"-}"
+        t="${t%.tar.gz}"
+        LINUX_CLI="$LINUX_CLI
+      <dino:cli arch=\"$t\" url=\"$UPDATE_BASE/$f\" sha256=\"$(shasum -a 256 "$DIST/$f" | cut -d' ' -f1)\" signature=\"$(swift scripts/release-key.swift sign "$KEY" "$DIST/$f")\"/>"
+    done
     cat > "$DIST/appcast.xml" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dino="https://meetdino.com/xml-namespaces/dino">
@@ -208,7 +264,7 @@ if [ -n "$KEY" ]; then
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <link>https://github.com/$RELEASES_REPO/releases/tag/v$VERSION</link>
       <enclosure url="$UPDATE_BASE/$ZIP" length="$(stat -f %z "$DIST/$ZIP")" type="application/octet-stream" sparkle:edSignature="$ZIP_SIG"/>
-      <dino:cli arch="$LABEL" url="$UPDATE_BASE/$TAR" sha256="$TAR_SHA" signature="$TAR_SIG"/>
+      <dino:cli arch="$LABEL" url="$UPDATE_BASE/$TAR" sha256="$TAR_SHA" signature="$TAR_SIG"/>$LINUX_CLI
     </item>
   </channel>
 </rss>
@@ -233,6 +289,7 @@ cp packaging/homebrew/README.md "$DIST/tap/README.md"
 D="$DIST/download/dino/$VERSION"
 mkdir -p "$D"
 cp "$DMG" "$DIST/$TAR" "$DIST/SHA256SUMS" "$D/"
+for f in ${LINUX_TARS[@]+"${LINUX_TARS[@]}"}; do cp "$DIST/$f" "$D/"; done
 if [ -n "$KEY" ]; then cp "$DIST/$ZIP" "$DIST/appcast.xml" "$D/"; fi
 echo "$VERSION" > "$DIST/download/dino/latest"
 # The commit this was built from, which publish.sh tags; only when nothing uncommitted went in.
@@ -244,5 +301,5 @@ cp scripts/install.sh "$DIST/download/install.sh"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP" 2>/dev/null || true
 
 say "done: dino $VERSION"
-ls -lh "$DMG" "$DIST/$TAR" | awk '{print "  " $5 "  " $9}'
+ls -lh "$DMG" "$DIST/$TAR" ${LINUX_TARS[@]+"${LINUX_TARS[@]/#/$DIST/}"} | awk '{print "  " $5 "  " $9}'
 echo "  publish with scripts/publish.sh (GitHub release in $RELEASES_REPO, then the tap)"

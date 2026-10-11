@@ -14,6 +14,7 @@ mod shell;
 mod stats;
 #[cfg(target_os = "linux")]
 mod systemd;
+mod tui;
 
 use std::time::Instant;
 
@@ -58,6 +59,7 @@ const USAGE: &str = "Sessions
   dino new [--worktree] [--stay] <agent> [--on <provider> <model>] [args...]
                                     start a session in the background and print its id
   dino attach | resume | kill <id>  open a session here, resume an ended one, or close one
+  dino tui [args...]                open dino-tui, dino's terminal UI, here (installed first if missing)
   dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]
                                     start a new session on a copy of a session's conversation
   dino rm [--force] <id>            delete a session and the worktree dino made for it
@@ -90,11 +92,19 @@ Setup
 
 Every command accepts `-h` or `--help` for its usage.";
 
-/// `USAGE` on Linux: macOS's `power` and `permissions` out, the systemd service in.
+/// `INTRO` on Linux: plain `dino` opens dino-tui, not an app.
+#[cfg(target_os = "linux")]
+fn linux_intro() -> String {
+    INTRO.replace("open the dino app (inside", "open dino-tui, dino's terminal UI (inside")
+}
+
+/// `USAGE` on Linux: macOS's `power` and `permissions` out, the systemd service in, and plain
+/// `dino` opening dino-tui.
 #[cfg(target_os = "linux")]
 fn linux_usage() -> String {
     let mut out = String::new();
-    for l in USAGE.lines().filter(|l| !l.starts_with("  dino power") && !l.starts_with("  dino permissions")) {
+    let usage = USAGE.replace("open the app, or start an agent", "open dino-tui, or start an agent");
+    for l in usage.lines().filter(|l| !l.starts_with("  dino power") && !l.starts_with("  dino permissions")) {
         if l.starts_with("  dino ping") {
             out.push_str("  dino service install|uninstall|status\n                                    run dinod as a systemd user service\n");
         }
@@ -108,6 +118,7 @@ const COMMAND_USAGE: &[(&str, &str)] = &[
     ("status", "dino status [--tmux]"),
     ("new", "dino new [--worktree] [--stay] <agent> [--on <provider> <model>] [args...]"),
     ("attach", "dino attach <id>"),
+    ("tui", "dino tui [args...]"),
     ("resume", "dino resume <id>"),
     ("kill", "dino kill <id>"),
     ("continue", "dino continue <id>"),
@@ -220,6 +231,7 @@ fn dino() -> anyhow::Result<()> {
             return client::attach_raw(id, fresh);
         }
         Some("ls") => return cmd_ls(&cli[1..]),
+        Some("tui") => return tui::run(&cli[1..]),
         Some("status") => return cmd_status(cli.iter().any(|a| a == "--tmux")),
         Some("mcp") => return mcp::serve(cli.iter().any(|a| a == "--read-only")),
         // Wired in by dinod around the user's own statusline (see `dino_core::statusline`).
@@ -324,7 +336,7 @@ fn dino() -> anyhow::Result<()> {
         Some(arg) if is_folder(arg) => return cmd_open(arg, &cli[1..]),
         Some("-h" | "--help" | "help") => {
             #[cfg(target_os = "linux")]
-            println!("{INTRO}\n{}", linux_usage());
+            println!("{}\n{}", linux_intro(), linux_usage());
             #[cfg(not(target_os = "linux"))]
             println!("{INTRO}\n{USAGE}");
             return Ok(());
@@ -340,12 +352,21 @@ fn dino() -> anyhow::Result<()> {
     cmd_open(".", &[std::slice::from_ref(&launcher.short), args].concat())
 }
 
-/// `dino` on its own opens the app, as `code` and `zed` open theirs. Inside a dino session (the app
-/// is in front already), piped, or with no app to open: the sessions, and where to go from there.
+/// `dino` on its own opens the app, as `code` and `zed` open theirs; on Linux, in a terminal, it
+/// opens dino-tui, installed first if it's missing. Inside a dino session (the app is in front
+/// already), piped, or with no app to open: the sessions, and where to go from there.
 fn cmd_home() -> anyhow::Result<()> {
     let inside = std::env::var_os("DINO_SESSION").is_some_and(|s| !s.is_empty());
     if !inside && out::tty() && open_app() {
         return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if !inside
+        && out::tty()
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && let Err(e) = tui::run(&[])
+    {
+        eprintln!("{}", out::paint(&format!("{e}: the sessions instead."), Paint::Dim));
     }
     let sessions = sessions()?;
     if sessions.is_empty() {
@@ -1687,6 +1708,14 @@ mod tests {
         assert_eq!(status_line(true, 3, 2, 0), "dino: 2 need you");
         assert_eq!(status_line(false, 1, 0, 0), "1 agent, none working");
         assert_eq!(status_line(false, 4, 0, 1), "4 agents: 1 working");
+    }
+
+    /// On Linux, plain `dino` opens dino-tui: the help says so, not that it opens an app.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_linux_plain_dino_opens_dino_tui() {
+        assert!(linux_intro().contains("  dino                open dino-tui, dino's terminal UI (inside a dino session") && !linux_intro().contains("open the dino app"));
+        assert!(linux_usage().contains("open dino-tui, or start an agent") && linux_usage().contains("  dino tui [args...]"));
     }
 
     #[test]
