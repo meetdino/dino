@@ -255,14 +255,30 @@ struct FallbackSection: View {
     }
 }
 
-/// The toolbar's word on a session answered by a fallback: from where, and until when.
+/// The toolbar's word on a session answered by a fallback: from where, and until when. Another of
+/// your Claude accounts answering is routine, and the sidebar's usage panel already says which one
+/// and when the spent one is back: for that, only the account's name, small and quiet.
 struct FallbackChip: View {
     let fallback: FallbackInfo
     var usage: [RouteUsage] = []
 
     var body: some View {
+        if fallback.isAccount {
+            Text(fallback.name)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(FallbackChip.detail(fallback, usage))
+                .accessibilityLabel(fallback.label)
+        } else {
+            chip
+        }
+    }
+
+    private var chip: some View {
         HStack(spacing: 4) {
-            Image(systemName: fallback.isAccount ? "person.2" : "arrow.triangle.branch").font(.caption)
+            Image(systemName: "arrow.triangle.branch").font(.caption)
             Text(fallback.label).lineLimit(1)
         }
         .font(.callout)
