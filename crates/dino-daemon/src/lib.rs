@@ -1225,7 +1225,10 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
         let resp = match req {
             Request::State => state(d),
             Request::StateChange { seen } => state_change(d, seen),
-            Request::OutputRate { seen } => Response::OutputRate { tokens_per_second: d.proxy.stats.rate.changed(seen, std::time::Duration::from_secs(60)) },
+            Request::OutputRate { seen, seen_input } => {
+                let (tokens_per_second, input_tokens_per_second) = d.proxy.stats.rate.changed(seen, seen_input, std::time::Duration::from_secs(60));
+                Response::OutputRate { tokens_per_second, input_tokens_per_second }
+            }
             Request::Launchers => Response::Launchers { launchers: d.offered() },
             Request::AllLaunchers => Response::Launchers { launchers: d.all_launchers() },
             Request::AgentSetup => Response::AgentSetup { agents: agent_setup(d) },

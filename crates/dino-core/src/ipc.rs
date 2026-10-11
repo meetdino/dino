@@ -79,11 +79,14 @@ pub enum Request {
     StateChange {
         seen: Option<u64>,
     },
-    /// Output tokens per second across every session over the last 10 seconds, once it isn't
-    /// `seen` (or after a minute regardless): the sidebar waits on this, which costs nothing while
-    /// no agent writes.
+    /// Output tokens per second across every session over the last 10 seconds, and the new input
+    /// (what the prompt cache didn't hold), once they aren't `seen` / `seen_input` (or after a
+    /// minute regardless): the sidebar waits on this, which costs nothing while no agent writes.
+    /// Without `seen_input` (an older client), only the output is compared.
     OutputRate {
         seen: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seen_input: Option<u32>,
     },
     /// What can be started now: allowed by the policies, the default first.
     Launchers,
@@ -607,6 +610,9 @@ pub enum Response {
     },
     OutputRate {
         tokens_per_second: u32,
+        /// New input tokens per second; 0 from an older dinod.
+        #[serde(default)]
+        input_tokens_per_second: u32,
     },
     Launchers {
         launchers: Vec<LauncherInfo>,
