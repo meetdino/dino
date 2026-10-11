@@ -1557,6 +1557,7 @@ private struct ManagedPane: View {
         case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", .power)
         case ("machine", "check_updates"): return make("Check for updates automatically", .updates)
         case ("machine", let r) where r == "claude_token" || r.hasPrefix("claude_token."): return make("Claude Code on SSH hosts", .claude)
+        case ("machine", "claude_account"): return make("The Claude account Claude Code uses", .claude)
         case ("worktrees", "location"): return make("Worktree location", .worktrees)
         case ("machine", "build_cache"), ("machine", "build_cache.enabled"): return make("Share one build cache across worktrees", .repos)
         case ("machine", "build_cache.size_gb"): return make("Build cache size", .repos)

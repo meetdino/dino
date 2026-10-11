@@ -11,6 +11,7 @@ machine.awake_while_working
 machine.build_cache.enabled
 machine.build_cache.size_gb
 machine.check_updates
+machine.claude_account
 machine.claude_token.local
 machine.claude_token.ssh
 machine.computer_use

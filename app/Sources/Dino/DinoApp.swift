@@ -1328,8 +1328,9 @@ final class PulseView: NSView {
 
 /// Usage at the foot of the sidebar: one line with the fullest window, opening to all of them.
 /// It answers "can my agents work right now, and on what?": with more than one Claude account and
-/// one of them spent, the account Claude Code's calls go to now comes first with its own windows,
-/// a spent one is said in a line with when it's back, and which sessions move back when.
+/// one of them spent (or another than account 1 chosen), the account Claude Code's calls go to now
+/// comes first with its own windows, a spent one is said in a line with when it's back, and which
+/// sessions move back when.
 struct UsagePanel: View {
     @EnvironmentObject var model: DinoModel
     @Environment(\.colorScheme) private var colorScheme
@@ -1352,9 +1353,18 @@ struct UsagePanel: View {
         }
     }
 
+    /// The account in use, when it says more than the usual: another than account 1, or account 1
+    /// while the one chosen to go first is spent.
+    private func named(_ answering: ClaudeAccountInfo?, _ accounts: [ClaudeAccountInfo]?) -> ClaudeAccountInfo? {
+        guard let answering, let accounts else { return nil }
+        let first = accounts.first(where: \.isChosen) ?? accounts.first(where: \.isOwn)
+        return answering.isOwn && first?.isOwn != false ? nil : answering
+    }
+
     var body: some View {
         let accounts = accounts
         let answering = accounts?.first { $0.answering }
+        let named = named(answering, accounts)
         let windows = windows(accounts)
         // The window closest to its limit is the one that stops work: of the account in use, and
         // only windows still current (one past its reset hasn't been reported since).
@@ -1377,8 +1387,8 @@ struct UsagePanel: View {
                                 Spacer(minLength: 0)
                                 Text("Claude back \(Clock.short(back))").font(.caption).foregroundStyle(SessionStatus.exited.color).lineLimit(1)
                             } else {
-                                if let answering, answering.number != 1 {
-                                    Text(answering.name ?? "account \(answering.number)").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                if let named {
+                                    Text(named.name ?? "account \(named.number)").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                                 }
                                 if let fullest {
                                     let pct = Double(fullest.window.utilization)
@@ -1395,9 +1405,9 @@ struct UsagePanel: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help(summary(answering: answering, fullest: fullest) + " Click for every window.")
+                .help(summary(answering: named, fullest: fullest) + " Click for every window.")
                 .accessibilityLabel("Usage")
-                .accessibilityValue(summary(answering: answering, fullest: fullest))
+                .accessibilityValue(summary(answering: named, fullest: fullest))
                 .accessibilityHint(open ? "Collapses usage" : "Shows every usage window")
                 .contextMenu {
                     Button("Usage Stats…") { openWindow(id: StatsView.windowID) }
@@ -1439,10 +1449,11 @@ struct UsagePanel: View {
         .overlay(alignment: .top) { if colorScheme == .light { Divider() } }
     }
 
-    /// The collapsed line in words: "Work in use, Claude 5h 12% used".
+    /// The collapsed line in words: "Work in use, Claude 5h 12% used"; "Work in use, chosen by you"
+    /// for the one chosen with Use This Account. `answering`: the account in use, when it's named.
     private func summary(answering: ClaudeAccountInfo?, fullest: (label: String, window: WindowInfo)?) -> String {
         var parts: [String] = []
-        if let answering, answering.number != 1 { parts.append("\(answering.short) in use") }
+        if let answering { parts.append(answering.chosenByYou ? "\(answering.short) in use, chosen by you" : "\(answering.short) in use") }
         if let fullest { parts.append("\(fullest.label) \(Int((Double(fullest.window.utilization) * 100).rounded()))% used") }
         if accounts != nil, answering == nil { parts.append("Every Claude account is at its limit") }
         return parts.isEmpty ? "No data yet." : parts.joined(separator: ", ") + "."
@@ -1497,7 +1508,7 @@ struct ClaudeAccountsUsage: View {
                     Text("in use").font(.caption).foregroundStyle(Color(nsColor: .systemGreen))
                 }
                 .accessibilityElement(children: .combine)
-                .help("Claude Code's calls go to \(answering.short) now\(answering.isOwn ? ", the account it signed in with" : "").")
+                .help("Claude Code's calls go to \(answering.short) now\(answering.isOwn ? ", the account it signed in with" : answering.chosenByYou ? ", the account you chose" : "").")
                 let windows = (answering.windows ?? []).filter(\.isWindow)
                 if windows.isEmpty {
                     // Never a made-up 0%: Anthropic says an account's use on the calls it signs.
@@ -1533,15 +1544,16 @@ struct ClaudeAccountsUsage: View {
     }
 
     private func help(_ a: ClaudeAccountInfo) -> String {
-        guard a.spent else { return "\(a.short) answers when the accounts before it are at their limit." }
+        guard a.spent else { return "\(a.short) answers when the accounts tried before it are at their limit." }
         let windows = (a.windows ?? []).filter(\.isWindow).map { "\($0.name) \(Int((Double($0.utilization) * 100).rounded()))%" }
         let back = a.resets_at.map { "Its limit resets \(Clock.short($0))." } ?? a.retry_at.map { "dino tries it again \(Clock.short($0))." } ?? ""
         return (["\(a.short)\(a.isOwn ? ", the one Claude Code signed in with," : "") is at its limit.", back] + (windows.isEmpty ? [] : ["Last reported: " + windows.joined(separator: ", ") + "."])).filter { !$0.isEmpty }.joined(separator: " ")
     }
 
-    /// One line on when sessions move: back to account 1 once it resets, or now, at their next turn.
+    /// One line on when sessions move: back to the account that goes first (account 1, or the one
+    /// chosen) once it resets, or now, at their next turn.
     private func note(_ answering: ClaudeAccountInfo?) -> String? {
-        let elsewhere = sessions.filter { s in s.fallback.map { $0.isAccount && $0.name != answering?.short } ?? false }
+        let elsewhere = sessions.filter { s in s.fallback.map { $0.isAccount && $0.accountName != answering?.short } ?? false }
         if let answering, !elsewhere.isEmpty {
             let n = elsewhere.count
             return "\(n == 1 ? "1 session" : "\(n) sessions") on another account \(n == 1 ? "moves" : "move") to \(answering.name ?? "account \(answering.number)") at \(n == 1 ? "its" : "their") next turn."
@@ -1551,8 +1563,9 @@ struct ClaudeAccountsUsage: View {
             let back = accounts.compactMap(\.backAt).min()
             return "Every Claude account is at its limit" + (back.map { ": the first is back at \(Clock.short($0))." } ?? ".")
         }
-        guard answering.number != 1, let own = accounts.first(where: \.isOwn), own.spent, let back = own.backAt else { return nil }
-        return "Sessions go back to \(own.name ?? "account 1") at their next turn after \(Clock.short(back))."
+        let first = accounts.first(where: \.isChosen) ?? accounts.first(where: \.isOwn)
+        guard let first, answering.number != first.number, first.spent, let back = first.backAt else { return nil }
+        return "Sessions go back to \(first.name ?? "account \(first.number)") at their next turn after \(Clock.short(back))."
     }
 }
 

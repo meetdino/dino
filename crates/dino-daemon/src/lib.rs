@@ -396,8 +396,7 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     let keys = load_keys();
     let free_tier = free_tier(&keys);
     let plans = providers::plan_routes(&keys);
-    let proxy = Proxy::start(dino_core::account_store::with_accounts(keys))?;
-    proxy.set_account_names(claude_accounts::proxy_names());
+    let proxy = start_proxy(keys)?;
     proxy.set_plans(plans);
     proxy.set_budget(Settings::load().policies.session_token_budget);
     proxy.set_free_models(Settings::load().experimental.free_models);
@@ -852,6 +851,15 @@ fn save_chatgpt(d: &Daemon, t: &chatgpt::Tokens) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// dinod's proxy, with `keys` and your other Claude accounts' tokens (from the Keychain, in memory
+/// only), their names, and the one chosen for Claude Code's calls to go to first.
+fn start_proxy(keys: HashMap<String, String>) -> anyhow::Result<Proxy> {
+    let proxy = Proxy::start(dino_core::account_store::with_accounts(keys))?;
+    proxy.set_account_names(claude_accounts::proxy_names());
+    proxy.set_chosen_account(claude_accounts::chosen_token().as_deref());
+    Ok(proxy)
+}
+
 pub(crate) fn keys_changed(d: &Daemon) {
     let keys = load_keys();
     *d.launchers.write().unwrap() = launchers(free_tier(&keys));
@@ -859,6 +867,7 @@ pub(crate) fn keys_changed(d: &Daemon) {
     // With your other Claude accounts' tokens, from the Keychain, in memory only.
     d.proxy.set_keys(dino_core::account_store::with_accounts(keys));
     d.proxy.set_account_names(claude_accounts::proxy_names());
+    d.proxy.set_chosen_account(claude_accounts::chosen_token().as_deref());
     std::thread::spawn(|| providers::refresh(true));
 }
 
@@ -1268,7 +1277,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 let managed = dino_core::settings::Managed::load();
                 Response::Settings { settings: Settings::load(), locked: managed.locked_paths(), locked_from: managed.locked_from(), ssh_config_hosts: ssh::config_hosts(), error: Settings::error() }
             }
-            Request::SetSettings { settings } => match settings.save() {
+            Request::SetSettings { settings } => match claude_accounts::with_chosen(settings).save() {
                 Ok(()) => {
                     d.proxy.set_budget(Settings::load().policies.session_token_budget);
                     fallbacks::sync(d);
@@ -5282,7 +5291,8 @@ mod tests {
         shell_daemon()
     }
 
-    /// The Claude accounts are kept in one key file for every test: one test at a time looks at them.
+    /// The Claude accounts are kept in one key file for every test, and the one chosen in one
+    /// settings.toml: one test at a time looks at them, or saves settings.toml.
     pub(crate) fn claude_accounts_lock() -> std::sync::MutexGuard<'static, ()> {
         static ONE: Mutex<()> = Mutex::new(());
         ONE.lock().unwrap_or_else(|e| e.into_inner())
@@ -5361,6 +5371,122 @@ mod tests {
             serve("remove", None, Some(n), vec![]).unwrap();
         }
         assert!(kept().is_empty());
+    }
+
+    /// One request through dinod's socket, as a client sends it.
+    fn request(d: &Arc<Daemon>, req: &Request) -> Response {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let d2 = d.clone();
+        std::thread::spawn(move || serve(&d2, server));
+        ipc::write_json(&mut client, req).unwrap();
+        let (_, payload) = ipc::read_frame(&mut client).unwrap();
+        serde_json::from_slice(&payload).unwrap()
+    }
+
+    /// "Use this account": the one chosen is the account Claude Code's calls go to first, as the
+    /// list and the state both say; while it's spent, the ones after it answer, then from the top.
+    /// It's kept in settings.toml, so a restart keeps it, and a client saving its whole settings
+    /// (an older app, which doesn't know it) never changes it. Reordered, the choice goes with its
+    /// account; removed, it's Claude Code's own sign-in again, as `use` with account 1 is.
+    #[test]
+    fn a_chosen_claude_account_is_kept_and_follows_its_account() {
+        let _one = claude_accounts_lock();
+        let d = shell_daemon();
+        let a = "sk-ant-oat01-CHOSENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let b = "sk-ant-oat01-CHOSENBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        let c = "sk-ant-oat01-CHOSENCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+        let accounts = |d: &Arc<Daemon>, action: &str, account: Option<u32>, order: Vec<u32>| match request(d, &Request::ClaudeAccounts { action: action.into(), value: None, account, order }) {
+            Response::ClaudeAccounts { accounts } => Ok(accounts),
+            Response::Error { message } => Err(message),
+            r => panic!("{r:?}"),
+        };
+        // Each account's number, whether it's the one chosen, and whether it answers now.
+        let rows = |a: &[dino_core::ipc::ClaudeAccountInfo]| a.iter().map(|x| (x.number, x.chosen, x.answering)).collect::<Vec<_>>();
+        let listed = |d: &Arc<Daemon>| rows(&accounts(d, "status", None, vec![]).unwrap().accounts);
+        let in_state = |d: &Arc<Daemon>| match request(d, &Request::State) {
+            Response::State { claude_accounts, .. } => rows(&claude_accounts.expect("more than one account")),
+            r => panic!("{r:?}"),
+        };
+        let kept = || Settings::load().machine.claude_account;
+        let spent = |d: &Daemon, key: &str, name: &str| {
+            let at = now_secs() + 3600;
+            let l = dino_proxy::fallback::Limited { name: name.into(), kind: dino_proxy::fallback::Kind::Quota, said: "spent".into(), resets_at: Some(at), retry_at: at };
+            d.proxy.stats.limited.lock().unwrap().insert(key.into(), l);
+        };
+        for t in [a, b, c] {
+            claude_accounts::serve(&d, "add", Some(t.into()), None, vec![]).unwrap();
+        }
+
+        // Nothing chosen: Claude Code's own sign-in, account 1.
+        assert_eq!(listed(&d), [(1, true, true), (2, false, false), (3, false, false), (4, false, false)]);
+        assert!(accounts(&d, "use", Some(9), vec![]).unwrap_err().contains("no Account 9"));
+
+        // Account 3 chosen: it answers, though account 1 has room.
+        let chosen = [(1, false, false), (2, false, false), (3, true, true), (4, false, false)];
+        assert_eq!(rows(&accounts(&d, "use", Some(3), vec![]).unwrap().accounts), chosen);
+        assert_eq!(in_state(&d), chosen);
+        assert_eq!((kept(), d.proxy.chosen_account()), (Some(3), Some(3)));
+
+        // Spent: the one after it answers, then from the top, account 1 first.
+        spent(&d, &dino_proxy::accounts::key(b), "Claude account 3");
+        assert_eq!(in_state(&d), [(1, false, false), (2, false, false), (3, true, false), (4, false, true)]);
+        spent(&d, &dino_proxy::accounts::key(c), "Claude account 4");
+        assert_eq!(in_state(&d), [(1, false, true), (2, false, false), (3, true, false), (4, false, false)]);
+        spent(&d, "anthropic#own", "Claude");
+        assert_eq!(listed(&d), [(1, false, false), (2, false, true), (3, true, false), (4, false, false)]);
+        // Back: the chosen one again.
+        d.proxy.stats.limited.lock().unwrap().clear();
+        assert_eq!(in_state(&d), chosen);
+
+        // Saved by a client that doesn't know the choice (an older app sends the whole document
+        // without it), as dinod's SetSettings saves it: still chosen.
+        let mut older = Settings::load();
+        older.machine.claude_account = None;
+        claude_accounts::with_chosen(older).save().unwrap();
+        assert_eq!(kept(), Some(3));
+
+        // dinod started again: the same choice, from settings.toml.
+        let d = new_daemon(d.home.clone(), start_proxy(load_keys()).unwrap(), vec![shell()]);
+        assert_eq!(d.proxy.chosen_account(), Some(3));
+        assert_eq!(listed(&d), chosen);
+        assert_eq!(in_state(&d), chosen);
+
+        // Reordered: the choice goes with its account (b) to its new number.
+        accounts(&d, "order", None, vec![3, 2, 4]).unwrap();
+        assert_eq!(dino_core::account_store::load().kept[0], (2, b.to_string()));
+        assert_eq!((kept(), d.proxy.chosen_account()), (Some(2), Some(2)));
+        assert_eq!(listed(&d), [(1, false, false), (2, true, true), (3, false, false), (4, false, false)]);
+
+        // Removed: Claude Code's own sign-in again.
+        accounts(&d, "remove", Some(2), vec![]).unwrap();
+        assert_eq!((kept(), d.proxy.chosen_account()), (None, None));
+        assert_eq!(listed(&d), [(1, true, true), (3, false, false), (4, false, false)]);
+
+        // `use` with account 1, or with none, goes back to it too.
+        accounts(&d, "use", Some(4), vec![]).unwrap();
+        assert_eq!(in_state(&d), [(1, false, false), (3, false, false), (4, true, true)]);
+        assert_eq!(rows(&accounts(&d, "use", Some(1), vec![]).unwrap().accounts), [(1, true, true), (3, false, false), (4, false, false)]);
+        assert_eq!(kept(), None);
+        accounts(&d, "use", Some(4), vec![]).unwrap();
+        accounts(&d, "use", None, vec![]).unwrap();
+        assert_eq!((kept(), d.proxy.chosen_account()), (None, None));
+
+        // The chosen account gone other than by `remove` (its Keychain item deleted): account 1
+        // answers, and an account added later under its number isn't chosen.
+        accounts(&d, "use", Some(4), vec![]).unwrap();
+        dino_core::account_store::set(&[(4, None)]).unwrap();
+        keys_changed(&d);
+        assert_eq!(listed(&d), [(1, true, true), (3, false, false)]);
+        for t in [b, c] {
+            claude_accounts::serve(&d, "add", Some(t.into()), None, vec![]).unwrap();
+        }
+        assert_eq!(listed(&d), [(1, true, true), (2, false, false), (3, false, false), (4, false, false)]);
+        assert_eq!(kept(), None);
+
+        for n in [2, 3, 4] {
+            claude_accounts::serve(&d, "remove", None, Some(n), vec![]).unwrap();
+        }
+        assert!(dino_core::account_store::load().kept.is_empty());
     }
 
     /// dino never runs two processes on one conversation: a second start of it is refused, an
@@ -6488,6 +6614,8 @@ while (sysread(STDIN, my $c, 1)) {
     #[test]
     fn an_agent_at_its_limit_falls_back_and_starts_new_sessions_elsewhere() {
         use dino_core::settings::{AgentSwitch, Fallback, FallbackStep};
+        // It saves settings.toml, and puts back what it found after.
+        let _one = claude_accounts_lock();
         test_home();
         let before = Settings::load_user();
         let mut settings = before.clone();

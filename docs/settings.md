@@ -92,6 +92,13 @@ user-facing values under **General**, **Terminal**, **Agents**, **Power**, and
 - `claude_token` (table, defaults below): where the Claude Code subscription token may be used.
   The token itself is stored separately and locally. App: **Agents → Claude Code Subscription
   Token**.
+- `claude_account` (optional integer, default *unset*, which means account 1): the Claude account
+  Claude Code's calls go to first, by its number in **Accounts** (account 1 is the one Claude Code
+  signed in with). dinod's proxy signs Claude Code's calls with that account's token from each
+  session's next turn; while it's at its limit, the accounts after it answer, then the ones before
+  it. Set by **Accounts → Use This Account** or `dino claude-token use-account <n>`; dinod keeps it
+  when the app saves the rest of the settings, follows the account when the list is reordered, and
+  unsets it when that account is removed.
 - `check_updates` (`boolean`, default `true`): check daily for updates and install them automatically
   where dino manages updates. Homebrew installations remain managed by Homebrew. App: **General →
   Updates**.

@@ -393,12 +393,15 @@ pub enum Request {
         #[serde(default)]
         value: Option<String>,
     },
-    /// Your other Claude accounts, which Claude Code goes on with when the one it signed in with
-    /// is at its limit: `status`, `add` (`value`: a token `claude setup-token` printed, or text
+    /// Your Claude accounts: the one Claude Code's calls go to, and the others it goes on with when
+    /// that one is at its limit. `status`, `add` (`value`: a token `claude setup-token` printed, or text
     /// holding one), `login` (signs in in the browser: runs `claude setup-token` out of sight and
     /// adds the token it prints; `create` is the same), `login_code` (`value`: the code claude.ai
-    /// showed, for a sign-in in another browser), `login_cancel`, `remove` (`account`: its number) or `order` (`order`: every account's number, in
-    /// the order to try them). Replies `ClaudeAccounts`; never with a token.
+    /// showed, for a sign-in in another browser), `login_cancel`, `rename` (`account`, `value`: its
+    /// name, empty for none), `remove` (`account`: its number), `order` (`order`: every account's
+    /// number, in the order to try them) or `use` (`account`: the one Claude Code's calls go to
+    /// first, from each session's next turn, even while the others have room; 1 or none for the
+    /// one it signed in with). Replies `ClaudeAccounts`; never with a token.
     ClaudeAccounts {
         action: String,
         #[serde(default)]
@@ -1662,8 +1665,13 @@ pub struct ClaudeLoginInfo {
 pub struct ClaudeAccountInfo {
     /// 1 for the account Claude Code signed in with, 2 on for the others (`CLAUDE_ACCOUNT_<n>`).
     pub number: u32,
-    /// Claude Code's calls go to this one now: the first that isn't spent.
+    /// Claude Code's calls go to this one now: the first that isn't spent, from the chosen one on.
     pub answering: bool,
+    /// The one Claude Code's calls go to first (`use`): the one the user chose, else account 1.
+    /// While it's spent, the accounts after it answer, then the ones before it. False for every
+    /// account from an older dinod.
+    #[serde(default)]
+    pub chosen: bool,
     /// Found at its subscription limit, and not tried again yet.
     pub spent: bool,
     /// When its limit resets (unix seconds), when Anthropic said so.

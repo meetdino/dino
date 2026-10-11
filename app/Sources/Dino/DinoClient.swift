@@ -141,23 +141,29 @@ struct FallbackInfo: Codable, Equatable {
     /// Answered by another of the user's Claude accounts ("Work", "Claude account 2"), not a fallback route.
     var isAccount: Bool { provider == "anthropic" && !isModel }
 
+    /// For another Claude account: the one answering, and the spent one it answers for, as the list
+    /// names them. dinod calls Claude Code's own sign-in "Claude": it answers when the account
+    /// chosen to go first is spent, and is the spent one otherwise.
+    var accountName: String { name == "Claude" ? ClaudeAccountInfo.ownShort : name }
+    var accountFrom: String { from == "Claude" ? ClaudeAccountInfo.ownShort : from }
+
     /// Answered by another model of the same account, the one asked for being rejected.
     var isModel: Bool { reason == "unavailable" }
 
     /// What the session shows: "On fallback: GLM Coding Plan · Claude limit resets 14:00", for
     /// another Claude account "On Work · you@example.com back at 14:00" (the reset is the spent
-    /// account's, Claude Code's own sign-in; each by the name the user knows it by, else "Claude
-    /// account 2"), for another model "gpt-5.5 unavailable · using gpt-5.4".
+    /// account's: Claude Code's own sign-in, or the one chosen to go first; each by the name the
+    /// user knows it by, else "Claude account 2"), for another model "gpt-5.5 unavailable · using
+    /// gpt-5.4".
     var label: String {
         if isModel { return "\(why) · using \(model)" }
         guard isAccount else { return "On fallback: \(name) · \(why)" }
-        let own = ClaudeAccountInfo.ownShort
-        if let t = resets_at { return "On \(name) · \(own) back at \(Clock.short(t))" }
-        return "On \(name) · \(own) at its limit"
+        if let t = resets_at { return "On \(accountName) · \(accountFrom) back at \(Clock.short(t))" }
+        return "On \(accountName) · \(accountFrom) at its limit"
     }
 
-    /// The sidebar row's, short: "On Work"; the footer says when account 1 is back.
-    var rowLabel: String { isAccount ? "On \(name)" : label }
+    /// The sidebar row's, short: "On Work"; the footer says when the spent account is back.
+    var rowLabel: String { isAccount ? "On \(accountName)" : label }
 
     /// "Claude limit resets 14:00", "GLM out of balance", "Claude down".
     var why: String {
