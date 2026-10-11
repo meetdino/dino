@@ -1,0 +1,5 @@
+# Every test program cargo runs here (`cargo test`, from this folder or one below it, cloud/'s
+# too) starts in a home folder of its own, not yours: see scripts/test-home.sh. dinod's tests fail
+# a session they'd start in your home instead (dino-daemon's `tests::away_from_your_home`).
+[target.'cfg(unix)']
+runner = "scripts/test-home.sh"
