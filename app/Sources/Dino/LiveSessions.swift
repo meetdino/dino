@@ -76,3 +76,76 @@ struct Live<Content: View>: View {
 
     var body: some View { content(live.info) }
 }
+
+/// Output tokens per second across every agent, over dinod's last 10 s, for the usage panel. dinod
+/// answers once the rate differs from the one shown, so while no agent writes nothing is asked,
+/// woken or redrawn; while one does, at most once a second. Watched only while the panel shows it.
+@MainActor
+final class OutputRate: ObservableObject {
+    static let shared = OutputRate()
+
+    @Published private(set) var perSecond: UInt32 = 0
+    private var watchers = 0
+    private var running = false
+
+    func watch() {
+        watchers += 1
+        guard !running else { return }
+        running = true
+        // A thread of its own: the wait blocks, for as long as nothing writes.
+        Thread.detachNewThread { Self.follow() }
+    }
+
+    func unwatch() { watchers = max(0, watchers - 1) }
+
+    /// Shows `rate`; whether it's still wanted. Ends the watch if not, or if dinod `refused` it.
+    private func shown(_ rate: UInt32, refused: Bool) -> Bool {
+        if perSecond != rate { perSecond = rate }
+        if watchers == 0 || refused { running = false }
+        return running
+    }
+
+    private struct Answer: Decodable { var tokens_per_second: UInt32? }
+
+    nonisolated private static func follow() {
+        var connection: DinoConnection?
+        var seen: UInt32?
+        while true {
+            var rate: UInt32 = 0
+            var refused = false
+            do {
+                if connection == nil { connection = try DinoConnection(path: DinoEnvironment.socketPath) }
+                var body: [String: Any] = ["type": "output_rate"]
+                body["seen"] = seen
+                let data = try connection!.send(body)
+                rate = try JSONDecoder().decode(Answer.self, from: data).tokens_per_second ?? 0
+                seen = rate
+            } catch DinoError.daemon {
+                // A dinod older than this app: nothing shown until the panel opens again.
+                refused = true
+            } catch {
+                // dinod went: asked again once it's back.
+                connection = nil
+                seen = nil
+                Thread.sleep(forTimeInterval: 5)
+            }
+            let wanted = DispatchQueue.main.sync { MainActor.assumeIsolated { shared.shown(rate, refused: refused) } }
+            if !wanted { return }
+        }
+    }
+}
+
+/// The usage panel's live rate, beside Usage Stats and under the sessions' tokens, drawn as they
+/// are: only while agents write, where "0 tok/s" would sit in the sidebar for good saying nothing.
+struct OutputRateText: View {
+    @ObservedObject private var rate = OutputRate.shared
+
+    var body: some View {
+        if rate.perSecond > 0 {
+            Text("\(tokens(UInt64(rate.perSecond))) tok/s")
+                .font(.caption.monospacedDigit())
+                .help("Output tokens per second across every agent, over the last 10 seconds. Only traffic routed through dino is counted.")
+                .accessibilityLabel("\(rate.perSecond) output tokens per second")
+        }
+    }
+}

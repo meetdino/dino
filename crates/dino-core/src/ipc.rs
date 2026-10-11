@@ -79,6 +79,12 @@ pub enum Request {
     StateChange {
         seen: Option<u64>,
     },
+    /// Output tokens per second across every session over the last 10 seconds, once it isn't
+    /// `seen` (or after a minute regardless): the sidebar waits on this, which costs nothing while
+    /// no agent writes.
+    OutputRate {
+        seen: Option<u32>,
+    },
     /// What can be started now: allowed by the policies, the default first.
     Launchers,
     /// Every launcher, allowed or not (for choosing policies).
@@ -598,6 +604,9 @@ pub enum Response {
         /// Tags this state for `StateChange`; only in a reply to one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<u64>,
+    },
+    OutputRate {
+        tokens_per_second: u32,
     },
     Launchers {
         launchers: Vec<LauncherInfo>,

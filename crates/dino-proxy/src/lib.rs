@@ -17,6 +17,7 @@ mod free;
 pub mod local;
 mod openrouter;
 pub mod plan;
+pub mod rate;
 mod siwc;
 pub mod tasks;
 mod upstream;
@@ -409,6 +410,8 @@ pub struct Stats {
     /// The organization Anthropic said answered a subscription's calls, by the same key as
     /// `quotas`: which Claude account a token is, without asking anything more of Anthropic.
     orgs: Mutex<HashMap<String, String>>,
+    /// Output tokens per second across every session, live (see `rate`).
+    pub rate: rate::Rate,
 }
 
 impl Stats {
@@ -1532,6 +1535,9 @@ fn tapped(resp: reqwest::Response, mut tap: Tap) -> Body {
                 tap.first = Some(Instant::now());
             }
             tap.meter.feed(bytes);
+            if tap.call.is_some() && tap.meter.sse == Some(true) {
+                tap.stats.rate.chunk(&mut tap.meter.live, bytes.len());
+            }
         }
         chunk
     }))
@@ -1799,6 +1805,9 @@ impl Drop for Tap {
             log(format_args!("{} model call answered 200 with an error: {e}", self.session));
         }
         let subagent = self.call.as_ref().is_some_and(|c| c.subagent.is_some());
+        if self.call.is_some() {
+            self.stats.rate.ended(&mut self.meter.live, self.meter.seen.as_ref().map_or(0, |u| u.output));
+        }
         if let Some(mut call) = self.call.take() {
             call.session = self.session.clone();
             // Kept only for an agent that says which conversation a call is for (Claude Code):
@@ -2170,6 +2179,8 @@ struct Meter {
     /// The answer was an error after all, though it came with 200: OpenRouter passes an upstream
     /// failure ("provider_overloaded") on in the body, and a stream can end in an error event.
     error: Option<String>,
+    /// A model call's streamed part, as the live rate counts it.
+    live: rate::Live,
 }
 
 impl Meter {
@@ -2565,6 +2576,12 @@ mod tests {
         let s = proxy.stats.session("9");
         assert_eq!((s.usage.total_input(), s.usage.output), (309, 21));
         assert_eq!((s.subagent_usage.total_input(), s.subagent_usage.output), (103, 7), "one subagent call");
+        // And the live rate: 21 tokens in a few ms, over its 10 s, once their second is over.
+        let mut rate = 0;
+        while rate < 2 && since.elapsed() < std::time::Duration::from_secs(5) {
+            rate = proxy.stats.rate.changed(Some(rate), std::time::Duration::from_secs(3));
+        }
+        assert_eq!(rate, 2);
     }
 
     /// A session that was on a fallback goes back to its own route at a turn's start. When that
