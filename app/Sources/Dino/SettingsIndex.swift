@@ -111,7 +111,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .agents: "Every agent dino knows, which ones you use, and the one ⌘N starts."
         case .defaults: "What each agent's new sessions start with."
         case .limits: "How much a session may use, and where an agent goes at its limit."
-        case .claude: "Your Claude accounts. When one reaches its usage limit, Claude Code goes on with the next."
+        case .claude: "Your Claude accounts, and the one Claude Code uses. When one reaches its usage limit, Claude Code goes on with the next."
         case .computer: "Agents using your Mac's apps, and how dino shows it."
         case .providers: "Where models come from besides the agents' own accounts."
         case .models: "Every model your providers serve, and the agents it works in."
@@ -310,8 +310,9 @@ extension SettingsEntry {
               keys: ["fallbacks.*.steps", "fallbacks.*.on_outage", "fallbacks.*.new_sessions.agent", "fallbacks.*.new_sessions.model", "policies.fallback_providers"]),
 
         // Accounts
-        .init(id: "claude-accounts", pane: .claude, title: "Claude accounts", detail: "Sign in with more Claude accounts and name them. Claude Code switches to the next when one reaches its usage limit.",
-              synonyms: ["accounts", "add account", "sign in", "log in", "login", "subscription", "max", "pro", "switch account", "limit", "claude code", "rename", "account name", "email"]),
+        .init(id: "claude-accounts", pane: .claude, title: "Claude accounts", detail: "Sign in with more Claude accounts, name them, and choose the one Claude Code uses. Claude Code switches to the next when one reaches its usage limit.",
+              synonyms: ["accounts", "add account", "sign in", "log in", "login", "subscription", "max", "pro", "switch account", "use account", "choose account", "limit", "claude code", "rename", "account name", "email"],
+              keys: ["machine.claude_account"]),
         .init(id: "claude-token", pane: .claude, title: "Claude Code on SSH hosts", detail: "Claude Code on SSH hosts signs in with your first Claude account.",
               synonyms: ["setup-token", "oauth", "ssh", "token", "subscription token"], keys: ["machine.claude_token.ssh", "machine.claude_token.local"]),
 

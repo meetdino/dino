@@ -99,7 +99,8 @@ pub struct OnFallback {
     /// Which step of the chain: a session only moves up the chain at the start of a turn.
     pub(crate) step: usize,
     /// Answered by another of the user's Claude accounts, not a step of the chain: which (see
-    /// `accounts`). Same model, so nothing is mixed; it too changes only as a turn starts.
+    /// `accounts`; 1 for Claude Code's own sign-in, when another is chosen to answer first). Same
+    /// model, so nothing is mixed; it too changes only as a turn starts.
     pub account: Option<u32>,
 }
 

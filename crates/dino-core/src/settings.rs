@@ -312,6 +312,12 @@ pub struct Machine {
     pub lid: Lid,
     /// Where Claude Code gets the Claude subscription token (`crate::claude_token`).
     pub claude_token: ClaudeTokenUse,
+    /// The Claude account Claude Code's calls go to first, by its number in Settings → Accounts
+    /// (`ClaudeAccounts { action: "use" }`); unset for account 1, the one Claude Code signed in
+    /// with. While it's at its limit, the accounts after it answer, then the ones before it. Only
+    /// dinod sets it: a client saving the whole document leaves it as it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_account: Option<u32>,
     /// Look for a new dino once a day and install it: the app through Sparkle, a `dino` installed
     /// with install.sh by dinod itself. Homebrew installs are left to `brew upgrade`.
     pub check_updates: bool,
@@ -389,6 +395,7 @@ impl Default for Machine {
             shell_agents: true,
             lid: Lid::default(),
             claude_token: ClaudeTokenUse::default(),
+            claude_account: None,
             check_updates: true,
             build_cache: BuildCache::default(),
             shell_integration_mode: "detect".into(),
@@ -778,6 +785,7 @@ mod tests {
         let mut s = Settings::default();
         s.policies.default_agent = Some("claude".into());
         s.machine.computer_use = Some(true);
+        s.machine.claude_account = Some(3);
         s.experimental.computer_use = Some(true);
         s.agents.insert("claude".into(), Controls { mode: Some("ask".into()), model: Some("opus".into()), effort: Some("high".into()) });
         s.repos.insert("/repo".into(), Repo { env: [("VAR".to_string(), "1".to_string())].into() });

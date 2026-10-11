@@ -1018,12 +1018,12 @@ fn show_fallback(settings: &dino_core::settings::Settings, agent: &str, provider
 /// isn't signed in. `set` reads the token from stdin, so it never sits on a command line.
 fn cmd_claude_token(action: &str, arg: Option<&str>, rest: &[String]) -> anyhow::Result<()> {
     // Another of your Claude accounts, for when the one Claude Code signed in with is at its limit.
-    if action == "add-account" || action == "remove-account" || action == "rename-account" {
+    if matches!(action, "add-account" | "remove-account" | "rename-account" | "use-account") {
         return cmd_claude_account(action, arg, rest);
     }
     if !matches!(action, "status" | "create" | "set" | "remove") {
         println!(
-            "usage: dino claude-token [status|create|set|remove|add-account [--browser]|rename-account <n> <name>|remove-account <n>]\n\n\
+            "usage: dino claude-token [status|create|set|remove|add-account [--browser]|rename-account <n> <name>|use-account <n>|remove-account <n>]\n\n\
              A Claude subscription token lets Claude Code use your Claude plan on SSH hosts, and on this Mac\n\
              when Claude Code isn't signed in here (Settings → Agents). No other agent gets it.\n\n\
              \x20 create              run `claude setup-token` in a dino shell and keep the token it prints\n\
@@ -1034,6 +1034,8 @@ fn cmd_claude_token(action: &str, arg: Option<&str>, rest: &[String]) -> anyhow:
              \x20                     limit, Claude Code switches to the next until it resets\n\
              \x20 rename-account <n> <name>\n\
              \x20                     call account <n> <name> (no name: back to \"Account <n>\")\n\
+             \x20 use-account <n>     send Claude Code's calls to account <n> first, from each session's\n\
+             \x20                     next turn (1: the account Claude Code signed in with)\n\
              \x20 remove-account <n>  forget account <n>"
         );
         return Ok(());
@@ -1082,7 +1084,10 @@ fn cmd_claude_token(action: &str, arg: Option<&str>, rest: &[String]) -> anyhow:
         rows.push((name.as_str(), account_state(a)));
     }
     print!("{}", out::fields(&rows));
-    if !accounts.is_empty() {
+    if let Some(a) = accounts.iter().find(|a| a.chosen && a.number != 1) {
+        println!("\nClaude Code's calls go to {} first, as you chose. When it hits its limit, the accounts after it", printable(&a.label()));
+        println!("answer, then the ones before it, until its limit resets.");
+    } else if !accounts.is_empty() {
         println!("\nWhen an account hits its limit, Claude Code switches to the next one until the limit resets.");
     }
     Ok(())
@@ -1100,19 +1105,22 @@ fn account_row_name(a: &dino_core::ipc::ClaudeAccountInfo) -> String {
     }
 }
 
-/// What a Claude account is doing now: "answering now", "ready", "at its limit until today 14:00".
+/// What a Claude account is doing now: "answering now", "ready", "at its limit until today 14:00";
+/// "chosen, …" for the one the user chose to answer first.
 fn account_state(a: &dino_core::ipc::ClaudeAccountInfo) -> String {
-    match (a.answering, a.spent, a.resets_at, a.retry_at) {
+    let state = match (a.answering, a.spent, a.resets_at, a.retry_at) {
         (true, ..) => "answering now".into(),
         (_, true, Some(t), _) => format!("at its limit until {}", automations::when(t)),
         (_, true, None, Some(t)) => format!("at its limit, tried again {}", automations::when(t)),
         (_, true, None, None) => "at its limit".into(),
-        _ => "ready".into(),
-    }
+        _ => "ready".to_string(),
+    };
+    if a.chosen && a.number != 1 { format!("chosen, {state}") } else { state }
 }
 
-/// `dino claude-token add-account` (token on stdin) and `remove-account <n>`: your other Claude
-/// accounts, which dinod keeps in its key store as `CLAUDE_ACCOUNT_<n>`, never synced or shown.
+/// `dino claude-token add-account` (token on stdin), `rename-account`, `use-account` and
+/// `remove-account <n>`: your other Claude accounts, which dinod keeps in its key store as
+/// `CLAUDE_ACCOUNT_<n>`, never synced or shown.
 fn cmd_claude_account(action: &str, arg: Option<&str>, rest: &[String]) -> anyhow::Result<()> {
     // At a terminal, nothing piped in: sign in in the browser.
     if action == "add-account" && (arg == Some("--browser") || (arg.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdin()))) {
@@ -1136,7 +1144,11 @@ fn cmd_claude_account(action: &str, arg: Option<&str>, rest: &[String]) -> anyho
         }
         return Ok(());
     }
-    let usage = if action == "rename-account" { "usage: dino claude-token rename-account <n> <name>" } else { "usage: dino claude-token remove-account <n>" };
+    let usage = match action {
+        "rename-account" => "usage: dino claude-token rename-account <n> <name>",
+        "use-account" => "usage: dino claude-token use-account <n>",
+        _ => "usage: dino claude-token remove-account <n>",
+    };
     let n: u32 = arg.and_then(|a| a.parse().ok()).ok_or_else(|| anyhow::anyhow!(usage))?;
     // As the user knows it, before it changes.
     let before = ask("status", None, None)?.accounts.into_iter().find(|a| a.number == n).map(|a| a.label()).unwrap_or_else(|| format!("Account {n}"));
@@ -1145,6 +1157,14 @@ fn cmd_claude_account(action: &str, arg: Option<&str>, rest: &[String]) -> anyho
         let info = ask("rename", Some(name), Some(n))?;
         let after = info.accounts.iter().find(|a| a.number == n).map(|a| a.label()).unwrap_or_else(|| format!("Account {n}"));
         println!("{} is now called {}.", printable(&before), printable(&after));
+    } else if action == "use-account" {
+        ask("use", None, Some(n))?;
+        if n == 1 {
+            println!("Claude Code's calls go to {} again, from each session's next turn.", printable(&before));
+        } else {
+            println!("Claude Code's calls go to {} from each session's next turn. The first answer there can't use", printable(&before));
+            println!("the prompt cache, so it's slower and uses more of {}'s limit.", printable(&before));
+        }
     } else {
         ask("remove", None, Some(n))?;
         println!("{} removed.", printable(&before));
