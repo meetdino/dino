@@ -37,6 +37,24 @@ fn systemctl(args: &[&str]) -> bool {
     Command::new("systemctl").arg("--user").args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
+/// Why dinod can't run as a user service from here, if it can't: no systemd at all (a container),
+/// WSL without it, or no user session for this shell to reach (`su` to another user, say).
+fn unavailable() -> Option<String> {
+    let then = "Until then, dinod starts when a dino command needs it.";
+    if Command::new("systemctl").arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+        return Some("this system has no systemd (no systemctl), so dinod can't start at login: it starts when a dino command needs it.".into());
+    }
+    if systemctl(&["show-environment"]) {
+        return None;
+    }
+    let wsl = std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|r| r.to_lowercase().contains("microsoft"));
+    Some(if wsl {
+        format!("WSL is running without systemd: add `[boot]` and `systemd=true` to /etc/wsl.conf, run `wsl --shutdown` in Windows, then run `dino service install` again. {then}")
+    } else {
+        format!("this shell has no systemd user session (`systemctl --user` can't reach one): run `dino service install` in a desktop terminal or an ssh login as this user. {then}")
+    })
+}
+
 /// Quote a value for a unit file's `Environment=` or `ExecStart=`: double quotes, with `\`, `"`,
 /// `%` (a specifier) and `$` (a variable in ExecStart) escaped.
 fn quoted(s: &str) -> String {
@@ -99,7 +117,8 @@ Run dinod, dino's background service, as a systemd user service:
   uninstall  stop it, disable it and remove the unit
   status     say whether it's installed and running
 
-On a server, `loginctl enable-linger $USER` keeps it running while you're logged out.";
+It starts when you log in and stops when you log out. `loginctl enable-linger $USER` keeps it, and
+the agents it runs, going while you're logged out (a server), and starts it at boot.";
 
 /// `dino service install|uninstall|status`.
 pub fn run(args: &[String]) -> anyhow::Result<()> {
@@ -107,6 +126,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let path = unit_path();
     match args.first().map(String::as_str) {
         Some("install") => {
+            if let Some(why) = unavailable() {
+                anyhow::bail!("{why}");
+            }
             let exe = std::env::current_exe()?.canonicalize()?;
             let text = unit(&name, &exe);
             std::fs::create_dir_all(unit_dir())?;
@@ -125,7 +147,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             anyhow::ensure!(started, "systemctl --user start {name} failed: see `journalctl --user -u {name}` and {}", dino_core::config_dir().join("dinod.log").display());
             println!("Installed {} and started it.", path.display());
             if !lingering() {
-                println!("To keep it running while you're logged out (a server), run: loginctl enable-linger $USER");
+                println!("It stops when you log out. To keep it and its agents running while you're logged out (a server), run: loginctl enable-linger $USER");
             }
         }
         Some("uninstall") => {
@@ -153,7 +175,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                         "no".into()
                     },
                 ),
-                ("Lingering", if lingering() { "on: runs while you're logged out".into() } else { "off: `loginctl enable-linger $USER` to run while logged out".into() }),
+                ("Lingering", if lingering() { "on: runs while you're logged out".into() } else { "off: `loginctl enable-linger $USER` to run while you're logged out".into() }),
             ];
             print!("{}", crate::out::fields(&rows));
         }
