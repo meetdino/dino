@@ -2950,6 +2950,36 @@ fn undecorated(title: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
+/// What its agent calls the conversation: what its records call it (Codex's), else its terminal's
+/// title. Not its shell's, while its agent typed there (`inside`) starts again.
+fn agent_title(s: &Session, inside: bool) -> Option<String> {
+    let named = s.rollout.lock().unwrap().title.clone();
+    named.or_else(|| {
+        s.pane
+            .title()
+            .filter(|_| s.agent_id != "shell" || s.agent_pid().is_some() || !inside)
+            .and_then(|t| s.adapter().map_or(Some(t.clone()), |a| a.shown_title(&t)))
+            .and_then(|t| undecorated(&t))
+    })
+}
+
+/// The name it's listed by: the user's, else what its agent calls the conversation once that's
+/// more than the agent's own name ("Claude Code"). None for a plain shell, or with neither.
+fn shown_name(s: &Session) -> Option<String> {
+    if let Some(label) = s.label.lock().unwrap().clone() {
+        return Some(label);
+    }
+    let agent = s.agent_now();
+    if agent == "shell" {
+        return None;
+    }
+    let inside = s.inside.lock().unwrap().found.is_some();
+    agent_title(s, inside).filter(|t| {
+        let words: Vec<&str> = t.split_whitespace().collect();
+        !(words.len() <= 2 && words.first().is_some_and(|w| agent.to_lowercase().starts_with(&w.to_lowercase())))
+    })
+}
+
 fn state(d: &Daemon) -> Response {
     let prs = d.prs.lock().unwrap().clone();
     let previews = d.previews.lock().unwrap().clone();
@@ -3017,20 +3047,12 @@ fn state(d: &Daemon) -> Response {
             let peer_name = peer_name_of(s);
             let shell_cwd = s.pane.shared.cwd.lock().unwrap().clone();
             let last_exit = *s.pane.shared.last_exit.lock().unwrap();
-            // What its agent's records call its conversation (Codex's), over its terminal's title.
-            let named = s.rollout.lock().unwrap().title.clone();
+            let title = label.clone().or_else(|| agent_title(s, inside.is_some()));
             SessionInfo {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 agent_id: s.agent_id.clone(),
-                // Not its shell's, while its agent typed there starts again.
-                title: label.clone().or(named).or_else(|| {
-                    s.pane
-                        .title()
-                        .filter(|_| s.agent_id != "shell" || s.agent_pid().is_some() || inside.is_none())
-                        .and_then(|t| s.adapter().map_or(Some(t.clone()), |a| a.shown_title(&t)))
-                        .and_then(|t| undecorated(&t))
-                }),
+                title,
                 exited: s.pane.is_exited(),
                 exit_code: s.pane.exit_code(),
                 output_ms_ago,
@@ -5991,6 +6013,83 @@ while (sysread(STDIN, my $c, 1)) {
             title(&d).as_deref() == Some("Dark mode for settings")
         });
         s.pane.kill();
+    }
+
+    /// An archived session is listed by the name it went by: the one the user gave it, else the
+    /// one its agent gave the conversation (Claude titles its terminal with the topic). That one
+    /// went with its agent: the archive listed it as "claude-N", and unarchived, Claude titled it
+    /// again. Started again, it goes by the same name.
+    #[test]
+    fn an_archived_session_is_listed_by_the_name_it_went_by() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_home().join("fake-claude-archived-title");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Titles its terminal, spinner first, as Claude does, with whatever `title` says.
+        let program = dir.join("claude");
+        std::fs::write(&program, format!("#!/bin/sh\nprintf '\\033]0;\u{2733} %s\\007' \"$(cat '{}')\"\nexec sleep 600\n", dir.join("title").display())).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let claude = LauncherInfo {
+            short: "claude".into(),
+            agent_id: "claude".into(),
+            label: "Claude Code".into(),
+            program: program.display().to_string(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
+        let d = test_daemon(vec![claude]);
+        let title_of = |id: &str| match state(&d) {
+            Response::State { sessions, .. } => sessions.into_iter().find(|x| x.id == id).and_then(|x| x.title),
+            _ => None,
+        };
+        let listed = || match lifecycle::serve(&d, Request::Archived) {
+            Response::Archived { sessions } => sessions,
+            other => panic!("{other:?}"),
+        };
+        // Started, titled `title`, renamed `label` if given, archived and started again: how it's
+        // listed in between, and how it goes by after.
+        let round = |title: &str, label: Option<&str>| {
+            std::fs::write(dir.join("title"), title).unwrap();
+            let id = spawn(&d, Launch::new("claude", vec![], Some(dir.display().to_string()))).unwrap();
+            let s = session(&d, &id);
+            wait_for("its terminal's title", || s.pane.title().is_some_and(|t| t.ends_with(title)));
+            if let Some(name) = label {
+                assert!(matches!(lifecycle::serve(&d, Request::Rename { id: id.clone(), name: name.into() }), Response::Ok));
+            }
+            assert!(matches!(lifecycle::serve(&d, Request::Archive { id: id.clone() }), Response::Ok));
+            let a = listed().into_iter().find(|a| a.id == id).unwrap();
+            assert!(a.name.starts_with("claude"), "dino's own name: {}", a.name);
+            let Response::Created { id: back } = lifecycle::serve(&d, Request::Unarchive { id: id.clone() }) else { panic!("unarchived") };
+            let s = session(&d, &back);
+            wait_for("its terminal's title again", || s.pane.title().is_some_and(|t| t.ends_with(title)));
+            let after = title_of(&back);
+            s.pane.kill();
+            (a.label, a.title, after)
+        };
+
+        let (label, listed_as, after) = round("Bio rewrite", None);
+        assert_eq!((label, listed_as.as_deref()), (None, Some("Bio rewrite")), "the agent's name for it, without its spinner");
+        assert_eq!(after.as_deref(), Some("Bio rewrite"), "and it goes by it again");
+
+        let (label, listed_as, after) = round("Bio rewrite", Some("Bio"));
+        assert_eq!((label.as_deref(), listed_as.as_deref()), (Some("Bio"), Some("Bio")), "the user's name over the agent's");
+        assert_eq!(after.as_deref(), Some("Bio"));
+
+        let (_, listed_as, _) = round("Claude Code", None);
+        assert_eq!(listed_as, None, "only the agent's own name: listed by dino's");
+
+        // Kept across a restart; one archived by an older dinod has none, and is listed as before.
+        std::fs::write(dir.join("title"), "Bio rewrite").unwrap();
+        let id = spawn(&d, Launch::new("claude", vec![], Some(dir.display().to_string()))).unwrap();
+        let s = session(&d, &id);
+        wait_for("its terminal's title", || s.pane.title().is_some_and(|t| t.ends_with("Bio rewrite")));
+        assert!(matches!(lifecycle::serve(&d, Request::Archive { id: id.clone() }), Response::Ok));
+        let Response::Archived { sessions } = lifecycle::serve(&restarted(&d), Request::Archived) else { panic!("listed") };
+        assert_eq!(sessions.iter().find(|a| a.id == id).and_then(|a| a.title.as_deref()), Some("Bio rewrite"));
+        let older: ipc::ArchivedInfo = serde_json::from_str(r#"{"id":"1","name":"claude-3","label":null,"launcher":"claude","cwd":"/","branch":null,"archived_at":0,"resumable":false,"worktree_removed":false,"agent":"claude","agent_session":null,"pinned":false}"#).unwrap();
+        assert_eq!(older.title, None);
     }
 
     /// With bypass allowed and Claude's warning about it accepted in its config folder, Claude
