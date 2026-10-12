@@ -8,6 +8,9 @@ use std::time::Duration;
 pub fn install_hint(id: &str) -> &'static str {
     match id {
         "claude" => "curl -fsSL https://claude.ai/install.sh | bash",
+        // Linux: Codex's own installer, a standalone binary in ~/.local/bin. A fresh Ubuntu has no
+        // npm, and with its packaged Node, `npm i -g` needs root.
+        "codex" if cfg!(target_os = "linux") => "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
         "codex" => "npm i -g @openai/codex",
         "qwen" => "npm i -g @qwen-code/qwen-code",
         "kimi" => "npm i -g @moonshot-ai/kimi-code",
@@ -38,6 +41,9 @@ pub struct Setup {
 pub fn setup(id: &str) -> Setup {
     let (homepage, sign_in, sign_in_hint) = match id {
         "claude" => ("https://code.claude.com/docs", Some("claude auth login"), None),
+        // With no desktop to open a browser on (a server over ssh), a code to enter on another
+        // machine's: `codex login` waits for a browser on this one.
+        "codex" if no_desktop() => ("https://developers.openai.com/codex", Some("codex login --device-auth"), None),
         "codex" => ("https://developers.openai.com/codex", Some("codex login"), None),
         "kimi" => ("https://moonshotai.github.io/kimi-code/en/", Some("kimi login"), None),
         "qwen" => ("https://qwenlm.github.io/qwen-code-docs/", Some("qwen"), Some("/auth")),
@@ -60,6 +66,12 @@ pub fn setup(id: &str) -> Setup {
         _ => None,
     };
     Setup { homepage, sign_in, sign_in_hint, sign_in_note }
+}
+
+/// Linux with neither X nor Wayland where dinod runs: nothing here can open a browser.
+pub fn no_desktop() -> bool {
+    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    cfg!(target_os = "linux") && !set("DISPLAY") && !set("WAYLAND_DISPLAY")
 }
 
 /// Whether agent `id` at `bin` is signed in, from its own status command, and how ("Claude Max",
@@ -233,6 +245,15 @@ mod tests {
         let many = format!("{list}openrouter  x/y  1M 1K no no\ngoogle  g  1M 1K no no\n");
         assert_eq!(pi_providers(&many), Some((true, Some("4 providers".into()))));
         assert_eq!(pi_providers("No models available. Use /login to log into a provider via OAuth or API key. See:\n  docs/providers.md\n"), Some((false, None)));
+    }
+
+    #[test]
+    fn codex_installs_without_npm_on_linux_and_signs_in_with_a_code_headless() {
+        let linux = cfg!(target_os = "linux");
+        assert_eq!(install_hint("codex").starts_with("curl -fsSL https://chatgpt.com/codex/install.sh"), linux);
+        let sign_in = setup("codex").sign_in.unwrap();
+        assert_eq!(sign_in == "codex login --device-auth", no_desktop(), "{sign_in}");
+        assert!(!no_desktop() || linux, "a Mac always has a browser");
     }
 
     #[test]
