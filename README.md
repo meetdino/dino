@@ -58,6 +58,28 @@ dino updates itself. Installed it with `brew install asdf9384/tap/dino`, the tap
 `brew install meetdino/tap/dino` once: Homebrew stopped trusting the tap when it moved, and until
 then `brew upgrade` skips dino.
 
+### Linux
+
+From dino 0.1.13, on Ubuntu 22.04 or later, Debian 12 or later, or another Linux with glibc 2.35
+or newer, on x86_64 or arm64:
+
+```sh
+curl -fsSL https://meetdino.com/install.sh | sh
+```
+
+A fresh Ubuntu Desktop has no curl: `sudo apt install curl` first. The installer puts `dino` (the
+command line, which is also `dinod`) and [dino-tui](https://github.com/meetdino/dino-tui), dino's
+terminal UI on Linux, in `~/.local/bin`, each checked against its release's SHA256SUMS, without
+sudo. If that folder isn't on your `PATH` yet, it prints the line that adds it. Then run `dino`: it
+starts dinod and opens dino-tui, whose first screen finds your agents and offers to install them or
+sign in to them, with a link and a code where there's no browser.
+
+The first `dino` you run starts dinod. To start it at login instead, run `dino service install`,
+which sets it up as a systemd user service; the installer offers this when it runs in a terminal.
+A user service stops when you log out. On a server, `loginctl enable-linger $USER` keeps dinod and
+its agents running after you log out, and starts it at boot. Under WSL without systemd, dinod
+starts when a dino command needs it.
+
 ## Quick start
 
 1. Open dino. Each tab is a shell (<kbd>⌘T</kbd>), as in any terminal.
