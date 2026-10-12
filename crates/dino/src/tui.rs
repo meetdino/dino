@@ -36,12 +36,16 @@ pub(crate) fn install() -> anyhow::Result<PathBuf> {
     }
 }
 
-/// `dino tui [args...]`: dino-tui in this terminal, in place of this process.
+/// `dino tui [args...]`: dino-tui in this terminal, in place of this process. dinod first, started
+/// as any `dino` command starts it: dino-tui never starts it, so on Linux, without the systemd
+/// service, nothing else would.
 pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     let exe = match find() {
         Some(p) => p,
         None => install()?,
     };
+    // When dinod can't start, dino-tui says so and how to start it.
+    let _ = crate::client::connect();
     let e = Command::new(&exe).args(args).exec();
     anyhow::bail!("couldn't run {}: {e}", exe.display())
 }

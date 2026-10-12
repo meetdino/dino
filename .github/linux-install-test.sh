@@ -2,8 +2,8 @@
 # What .github/workflows/linux-install.yml runs on each Linux machine, as the user it runs as, on
 # the throwaway machine GitHub gives it:
 #   linux-install-test.sh <target> <folder with the release tarball> <throwaway release key, PEM>
-# 1. scripts/install.sh installs dino from a local copy laid out as a release (dino-tui from its
-#    real place, which isn't public yet: it has to carry on without it).
+# 1. scripts/install.sh installs dino from a local copy laid out as a release, with no dino-tui to
+#    download (a place that has none): it has to carry on without it.
 # 2. `dino` starts dinod; a stand-in agent runs as a session.
 # 3. Where there's a systemd user session, `dino service install` runs dinod under it.
 # 4. `dino tui` installs dino-tui (a stand-in, from a local copy) and runs it; so does plain `dino`
@@ -47,7 +47,8 @@ mkdir -p "$W/tui/dino-tui-0.0.1-$target"
 cat > "$W/tui/dino-tui-0.0.1-$target/dino-tui" <<'EOF'
 #!/bin/sh
 if [ -t 0 ] && [ -t 1 ]; then where=terminal; else where=pipe; fi
-echo "STANDIN dino-tui $* ($where) dinod=$(dino ping >/dev/null 2>&1 && echo up || echo down)"
+# Whether dinod is running, by its process: `dino ping` would start it.
+echo "STANDIN dino-tui $* ($where) dinod=$(pgrep -u "$(id -u)" -f '^[^ ]*dino daemon$' >/dev/null && echo up || echo down)"
 EOF
 chmod 755 "$W/tui/dino-tui-0.0.1-$target/dino-tui"
 tar -C "$W/tui" -czf "$REL/dino-tui/0.0.1/dino-tui-0.0.1-$target.tar.gz" "dino-tui-0.0.1-$target"
@@ -69,14 +70,15 @@ until_ok 10 curl -fsS http://127.0.0.1:8765/dino/latest || echo "the local serve
 BASE=http://127.0.0.1:8765
 
 section "1. install.sh"
-out="$(DINO_DOWNLOAD_BASE=$BASE sh "$repo/scripts/install.sh" --service no 2>&1)"
+# Not dino-tui's real release, which is public now: step 4 installs a stand-in from the local copy.
+out="$(DINO_DOWNLOAD_BASE=$BASE DINO_TUI_DOWNLOAD_BASE=$BASE/none sh "$repo/scripts/install.sh" --service no 2>&1)"
 code=$?
 echo "$out"
 if [ "$code" = 0 ] && [ -x "$HOME/.local/bin/dino" ] && "$HOME/.local/bin/dino" --version | grep -q "dino $version" \
     && echo "$out" | grep -q "dino-tui, dino's terminal UI, isn't installed" && [ ! -e "$HOME/.local/bin/dino-tui" ]; then
-    result "install.sh (dino from a local release, dino-tui not public: carries on)" pass
+    result "install.sh (dino from a local release, no dino-tui to download: carries on)" pass
 else
-    result "install.sh (dino from a local release, dino-tui not public: carries on)" "fail (exit $code)"
+    result "install.sh (dino from a local release, no dino-tui to download: carries on)" "fail (exit $code)"
 fi
 
 section "2. dinod and a stand-in session"
