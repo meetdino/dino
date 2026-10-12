@@ -5,7 +5,10 @@ name: Linux install
 # release, on Ubuntu 22.04 and 24.04 (x86_64), Ubuntu 24.04 on arm64, and Fedora. Each one starts
 # dinod, runs a stand-in agent session, runs dinod under systemd --user where there is one, installs
 # and opens dino-tui (a stand-in), takes an update from a local feed, and stops
-# (.github/linux-install-test.sh). Runs on changes to what it tests, and by hand.
+# (.github/linux-install-test.sh). GitHub's runners have nearly everything installed, so it also
+# installs on the official ubuntu:22.04, ubuntu:24.04 and debian:12 images, as fresh as a machine
+# gets (no curl, no libsqlite3, no systemd), and checks ubuntu:20.04 (glibc 2.31) is told what dino
+# needs (.github/linux-fresh-test.sh). Runs on changes to what it tests, and by hand.
 on:
   workflow_dispatch:
   pull_request:
@@ -15,6 +18,8 @@ on:
       - crates/dino-daemon/src/update.rs
       - crates/dino/src/systemd.rs
       - .github/linux-install-test.sh
+      - .github/linux-fresh-test.sh
+      - crates/dino-core/Cargo.toml
       - .github/workflows/release-linux.yml
       - .github/workflows/linux-install.yml
 
@@ -94,3 +99,40 @@ jobs:
           path: art
           merge-multiple: true
       - run: .github/linux-install-test.sh linux-x64 art art/release-key.pem
+
+  fresh:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:22.04
+            runner: ubuntu-24.04
+            target: linux-x64
+          - image: ubuntu:24.04
+            runner: ubuntu-24.04
+            target: linux-x64
+          - image: debian:12
+            runner: ubuntu-24.04
+            target: linux-x64
+          - image: ubuntu:24.04
+            runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - image: ubuntu:20.04
+            runner: ubuntu-24.04
+            target: linux-x64
+            expect: old-glibc
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: art
+      - run: sh .github/linux-fresh-test.sh ${{ matrix.target }} art ${{ matrix.expect || 'ok' }}
