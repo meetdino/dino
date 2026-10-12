@@ -11,9 +11,13 @@ libc = "0.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 toml = "1.1.6"
-# Hermes Agent keeps its sessions in SQLite; read-only, with the system's SQLite.
+# Hermes Agent keeps its sessions in SQLite; read-only. The Mac's own SQLite; on Linux, SQLite
+# compiled in (below), since a fresh Ubuntu or Debian has no libsqlite3.
 rusqlite = "0.37"
 memchr = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The Keychain, which keeps your other Claude accounts' tokens (in the tree already, through

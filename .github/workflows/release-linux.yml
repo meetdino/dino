@@ -70,8 +70,6 @@ jobs:
         with:
           ref: ${{ inputs.commit || github.sha }}
           persist-credentials: false
-      # rusqlite links the system SQLite.
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libsqlite3-dev
       # rust-toolchain.toml picks the version.
       - run: rustup toolchain install --no-self-update
       - name: Build
@@ -96,8 +94,12 @@ jobs:
           cp target/release/dino LICENSE THIRD_PARTY_NOTICES.md pkg/
           tar -C pkg -czf "$name.tar.gz" dino LICENSE THIRD_PARTY_NOTICES.md
           pkg/dino --version
-          # What it links, and the newest glibc it needs: 2.35 at most, Ubuntu 22.04's.
+          # What it links: glibc's own libraries alone, which every glibc system has (a fresh
+          # Ubuntu or Debian has no libsqlite3, say: SQLite is compiled in). And the newest glibc it
+          # needs: 2.35 at most, Ubuntu 22.04's.
           ldd pkg/dino
+          extra="$(ldd pkg/dino | grep -v -E '^\s*(linux-vdso\.so|/lib(64)?/ld-linux|lib(c|m|gcc_s|pthread|dl|rt)\.so\.[0-9]+ )' || true)"
+          [ -z "$extra" ] || { echo "::error::$name links libraries a fresh Ubuntu doesn't have: $extra"; exit 1; }
           need="$(objdump -T pkg/dino | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
           echo "needs $need"
           [ "$(printf '%s\nGLIBC_2.35\n' "$need" | sort -V | tail -n 1)" = GLIBC_2.35 ] || { echo "::error::$name needs $need, newer than Ubuntu 22.04's"; exit 1; }

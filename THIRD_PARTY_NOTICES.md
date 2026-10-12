@@ -44,6 +44,8 @@ Written by scripts/third-party.py from packaging/licenses/ and Cargo.lock; don't
   Ghostty 1.3.1's color themes, generated from it, in the app's resources.
 - bash-preexec, MIT. https://github.com/rcaloras/bash-preexec
   In the dino binary's bash integration.
+- SQLite 3.50.2, blessing (public domain). https://sqlite.org
+  Compiled into the Linux dino binary (libsqlite3-sys 0.35.0's copy); on a Mac, dino uses macOS's own.
 - MSDisplayLink 2.2.1, MIT. https://github.com/Lakr233/MSDisplayLink
   Linked into the app.
 - Sparkle 2.10.0, MIT AND BSD-2-Clause AND Zlib. https://github.com/sparkle-project/Sparkle
@@ -6426,6 +6428,22 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
 STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
 IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
+```
+
+### SQLite's public domain dedication
+
+Used by SQLite 3.50.2.
+
+```text
+The author disclaims copyright to this source code.  In place of
+a legal notice, here is a blessing:
+
+   May you do good and not evil.
+   May you find forgiveness for yourself and forgive others.
+   May you share freely, never taking more than you give.
+
+All of the code and documentation in SQLite has been dedicated to the public domain by the
+authors: https://sqlite.org/copyright.html
 ```
 
 ### Unicode License v3
