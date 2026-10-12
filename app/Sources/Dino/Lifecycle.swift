@@ -8,6 +8,8 @@ struct ArchivedInfo: Codable, Identifiable, Equatable {
     var id: String
     var name: String
     var label: String?
+    /// What it was listed by: the user's name, else its agent's for the conversation; nil from an older dinod.
+    var title: String?
     var launcher: String
     var cwd: String
     var branch: String?
@@ -21,7 +23,7 @@ struct ArchivedInfo: Codable, Identifiable, Equatable {
     var agent_session: String?
     var pinned: Bool?
 
-    var display: String { label ?? name }
+    var display: String { title ?? label ?? name }
 }
 
 /// A worktree dino made, for Settings → Workspaces → Worktrees.

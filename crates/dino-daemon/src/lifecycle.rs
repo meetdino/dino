@@ -25,6 +25,10 @@ pub(crate) struct Archived {
     pub worktree: Option<SessionWorktree>,
     /// That worktree was put away (its branch kept) and is made again on unarchive.
     pub worktree_removed: bool,
+    /// The name it was listed by when archived (see `shown_name`): its agent's for the
+    /// conversation, which is gone from the list once its agent stops. None from before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 fn archived_path(home: &Path) -> PathBuf {
@@ -99,6 +103,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
     // The mode it's in, which it may have switched to since it started. Read before any of its
     // locks is taken below: the pane's reader takes them holding its screen.
     let controls = if s.agent_id == "shell" { s.controls.clone() } else { super::mode::current(d, &s) };
+    let title = super::shown_name(&s);
     let saved = SavedSession {
         id: s.id.clone(),
         name: s.name.clone(),
@@ -144,7 +149,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         }
     }
     let mut archived = d.archived.lock().unwrap();
-    archived.insert(0, Archived { saved, archived_at: now_secs(), worktree: w, worktree_removed });
+    archived.insert(0, Archived { saved, archived_at: now_secs(), worktree: w, worktree_removed, title });
     save_archived(&d.home, &archived);
     Ok(())
 }
@@ -175,6 +180,7 @@ fn list(d: &Daemon) -> Vec<ipc::ArchivedInfo> {
             id: a.saved.id.clone(),
             name: a.saved.name.clone(),
             label: a.saved.label.clone(),
+            title: a.saved.label.clone().or_else(|| a.title.clone()),
             launcher: a.saved.launcher.clone(),
             cwd: a.saved.cwd.clone(),
             branch: a.worktree.as_ref().map(|w| w.branch.clone()),

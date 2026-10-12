@@ -1416,7 +1416,12 @@ pub struct BackgroundInfo {
 pub struct ArchivedInfo {
     pub id: String,
     pub name: String,
+    /// The name the user gave it (`Rename`).
     pub label: Option<String>,
+    /// The name to show it by, as `SessionInfo::title` was while it ran: the user's, else what its
+    /// agent called the conversation when it was archived. None with neither, and from an older dinod.
+    #[serde(default)]
+    pub title: Option<String>,
     pub launcher: String,
     pub cwd: String,
     pub branch: Option<String>,
