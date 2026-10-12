@@ -33,6 +33,10 @@ PACKAGES = {"libghostty-spm": "1.6.20260929", "MSDisplayLink": "2.2.1", "Sparkle
 
 GHOSTTY = "0538f7535be0cbca6bbe54e6fde654d5c628f1f2"  # libghostty-spm 1.6.20260929's Ghostty.ref
 
+# The SQLite compiled into the Linux binary is libsqlite3-sys's copy (its sqlite3/sqlite3.h says
+# the version): this one's, as Cargo.lock resolves it.
+LIBSQLITE3_SYS = ("0.35.0", "3.50.2")
+
 # What ships besides the Rust crates: (name, version, source, what it is and where it ships,
 # SPDX license, [(license, file in packaging/licenses/native/ or a path in this repository)],
 # symbols: a regex nm finds in Contents/MacOS/Dino when the app links it, or None).
@@ -93,6 +97,10 @@ NATIVE = [
     ("bash-preexec", "", "https://github.com/rcaloras/bash-preexec",
      "In the dino binary's bash integration.", "MIT",
      [("MIT License", "crates/dino-daemon/shell-integration/bash/LICENSE-bash-preexec.md")], None),
+    ("SQLite", LIBSQLITE3_SYS[1], "https://sqlite.org",
+     f"Compiled into the Linux dino binary (libsqlite3-sys {LIBSQLITE3_SYS[0]}'s copy); on a Mac, "
+     "dino uses macOS's own.", "blessing (public domain)",
+     [("SQLite's public domain dedication", "native/sqlite.txt")], None),
     ("MSDisplayLink", PACKAGES["MSDisplayLink"], "https://github.com/Lakr233/MSDisplayLink",
      "Linked into the app.", "MIT", [("MIT License", "native/msdisplaylink.txt")], None),
     ("Sparkle", PACKAGES["Sparkle"], "https://github.com/sparkle-project/Sparkle",
@@ -129,6 +137,10 @@ def check_packages():
         fail(f"app/Package.swift pins {pinned}, but NATIVE was checked at {PACKAGES}: check what the "
              "new versions ship and link (this script's docstring says how), then update NATIVE, "
              "its license texts and PACKAGES")
+    locked = re.findall(r'name = "libsqlite3-sys"\nversion = "([^"]+)"', read(os.path.join(ROOT, "Cargo.lock")))
+    if locked != [LIBSQLITE3_SYS[0]]:
+        fail(f"Cargo.lock has libsqlite3-sys {locked}, but NATIVE's SQLite is {LIBSQLITE3_SYS[0]}'s: "
+             "update LIBSQLITE3_SYS with the SQLite version its sqlite3/sqlite3.h says")
 
 
 def cargo_about():
