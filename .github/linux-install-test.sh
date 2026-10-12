@@ -99,7 +99,15 @@ dino kill "$id" && until_ok 10 sh -c "! dino ls | grep -q '$id'" && result "the 
 
 section "3. dino service install"
 if command -v systemctl >/dev/null && [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null; then
-    # GitHub's runner has no login session: lingering starts the user's systemd.
+    # GitHub's runner has no login session: lingering starts the user's systemd. Turned on as
+    # `dino service install` says to, without sudo (polkit lets a user linger themselves).
+    if loginctl enable-linger "$(id -un)" 2>"$W/linger.err"; then
+        result "loginctl enable-linger, as the user, no sudo" pass
+    elif ! systemctl is-active --quiet polkit; then
+        result "loginctl enable-linger, as the user, no sudo" "skipped (no polkit running here: $(cat "$W/linger.err"))"
+    else
+        result "loginctl enable-linger, as the user, no sudo" "fail ($(cat "$W/linger.err"))"
+    fi
     sudo loginctl enable-linger "$(id -un)"
     export XDG_RUNTIME_DIR="/run/user/$(id -u)"
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
