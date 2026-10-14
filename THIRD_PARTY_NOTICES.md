@@ -138,7 +138,7 @@ in the CLI tarball.
 - indexmap 2.14.2, Apache-2.0 OR MIT. https://github.com/indexmap-rs/indexmap
 - ipnet 2.12.2, MIT OR Apache-2.0. https://github.com/krisprice/ipnet
 - itoa 1.0.18, MIT OR Apache-2.0. https://github.com/dtolnay/itoa
-- libc 0.2.189, MIT OR Apache-2.0. https://github.com/rust-lang/libc
+- libc 0.2.190, MIT OR Apache-2.0. https://github.com/rust-lang/libc
 - libsqlite3-sys 0.35.0, MIT. https://github.com/rusqlite/rusqlite
 - linux-raw-sys 0.12.1, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT. https://github.com/sunfishcode/linux-raw-sys
 - litemap 0.8.3, Unicode-3.0. https://github.com/unicode-org/icu4x
@@ -171,7 +171,7 @@ in the CLI tarball.
 - rusqlite 0.37.0, MIT. https://github.com/rusqlite/rusqlite
 - rustix 1.1.5, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT. https://github.com/bytecodealliance/rustix
 - rustix-openpty 0.2.0, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT. https://github.com/sunfishcode/rustix-openpty
-- rustls 0.23.45, Apache-2.0 OR ISC OR MIT. https://github.com/rustls/rustls
+- rustls 0.23.46, Apache-2.0 OR ISC OR MIT. https://github.com/rustls/rustls
 - rustls-native-certs 0.8.4, Apache-2.0 OR ISC OR MIT. https://github.com/rustls/rustls-native-certs
 - rustls-pki-types 1.15.1, MIT OR Apache-2.0. https://github.com/rustls/pki-types
 - rustls-platform-verifier 0.7.1, MIT OR Apache-2.0. https://github.com/rustls/rustls-platform-verifier
@@ -208,7 +208,7 @@ in the CLI tarball.
 - thiserror-impl 1.0.69, MIT OR Apache-2.0. https://github.com/dtolnay/thiserror
 - thiserror-impl 2.0.21, MIT OR Apache-2.0. https://github.com/dtolnay/thiserror
 - tinystr 0.8.4, Unicode-3.0. https://github.com/unicode-org/icu4x
-- tokio 1.53.1, MIT. https://github.com/tokio-rs/tokio
+- tokio 1.53.2, MIT. https://github.com/tokio-rs/tokio
 - tokio-macros 2.7.2, MIT. https://github.com/tokio-rs/tokio
 - tokio-rustls 0.26.5, MIT OR Apache-2.0. https://github.com/rustls/tokio-rustls
 - tokio-util 0.7.19, MIT. https://github.com/tokio-rs/tokio
@@ -2984,7 +2984,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### MIT License
 
-Used by hyper-rustls 0.27.10, rustls 0.23.45, rustls-native-certs 0.8.4.
+Used by hyper-rustls 0.27.10, rustls 0.23.46, rustls-native-certs 0.8.4.
 
 ```text
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
@@ -4500,7 +4500,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by libc 0.2.189.
+Used by libc 0.2.190.
 
 ```text
 Copyright (c) The Rust Project Developers
@@ -5158,7 +5158,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by tokio 1.53.1, tokio-util 0.7.19.
+Used by tokio 1.53.2, tokio-util 0.7.19.
 
 ```text
 MIT License
