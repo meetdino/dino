@@ -29,9 +29,11 @@ LICENSES = os.path.join(ROOT, "packaging", "licenses")
 CARGO_ABOUT = "0.9.2"
 
 # The app's Swift packages, as app/Package.swift pins them. NATIVE below was checked at these.
-PACKAGES = {"libghostty-spm": "1.6.20260929", "MSDisplayLink": "2.2.1", "Sparkle": "2.10.0"}
+# libghostty-spm's own dependency DisplayLink (MSDisplayLink, renamed) is resolved but never built:
+# the app takes only its GhosttyKit.
+PACKAGES = {"libghostty-spm": "2.2.2026101301", "MSDisplayLink": "2.2.1", "Sparkle": "2.10.0"}
 
-GHOSTTY = "0538f7535be0cbca6bbe54e6fde654d5c628f1f2"  # libghostty-spm 1.6.20260929's Ghostty.ref
+GHOSTTY = "1e9e14af5df14211892f5fc15fd21a49c7d94868"  # libghostty-spm 2.2.2026101301's Ghostty.ref
 
 # The SQLite compiled into the Linux binary is libsqlite3-sys's copy (its sqlite3/sqlite3.h says
 # the version): this one's, as Cargo.lock resolves it.
