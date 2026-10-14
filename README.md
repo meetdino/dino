@@ -217,7 +217,7 @@ Mac and when.
 
 ## Building from source
 
-You need the Xcode Command Line Tools (`xcode-select --install`) and Rust
+You need the Xcode Command Line Tools 26 or later (`xcode-select --install`; Swift 6.2) and Rust
 ([rustup](https://rustup.rs), 1.91 or later: a dependency uses `str::floor_char_boundary`). No
 Apple developer account or signing keys.
 

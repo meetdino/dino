@@ -5,7 +5,8 @@ you use, and get it merged.
 
 ## Setup
 
-- macOS 14 or later, the Xcode Command Line Tools (`xcode-select --install`), and Rust through
+- macOS 14 or later, the Xcode Command Line Tools 26 or later (`xcode-select --install`; Swift 6.2,
+  which libghostty-spm's manifest asks for), and Rust through
   [rustup](https://rustup.rs). rustup picks the version CI uses, from `rust-toolchain.toml`; dino
   builds with 1.91 or later (a dependency, anyllm_translate, uses `str::floor_char_boundary`, stable
   since 1.91).
