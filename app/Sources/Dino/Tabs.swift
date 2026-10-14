@@ -160,8 +160,8 @@ private struct TabItem: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             } else {
-                // Its name, renamed in place by double-clicking it.
-                SessionName(session: session, place: .tab, font: .subheadline, color: selected ? .primary : .secondary)
+                // Its name, renamed in place by double-clicking it; the tab's one tooltip says so.
+                SessionName(session: session, place: .tab, font: .subheadline, color: selected ? .primary : .secondary, tooltip: false)
                     .truncationMode(.middle)
             }
             let unseen = model.tmuxUnseen(session)
@@ -198,7 +198,14 @@ private struct TabItem: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { model.select(session.id) }
-        .help([tabAgent.map { model.launcherLabel($0) }, session.here.map(shortPath) ?? session.display].compactMap { $0 }.joined(separator: " · "))
+        .help(help(renames: panes.count <= 1))
+    }
+
+    /// The tab's one tooltip: its agent and where it is, then how to rename it (a split's tab
+    /// names its panes, and isn't renamed in place).
+    private func help(renames: Bool) -> String {
+        let what = [tabAgent.map { model.launcherLabel($0) }, session.here.map(shortPath) ?? session.display].compactMap { $0 }.joined(separator: " · ")
+        return renames ? what + "\nDouble-click to rename" : what
     }
 }
 
