@@ -95,6 +95,19 @@ final class RowFactsTests: XCTestCase {
         XCTAssertNil(session("2", "claude").asleep, "an older dinod's says nothing")
     }
 
+    /// Asleep, a session that finished since you last looked is still Done (and in the Done filter),
+    /// one that rang or asks is still Needs you; the moon goes beside the mark. Else it's Asleep.
+    func testAsleepKeepsItsDoneAndNeedsYou() {
+        let s = session("1", "claude", ["asleep": true, "activity": "done"])
+        XCTAssertEqual(DinoModel.status(of: s, attention: false, unseenDone: false), .asleep)
+        XCTAssertEqual(DinoModel.status(of: s, attention: false, unseenDone: true), .done)
+        XCTAssertTrue(SessionFilter.done.passes(DinoModel.status(of: s, attention: false, unseenDone: true)))
+        XCTAssertEqual(DinoModel.status(of: s, attention: true, unseenDone: true), .needsYou)
+        let awake = session("2", "claude", ["activity": "done"])
+        XCTAssertEqual(DinoModel.status(of: awake, attention: false, unseenDone: true), .done)
+        XCTAssertEqual(DinoModel.status(of: awake, attention: false, unseenDone: false), .idle)
+    }
+
     func testShellPlaceAndExit() {
         var i = RowFacts.Input(name: "zsh", status: .idle, agent: "Shell")
         i.shellPlace = "src/app"

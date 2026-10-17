@@ -282,6 +282,8 @@ struct SessionRow: View {
                 tooltip: false
             )
             .layoutPriority(1)
+            // Done or Needs you while asleep: the moon beside it.
+            if status != .asleep, session.asleep == true { SleepMark(session: session) }
             // Computer use stays on the row while it lasts: the Mac is being driven.
             if let reach = session.reach { UsingMark(session: session, reach: reach) }
             Spacer(minLength: 4)

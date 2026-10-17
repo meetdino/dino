@@ -20,6 +20,7 @@ extension DinoModel {
 
     private static let viewingQueue = DispatchQueue(label: "dino.viewing")
 
+
     /// An agent session dinod could put to sleep now, as far as the app can tell: dinod says why
     /// when it can't (working, asking, background work, scheduled prompts).
     func canSleep(_ s: SessionInfo) -> Bool {
@@ -79,6 +80,19 @@ struct SleepBanner: View {
                 : "\(s.display)'s agent was stopped\(s.slept_at.map { " at \(Clock.short($0))" } ?? "") to free its memory, its session kept as it was. Typing into it, or Wake in its menu, starts it again on its conversation.")
             .accessibilityElement(children: .combine)
         }
+    }
+}
+
+/// On a session's row and tab beside the Done or Needs-you mark it still has while it's asleep.
+struct SleepMark: View {
+    let session: SessionInfo
+
+    var body: some View {
+        Image(systemName: "moon.zzz.fill")
+            .font(.system(size: 9))
+            .foregroundStyle(.secondary)
+            .help(session.slept_at.map { "Asleep since \(Clock.short($0)) to save memory" } ?? "Asleep to save memory")
+            .accessibilityLabel("Asleep")
     }
 }
 

@@ -672,24 +672,31 @@ final class DinoModel: ObservableObject {
     }
 
     func status(of s: SessionInfo) -> SessionStatus {
+        Self.status(of: s, attention: attention.contains(s.id), unseenDone: unseenDone.contains(s.id))
+    }
+
+    /// `s`'s status. `attention`: it rang or finished while in the background; `unseenDone`: its
+    /// turn ended since you last looked. Asleep, it's still Done or Needs you while it is (its moon
+    /// beside the mark, see `SleepMark`), else Asleep.
+    nonisolated static func status(of s: SessionInfo, attention: Bool, unseenDone: Bool) -> SessionStatus {
         if s.exited { return (s.exit_code ?? 0) == 0 ? .ended : .exited }
-        if s.asleep == true { return .asleep }
-        if attention.contains(s.id) || s.needs != nil { return .needsYou }
+        if attention || s.needs != nil { return .needsYou }
+        if s.asleep == true { return unseenDone ? .done : .asleep }
         // An agent run by hand in a shell says whether it's busy, unless its hooks report to dino
         // (typed into a dino shell, see dino-agents.zsh): those say more, as for dino's sessions.
         if s.activity == nil, let f = s.inside, let st = f.status {
             if st == "needs" { return .needsYou }
             if st == "busy" { return s.in_flight > 0 ? .thinking : .working }
-            return unseenDone.contains(s.id) ? .done : .idle
+            return unseenDone ? .done : .idle
         }
         // Agents with hooks (Claude) say when a turn starts and ends. Between turns, their side
         // calls and their redraws when you focus or resize the pane aren't work. A turn that ended
         // on subagents or background commands isn't done until they are.
         if s.waitingOn != nil { return .waiting }
-        if let a = s.activity, a != "working" { return unseenDone.contains(s.id) ? .done : .idle }
+        if let a = s.activity, a != "working" { return unseenDone ? .done : .idle }
         if s.in_flight > 0 { return .thinking }
         if s.activity == "working" || (s.output_ms_ago ?? .max) < 1500 { return .working }
-        if unseenDone.contains(s.id) { return .done }
+        if unseenDone { return .done }
         return .idle
     }
 

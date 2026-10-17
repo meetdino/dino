@@ -157,6 +157,7 @@ private struct TabItem: View {
                 Circle().fill(status.color).frame(width: 5, height: 5)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(status.label)
+                if session.asleep == true { SleepMark(session: session) }
             }
             BellTitleMark(signal: PaneSignals.of(session.id))
             if panes.count > 1 {

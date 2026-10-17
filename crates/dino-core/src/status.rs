@@ -29,11 +29,13 @@ impl Status {
         if s.exited {
             return if s.exit_code.unwrap_or(0) == 0 { Status::Ended } else { Status::Exited };
         }
-        if s.asleep {
-            return Status::Asleep;
-        }
         if needs(s).is_some() {
             return Status::NeedsYou;
+        }
+        // Over Done: here a turn that ended is Done until the next starts, which an asleep one's
+        // always is (the app, which knows what you've looked at, keeps an unseen one Done).
+        if s.asleep {
+            return Status::Asleep;
         }
         // An agent run by hand in a shell says whether it's busy, unless its hooks report to dino
         // (typed into a dino shell): those say more, as for dino's sessions. As the app has it.
@@ -119,8 +121,9 @@ mod tests {
         assert_eq!(Status::of(&SessionInfo { in_flight: 1, ..session(None) }), Status::Working);
         assert_eq!(Status::of(&SessionInfo { exited: true, ..session(Some("needs:x")) }), Status::Ended);
         assert_eq!(Status::of(&SessionInfo { exited: true, exit_code: Some(1), ..session(None) }), Status::Exited);
-        // Asleep whatever its last turn said; listed after the idle ones, before the ended.
+        // Asleep whatever its last turn said, but asking; listed after the idle ones, before the ended.
         assert_eq!(Status::of(&SessionInfo { asleep: true, ..session(Some("done")) }), Status::Asleep);
+        assert_eq!(Status::of(&SessionInfo { asleep: true, ..session(Some("needs:Run: ls?")) }), Status::NeedsYou);
         assert!(Status::Idle < Status::Asleep && Status::Asleep < Status::Ended);
         assert!(Status::NeedsYou < Status::Working && Status::Done < Status::Idle);
     }
