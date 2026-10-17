@@ -338,13 +338,19 @@ pub struct Machine {
     /// Put an agent to sleep once it has been idle this many minutes, off screen, to free its
     /// memory: its process stops, and it starts again on its conversation when it's shown or
     /// typed into. 0 never does, memory pressure or not. While macOS says memory is short, ones
-    /// idle 5 minutes go first (see dinod's `sleep`).
+    /// idle 5 minutes go first (see dinod's `sleep`). Not written while it's the default, so a
+    /// later default reaches those who never chose.
+    #[serde(skip_serializing_if = "Machine::sleeps_after_the_default")]
     pub sleep_idle_agents: u32,
 }
 
 impl Machine {
     /// `sleep_idle_agents` unless set: an hour.
     pub const SLEEP_IDLE_AGENTS: u32 = 60;
+
+    fn sleeps_after_the_default(minutes: &u32) -> bool {
+        *minutes == Self::SLEEP_IDLE_AGENTS
+    }
 }
 
 /// One compiler cache for the whole Mac: every agent dino starts, and every dino shell, builds Rust
@@ -797,6 +803,7 @@ mod tests {
         s.policies.default_agent = Some("claude".into());
         s.machine.computer_use = Some(true);
         s.machine.claude_account = Some(3);
+        s.machine.sleep_idle_agents = 30;
         s.experimental.computer_use = Some(true);
         s.agents.insert("claude".into(), Controls { mode: Some("ask".into()), model: Some("opus".into()), effort: Some("high".into()) });
         s.repos.insert("/repo".into(), Repo { env: [("VAR".to_string(), "1".to_string())].into() });
@@ -805,6 +812,19 @@ mod tests {
         let switch = AgentSwitch { agent: "codex".into(), model: Some("m".into()), extra: Extra::default() };
         s.fallbacks.insert("claude".into(), Fallback { steps: vec![step], new_sessions: Some(switch), ..Default::default() });
         s
+    }
+
+    /// How long idle agents wait before they sleep is written only once it's chosen: a later
+    /// default then reaches whoever never chose.
+    #[test]
+    fn sleep_idle_agents_is_written_only_once_chosen() {
+        let mut s = Settings::default();
+        assert!(!toml::to_string(&s).unwrap().contains("sleep_idle_agents"));
+        assert_eq!(toml::from_str::<Settings>("").unwrap().machine.sleep_idle_agents, Machine::SLEEP_IDLE_AGENTS);
+        s.machine.sleep_idle_agents = 0;
+        let text = toml::to_string(&s).unwrap();
+        assert!(text.contains("sleep_idle_agents = 0"), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap().machine.sleep_idle_agents, 0);
     }
 
     /// settings-keys.txt lists every key's path, a map's own keys as `*` (`agents.*.model`): the
