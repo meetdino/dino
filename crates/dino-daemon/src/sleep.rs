@@ -106,18 +106,17 @@ pub(crate) fn start(d: &Arc<Daemon>) {
 /// first, one at a time, the pressure read again after each. The ids put to sleep, in order.
 pub(crate) fn tick(d: &Daemon, after: Duration, pressure: &dyn Fn() -> Pressure) -> Vec<String> {
     let sessions = d.sessions.lock().unwrap().clone();
-    let shown = shown(d);
     let mut idle: Vec<(Duration, Arc<Session>)> = sessions.into_iter().filter(|s| !s.asleep() && !s.pane.is_exited()).map(|s| (idle_for(&s), s)).collect();
     idle.sort_by(|a, b| b.0.cmp(&a.0));
     let mut slept = vec![];
     let mut now = pressure();
     for (idle, s) in idle {
         let due = if now > Pressure::Normal { after.min(PRESSED_IDLE) } else { after };
-        if idle < due || (shown.contains(&s.id) && now < Pressure::Critical) {
+        if idle < due {
             continue;
         }
-        // Refused (see `why_not`), it's looked at again next time, unsaid: most idle sessions are
-        // refused every time, for their pin or what they still run.
+        // Refused (see `why_not`, and on screen: `sleep`), it's looked at again next time, unsaid:
+        // most idle sessions are refused every time, for their pin or what they still run.
         if sleep(d, &s.id, By::Checker { critical: now == Pressure::Critical }).is_ok() {
             eprintln!("{} dinod: session {} ({}) asleep after {} min idle{}", stamp(), s.id, s.name, idle.as_secs() / 60, if now > Pressure::Normal { ", memory short" } else { "" });
             slept.push(s.id.clone());
@@ -269,6 +268,9 @@ pub(crate) fn sleep(d: &Daemon, id: &str, by: By) -> anyhow::Result<()> {
         // Input on its way to its program now (taken before the waking lock was let go, see
         // `input`) lands first, and then counts as typing.
         let Ok(_giving) = s.giving.try_lock() else { anyhow::bail!("{} stays awake: you're typing in it", s.name) };
+        if by == (By::Checker { critical: false }) && shown(d).contains(id) {
+            anyhow::bail!("{} stays awake: it's on screen", s.name);
+        }
         if let Some(why) = why_not(d, &s, by == By::Name) {
             anyhow::bail!("{} stays awake: {why}", s.name);
         }

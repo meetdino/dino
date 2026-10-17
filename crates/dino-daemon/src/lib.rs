@@ -7943,6 +7943,8 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         assert!(d.viewing.lock().unwrap().is_empty(), "forgotten as its connection closes");
         s.looking.fetch_add(1, Ordering::Relaxed);
         assert!(sleep::tick(&d, 60 * MINUTE, &normal).is_empty());
+        // Looked at as it's put to sleep, not once per look at every session.
+        assert!(sleep::sleep(&d, &id, IDLE).unwrap_err().to_string().contains("it's on screen"));
         assert_eq!(sleep::tick(&d, 60 * MINUTE, &|| sleep::Pressure::Critical), std::slice::from_ref(&id));
         s.looking.fetch_sub(1, Ordering::Relaxed);
         sleep::wake(&d, &id).unwrap();
