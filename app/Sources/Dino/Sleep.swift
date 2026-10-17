@@ -11,7 +11,7 @@ extension DinoModel {
     /// switches ends on the last one.
     func reportViewing() {
         guard let conn = connection else { return }
-        let ids = Self.isShown ? shownSessions.filter { id in sessions.contains { $0.id == id } } : []
+        let ids = Self.mainWindowShown ? shownSessions.filter { id in sessions.contains { $0.id == id } } : []
         guard ids != viewingSent else { return }
         viewingSent = ids
         // An older dinod doesn't know the request: its sessions never sleep, so there's nothing to say.
@@ -20,6 +20,14 @@ extension DinoModel {
 
     private static let viewingQueue = DispatchQueue(label: "dino.viewing")
 
+    /// A window showing the selected tab is on screen: visible, not minimized and not wholly
+    /// covered. Settings, Usage Stats and the quick terminal don't show it (`isShown` counts them).
+    static var mainWindowShown: Bool {
+        NSApp.windows.contains { w in
+            w.isVisible && !w.isMiniaturized && w.occlusionState.contains(.visible) && w.canBecomeMain && !(w is NSPanel)
+                && ![SettingsView.windowID, StatsView.windowID].contains { w.identifier?.rawValue.hasPrefix($0) == true }
+        }
+    }
 
     /// An agent session dinod could put to sleep now, as far as the app can tell: dinod says why
     /// when it can't (working, asking, background work, scheduled prompts).
@@ -27,24 +35,25 @@ extension DinoModel {
         !s.plainShell && s.agent_id != "shell" && s.host == nil && !s.exited && s.asleep != true && s.waking != true
     }
 
-    /// Sleep Now: its agent stopped now to free its memory, pinned or not.
+    /// Sleep Now: its agent stopped now to free its memory, pinned or not. On a connection of its
+    /// own: dinod answers once the agent is gone, which takes a few seconds, and every other request
+    /// would wait on the shared one meanwhile.
     func sleepNow(_ id: String) {
-        guard let conn = connection else { return }
         Task.detached {
             do {
-                try conn.sleep(session: id)
+                try DinoConnection(path: DinoEnvironment.socketPath).sleep(session: id)
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
             }
         }
     }
 
-    /// Wake: its agent started again on its conversation, in its place.
+    /// Wake: its agent started again on its conversation, in its place (one whose wake failed is
+    /// tried again). On a connection of its own, as `sleepNow`: dinod answers once the agent is up.
     func wake(_ id: String) {
-        guard let conn = connection else { return }
         Task.detached {
             do {
-                try conn.wake(session: id)
+                try DinoConnection(path: DinoEnvironment.socketPath).wake(session: id)
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }
             }
@@ -61,7 +70,7 @@ struct SleepBanner: View {
         let ids = model.shownSessions
         if let s = ids.lazy.compactMap({ id in model.sessions.first { $0.id == id && ($0.asleep == true || $0.waking == true) } }).first {
             let waking = s.waking == true
-            let words = waking ? "Waking…" : "Asleep to save memory · wakes when you type"
+            let words = waking ? "Waking…" : s.wake_error.map { "Couldn't wake: \($0) · Wake in its menu tries again" } ?? "Asleep to save memory · wakes when you type"
             HStack(spacing: 6) {
                 Image(systemName: "moon.zzz.fill")
                     .accessibilityHidden(true)

@@ -282,9 +282,12 @@ final class DinoModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        // Hidden, minimized or covered, and shown again: what's on screen changes with it.
-        NotificationCenter.default.addObserver(forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.reportViewing() }
+        // A window hidden, minimized or covered, and shown again: what's on screen changes with it.
+        for name in [NSApplication.didChangeOcclusionStateNotification, NSWindow.didChangeOcclusionStateNotification,
+                     NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.willCloseNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reportViewing() }
+            }
         }
         Task.detached {
             do {

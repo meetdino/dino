@@ -110,6 +110,8 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     var slept_at: UInt64?
     /// Woken, its agent starting: what's typed meanwhile goes in once it takes input.
     var waking: Bool?
+    /// Asleep, why its last wake failed; it's tried again by Wake or when it's shown anew.
+    var wake_error: String?
 
     /// All its turn left running is a server: the ports it listens on ("3000, 8080").
     var serving: String? {
