@@ -44,8 +44,10 @@ pub(crate) enum Held {
     Text { text: String, submit: bool },
 }
 
-/// How short of memory macOS says it is (`kern.memorystatus_vm_pressure_level`: 1, 2, 4).
+/// How short of memory macOS says it is (`kern.memorystatus_vm_pressure_level`: 1, 2, 4). Linux
+/// reads none (see `pressure`): there only tests make the others.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum Pressure {
     Normal,
     Warning,
