@@ -16,6 +16,8 @@ pub enum Status {
     Working,
     Done,
     Idle,
+    /// Asleep to save memory: its agent starts again when it's shown or typed into (`dino wake`).
+    Asleep,
     /// Its program exited cleanly; `dino resume` starts it again.
     Ended,
     /// Its program failed.
@@ -26,6 +28,9 @@ impl Status {
     pub fn of(s: &SessionInfo) -> Status {
         if s.exited {
             return if s.exit_code.unwrap_or(0) == 0 { Status::Ended } else { Status::Exited };
+        }
+        if s.asleep {
+            return Status::Asleep;
         }
         if needs(s).is_some() {
             return Status::NeedsYou;
@@ -56,18 +61,20 @@ impl Status {
             Status::Working => "Working",
             Status::Done => "Done",
             Status::Idle => "Idle",
+            Status::Asleep => "Asleep",
             Status::Ended => "Ended",
             Status::Exited => "Exited",
         }
     }
 
-    /// The same, for scripts: `needs_you`, `working`, `done`, `idle`, `ended`, `exited`.
+    /// The same, for scripts: `needs_you`, `working`, `done`, `idle`, `asleep`, `ended`, `exited`.
     pub fn key(self) -> &'static str {
         match self {
             Status::NeedsYou => "needs_you",
             Status::Working => "working",
             Status::Done => "done",
             Status::Idle => "idle",
+            Status::Asleep => "asleep",
             Status::Ended => "ended",
             Status::Exited => "exited",
         }
@@ -112,6 +119,9 @@ mod tests {
         assert_eq!(Status::of(&SessionInfo { in_flight: 1, ..session(None) }), Status::Working);
         assert_eq!(Status::of(&SessionInfo { exited: true, ..session(Some("needs:x")) }), Status::Ended);
         assert_eq!(Status::of(&SessionInfo { exited: true, exit_code: Some(1), ..session(None) }), Status::Exited);
+        // Asleep whatever its last turn said; listed after the idle ones, before the ended.
+        assert_eq!(Status::of(&SessionInfo { asleep: true, ..session(Some("done")) }), Status::Asleep);
+        assert!(Status::Idle < Status::Asleep && Status::Asleep < Status::Ended);
         assert!(Status::NeedsYou < Status::Working && Status::Done < Status::Idle);
     }
 

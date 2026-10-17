@@ -22,7 +22,7 @@ use dino_core::settings::{AgentSwitch, Settings};
 use dino_core::worktree;
 use dino_proxy::Activity;
 
-use crate::{Daemon, Launch, fallbacks, finished, idle, new_uuid, now_secs, save, send_input, spawn, spawn_in_worktree, triggers, work_dir};
+use crate::{Daemon, Launch, Session, fallbacks, finished, idle, new_uuid, now_secs, save, send_input, spawn, spawn_in_worktree, triggers, work_dir};
 
 /// Later than this after its time, a run counts as a catch-up.
 const LATE: u64 = 120;
@@ -95,6 +95,26 @@ struct Live {
 }
 
 impl Scheduler {
+    /// A run that's going follows session `id` to its end.
+    pub(crate) fn follows(&self, id: &str) -> bool {
+        self.live.lock().unwrap().values().any(|l| l.baseline.contains_key(id))
+    }
+
+    /// Run `run` follows session `id` now, as a run continuing it does; `None`, it's over.
+    #[cfg(test)]
+    pub(crate) fn following(&self, run: &str, id: Option<&str>) {
+        let mut live = self.live.lock().unwrap();
+        match id {
+            Some(id) => {
+                let baseline = HashMap::from([(id.to_string(), 0)]);
+                live.insert(run.into(), Live { task: String::new(), deliver: None, baseline, since: Instant::now(), done_since: None, restored: false, command: None, event: None });
+            }
+            None => {
+                live.remove(run);
+            }
+        }
+    }
+
     pub(crate) fn load() -> Self {
         let mut tasks: Vec<ScheduledTask> = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         // Runs from before automations had no ids: give them one, so they can be followed.
@@ -890,16 +910,7 @@ pub(crate) fn type_when_ready(d: &Daemon, id: &str, text: &str) {
                 return;
             }
             let quiet = s.last_write.lock().unwrap().is_some_and(|t| t.elapsed() > Duration::from_secs(1));
-            let ready = if shell {
-                (quiet || start.elapsed() > SHELL_READY) && !asks(&s.pane.text(0))
-            } else {
-                let waits = s.pane.reads_keys() && {
-                    let screen = s.pane.text(0);
-                    !screen.trim().is_empty() && !asks(&screen)
-                };
-                steady = steady.filter(|_| waits).or_else(|| waits.then(Instant::now));
-                waits && (quiet || steady.is_some_and(|t| t.elapsed() > AGENT_STEADY))
-            };
+            let ready = if shell { (quiet || start.elapsed() > SHELL_READY) && !asks(&s.pane.text(0)) } else { agent_ready(&s, &mut steady, true) };
             if ready {
                 break;
             }
@@ -907,6 +918,19 @@ pub(crate) fn type_when_ready(d: &Daemon, id: &str, text: &str) {
         }
         send_input(&s, &text, true);
     });
+}
+
+/// One look at whether agent `s`, starting, waits for input (see `type_when_ready`): it reads
+/// keys, shows something (and, with `asking`, asks nothing on its screen), and has gone quiet or
+/// stayed so for `AGENT_STEADY`. `steady` keeps since when it has, from one look to the next.
+pub(crate) fn agent_ready(s: &Session, steady: &mut Option<Instant>, asking: bool) -> bool {
+    let quiet = s.last_write.lock().unwrap().is_some_and(|t| t.elapsed() > Duration::from_secs(1));
+    let waits = s.pane.reads_keys() && {
+        let screen = s.pane.text(0);
+        !screen.trim().is_empty() && !(asking && s.adapter().is_some_and(|a| a.asking(&screen).is_some()))
+    };
+    *steady = steady.filter(|_| waits).or_else(|| waits.then(Instant::now));
+    waits && (quiet || steady.is_some_and(|t| t.elapsed() > AGENT_STEADY))
 }
 
 // ---- Following a run to its end ----

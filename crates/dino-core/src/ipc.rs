@@ -203,10 +203,36 @@ pub enum Request {
         /// replay, for a terminal whose own scrollback shouldn't fill with it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scrollback: Option<u64>,
+        /// A surface kept for the session whether or not it's on screen (an app pane, a tmux
+        /// window: `dino attach --fresh`): attached, it neither wakes a session that's asleep nor
+        /// keeps one awake; its app says what it shows (`Viewing`). Without it, attaching is
+        /// looking at the session (`dino attach` in a terminal, dino-tui).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        background: bool,
     },
-    /// Start the agent of a session that ended again, in place, continuing its conversation.
+    /// Start the agent of a session that ended again, in place, continuing its conversation; one
+    /// asleep wakes.
     Resume {
         id: String,
+    },
+    /// Put session `id` to sleep now to free its memory (see `SessionInfo::asleep`), pinned or
+    /// not; refused, saying why, when that would cut something short (a turn, a question, its
+    /// background work or scheduled prompts) or it isn't an agent dino can start again on its
+    /// conversation.
+    Sleep {
+        id: String,
+    },
+    /// Wake session `id`: its agent started again on its conversation, in its place. Answers once
+    /// the agent takes input.
+    Wake {
+        id: String,
+    },
+    /// The sessions this client shows on screen now, all of them each time (its visible tabs and
+    /// splits, none while its windows are hidden), sent whenever that changes: one asleep that
+    /// comes into view wakes, and one in view isn't put to sleep while there's memory to spare.
+    /// Kept for the connection it's sent on, until it closes.
+    Viewing {
+        ids: Vec<String>,
     },
     /// Fork session `id`: a new session on a copy of its conversation, made by the agent's own
     /// fork (see `LauncherInfo::forks`), with its mode, model, flags and account. The original
@@ -1228,6 +1254,17 @@ pub struct SessionInfo {
     /// one the agent forked itself (Claude's `/branch`, Codex's `/fork`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ForkedFrom>,
+    /// Asleep to save memory: its agent was stopped while idle, its place, name, screen, usage
+    /// and conversation kept, and it starts again on that conversation when it's shown or typed
+    /// into (`Wake`). Not `exited`: it hasn't ended.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asleep: bool,
+    /// When it went to sleep, in Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slept_at: Option<u64>,
+    /// Woken, its agent starting: what's typed meanwhile goes in once it takes input.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waking: bool,
 }
 
 /// The session a fork was made from.

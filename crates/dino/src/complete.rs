@@ -78,6 +78,8 @@ const COMMANDS: &[Command] = &[
     Command { name: "attach", about: "open a session here", flags: &[HELP], args: &[Kind::Sessions] },
     Command { name: "resume", about: "resume an ended session", flags: &[HELP], args: &[Kind::Sessions] },
     Command { name: "kill", about: "close a session into Archived", flags: &[HELP], args: &[Kind::Sessions] },
+    Command { name: "sleep", about: "stop an idle agent to free its memory, its session kept", flags: &[HELP], args: &[Kind::Sessions] },
+    Command { name: "wake", about: "start an asleep session's agent again", flags: &[HELP], args: &[Kind::Sessions] },
     Command { name: "tui", about: "open dino-tui, dino's terminal UI, here", flags: &[HELP], args: &[] },
     Command {
         name: "fork",
@@ -501,7 +503,7 @@ mod tests {
 
     #[test]
     fn sessions_for_the_commands_that_take_one() {
-        for c in ["attach", "kill", "resume", "rm", "fork"] {
+        for c in ["attach", "kill", "resume", "sleep", "wake", "rm", "fork"] {
             has(&format!("dino {c} "), &["3", "1"]);
         }
         has("dino rm --force ", &["3"]);
@@ -581,6 +583,8 @@ mod tests {
             "attach",
             "resume",
             "kill",
+            "sleep",
+            "wake",
             "tui",
             "fork",
             "rm",

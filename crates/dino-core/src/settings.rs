@@ -335,6 +335,16 @@ pub struct Machine {
     /// dinod's `computer_use`). Nothing leaves the Mac either way. Unset: [`Settings::computer_use`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub computer_use: Option<bool>,
+    /// Put an agent to sleep once it has been idle this many minutes, off screen, to free its
+    /// memory: its process stops, and it starts again on its conversation when it's shown or
+    /// typed into. 0 never does, memory pressure or not. While macOS says memory is short, ones
+    /// idle 5 minutes go first (see dinod's `sleep`).
+    pub sleep_idle_agents: u32,
+}
+
+impl Machine {
+    /// `sleep_idle_agents` unless set: an hour.
+    pub const SLEEP_IDLE_AGENTS: u32 = 60;
 }
 
 /// One compiler cache for the whole Mac: every agent dino starts, and every dino shell, builds Rust
@@ -401,6 +411,7 @@ impl Default for Machine {
             shell_integration_mode: "detect".into(),
             shell_features: "cursor,title".into(),
             computer_use: None,
+            sleep_idle_agents: Self::SLEEP_IDLE_AGENTS,
         }
     }
 }

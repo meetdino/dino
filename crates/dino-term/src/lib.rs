@@ -160,6 +160,8 @@ pub struct Shared {
     size: Mutex<(u16, u16)>,
     /// All output up to EOF has been processed.
     drained: AtomicBool,
+    /// The screen stays as it is (see [`Pane::freeze`]): output from here on is read and dropped.
+    frozen: AtomicBool,
     /// At exit the screen became the alternate screen as last seen (see [`KEEP_ALT_WITHIN`]),
     /// so what clients streamed no longer matches it.
     pub kept_alt: AtomicBool,
@@ -366,6 +368,7 @@ impl Pane {
             transport: OnceLock::new(),
             size: Mutex::new((cols, rows)),
             drained: AtomicBool::new(false),
+            frozen: AtomicBool::new(false),
             kept_alt: AtomicBool::new(false),
             notices: AtomicU64::new(0),
             notice: Mutex::new(None),
@@ -426,6 +429,9 @@ impl Pane {
                 // while the terminal is open keeps the program from exiting: macOS waits for it
                 // to drain as the program closes its terminal, and it never would.
                 let Some(pane) = weak.upgrade() else { continue };
+                if pane.shared.frozen.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let mut term = pane.term.lock();
                 pane.advance(&mut term, &buf[..n]);
                 tap(&buf[..n]);
@@ -436,12 +442,17 @@ impl Pane {
                     look_again_soon(&pane);
                 }
             }
+            let mut frozen = false;
             if let Some(pane) = weak.upgrade() {
                 let mut term = pane.term.lock();
                 pane.keep_alt(&mut term);
                 pane.shared.drained.store(true, Ordering::Relaxed);
+                frozen = pane.shared.frozen.load(Ordering::Relaxed);
             }
-            tap(&[]);
+            // A frozen pane's end is no news: its screen is what it was.
+            if !frozen {
+                tap(&[]);
+            }
         })?;
         let shared = pane.shared.clone();
         std::thread::Builder::new().name("pty-wait".into()).spawn(move || {
@@ -632,6 +643,16 @@ impl Pane {
         feed.processor = Processor::new();
         feed.processor.advance(term, screen.join("\r\n").as_bytes());
         self.shared.kept_alt.store(true, Ordering::Relaxed);
+    }
+
+    /// Keep the screen as it is now, whatever the program writes from here on: what it prints as
+    /// it's stopped (a goodbye, the main screen it switches back to) is read and dropped, and the
+    /// output tap hears nothing more, its end included. For a session put to sleep, whose last
+    /// screen stays up until it starts again.
+    pub fn freeze(&self) {
+        // Under the screen's lock: output being processed now finishes before it takes effect.
+        let _term = self.term.lock();
+        self.shared.frozen.store(true, Ordering::Relaxed);
     }
 
     pub fn mark_exited(&self) {
@@ -1203,6 +1224,24 @@ mod tests {
     fn shell(script: &str) -> Arc<Pane> {
         let spec = SpawnSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: None, env: Default::default() };
         Pane::spawn(spec, 80, 24, |_| {}).unwrap()
+    }
+
+    /// Frozen, a pane keeps the screen it had: what its program prints as it's stopped (a goodbye,
+    /// the screen it clears on the way out) never shows, and its tap hears no end.
+    #[test]
+    fn a_frozen_pane_keeps_its_screen_through_its_programs_goodbye() {
+        let script = "trap 'printf \"\\033[2J\\033[Hgoodbye\"; exit 0' HUP; printf 'last words'; while :; do /bin/sleep 0.1; done";
+        let spec = SpawnSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: None, env: Default::default() };
+        let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let h = heard.clone();
+        let pane = Pane::spawn(spec, 80, 24, move |b| h.lock().unwrap().push(b.to_vec())).unwrap();
+        wait_for("its screen", || pane.text(0).contains("last words"));
+        let before = heard.lock().unwrap().len();
+        pane.freeze();
+        pane.kill().unwrap().join().unwrap();
+        wait_for("its end", || pane.is_exited());
+        assert_eq!(pane.text(0), "last words");
+        assert_eq!(heard.lock().unwrap().len(), before, "neither its goodbye nor its end reached the tap");
     }
 
     fn wait_for(what: &str, done: impl Fn() -> bool) {

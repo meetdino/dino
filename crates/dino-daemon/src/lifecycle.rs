@@ -128,6 +128,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         forked_from: s.forked_from.lock().unwrap().clone(),
         fork_pending: s.fork_pending.load(Ordering::Relaxed),
         typed,
+        asleep: None,
     };
     let w = if s.host.is_some() { None } else { session_worktree(d, &s.cwd) };
     kill(d, id);
@@ -138,7 +139,8 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
     let mut worktree_removed = false;
     if let Some(w) = &w {
         let target = real(&w.path);
-        let others = sessions_in(d, &target).iter().any(|o| !o.pane.is_exited());
+        // One asleep there comes back to it.
+        let others = sessions_in(d, &target).iter().any(|o| !o.ended());
         if put_away && !others && nothing_to_lose(d, w) && worktree::put_away(&w.path).is_ok() {
             worktree_removed = true;
             let mut worktrees = d.worktrees.lock().unwrap();
@@ -383,10 +385,10 @@ fn storage(d: &Arc<Daemon>) -> Vec<ipc::StoredWorktree> {
                 stale.push(key.clone());
             }
             let here = sessions_in(d, &key);
-            let live = here.iter().find(|s| !s.pane.is_exited());
+            let live = here.iter().find(|s| !s.ended());
             let session = live.map(|s| s.label.lock().unwrap().clone().unwrap_or_else(|| s.name.clone()));
             let session_state = match live {
-                Some(s) if super::finished(d, s) => Some("idle"),
+                Some(s) if s.asleep() || super::finished(d, s) => Some("idle"),
                 Some(_) => Some("working"),
                 None if !here.is_empty() => Some("ended"),
                 None => None,
@@ -437,7 +439,8 @@ fn remove_stored(d: &Daemon, path: &str) -> anyhow::Result<()> {
     let w = d.worktrees.lock().unwrap().iter().find(|w| real(&w.path) == target).cloned();
     let w = w.ok_or_else(|| anyhow::anyhow!("{path} isn't a worktree dino made"))?;
     let ended = sessions_in(d, &target);
-    if let Some(s) = ended.iter().find(|s| !s.pane.is_exited()) {
+    // Asleep counts as running: it comes back there.
+    if let Some(s) = ended.iter().find(|s| !s.ended()) {
         anyhow::bail!("{} is running in it", s.label.lock().unwrap().clone().unwrap_or_else(|| s.name.clone()));
     }
     worktree::clean(&w.path).map_err(|e| anyhow::anyhow!("Kept {}: {e}", w.branch))?;
@@ -482,7 +485,7 @@ fn forget_stored(d: &Daemon, w: &SessionWorktree, target: &str, ended: Vec<Arc<s
 pub(crate) fn clean_up(d: &Daemon, path: &str, force: bool) -> anyhow::Result<()> {
     let target = real(Path::new(path));
     let ended = sessions_in(d, &target);
-    if let Some(s) = ended.iter().find(|s| !s.pane.is_exited()) {
+    if let Some(s) = ended.iter().find(|s| !s.ended()) {
         anyhow::bail!("{} is running in it", s.label.lock().unwrap().clone().unwrap_or_else(|| s.name.clone()));
     }
     anyhow::ensure!(!super::subagent_owners(d).iter().any(|(p, o)| *p == target && o.running), "a subagent is working in it");
@@ -535,8 +538,9 @@ pub(crate) fn sweep_merged(d: &Daemon) {
     for w in mine {
         let target = real(&w.path);
         let sessions = sessions_in(d, &target);
-        // Pinned sessions keep theirs until the user says otherwise, as after a merge.
-        if sessions.iter().any(|s| !s.pane.is_exited() || s.pinned.load(Ordering::Relaxed)) {
+        // Pinned sessions keep theirs until the user says otherwise, as after a merge; asleep
+        // ones come back to theirs.
+        if sessions.iter().any(|s| !s.ended() || s.pinned.load(Ordering::Relaxed)) {
             continue;
         }
         let base = base_of(&w.repo);

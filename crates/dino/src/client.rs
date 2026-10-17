@@ -116,9 +116,10 @@ fn scrollback() -> Option<u64> {
     std::env::var("DINO_SCROLLBACK_LIMIT").ok()?.parse().ok()
 }
 
-/// `wait`: if the session has ended, answer once it's resumed.
-fn attach_on(mut s: UnixStream, id: &str, cols: u16, rows: u16, wait: bool) -> io::Result<UnixStream> {
-    ipc::write_json(&mut s, &Request::Attach { id: id.into(), cols, rows, wait, scrollback: scrollback() })?;
+/// `wait`: if the session has ended, answer once it's resumed. `background`: a surface dino keeps
+/// for the session (`--fresh`), not someone looking at it, which would wake it from sleep.
+fn attach_on(mut s: UnixStream, id: &str, cols: u16, rows: u16, wait: bool, background: bool) -> io::Result<UnixStream> {
+    ipc::write_json(&mut s, &Request::Attach { id: id.into(), cols, rows, wait, scrollback: scrollback(), background })?;
     let (_, payload) = ipc::read_frame(&mut s)?;
     match serde_json::from_slice(&payload).map_err(io::Error::other)? {
         Response::Ok => Ok(s),
@@ -176,7 +177,7 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
         set
     };
     let (cols, rows) = crossterm::terminal::size()?;
-    let stream = attach_on(attach_connection(fresh)?, id, cols, rows, false)?;
+    let stream = attach_on(attach_connection(fresh)?, id, cols, rows, false, fresh)?;
     let mut reader = stream.try_clone()?;
     let writer = Arc::new(Mutex::new(stream));
     crossterm::terminal::enable_raw_mode()?;
@@ -320,7 +321,7 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
             let wait = ended.load(Ordering::Relaxed);
             let tried = Instant::now();
             // Only a running dinod: if it's gone, so is the session, and starting one here would be a surprise.
-            match UnixStream::connect(ipc::socket_path()).and_then(|s| attach_on(s, id, cols, rows, wait)) {
+            match UnixStream::connect(ipc::socket_path()).and_then(|s| attach_on(s, id, cols, rows, wait, fresh)) {
                 Ok(s) => break s,
                 Err(e) if e.kind() == io::ErrorKind::Other => break 'session,
                 // Dropped after a long wait (dinod restarting): give it the full time again.

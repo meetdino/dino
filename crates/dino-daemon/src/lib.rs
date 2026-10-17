@@ -55,6 +55,7 @@ mod providers;
 mod schedule;
 mod servers;
 mod shell;
+mod sleep;
 mod stats;
 mod subtoken;
 mod sync;
@@ -71,13 +72,17 @@ mod update;
 const RESTART_MARK: &[u8] =
     b"\x1b[?1049l\r\n\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1l\x1b>\x1b[?25h\x1b[=0;1u\x1b[0m\x1b[2m-- dino restarted; above is where this session was --\x1b[0m\r\n";
 
-/// A saved screen without the restart lines earlier restarts left in it: one line per restart,
-/// not one more each time.
+/// The same line for a session woken from sleep (see `sleep`).
+const WAKE_MARK: &[u8] =
+    b"\x1b[?1049l\r\n\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1l\x1b>\x1b[?25h\x1b[=0;1u\x1b[0m\x1b[2m-- woke from sleep; above is where this session was --\x1b[0m\r\n";
+
+/// A saved screen without the restart (and wake) lines earlier ones left in it: one line per
+/// restart, not one more each time.
 fn without_restart_marks(screen: &[u8]) -> Vec<u8> {
-    const TEXT: &[u8] = b"-- dino restarted; above is where this session was --";
+    const TEXTS: [&[u8]; 2] = [b"-- dino restarted; above is where this session was --", b"-- woke from sleep; above is where this session was --"];
     let mut out = Vec::with_capacity(screen.len());
     for line in screen.split_inclusive(|&b| b == b'\n') {
-        if !line.windows(TEXT.len()).any(|w| w == TEXT) {
+        if !TEXTS.iter().any(|t| line.windows(t.len()).any(|w| w == *t)) {
             out.extend_from_slice(line);
         }
     }
@@ -183,6 +188,18 @@ struct Session {
     moving_to: Mutex<Option<(String, Instant)>>,
     /// Since its program ended, its conversation's record was looked at (see `drop_unused`).
     looked_unused: AtomicBool,
+    /// Asleep to save memory since then, in Unix seconds; 0 while it isn't (see `sleep`). Its
+    /// program is stopped, its pane frozen on its last screen.
+    asleep: AtomicU64,
+    /// When this session's program was started here (or its pane made, ended or asleep): how long
+    /// it has been idle, until it prints.
+    spawned: Instant,
+    /// Clients attached that are looking at it, rather than keeping a surface for it (see
+    /// `Request::Attach`'s `background`): it stays awake while one is.
+    looking: AtomicUsize,
+    /// Held while input is given to its program (see `sleep::input`): it isn't put to sleep with
+    /// some on its way.
+    giving: Mutex<()>,
 }
 
 /// What a shell is running in the foreground, as last looked at.
@@ -343,6 +360,12 @@ struct Daemon {
     starting: Mutex<HashSet<String>>,
     /// Sessions ended for good whose program may still be stopping (see `end`), for `drop_unused`.
     ending: Mutex<Vec<Arc<Session>>>,
+    /// Sessions waking from sleep, by id, each with what was typed or sent to it meanwhile, in
+    /// order, held until its agent takes input. Each sleep and wake is decided under this lock,
+    /// taken before the sessions' (see `sleep`).
+    waking: Mutex<HashMap<String, Vec<sleep::Held>>>,
+    /// The sessions each client shows on screen, by its connection (see `Request::Viewing`).
+    viewing: Mutex<HashMap<u64, HashSet<String>>>,
 }
 
 /// `dino lid-watchdog <pid>`: see [`lid`].
@@ -498,6 +521,7 @@ pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
         });
     }
     schedule::start(&daemon);
+    sleep::start(&daemon);
     providers::start();
     {
         let (d, d2) = (daemon.clone(), daemon.clone());
@@ -823,6 +847,8 @@ fn new_daemon(home: PathBuf, proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<
         leftovers: Mutex::default(),
         starting: Mutex::default(),
         ending: Mutex::default(),
+        waking: Mutex::default(),
+        viewing: Mutex::default(),
     });
     // Archived ids stay theirs, so a new session never takes one.
     let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
@@ -1184,6 +1210,8 @@ fn say_in(s: &Session, text: &str) {
 }
 
 fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
+    // What this client says it shows (`Viewing`), until it hangs up.
+    let viewer = sleep::Viewer::new(d);
     loop {
         let (kind, payload) = ipc::read_frame(&mut stream)?;
         if kind != ipc::JSON {
@@ -1500,13 +1528,17 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     Response::Error { message: format!("{id} can't be reopened anymore") }
                 }
             }
-            Request::Attach { id, cols, rows, wait, scrollback } => {
+            Request::Attach { id, cols, rows, wait, scrollback, background } => {
+                // Looked at, one asleep wakes; a surface kept for it shows its last screen.
+                if !background && attachable(d, &id).is_some_and(|s| s.asleep()) {
+                    sleep::wake_soon(d, &id, vec![]);
+                }
                 let session = loop {
                     match attachable(d, &id) {
                         // Restarting: wait for the one taking its place.
                         Some(s) if s.replaced.load(Ordering::Relaxed) => {}
                         // Ended: wait for it to be resumed, from this client or any other.
-                        Some(s) if wait && s.pane.is_exited() => {}
+                        Some(s) if wait && s.ended() => {}
                         other => break other,
                     }
                     if client_gone(&stream) {
@@ -1515,7 +1547,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 };
                 return match session {
-                    Some(s) => attach(d, &s, stream, cols, rows, scrollback),
+                    Some(s) => attach(d, &s, stream, cols, rows, scrollback, background),
                     None => ipc::write_json(&mut stream, &Response::Error { message: format!("no session {id}") }),
                 };
             }
@@ -1547,6 +1579,18 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
+            Request::Sleep { id } => match sleep::sleep(d, &id, true) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Wake { id } => match sleep::wake(d, &id) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error { message: e.to_string() },
+            },
+            Request::Viewing { ids } => {
+                sleep::viewing(d, viewer.conn, ids);
+                Response::Ok
+            }
             Request::Found { cloud, running_only, limit, query, hidden } => {
                 let (sessions, more, hidden) = discover(d, cloud, running_only, limit, query.as_deref().unwrap_or(""), hidden);
                 Response::Found { sessions, more, hidden }
@@ -1639,8 +1683,9 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::SendInput { id, text, submit } => {
                 let session = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
                 match session {
-                    Some(s) if !s.pane.is_exited() => {
-                        send_input(&s, &text, submit);
+                    // Asleep, it wakes and gets it once its agent takes input.
+                    Some(s) if !s.ended() => {
+                        sleep::input(d, &s, sleep::Held::Text { text, submit });
                         Response::Ok
                     }
                     Some(_) => Response::Error { message: format!("{id} has exited") },
@@ -1648,7 +1693,12 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 }
             }
             Request::SendKeys { id, text } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
-                Some(s) if s.pane.is_exited() => Response::Error { message: format!("{id} has exited") },
+                Some(s) if s.ended() => Response::Error { message: format!("{id} has exited") },
+                // Held for the agent once it takes input, waking it.
+                Some(s) if s.asleep() || sleep::waking(d, &id) => {
+                    sleep::input(d, &s, sleep::Held::Keys(text.into_bytes()));
+                    Response::Ok
+                }
                 // In line mode its terminal prints them (`^[[105;9u`) for what runs to read as text:
                 // a command, or the shell itself before its next prompt (old bash asking for a #
                 // line). A line editor reads keys (a shell's, or one behind a tmux client or ssh).
@@ -1660,6 +1710,8 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 None => Response::Error { message: format!("no session {id}") },
             },
             Request::Interrupt { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
+                // Asleep, its agent is between turns: nothing to interrupt.
+                Some(s) if s.asleep() => Response::Ok,
                 Some(s) if !s.pane.is_exited() => match interrupt(d, &s) {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error { message: e.to_string() },
@@ -1677,6 +1729,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             },
             Request::SessionCost { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
                 Some(s) if s.host.is_some() => Response::Error { message: format!("{id} runs on {}, so dino can't measure it from this Mac", s.host.as_deref().unwrap_or_default()) },
+                Some(s) if s.asleep() => Response::Error { message: format!("{} is asleep: nothing of it runs", s.name) },
                 Some(s) => match d.costs.measure(&d.home, &id, s.pane.pid().filter(|_| !s.pane.is_exited())) {
                     Some(cost) => Response::SessionCost { cost },
                     None => Response::Error { message: format!("{id} has exited") },
@@ -1832,6 +1885,9 @@ struct Launch {
     route: Option<ProviderRoute>,
     /// Start this agent even while it's at its limit, not the one its fallback names.
     stay: bool,
+    /// For a session waking from sleep: its last screen, put above what its agent shows now, as a
+    /// restored one gets its screen as last kept on disk (see `save_live_screens`).
+    woke_from: Option<Vec<u8>>,
 }
 
 impl Launch {
@@ -1841,7 +1897,7 @@ impl Launch {
 }
 
 fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
-    let Launch { launcher, mut args, cwd, cols, rows, restore, name, mut prompt, mut controls, scheduled, started_by, host, route, stay } = launch;
+    let Launch { launcher, mut args, cwd, cols, rows, restore, name, mut prompt, mut controls, scheduled, started_by, host, route, stay, woke_from } = launch;
     // A prompt typed among the agent's arguments (`dino new claude … "fix it"`) is given once, as
     // the session starts, and kept apart from them: a session resuming its conversation (dinod
     // restarted, unarchived, taken over) would otherwise be asked it again. One saved with it in
@@ -2006,15 +2062,17 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         }
         None => Pane::ended(&load_screen(&d.home, &id), cols.max(20), rows.max(5), ended.and_then(|r| r.exit_code)),
     };
-    // Resumed after dinod stopped or crashed: what its pane showed then, above the agent's resume.
+    // Resumed after dinod stopped or crashed, or woken: what its pane showed then, above the
+    // agent's resume.
+    let woke = woke_from.is_some();
     if restore.is_some()
         && !pane.is_exited()
-        && let Some(before) = std::fs::read(live_screens_dir(&d.home).join(&id)).ok().filter(|b| !b.is_empty())
+        && let Some(before) = woke_from.or_else(|| std::fs::read(live_screens_dir(&d.home).join(&id)).ok()).filter(|b| !b.is_empty())
     {
         pane.feed(&without_restart_marks(&before));
         // Back on the normal screen (it may have been saved with a full-screen program up),
         // and a line between then and now.
-        pane.feed(RESTART_MARK);
+        pane.feed(if woke { WAKE_MARK } else { RESTART_MARK });
     }
     // A shell's `cd` shows at once rather than at the next look (the sidebar files it by folder).
     let asked = d.asked.clone();
@@ -2088,6 +2146,11 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         fork_pending: AtomicBool::new(restore.as_ref().is_some_and(|r| r.fork_pending)),
         moving_to: Mutex::default(),
         looked_unused: AtomicBool::new(false),
+        // Asleep it stays, across a dinod restart: its pane is its last screen (see `save`).
+        asleep: AtomicU64::new(restore.as_ref().filter(|_| ended.is_some()).and_then(|r| r.asleep).unwrap_or(0)),
+        spawned: Instant::now(),
+        looking: AtomicUsize::new(0),
+        giving: Mutex::new(()),
     }));
     let session = sessions.last().cloned();
     drop(sessions);
@@ -2540,6 +2603,21 @@ impl Session {
         *self.poked.lock().unwrap() = Some(Instant::now());
     }
 
+    /// Asleep to save memory (see `sleep`): its program stopped or stopping, its pane its last screen.
+    fn asleep(&self) -> bool {
+        self.asleep.load(Ordering::SeqCst) != 0
+    }
+
+    /// When it went to sleep, while it is.
+    fn slept_at(&self) -> Option<u64> {
+        Some(self.asleep.load(Ordering::SeqCst)).filter(|&t| t != 0)
+    }
+
+    /// Its program ended, and not by going to sleep: over until it's resumed.
+    fn ended(&self) -> bool {
+        self.pane.is_exited() && !self.asleep()
+    }
+
     /// Its size, as the client the user is looking at has it (see `clients`).
     fn fit(&self) {
         // Held while it's applied, so two clients' changes at once can't land out of order.
@@ -2601,17 +2679,22 @@ fn ended_note(d: &Daemon, s: &Arc<Session>) -> Vec<u8> {
 struct Attached<'a> {
     s: &'a Session,
     id: u64,
+    /// A surface kept for it, not someone looking (see `Request::Attach`).
+    background: bool,
 }
 
 impl<'a> Attached<'a> {
-    fn new(s: &'a Session, id: u64, size: (u16, u16)) -> Self {
+    fn new(s: &'a Session, id: u64, size: (u16, u16), background: bool) -> Self {
         // Its size, unless another client is the one being looked at (see `clients`).
         s.clients.lock().unwrap().join(id, size);
         s.fit();
         // The client's terminal answers queries now; the daemon's emulator must stay quiet.
         s.attached.fetch_add(1, Ordering::Relaxed);
         s.pane.shared.answer_queries.store(false, Ordering::Relaxed);
-        Self { s, id }
+        if !background {
+            s.looking.fetch_add(1, Ordering::Relaxed);
+        }
+        Self { s, id, background }
     }
 }
 
@@ -2623,11 +2706,16 @@ impl Drop for Attached<'_> {
         if s.attached.fetch_sub(1, Ordering::Relaxed) == 1 {
             s.pane.shared.answer_queries.store(true, Ordering::Relaxed);
         }
+        if !self.background {
+            s.looking.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
-/// Stream a session to a client until it detaches or the session ends.
-fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, rows: u16, scrollback: Option<u64>) -> io::Result<()> {
+/// Stream a session to a client until it detaches or the session ends. One asleep shows its last
+/// screen and nothing ends it: what the client types wakes it (see `sleep`), and the client is let
+/// go to reattach to the agent taking its place.
+fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, rows: u16, scrollback: Option<u64>, background: bool) -> io::Result<()> {
     // As much scrollback as the client keeps (Ghostty's `scrollback-limit`), kept from now on by
     // this session and the ones started after it.
     let history = scrollback.map_or(REPLAY_HISTORY, |bytes| dino_term::history_lines(bytes, cols));
@@ -2640,7 +2728,7 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
     ipc::write_json(&mut stream, &Response::Ok)?;
     s.poke();
     let sub_id = d.next_sub.fetch_add(1, Ordering::Relaxed);
-    let attached = Attached::new(s, sub_id, (cols, rows));
+    let attached = Attached::new(s, sub_id, (cols, rows), background);
 
     let (tx, rx) = channel::<Vec<u8>>();
     // Subscribed as its screen is taken, so what it's sent after that is exactly what came next.
@@ -2662,7 +2750,9 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
             let _ = out.shutdown(std::net::Shutdown::Both);
             return;
         }
-        if exited_already {
+        // Asleep, it hasn't ended: the client stays until it's woken (its subscription dropped
+        // as the agent taking its place starts) or it leaves.
+        if exited_already && !s2.asleep() {
             let _ = ipc::write_frame(&mut out, ipc::EXIT, &ended_note(&d2, &s2));
             return;
         }
@@ -2680,6 +2770,10 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
             if !bytes.is_empty() && ipc::write_frame(&mut out, ipc::DATA, &bytes).is_err() {
                 break;
             }
+            // An asleep session still listed hasn't ended (closed or deleted, it has).
+            if ended && s2.asleep() && d2.sessions.lock().unwrap().iter().any(|o| Arc::ptr_eq(o, &s2)) {
+                continue;
+            }
             if ended {
                 // A fullscreen agent ends on its last screen, not the one it switched back to.
                 if s2.pane.shared.kept_alt.load(Ordering::Relaxed) {
@@ -2690,7 +2784,9 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
                 break;
             }
         }
-        let _ = out.shutdown(std::net::Shutdown::Both);
+        // Woken: only the way out shuts, so what the client types until it reattaches is still
+        // read, and held for the agent taking its place.
+        let _ = out.shutdown(if s2.asleep() { std::net::Shutdown::Write } else { std::net::Shutdown::Both });
     });
 
     while let Ok((kind, payload)) = ipc::read_frame(&mut stream) {
@@ -2699,8 +2795,8 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
                 // From an older client, includes the focus in/out reports agents ask for: Claude
                 // repaints on those.
                 s.poke();
-                *s.typed.lock().unwrap() = Some(Instant::now());
-                s.pane.write(payload)
+                // To its program; held, and waking it, while it's asleep or waking.
+                sleep::input(d, s, sleep::Held::Keys(payload));
             }
             ipc::RESIZE => {
                 s.poke();
@@ -2983,6 +3079,7 @@ fn shown_name(s: &Session) -> Option<String> {
 fn state(d: &Daemon) -> Response {
     let prs = d.prs.lock().unwrap().clone();
     let previews = d.previews.lock().unwrap().clone();
+    let waking: HashSet<String> = d.waking.lock().unwrap().keys().cloned().collect();
     let live = d.sessions.lock().unwrap().clone();
     let sessions = live
         .iter()
@@ -3053,8 +3150,8 @@ fn state(d: &Daemon) -> Response {
                 name: s.name.clone(),
                 agent_id: s.agent_id.clone(),
                 title,
-                exited: s.pane.is_exited(),
-                exit_code: s.pane.exit_code(),
+                exited: s.ended(),
+                exit_code: s.pane.exit_code().filter(|_| !s.asleep()),
                 output_ms_ago,
                 bells: s.pane.shared.bells.load(Ordering::Relaxed),
                 requests: st.requests,
@@ -3107,6 +3204,9 @@ fn state(d: &Daemon) -> Response {
                 usage_by_route,
                 instead_of: s.instead_of.clone(),
                 forked_from: s.forked_from.lock().unwrap().clone(),
+                asleep: s.asleep(),
+                slept_at: s.slept_at(),
+                waking: waking.contains(&s.id),
             }
         })
         .collect();
@@ -3285,6 +3385,10 @@ struct SavedSession {
     /// A shell's: the agent typed into it, running as it was saved, to start there again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     typed: Option<typed::Typed>,
+    /// Asleep since then (Unix seconds): saved `ended` as well, with its last screen, so it comes
+    /// back asleep (an older dinod brings it back ended, to resume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    asleep: Option<u64>,
 }
 
 fn saved_path(home: &Path) -> PathBuf {
@@ -3367,7 +3471,8 @@ fn save(d: &Daemon) {
     let sessions = d.sessions.lock().unwrap().clone();
     let saved: Vec<SavedSession> = sessions.iter().map(|s| snapshot(d, s)).collect();
     let dir = screens_dir(&d.home);
-    for s in sessions.iter().filter(|s| s.pane.is_exited() && !s.screen_saved.load(Ordering::Relaxed)) {
+    // An asleep one's too: its pane is frozen on it, its program stopping or gone.
+    for s in sessions.iter().filter(|s| (s.pane.is_exited() || s.asleep()) && !s.screen_saved.load(Ordering::Relaxed)) {
         use std::os::unix::fs::OpenOptionsExt;
         let _ = std::fs::create_dir_all(&dir);
         let written = std::fs::OpenOptions::new()
@@ -3379,10 +3484,10 @@ fn save(d: &Daemon) {
             .and_then(|mut f| io::Write::write_all(&mut f, &s.pane.replay(REPLAY.load(Ordering::Relaxed))));
         s.screen_saved.store(written.is_ok(), Ordering::Relaxed);
     }
-    // A screen whose session was resumed or removed goes.
+    // A screen whose session was resumed, woken or removed goes.
     for f in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
         let name = f.file_name().to_string_lossy().into_owned();
-        if !sessions.iter().any(|s| s.id == name && s.pane.is_exited()) {
+        if !sessions.iter().any(|s| s.id == name && (s.pane.is_exited() || s.asleep())) {
             let _ = std::fs::remove_file(f.path());
         }
     }
@@ -3446,14 +3551,15 @@ fn snapshot(d: &Daemon, s: &Session) -> SavedSession {
         label,
         pinned: s.pinned.load(Ordering::Relaxed),
         host: s.host.clone(),
-        ended: s.pane.is_exited(),
-        exit_code: s.pane.exit_code(),
+        ended: s.pane.is_exited() || s.asleep(),
+        exit_code: s.pane.exit_code().filter(|_| !s.asleep()),
         route: s.route.clone(),
         instead_of: s.instead_of.clone(),
         account: s.account.clone(),
         forked_from: s.forked_from.lock().unwrap().clone(),
         fork_pending: s.fork_pending.load(Ordering::Relaxed),
         typed,
+        asleep: s.slept_at(),
     }
 }
 
@@ -3478,7 +3584,7 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
     if let Some(s) = typed {
         return typed::restart(d, &s, controls);
     }
-    restart_with(d, id, |saved| {
+    restart_with(d, id, None, |saved| {
         if saved.controls.model != controls.model {
             d.proxy.stats.reset_context(id);
         }
@@ -3486,8 +3592,9 @@ fn restart(d: &Daemon, id: &str, controls: Controls) -> anyhow::Result<()> {
     })
 }
 
-/// Stop session `id`'s agent and start it again as `change` makes what it was started with.
-fn restart_with(d: &Daemon, id: &str, change: impl FnOnce(&mut SavedSession)) -> anyhow::Result<()> {
+/// Stop session `id`'s agent and start it again as `change` makes what it was started with;
+/// `woke_from`, for one waking from sleep, is its last screen.
+fn restart_with(d: &Daemon, id: &str, woke_from: Option<Vec<u8>>, change: impl FnOnce(&mut SavedSession)) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
     // Not holding the sessions' lock: it reads the screen (see `snapshot`).
     let mut saved = snapshot(d, &s);
@@ -3506,8 +3613,9 @@ fn restart_with(d: &Daemon, id: &str, change: impl FnOnce(&mut SavedSession)) ->
     change(&mut saved);
     saved.ended = false;
     saved.exit_code = None;
+    saved.asleep = None;
     let (cols, rows) = s.pane.size();
-    let launch = Launch { cols, rows, restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) };
+    let launch = Launch { cols, rows, restore: Some(saved.clone()), woke_from, ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) };
     let spawned = spawn(d, launch);
     // The new one takes the old one's place, so the session never drops out of the list.
     take_place(d, &s);
@@ -3534,6 +3642,10 @@ fn take_place(d: &Daemon, old: &Arc<Session>) {
 /// shell starts afresh, in the same place and with any controls chosen meanwhile.
 fn resume(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    // Asleep: woken, once its agent takes input (see `sleep`).
+    if s.asleep() {
+        return sleep::wake(d, id);
+    }
     anyhow::ensure!(s.pane.is_exited(), "{} is still running", s.name);
     if let Some(other) = s.agent_session.lock().unwrap().clone().and_then(|c| holder(d, &c, Some(id))).filter(|o| !o.pane.is_exited()) {
         anyhow::bail!("its conversation is running in {} already", other.name);
@@ -3755,7 +3867,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
 
     let id = match held {
         Some(h) => {
-            restart_with(d, &h.id, |saved| {
+            restart_with(d, &h.id, None, |saved| {
                 saved.args = f.args.clone();
                 saved.account = account;
             })?;
@@ -3788,6 +3900,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
                 forked_from: None,
                 fork_pending: false,
                 typed: None,
+                asleep: None,
             };
             spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?
         }
@@ -4145,6 +4258,12 @@ fn end(d: &Daemon, s: &Arc<Session>) {
         tmux::detach(&v);
     }
     s.pane.kill();
+    // Asleep, its clients never hear its program end (its pane is frozen): told it's gone.
+    if s.asleep() {
+        for (_, tx) in s.subscribers.lock().unwrap().drain(..) {
+            let _ = tx.send(Vec::new());
+        }
+    }
     // What it started outside its terminal, too.
     if s.host.is_none() {
         procs::stop_session(&d.home, id, false);
@@ -4755,13 +4874,13 @@ fn pr_session(d: &Daemon, id: &str) -> anyhow::Result<Arc<Session>> {
     local_session(d, id)
 }
 
-/// Ask the agent to fix its PR's failed checks, with their logs.
-fn pr_fix(d: &Daemon, id: &str) -> anyhow::Result<()> {
+/// Ask the agent to fix its PR's failed checks, with their logs; one asleep wakes for it.
+fn pr_fix(d: &Arc<Daemon>, id: &str) -> anyhow::Result<()> {
     let s = pr_session(d, id)?;
-    anyhow::ensure!(!s.pane.is_exited(), "{id} has exited");
+    anyhow::ensure!(!s.ended(), "{id} has exited");
     let branch = pr::branch(&s.cwd).ok_or_else(|| anyhow::anyhow!("Not on a branch"))?;
     let msg = pr::fix_message(&s.cwd, &branch)?;
-    send_input(&s, &msg, true);
+    sleep::input(d, &s, sleep::Held::Text { text: msg, submit: true });
     // Asked by hand: no automatic fix for the same push.
     if let Some(pr) = d.prs.lock().unwrap().get(id) {
         s.auto.lock().unwrap().fixed = Some((pr.number, pr.head.clone()));
@@ -4799,7 +4918,8 @@ fn refresh_prs(d: &Daemon) {
         d.prs.lock().unwrap().clear();
         return;
     }
-    let live: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| !s.pane.is_exited() && s.host.is_none()).cloned().collect();
+    // Asleep ones too: their PR still merges, and the sidebar shows it.
+    let live: Vec<Arc<Session>> = d.sessions.lock().unwrap().iter().filter(|s| !s.ended() && s.host.is_none()).cloned().collect();
     let mut looked_up: HashMap<(PathBuf, String), Option<ipc::PrInfo>> = HashMap::new();
     let mut found = HashMap::new();
     let mut with_pr = vec![];
@@ -4936,7 +5056,7 @@ fn archive_done_prs(d: &Daemon) {
     let due: Vec<String> = d.closing.lock().unwrap().iter().filter(|(_, t)| t.elapsed() >= CLOSE_AFTER_MERGE).map(|(id, _)| id.clone()).collect();
     for id in due {
         let state = d.prs.lock().unwrap().get(&id).map(|pr| pr.state.clone());
-        let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id && !s.pane.is_exited()).cloned();
+        let s = d.sessions.lock().unwrap().iter().find(|s| s.id == id && !s.ended()).cloned();
         let w = s.as_ref().and_then(|s| session_worktree(d, &s.cwd));
         let (Some(s), Some(w)) = (s, w) else {
             // Gone, or not in a worktree.
@@ -5354,6 +5474,7 @@ mod tests {
             forked_from: None,
             fork_pending: false,
             typed: None,
+            asleep: None,
         }
     }
 
@@ -6208,7 +6329,7 @@ while (sysread(STDIN, my $c, 1)) {
         let (mut client, server) = UnixStream::pair().unwrap();
         let d2 = d.clone();
         std::thread::spawn(move || serve(&d2, server));
-        ipc::write_json(&mut client, &Request::Attach { id: id.clone(), cols: 80, rows: 24, wait: false, scrollback: None }).unwrap();
+        ipc::write_json(&mut client, &Request::Attach { id: id.clone(), cols: 80, rows: 24, wait: false, scrollback: None, background: false }).unwrap();
         client.set_read_timeout(Some(std::time::Duration::from_millis(400))).unwrap();
         let mut b = [0u8; 1];
         let early = io::Read::read(&mut client, &mut b);
@@ -6254,7 +6375,7 @@ while (sysread(STDIN, my $c, 1)) {
         // other end has closed (EINVAL).
         client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
         let (d2, old2) = (d.clone(), old.clone());
-        let attaching = std::thread::spawn(move || attach(&d2, &old2, server, 80, 24, None));
+        let attaching = std::thread::spawn(move || attach(&d2, &old2, server, 80, 24, None, false));
         let (kind, _) = ipc::read_frame(&mut client).unwrap();
         assert_eq!(kind, ipc::JSON);
         let next = ipc::read_frame(&mut client);
@@ -6284,7 +6405,7 @@ while (sysread(STDIN, my $c, 1)) {
         let (mut pane, server) = UnixStream::pair().unwrap();
         let d2 = d.clone();
         std::thread::spawn(move || serve(&d2, server));
-        ipc::write_json(&mut pane, &Request::Attach { id: id.clone(), cols: 100, rows: 30, wait: false, scrollback: None }).unwrap();
+        ipc::write_json(&mut pane, &Request::Attach { id: id.clone(), cols: 100, rows: 30, wait: false, scrollback: None, background: false }).unwrap();
         ipc::write_frame(&mut pane, ipc::FOCUS, &[0]).unwrap();
         std::thread::spawn(move || while ipc::read_frame(&mut pane).is_ok() {});
         wait_for("the pane's size", || s.pane.size() == (100, 30));
@@ -6293,7 +6414,7 @@ while (sysread(STDIN, my $c, 1)) {
         let (mut once, server) = UnixStream::pair().unwrap();
         let d2 = d.clone();
         let served = std::thread::spawn(move || serve(&d2, server));
-        ipc::write_json(&mut once, &Request::Attach { id: id.clone(), cols: 120, rows: 40, wait: false, scrollback: None }).unwrap();
+        ipc::write_json(&mut once, &Request::Attach { id: id.clone(), cols: 120, rows: 40, wait: false, scrollback: None, background: false }).unwrap();
         let (kind, _) = ipc::read_frame(&mut once).unwrap();
         assert_eq!(kind, ipc::JSON);
         ipc::write_frame(&mut once, ipc::DATA, b"echo typed-$((6*7))\r").unwrap();
@@ -7441,5 +7562,461 @@ while (sysread(STDIN, my $c, 1)) {
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(!tmp.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Asleep to save memory (see `sleep`) ----
+
+    /// A daemon whose Claude Code is a stand-in that sleeps and wakes as Claude does, in folder
+    /// `name`: each start's arguments go in `log.starts`; it takes `slow` seconds to start, then
+    /// reads keys, throwing away what was typed before it could (as an agent starting up may),
+    /// draws its prompt, and keeps each key it's given in `log.keys`, echoing it. `extra` is Perl
+    /// it runs first (what it starts).
+    fn sleepy(name: &str, slow: f64, extra: &str) -> (Arc<Daemon>, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_home().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log");
+        let script = format!(
+            r#"#!/usr/bin/perl
+use POSIX;
+open(my $f, ">>", "{log}.starts"); print $f "$$ @ARGV\n"; close $f;
+{extra}
+select(undef, undef, undef, {slow});
+system("stty raw -echo");
+POSIX::tcflush(0, POSIX::TCIFLUSH);
+$| = 1;
+print "\e[2J\e[H> ";
+open(my $k, ">>", "{log}.keys"); my $o = select($k); $| = 1; select($o);
+while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
+"#,
+            log = log.display()
+        );
+        let program = dir.join("claude");
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let claude = LauncherInfo {
+            short: "claude".into(),
+            agent_id: "claude".into(),
+            label: "Claude Code".into(),
+            program: program.display().to_string(),
+            knobs: Default::default(),
+            answers_once: false,
+            formats: vec![],
+            forks: false,
+        };
+        (test_daemon(vec![claude]), dir)
+    }
+
+    /// A stand-in's session, started in `dir`, its prompt up.
+    fn sleepy_session(d: &Daemon, dir: &Path) -> Arc<Session> {
+        let id = spawn(d, Launch::new("claude", vec![], Some(dir.display().to_string()))).unwrap();
+        let s = session(d, &id);
+        wait_for("its prompt", || s.pane.text(0).starts_with('>'));
+        s
+    }
+
+    /// `s` as if its agent last printed `ago`, nobody typing since.
+    fn idle_for(s: &Session, ago: std::time::Duration) {
+        *s.last_output.lock().unwrap() = Instant::now().checked_sub(ago);
+        *s.typed.lock().unwrap() = None;
+    }
+
+    /// What `dir`'s stand-in noted: each start's arguments, or every key it was given.
+    fn noted(dir: &Path, what: &str) -> String {
+        std::fs::read_to_string(dir.join(format!("log.{what}"))).unwrap_or_default()
+    }
+
+    fn info(d: &Daemon, id: &str) -> SessionInfo {
+        let Response::State { sessions, .. } = state(d) else { unreachable!() };
+        sessions.into_iter().find(|s| s.id == id).unwrap()
+    }
+
+    fn ids(d: &Daemon) -> Vec<String> {
+        d.sessions.lock().unwrap().iter().map(|s| s.id.clone()).collect()
+    }
+
+    fn alive(pid: u32) -> bool {
+        // SAFETY: signal 0 only asks whether the process is there.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    const MINUTE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Put to sleep, an agent's process is gone and its session stays in its place as it was: its
+    /// name, pin, last screen and conversation; nothing says it ended. Woken, a new agent starts on
+    /// the same conversation in the same session, its last screen above; and again.
+    #[test]
+    fn an_idle_agent_sleeps_and_wakes_on_its_conversation_in_its_place() {
+        let (d, dir) = sleepy("sleep-wake", 0.1, "");
+        let before = sleepy_session(&d, &dir);
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        sleep::input(&d, &s, sleep::Held::Keys(b"hi".to_vec()));
+        wait_for("its keys", || s.pane.text(0).contains("> hi"));
+        *s.label.lock().unwrap() = Some("mine".into());
+        s.pinned.store(true, Ordering::Relaxed);
+        let conversation = s.agent_session.lock().unwrap().clone().unwrap();
+        let pid = s.pane.pid().unwrap();
+        idle_for(&s, 2 * MINUTE);
+
+        // Pinned, it only sleeps when asked by name.
+        assert_eq!(sleep::why_not(&d, &s, false).as_deref(), Some("it's pinned"));
+        assert!(sleep::tick(&d, MINUTE, &|| sleep::Pressure::Normal).is_empty(), "the other one isn't idle a minute");
+        sleep::sleep(&d, &id, true).unwrap();
+        assert!(s.asleep() && s.pane.is_exited() && !alive(pid), "its agent is gone");
+        assert!(s.pane.text(0).contains("> hi"), "{}", s.pane.text(0));
+        assert_eq!(ids(&d), [before.id.clone(), id.clone()]);
+        let shown = info(&d, &id);
+        assert!(shown.asleep && !shown.exited && shown.exit_code.is_none() && shown.slept_at.is_some() && !shown.waking);
+        assert_eq!((shown.label.as_deref(), shown.pinned, shown.conversation.as_deref()), (Some("mine"), true, Some(conversation.as_str())));
+        assert_eq!(dino_core::status::Status::of(&shown), dino_core::status::Status::Asleep);
+        let saved = load_saved(&d.home).into_iter().find(|x| x.id == id).unwrap();
+        assert!(saved.ended && saved.asleep.is_some() && saved.exit_code.is_none(), "saved asleep, and ended for an older dinod");
+        sleep::sleep(&d, &id, true).unwrap();
+        assert_eq!(noted(&dir, "starts").lines().count(), 2, "asleep already: nothing more");
+
+        sleep::wake(&d, &id).unwrap();
+        let woke = session(&d, &id);
+        assert!(!Arc::ptr_eq(&woke, &s) && !woke.asleep() && !woke.pane.is_exited() && woke.pane.pid() != Some(pid));
+        assert_eq!(ids(&d), [before.id.clone(), id.clone()], "in its place");
+        let starts = noted(&dir, "starts");
+        let ours: Vec<&str> = starts.lines().filter(|l| l.contains(&conversation)).collect();
+        assert_eq!(ours.len(), 2, "started again on its conversation: {starts}");
+        assert_eq!((woke.label.lock().unwrap().as_deref(), woke.pinned.load(Ordering::Relaxed)), (Some("mine"), true));
+        let text = woke.pane.text(LIVE_HISTORY);
+        assert!(text.contains("> hi") && text.contains("woke from sleep"), "{text}");
+        let shown = info(&d, &id);
+        assert!(!shown.asleep && !shown.waking && shown.slept_at.is_none());
+        sleep::wake(&d, &id).unwrap();
+        assert_eq!(noted(&dir, "starts").lines().filter(|l| l.contains(&conversation)).count(), 2, "awake already: nothing more");
+
+        idle_for(&woke, 2 * MINUTE);
+        sleep::sleep(&d, &id, true).unwrap();
+        sleep::wake(&d, &id).unwrap();
+        assert_eq!(noted(&dir, "starts").lines().filter(|l| l.contains(&conversation)).count(), 3);
+        assert_eq!(session(&d, &id).pane.text(LIVE_HISTORY).matches("woke from sleep").count(), 1, "one line per wake, not one more each time");
+        kill(&d, &id);
+        kill(&d, &before.id);
+    }
+
+    /// Keys typed into an asleep session, through a pane kept for it in the background, wake it;
+    /// those typed while it wakes (to the pane before it's let go, and after it reattaches) and a
+    /// message sent meanwhile all wait for the agent to take input, then reach it once each, in
+    /// order. The pane attaching didn't wake it.
+    #[test]
+    fn what_is_typed_while_asleep_or_waking_reaches_the_agent_once_in_order() {
+        let (d, dir) = sleepy("sleep-keys", 1.5, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, false).unwrap();
+
+        let attach = |background: bool| {
+            let (mut pane, server) = UnixStream::pair().unwrap();
+            pane.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+            let d2 = d.clone();
+            std::thread::spawn(move || serve(&d2, server));
+            ipc::write_json(&mut pane, &Request::Attach { id: id.clone(), cols: 80, rows: 24, wait: false, scrollback: None, background }).unwrap();
+            let (kind, ok) = ipc::read_frame(&mut pane).unwrap();
+            assert!(kind == ipc::JSON && matches!(serde_json::from_slice(&ok), Ok(Response::Ok)));
+            pane
+        };
+        let mut pane = attach(true);
+        let (kind, screen) = ipc::read_frame(&mut pane).unwrap();
+        assert!(kind == ipc::DATA && String::from_utf8_lossy(&screen).contains('>'), "its last screen");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(session(&d, &id).asleep(), "a pane kept in the background doesn't wake it");
+
+        // What each connection sends is held in the order it's read; across connections, in
+        // the order each is read, which the waits below make the order they're sent.
+        let held = || d.waking.lock().unwrap().get(&id).map_or(0, Vec::len);
+        ipc::write_frame(&mut pane, ipc::DATA, b"a").unwrap();
+        ipc::write_frame(&mut pane, ipc::DATA, b"b").unwrap();
+        wait_for("it to wake", || !session(&d, &id).asleep());
+        // Let go (its way out shut, no exit said), the pane is still read until it reattaches.
+        while let Ok((kind, _)) = ipc::read_frame(&mut pane) {
+            assert_ne!(kind, ipc::EXIT, "told the session ended");
+        }
+        ipc::write_frame(&mut pane, ipc::DATA, b"c").unwrap();
+        wait_for("a, b and c held", || held() == 3);
+        let mut again = attach(true);
+        ipc::write_frame(&mut again, ipc::DATA, b"d").unwrap();
+        // The terminal's answer to a query the agent made goes to it now, not held with the keys.
+        ipc::write_frame(&mut again, ipc::DATA, b"\x1b[?62;22c").unwrap();
+        wait_for("d held", || held() == 4);
+        assert!(matches!(request(&d, &Request::SendInput { id: id.clone(), text: "e".into(), submit: false }), Response::Ok));
+        assert_eq!(held(), 5, "the reply wasn't held");
+        assert!(sleep::waking(&d, &id) && info(&d, &id).waking, "still starting");
+        assert_eq!(noted(&dir, "keys"), "", "nothing reached it before it took input");
+        wait_for("what was held", || noted(&dir, "keys").contains('e'));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(noted(&dir, "keys"), "abcde", "once each, in order");
+        assert!(!sleep::waking(&d, &id));
+        // Then straight to it.
+        ipc::write_frame(&mut again, ipc::DATA, b"f").unwrap();
+        wait_for("a key after", || noted(&dir, "keys") == "abcdef");
+        assert_eq!(noted(&dir, "starts").lines().count(), 2, "one agent started");
+        drop((pane, again));
+        kill(&d, &id);
+    }
+
+    /// Woken by several at once (a client looking, a message, `dino wake`, keys), one agent starts.
+    /// While it wakes it doesn't go back to sleep, asked or not.
+    #[test]
+    fn one_agent_starts_however_many_wake_it_and_it_wakes_before_it_sleeps_again() {
+        let (d, dir) = sleepy("sleep-twice", 1.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, false).unwrap();
+        let wakes: Vec<_> = (0..4)
+            .map(|i| {
+                let (d, id, s) = (d.clone(), id.clone(), s.clone());
+                std::thread::spawn(move || match i {
+                    0 => sleep::wake(&d, &id).unwrap(),
+                    1 => sleep::viewing(&d, 1_000_001, vec![id.clone()]),
+                    2 => sleep::input(&d, &s, sleep::Held::Keys(b"k".to_vec())),
+                    _ => assert!(matches!(request(&d, &Request::Wake { id: id.clone() }), Response::Ok)),
+                })
+            })
+            .collect();
+        wait_for("it to be waking", || sleep::waking(&d, &id));
+        let refused = sleep::sleep(&d, &id, true).unwrap_err().to_string();
+        assert!(refused.contains("waking up"), "{refused}");
+        assert!(sleep::tick(&d, std::time::Duration::ZERO, &|| sleep::Pressure::Critical).is_empty(), "nor on its own, memory short or not");
+        for w in wakes {
+            w.join().unwrap();
+        }
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        assert_eq!(noted(&dir, "starts").lines().count(), 2, "{}", noted(&dir, "starts"));
+        assert_eq!(noted(&dir, "keys"), "k");
+        let woke = session(&d, &id);
+        assert!(!woke.asleep() && !woke.pane.is_exited());
+        d.viewing.lock().unwrap().clear();
+        kill(&d, &id);
+    }
+
+    /// Only what stopping cuts nothing short of goes to sleep, and only when it's been idle long
+    /// enough and no client shows it: each of these keeps an agent awake.
+    #[test]
+    fn only_an_idle_agent_with_nothing_running_and_on_no_screen_sleeps() {
+        let tmux = test_home().join("sleep-who-tmux");
+        let _ = std::fs::create_dir_all(&tmux);
+        let (d, dir) = sleepy("sleep-who", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        let why = |s: &Session| sleep::why_not(&d, s, false).unwrap_or_default();
+        idle_for(&s, 10 * MINUTE);
+        assert_eq!(sleep::why_not(&d, &s, false), None);
+        let hook = |body: serde_json::Value| {
+            let r = reqwest::blocking::Client::new().post(d.proxy.base_url(&id, "hook")).body(body.to_string()).send().unwrap();
+            assert!(r.status().is_success());
+        };
+
+        // A turn, a question, a call out, typing, printing.
+        d.proxy.stats.report(&id, Activity::Working);
+        assert_eq!(why(&s), "it's working");
+        d.proxy.stats.report(&id, Activity::NeedsPermission("Run: ls?".into()));
+        assert_eq!(why(&s), "it's waiting on you (Run: ls?)");
+        d.proxy.stats.report(&id, Activity::Done);
+        *s.typed.lock().unwrap() = Some(Instant::now());
+        assert_eq!(why(&s), "you're typing in it");
+        idle_for(&s, 10 * MINUTE);
+        *s.last_output.lock().unwrap() = Some(Instant::now());
+        assert_eq!(why(&s), "it's printing");
+        idle_for(&s, 10 * MINUTE);
+
+        // What its turn left running: a subagent, a background command, a monitor, a server, its
+        // scheduled prompts (CronCreate, and /loop's wakeups, which it lists as crons).
+        let done = || d.proxy.stats.report(&id, Activity::Done);
+        hook(serde_json::json!({"hook_event_name": "SubagentStart", "agent_id": "a1", "agent_type": "general-purpose"}));
+        done();
+        assert_eq!(why(&s), "a subagent of its is running");
+        hook(serde_json::json!({"hook_event_name": "SubagentStop", "agent_id": "a1", "agent_type": "general-purpose"}));
+        done();
+        hook(serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "sleep 99", "run_in_background": true}, "tool_response": {"backgroundTaskId": "b1"}}));
+        done();
+        assert_eq!(why(&s), "a background command of its is running (sleep 99)");
+        hook(serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "KillShell", "tool_input": {"shell_id": "b1"}}));
+        done();
+        hook(serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Monitor", "tool_input": {"command": "tail -f x", "description": "deploys"}, "tool_response": {"taskId": "m1"}}));
+        done();
+        assert_eq!(why(&s), "a monitor of its is running (deploys)");
+        hook(serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "TaskStop", "tool_input": {"task_id": "m1"}}));
+        done();
+        s.servers.lock().unwrap().push(servers::Server { task: "b2".into(), command: "npm run dev".into(), ports: vec![3000] });
+        assert_eq!(why(&s), "it serves on port 3000");
+        s.servers.lock().unwrap().clear();
+        hook(
+            serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "CronCreate", "tool_input": {"cron": "23 * * * *", "prompt": "p", "recurring": true}, "tool_response": {"id": "efc5ae94"}}),
+        );
+        done();
+        assert_eq!(why(&s), "it has prompts scheduled for itself (CronCreate, /loop)");
+        hook(serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "CronDelete", "tool_input": {"id": "efc5ae94"}, "tool_response": {"id": "efc5ae94"}}));
+        done();
+        idle_for(&s, 10 * MINUTE);
+        assert_eq!(sleep::why_not(&d, &s, false), None, "all of it over");
+
+        // A preview's server, an automation's run following it, controls it's to restart with,
+        // a pin, and a conversation dino doesn't know.
+        let preview = preview::Server::start(
+            &id,
+            dino_core::preview::PreviewConfig { name: "web".into(), argv: vec!["/bin/sleep".into(), "30".into()], cwd: dir.clone(), env: HashMap::new(), port: None, url: None, source: String::new() },
+        )
+        .unwrap();
+        d.previews.lock().unwrap().push(preview.clone());
+        assert_eq!(why(&s), "its preview's server is running");
+        preview.stop();
+        d.previews.lock().unwrap().clear();
+        d.schedule.following("run-1", Some(&id));
+        assert_eq!(why(&s), "an automation's run is following it");
+        d.schedule.following("run-1", None);
+        *s.pending.lock().unwrap() = Some(Controls::default());
+        assert_eq!(why(&s), "it's restarting");
+        *s.pending.lock().unwrap() = None;
+        s.pinned.store(true, Ordering::Relaxed);
+        assert_eq!(why(&s), "it's pinned");
+        assert_eq!(sleep::why_not(&d, &s, true), None, "asked by name");
+        s.pinned.store(false, Ordering::Relaxed);
+        let conversation = s.agent_session.lock().unwrap().take();
+        assert_eq!(why(&s), "dino doesn't know its conversation yet, to start it again on");
+        *s.agent_session.lock().unwrap() = conversation;
+
+        // Time and screens: under its time it stays; shown by a client (one that said so, or one
+        // attached to look at it), it stays unless memory is critical.
+        let normal = || sleep::Pressure::Normal;
+        idle_for(&s, 59 * MINUTE);
+        assert!(sleep::tick(&d, 60 * MINUTE, &normal).is_empty());
+        idle_for(&s, 61 * MINUTE);
+        let viewer = sleep::Viewer::new(&d);
+        sleep::viewing(&d, viewer.conn, vec![id.clone()]);
+        assert!(sleep::tick(&d, 60 * MINUTE, &normal).is_empty());
+        assert!(sleep::tick(&d, 60 * MINUTE, &|| sleep::Pressure::Warning).is_empty());
+        drop(viewer);
+        assert!(d.viewing.lock().unwrap().is_empty(), "forgotten as its connection closes");
+        s.looking.fetch_add(1, Ordering::Relaxed);
+        assert!(sleep::tick(&d, 60 * MINUTE, &normal).is_empty());
+        assert_eq!(sleep::tick(&d, 60 * MINUTE, &|| sleep::Pressure::Critical), std::slice::from_ref(&id));
+        s.looking.fetch_sub(1, Ordering::Relaxed);
+        sleep::wake(&d, &id).unwrap();
+        let s = session(&d, &id);
+        idle_for(&s, 61 * MINUTE);
+        assert_eq!(sleep::tick(&d, 60 * MINUTE, &normal), std::slice::from_ref(&id), "its time up, on no screen");
+        sleep::wake(&d, &id).unwrap();
+        let s = session(&d, &id);
+        idle_for(&s, 61 * MINUTE);
+
+        // Closed, with time to undo it: out of every list, it isn't put to sleep.
+        assert!(close(&d, &id, 60_000));
+        assert!(sleep::tick(&d, MINUTE, &normal).is_empty());
+        assert!(sleep::sleep(&d, &id, true).unwrap_err().to_string().contains("no session"));
+        assert!(reopen(&d, &id));
+
+        // Ended, it has nothing to stop.
+        s.pane.kill().unwrap().join().unwrap();
+        wait_for("its end", || s.pane.is_exited());
+        assert_eq!(why(&s), "it has ended");
+        kill(&d, &id);
+
+        // A shell; an agent on another machine; one dino can't start again on its conversation.
+        let shells = shell_daemon();
+        let sh = spawn(&shells, Launch::new("shell", vec![], Some(test_home().display().to_string()))).unwrap();
+        assert_eq!(sleep::why_not(&shells, &session(&shells, &sh), true).as_deref(), Some("it's a shell (an agent typed into one stays awake too)"));
+        kill(&shells, &sh);
+        let remote = spawn(
+            &d,
+            Launch { restore: Some(SavedSession { launcher: "claude".into(), host: Some("far".into()), ended: true, ..saved_on("9601", "conv-far", 1) }), ..Launch::new("claude", vec![], None) },
+        )
+        .unwrap();
+        assert_eq!(sleep::why_not(&d, &session(&d, &remote), true).as_deref(), Some("it runs on far"));
+        kill(&d, &remote);
+        let mut other = d.launcher("claude").unwrap();
+        other.short = "mystery".into();
+        other.agent_id = "mystery".into();
+        d.launchers.write().unwrap().push(other);
+        let m = spawn(&d, Launch::new("mystery", vec![], Some(dir.display().to_string()))).unwrap();
+        assert_eq!(sleep::why_not(&d, &session(&d, &m), true).as_deref(), Some("dino can't start mystery again on its conversation"));
+        kill(&d, &m);
+
+        // A tmux client in it, and something it left running in a terminal session of its own. A
+        // process is named for the file it runs, not a link to it, and macOS kills a copy of one
+        // of its own programs: a stand-in tmux is built, where there's a C compiler.
+        std::fs::write(tmux.join("tmux.c"), "#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n").unwrap();
+        let built = std::process::Command::new("cc").arg("-o").arg(tmux.join("tmux")).arg(tmux.join("tmux.c")).status().is_ok_and(|s| s.success());
+        if built {
+            let (d, dir) = sleepy("sleep-who-tmux-agent", 0.0, &format!("if (fork() == 0) {{ exec('{}'); }}", tmux.join("tmux").display()));
+            let s = sleepy_session(&d, &dir);
+            idle_for(&s, 10 * MINUTE);
+            wait_for("its tmux", || sleep::why_not(&d, &s, false).as_deref() == Some("a tmux client runs in it"));
+            kill(&d, &s.id);
+        }
+        if let Some(py) = procs::tests::python() {
+            let (d, dir) = sleepy("sleep-who-left", 0.0, &format!("if (fork() == 0) {{ POSIX::setsid(); exec('{py}', '-c', 'import time; time.sleep(30)'); }}"));
+            let s = sleepy_session(&d, &dir);
+            idle_for(&s, 10 * MINUTE);
+            wait_for("what it left running", || sleep::why_not(&d, &s, false).is_some_and(|w| w.starts_with("it left ")));
+            kill(&d, &s.id);
+        }
+    }
+
+    /// While memory is short, agents idle 5 minutes or more go to sleep, the longest idle first,
+    /// one at a time, until it isn't; when it's critical, ones on screen too.
+    #[test]
+    fn memory_pressure_puts_the_longest_idle_to_sleep_first_until_there_is_enough() {
+        let (d, dir) = sleepy("sleep-pressure", 0.0, "");
+        let list: Vec<(Arc<Session>, u64)> = [7, 20, 3, 9].into_iter().map(|m| (sleepy_session(&d, &dir), m)).collect();
+        for (s, m) in &list {
+            idle_for(s, *m as u32 * MINUTE);
+        }
+        let id = |m: u64| list.iter().find(|(_, n)| *n == m).unwrap().0.id.clone();
+        assert!(sleep::tick(&d, 60 * MINUTE, &|| sleep::Pressure::Normal).is_empty(), "none idle an hour");
+        // Short twice, then enough: the 20- and 9-minute ones, in that order, and no more.
+        let reads = Mutex::new(vec![sleep::Pressure::Warning, sleep::Pressure::Warning, sleep::Pressure::Normal]);
+        let pressure = || {
+            let mut r = reads.lock().unwrap();
+            if r.len() > 1 { r.remove(0) } else { r[0] }
+        };
+        assert_eq!(sleep::tick(&d, 60 * MINUTE, &pressure), [id(20), id(9)]);
+        assert!(reads.lock().unwrap().len() == 1, "read again after each");
+        // Critical: one shown on screen too, never one idle under 5 minutes.
+        let viewer = sleep::Viewer::new(&d);
+        sleep::viewing(&d, viewer.conn, vec![id(7), id(3)]);
+        assert_eq!(sleep::tick(&d, 60 * MINUTE, &|| sleep::Pressure::Critical), [id(7)]);
+        drop(viewer);
+        for (s, _) in &list {
+            kill(&d, &s.id);
+        }
+    }
+
+    /// dinod stopped and started again: an asleep session comes back asleep, its last screen up,
+    /// nothing started; it wakes there on its conversation.
+    #[test]
+    fn an_asleep_session_stays_asleep_across_a_dinod_restart() {
+        let (d, dir) = sleepy("sleep-restart", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        sleep::input(&d, &s, sleep::Held::Keys(b"kept".to_vec()));
+        wait_for("its keys", || s.pane.text(0).contains("kept"));
+        idle_for(&s, 2 * MINUTE);
+        let conversation = s.agent_session.lock().unwrap().clone().unwrap();
+        sleep::sleep(&d, &id, false).unwrap();
+        assert!(screens_dir(&d.home).join(&id).exists(), "its screen is kept");
+
+        let launchers = d.launchers.read().unwrap().clone();
+        let d2 = new_daemon(d.home.clone(), Proxy::start(HashMap::new()).unwrap(), launchers);
+        restore(&d2, load_saved(&d2.home));
+        let back = session(&d2, &id);
+        assert!(back.asleep() && back.pane.is_exited() && back.pane.pid().is_none(), "back asleep, nothing started");
+        assert!(back.pane.text(0).contains("kept"), "{}", back.pane.text(0));
+        assert_eq!(noted(&dir, "starts").lines().count(), 1);
+        let shown = info(&d2, &id);
+        assert!(shown.asleep && !shown.exited);
+        sleep::wake(&d2, &id).unwrap();
+        let starts = noted(&dir, "starts");
+        assert_eq!(starts.lines().filter(|l| l.contains(&conversation)).count(), 2, "{starts}");
+        assert!(!session(&d2, &id).asleep());
+        kill(&d, &id);
+        kill(&d2, &id);
     }
 }

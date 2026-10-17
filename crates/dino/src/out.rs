@@ -56,7 +56,7 @@ impl Paint {
             Status::NeedsYou => Paint::Orange,
             Status::Working => Paint::Green,
             Status::Done => Paint::Blue,
-            Status::Idle | Status::Ended => Paint::Dim,
+            Status::Idle | Status::Asleep | Status::Ended => Paint::Dim,
             Status::Exited => Paint::Red,
         }
     }

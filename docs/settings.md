@@ -114,6 +114,14 @@ user-facing values under **General**, **Terminal**, **Agents**, **Power**, and
   each agent on this Mac that takes MCP servers, except the agents you turn it off for. When off,
   dino removes what it added. App: **Agents → Computer Use**, and the Welcome screen. While this key
   is unset, an older `[experimental].computer_use` applies.
+- `sleep_idle_agents` (32-bit unsigned integer minutes, default `60`): put an agent to sleep once
+  it has been idle this long and no client shows it, to free its memory. Its process stops and its
+  session stays as it was; it starts again on its conversation when you open or type into it, or
+  with `dino wake`. While macOS reports memory pressure, agents idle 5 minutes or more go first,
+  the longest idle first, and when the pressure is critical, ones on screen too. Only an agent that
+  a stop cuts nothing short of sleeps: between turns, not asking anything, with no subagent,
+  background command, monitor, scheduled prompt or server of its own running, and not pinned.
+  `0` means never, memory pressure or not. App: **Power → Memory**.
 
 #### `[machine.lid]`
 

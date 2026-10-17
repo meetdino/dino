@@ -60,6 +60,8 @@ const USAGE: &str = "Sessions
                                     start a session in the background and print its id
   dino attach | resume | kill <id>  open a session here, resume an ended one, or close one into
                                     Archived, where the app and dino-tui bring it back
+  dino sleep | wake <id>            stop an idle agent to free its memory, its session kept as it
+                                    was, or start it again; opening or typing into it wakes it too
   dino tui [args...]                open dino-tui, dino's terminal UI, here (installed first if missing)
   dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]
                                     start a new session on a copy of a session's conversation
@@ -122,6 +124,8 @@ const COMMAND_USAGE: &[(&str, &str)] = &[
     ("tui", "dino tui [args...]"),
     ("resume", "dino resume <id>"),
     ("kill", "dino kill <id>"),
+    ("sleep", "dino sleep <id>"),
+    ("wake", "dino wake <id>"),
     ("continue", "dino continue <id>"),
     ("logout", "dino logout [<provider>]"),
     ("sync", "dino sync [status|now|resolve|undo]"),
@@ -143,6 +147,8 @@ fn detailed_command_help(command: &str) -> Option<&'static str> {
     match command {
         "ls" => Some(LS_HELP),
         "rm" => Some(RM_HELP),
+        "sleep" => Some(SLEEP_HELP),
+        "wake" => Some(WAKE_HELP),
         "found" => Some(FOUND_HELP),
         "fallback" => Some(FALLBACK_USAGE),
         "fork" => Some(FORK_HELP),
@@ -320,6 +326,19 @@ fn dino() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("rm") => return cmd_rm(&cli[1..]),
+        Some("sleep") => {
+            let id = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino sleep <id>\n`dino ls` lists the sessions."))?.clone();
+            done(client::request(&Request::Sleep { id: id.clone() })?)?;
+            say(&format!("Session {id} is asleep: its agent stopped, its session kept. Opening or typing into it wakes it, as does `dino wake {id}`.", id = printable(&id)));
+            return Ok(());
+        }
+        Some("wake") => {
+            let id = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino wake <id>\n`dino ls` lists the sessions."))?.clone();
+            let started = Instant::now();
+            done(client::request(&Request::Wake { id: id.clone() })?)?;
+            say(&format!("Session {id} is awake ({:.1} s). `dino attach {id}` opens it here.", started.elapsed().as_secs_f64(), id = printable(&id)));
+            return Ok(());
+        }
         Some("resume") => {
             let id = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino resume <id>\n`dino ls` lists the sessions; only ended ones can be resumed."))?.clone();
             done(client::request(&Request::Resume { id: id.clone() })?)?;
@@ -638,14 +657,35 @@ fn folder(s: &SessionInfo) -> String {
     })
 }
 
+const SLEEP_HELP: &str = "usage: dino sleep <id>
+
+Stop a session's agent now to free its memory. The session stays where it was, as it was: its
+name, pin, screen, conversation, account, mode and model. Opening or typing into it wakes it, as
+does `dino wake <id>`; what you type meanwhile reaches the agent once it's up.
+
+Idle agents go to sleep on their own too, after the time in Settings → Sessions (an hour unless
+set; `[machine] sleep_idle_agents` in settings.toml, in minutes, 0 for never), and after 5 minutes
+while macOS says memory is short. A pinned session only sleeps when you ask.
+
+Refused, saying why, while it would cut something short: a turn, a question, a subagent, a
+background command or monitor, prompts it scheduled, a server or anything else it left running.";
+
+const WAKE_HELP: &str = "usage: dino wake <id>
+
+Start an asleep session's agent again, on its conversation, in its place. Answers once the agent
+takes input.";
+
 const LS_HELP: &str = "usage: dino ls [--usage] [--json]
 
-List every session: the ones that need you first, then working, done, idle and ended.
+List every session: the ones that need you first, then working, done, idle, asleep and ended.
 Statuses match the app's. A session shows Done after its turn ends, until the next turn starts.
+One asleep has had its agent stopped to save memory; it starts again when you open or type
+into it, or with `dino wake <id>`.
 
   -u, --usage   add each session's input and output tokens
       --json    print a JSON array, one object per session, with
-                  id, name, agent, status (needs_you, working, done, idle, ended, exited),
+                  id, name, agent, status (needs_you, working, done, idle, asleep, ended,
+                  exited),
                   needs (what it asks for, or null), folder, host (or null),
                   last_active (ISO 8601 UTC, or null), input_tokens, output_tokens
                 Fields may be added; these keep their names and meanings.

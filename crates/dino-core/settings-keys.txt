@@ -26,6 +26,7 @@ machine.shell_agents
 machine.shell_features
 machine.shell_integration
 machine.shell_integration_mode
+machine.sleep_idle_agents
 policies.allow_bypass
 policies.allowed_agents
 policies.close_merged

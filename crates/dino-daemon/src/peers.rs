@@ -77,6 +77,10 @@ pub(crate) fn read(d: &Daemon, id: &str, lines: Option<u32>) -> anyhow::Result<S
 
 /// One word or phrase for where a session is at, as agents are told.
 pub(crate) fn status(d: &Daemon, s: &Session) -> String {
+    // A message wakes it, and it reads it once its agent is up again.
+    if s.asleep() {
+        return "asleep (a message wakes it)".into();
+    }
     if s.pane.is_exited() {
         return "exited".into();
     }
@@ -88,17 +92,23 @@ pub(crate) fn status(d: &Daemon, s: &Session) -> String {
     }
 }
 
-/// Send `text` to session `id` as a message from session `by`, if it's between turns.
-pub(crate) fn message(d: &Daemon, id: &str, text: &str, by: Option<String>) -> anyhow::Result<()> {
+/// Send `text` to session `id` as a message from session `by`, if it's between turns. One asleep
+/// is between turns: it wakes, and gets it once its agent takes input.
+pub(crate) fn message(d: &Arc<Daemon>, id: &str, text: &str, by: Option<String>) -> anyhow::Result<()> {
     let s = find(d, id)?;
     anyhow::ensure!(by.as_deref() != Some(id), "that's this session; message another one");
     anyhow::ensure!(!text.trim().is_empty(), "the message is empty");
-    anyhow::ensure!(!s.pane.is_exited(), "{} has exited", s.name);
+    anyhow::ensure!(!s.ended(), "{} has exited", s.name);
     // Its mode as dino started it, as the agent says it is now (Claude's Shift+Tab), and as
     // it's about to become.
     let now = super::mode::now(&s, d.proxy.stats.session(&s.id).agent_mode.as_deref());
     let pending = s.pending.lock().unwrap().as_ref().and_then(|c| c.mode.clone());
     check_messageable(&s.name, &s.agent_id, &[s.controls.mode.as_deref(), now.as_deref(), pending.as_deref()])?;
+    if s.asleep() || crate::sleep::waking(d, id) {
+        *s.messaged_by.lock().unwrap() = by;
+        crate::sleep::input(d, &s, crate::sleep::Held::Text { text: text.trim().into(), submit: true });
+        return Ok(());
+    }
     // Typed into a permission prompt or mid-turn, the text would answer the wrong question.
     anyhow::ensure!(idle(d, &s), "{} is {}; message it once it's idle", s.name, status(d, &s));
     // Hand over only once nobody is typing into it, so the text doesn't join a half-written prompt.
