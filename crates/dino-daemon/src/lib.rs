@@ -8768,4 +8768,27 @@ while (1) {{
         assert!(t.elapsed() < std::time::Duration::from_secs(2), "given {:?} after the key", t.elapsed());
         kill(&d, &id);
     }
+
+    /// A draft erased key by key isn't something typed and not sent: the agent's prompt box, empty
+    /// again, says so. One with text in it still keeps the session awake.
+    #[test]
+    fn a_draft_erased_key_by_key_doesnt_keep_it_awake() {
+        let (d, dir) = sleepy("sleep-erased", 0.0, "");
+        let s = boxed_session(&d, &dir);
+        let id = s.id.clone();
+        let unsent = Some("something typed in it isn't sent");
+        sleep::input(&d, &id, sleep::Held::Keys(b"x".to_vec()));
+        wait_for("its draft", || s.pane.text(0).contains("❯ x"));
+        idle_for(&s, 2 * MINUTE);
+        assert_eq!(sleep::why_not(&d, &s, false).as_deref(), unsent);
+        sleep::input(&d, &id, sleep::Held::Keys(b"\x7f".to_vec()));
+        wait_for("it erased", || s.pane.text(0).lines().any(|l| l.trim() == "❯"));
+        idle_for(&s, 2 * MINUTE);
+        assert_eq!(sleep::why_not(&d, &s, false), None);
+        sleep::input(&d, &id, sleep::Held::Keys(b"abc".to_vec()));
+        wait_for("a draft again", || s.pane.text(0).contains("❯ abc"));
+        idle_for(&s, 2 * MINUTE);
+        assert_eq!(sleep::why_not(&d, &s, false).as_deref(), unsent);
+        kill(&d, &id);
+    }
 }

@@ -404,6 +404,17 @@ impl Agent for Claude {
         true
     }
 
+    /// Its prompt box: the lines between the last two rules, the first after `❯`.
+    fn prompt_draft(&self, screen: &str) -> Option<String> {
+        let rule = |l: &str| l.trim().chars().count() >= 8 && l.trim().chars().all(|c| c == '─');
+        let lines: Vec<&str> = screen.lines().collect();
+        let bottom = lines.iter().rposition(|l| rule(l))?;
+        let top = lines[..bottom].iter().rposition(|l| rule(l))?;
+        let (first, rest) = lines[top + 1..bottom].split_first()?;
+        let first = first.trim_start().strip_prefix('❯')?;
+        Some(std::iter::once(first).chain(rest.iter().copied()).map(str::trim).collect::<Vec<_>>().join("\n").trim().to_string())
+    }
+
     /// Its permission and trust dialogs each end in "Esc to cancel".
     fn asking(&self, screen: &str) -> Option<String> {
         screen.contains("Esc to cancel").then(|| "Claude asks".into())
@@ -629,6 +640,20 @@ impl Agent for Claude {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What's typed in its prompt box, read off its screen: nothing when it's empty (a draft
+    /// erased), its lines when there's a draft, and nothing to say with no box up (a dialog).
+    #[test]
+    fn its_prompt_box_says_whats_typed_in_it() {
+        let claude = crate::agent::agent("claude").unwrap();
+        let rule = "─".repeat(40);
+        let screen = |box_: &str| format!("❯ Say hi\n⏺ Hey there!\n\n{rule}\n{box_}\n{rule}\n  ⏵⏵ auto mode on (shift+tab to cycle)\n");
+        assert_eq!(claude.prompt_draft(&screen("❯ ")).as_deref(), Some(""));
+        assert_eq!(claude.prompt_draft(&screen("❯\u{a0}")).as_deref(), Some(""));
+        assert_eq!(claude.prompt_draft(&screen("❯ fix the")).as_deref(), Some("fix the"));
+        assert_eq!(claude.prompt_draft(&screen("❯ one\n  two")).as_deref(), Some("one\ntwo"));
+        assert_eq!(claude.prompt_draft(" Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel"), None);
+    }
 
     /// A conversation kept in a config folder of its own (`CLAUDE_CONFIG_DIR`): once dino knows of
     /// the folder, it's resumed rather than started again with the same id (which Claude refuses,

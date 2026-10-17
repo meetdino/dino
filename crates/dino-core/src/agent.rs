@@ -328,6 +328,12 @@ pub trait Agent: Sync {
     fn log_event(&self, _line: &serde_json::Value) -> LogEvent {
         LogEvent::Other
     }
+    /// What's in its prompt box on `screen`, typed and not sent: empty when the box shows and
+    /// has nothing in it, `None` when no box shows (or this agent's isn't read). A draft erased
+    /// key by key is gone by this, where the keys typed say only that something was.
+    fn prompt_draft(&self, _screen: &str) -> Option<String> {
+        None
+    }
     /// A question its own screen puts to the user that its record doesn't (its folder trust, a
     /// permission dialog), in a few words; `None` when the screen asks nothing. Read in a dino
     /// shell, in a session's state, and, for `StatusSource::Polled`, while its store says it's on

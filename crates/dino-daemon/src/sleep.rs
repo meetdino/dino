@@ -544,10 +544,10 @@ fn give(d: &Daemon, s: &Session, what: Held) {
     *s.typed.lock().unwrap() = Some(now);
     match what {
         Held::Keys(keys) => {
-            let unsent = unsent(s);
+            let drafted = drafted(s);
             match draft(&keys) {
-                Some(true) if !unsent && !answering(d, s) => *s.drafted.lock().unwrap() = Some(now),
-                Some(false) if unsent && !answering(d, s) => *s.submitted.lock().unwrap() = Some(now),
+                Some(true) if !drafted && !answering(d, s) => *s.drafted.lock().unwrap() = Some(now),
+                Some(false) if drafted && !answering(d, s) => *s.submitted.lock().unwrap() = Some(now),
                 _ => {}
             }
             s.pane.write(keys);
@@ -579,9 +579,15 @@ pub(crate) fn message(d: &Daemon, id: &str, text: &str) -> Result<(), String> {
 }
 
 /// Something was typed into `s`'s agent and not sent: its last key that added to the prompt line
-/// came after the last that sent or cleared it. Asleep, the agent would forget it (Claude Code
-/// doesn't keep a prompt it wasn't sent across a resume).
+/// came after the last that sent or cleared it, and its prompt box (where its adapter reads one)
+/// isn't empty, as it is once a draft is erased key by key. Asleep, the agent would forget it
+/// (Claude Code doesn't keep a prompt it wasn't sent across a resume).
 pub(crate) fn unsent(s: &Session) -> bool {
+    drafted(s) && !s.adapter().is_some_and(|a| a.prompt_draft(&s.pane.text(0)).is_some_and(|t| t.is_empty()))
+}
+
+/// `unsent` by the keys alone: one added to the prompt line after the last that sent or cleared it.
+fn drafted(s: &Session) -> bool {
     let drafted = *s.drafted.lock().unwrap();
     drafted.is_some_and(|d| s.submitted.lock().unwrap().is_none_or(|sent| d > sent))
 }
