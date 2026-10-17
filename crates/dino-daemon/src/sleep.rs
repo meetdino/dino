@@ -731,7 +731,7 @@ fn settle(d: &Daemon, s: &Arc<Session>) {
     let mut steady = None;
     let mut up = false;
     while !s.pane.is_exited() && since.elapsed() < READY_WITHIN {
-        if prompt_drawn(s) || crate::schedule::agent_ready(s, &mut steady, false) {
+        if input_live(s) && (prompt_drawn(s) || crate::schedule::agent_ready(s, &mut steady, false)) {
             up = true;
             break;
         }
@@ -831,6 +831,15 @@ fn hold_for_question(d: &Daemon, mut waking: MutexGuard<'_, HashMap<String, Wake
         let dropped = d.waking.lock().unwrap().remove(&id);
         drop(dropped);
     }
+}
+
+/// Woken `s`'s agent has its own input up, where that can be told: Claude Code (2.1.302) reads
+/// keys raw from its start, but until its interface takes over it keeps them as text for its
+/// prompt (`startCapturingEarlyInput`), Return as a line break it trims away, and quits at Ctrl-C;
+/// it asks for bracketed pastes as its own input comes up, which on a busy Mac is up to a second
+/// after it has drawn its prompt. A Return typed into it before then was never sent.
+fn input_live(s: &Session) -> bool {
+    s.agent_now() != "claude" || s.pane.brackets_pastes()
 }
 
 /// Woken `s`'s agent has drawn its prompt anew, reads keys, and has been quiet `DRAWN_QUIET`: it

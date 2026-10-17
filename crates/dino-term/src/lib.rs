@@ -714,6 +714,12 @@ impl Pane {
         self.shared.transport.get().and_then(|t| t.lflag()).is_some_and(|l| l & libc::ICANON == 0)
     }
 
+    /// The program asked for pastes bracketed (`ESC[?2004h`): a full-screen program does as its
+    /// own input handling comes up, which can be well after it put its terminal out of line mode.
+    pub fn brackets_pastes(&self) -> bool {
+        self.term.lock().mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     pub fn size(&self) -> (u16, u16) {
         *self.shared.size.lock().unwrap()
     }

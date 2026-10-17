@@ -7667,8 +7667,12 @@ while (sysread(STDIN, my $c, 1)) {
     /// "Esc to cancel", until it's given `y`; with a file `slow`, it takes half a minute to come up.
     /// With a file `alt` it draws on the alternate screen, as Claude Code's fullscreen renderer
     /// does; with `box`, a prompt box as Claude's (its line in it, its footer under it) rather
-    /// than echoing; with `tick`, a clock that never lets it go quiet. Each read of its input is
-    /// noted too, in hex (`noted(dir, "reads")`). `extra` is Perl it runs first (what it starts).
+    /// than echoing; with `tick`, a clock that never lets it go quiet. As Claude's interface does,
+    /// it asks for bracketed pastes once its input is up (the brackets aren't noted with the keys);
+    /// with `early`, that's a second after its prompt is drawn, and what comes meanwhile, which
+    /// Claude would keep as text, a Return lost, is noted apart (`noted(dir, "early")`). Each read
+    /// of its input is noted too, in hex (`noted(dir, "reads")`). `extra` is Perl it runs first
+    /// (what it starts).
     fn sleepy(name: &str, slow: f64, extra: &str) -> (Arc<Daemon>, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let dir = test_home().join(name);
@@ -7678,6 +7682,7 @@ while (sysread(STDIN, my $c, 1)) {
         let script = format!(
             r#"#!/usr/bin/perl
 use POSIX;
+use Time::HiRes qw(time);
 open(my $f, ">>", "{log}.starts"); print $f "$$ @ARGV\n"; close $f;
 {extra}
 my $starts = 0;
@@ -7691,20 +7696,30 @@ $| = 1;
 open(my $k, ">>", "{log}.keys"); my $o = select($k); $| = 1; select($o);
 open(my $r, ">>", "{log}.reads"); $o = select($r); $| = 1; select($o);
 print "\e[?1049h" if -e "{dir}/alt";
+my ($box, $tick, $line) = (-e "{dir}/box", -e "{dir}/tick", "");
+sub draw {{ print "\e[2J\e[H" . ("─" x 40) . "\r\n❯ $line\r\n" . ("─" x 40) . "\r\n  ? for shortcuts"; }}
+sub prompt {{ if ($box) {{ draw(); }} else {{ print "\e[2J\e[H> "; }} }}
+if (-e "{dir}/early") {{
+    prompt();
+    open(my $e, ">>", "{log}.early"); my $until = time + 1;
+    while (time < $until) {{ my $in = ""; vec($in, 0, 1) = 1; if (select($in, undef, undef, 0.05)) {{ sysread(STDIN, my $c, 4096); print $e $c; }} }}
+    close $e;
+}}
+print "\e[?2004h";
 if ($starts > 1 && -e "{dir}/dialog") {{
     print "\e[2J\e[HAllow this? Esc to cancel";
     while (sysread(STDIN, my $c, 1)) {{ print $k $c; last if $c eq "y"; }}
 }}
-my ($box, $tick, $line) = (-e "{dir}/box", -e "{dir}/tick", "");
-sub draw {{ print "\e[2J\e[H" . ("─" x 40) . "\r\n❯ $line\r\n" . ("─" x 40) . "\r\n  ? for shortcuts"; }}
-if ($box) {{ draw(); }} else {{ print "\e[2J\e[H> "; }}
+prompt();
 while (1) {{
     if ($tick) {{
         my $in = ""; vec($in, 0, 1) = 1;
         if (!select($in, undef, undef, 0.3)) {{ print "\e7\e[6;1H" . time() . "\e8"; next; }}
     }}
     last unless sysread(STDIN, my $c, 4096);
-    print $k $c; print $r unpack("H*", $c), "\n";
+    print $r unpack("H*", $c), "\n";
+    $c =~ s/\e\[20[01]~//g;
+    print $k $c;
     if (!$box) {{ print $c; next; }}
     for my $ch (split //, $c) {{
         if ($ch eq "\x7f") {{ chop $line; }} elsif ($ch =~ /[\r\x03\x15]/) {{ $line = ""; }} elsif (ord($ch) >= 32) {{ $line .= $ch; }}
@@ -8904,5 +8919,23 @@ while (1) {{
         let why = schedule::undeliverable(&d, "run").unwrap();
         assert!(why.contains("didn't take its prompt, 3 times") && why.contains("it was dropped"), "{why}");
         d.schedule.following("run", None);
+    }
+
+    /// What's held for a woken Claude waits for its own input to be up (it asks for bracketed
+    /// pastes then), not only for its prompt to be drawn: until then Claude keeps keys as text for
+    /// its prompt, a Return lost (the prompt left unsent) and a Ctrl-C quitting it.
+    #[test]
+    fn held_keys_wait_for_the_agents_own_input_to_be_up() {
+        let (d, dir) = sleepy("sleep-early", 0.1, "");
+        let s = boxed_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        std::fs::write(dir.join("early"), "").unwrap();
+        sleep::input(&d, &id, sleep::Held::Keys(b"go".to_vec()));
+        sleep::input(&d, &id, sleep::Held::Keys(b"\r".to_vec()));
+        wait_for("what was held", || noted(&dir, "keys") == "go\r");
+        assert_eq!(noted(&dir, "early"), "", "given before its input was up");
+        kill(&d, &id);
     }
 }
