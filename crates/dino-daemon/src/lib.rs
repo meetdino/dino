@@ -3654,13 +3654,24 @@ fn restart_with(d: &Daemon, id: &str, woke_from: Option<Vec<u8>>, change: impl F
 }
 
 /// The session just spawned with `old`'s id replaces `old` in the list, at its position.
+/// `old` closed, killed or archived as the new one started (a wake does that by a click): the new
+/// one goes too, rather than stay listed, running, with nothing of its own.
 fn take_place(d: &Daemon, old: &Arc<Session>) {
     let mut sessions = d.sessions.lock().unwrap();
     let i = sessions.iter().position(|o| Arc::ptr_eq(o, old));
     let j = sessions.iter().rposition(|o| o.id == old.id && !Arc::ptr_eq(o, old));
-    if let (Some(i), Some(j)) = (i, j) {
-        let new = sessions.remove(j);
-        sessions[if j < i { i - 1 } else { i }] = new;
+    match (i, j) {
+        (Some(i), Some(j)) => {
+            let new = sessions.remove(j);
+            sessions[if j < i { i - 1 } else { i }] = new;
+        }
+        (None, Some(j)) => {
+            let new = sessions.remove(j);
+            drop(sessions);
+            eprintln!("{} dinod: session {} was closed as it started again: stopping the new one", stamp(), old.id);
+            end(d, &new);
+        }
+        _ => {}
     }
 }
 
@@ -8296,6 +8307,31 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         assert!(screen.contains("you were typing") && screen.contains("do Y"), "{screen}");
         assert_eq!(noted(&dir, "keys"), format!("{before}never sent"));
         assert!(!sleep::waking(&d, &id));
+        kill(&d, &id);
+    }
+
+    /// A session closed (or archived, or deleted) as its agent starts again leaves nothing behind:
+    /// the agent taking its place goes too, rather than stay listed, running, as a ghost.
+    #[test]
+    fn closing_a_session_as_it_wakes_leaves_no_ghost() {
+        let (d, dir) = sleepy("sleep-ghost", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        // A wake (`restart_with`) as far as starting the new agent, when the session is closed.
+        let mut saved = snapshot(&d, &s);
+        (saved.ended, saved.asleep) = (false, None);
+        s.replaced.store(true, Ordering::Relaxed);
+        spawn(&d, Launch { restore: Some(saved.clone()), ..Launch::new(&saved.launcher, saved.args.clone(), Some(saved.cwd.clone())) }).unwrap();
+        let new = d.sessions.lock().unwrap().iter().rfind(|o| o.id == id).cloned().unwrap();
+        assert!(close(&d, &id, 60_000));
+        take_place(&d, &s);
+        assert!(!d.sessions.lock().unwrap().iter().any(|o| o.id == id), "a ghost");
+        wait_for("the new agent to stop", || new.pane.is_exited());
+        // Undone, it's the asleep one that comes back.
+        assert!(reopen(&d, &id));
+        assert!(session(&d, &id).asleep());
         kill(&d, &id);
     }
 
