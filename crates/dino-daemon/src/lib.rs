@@ -8887,4 +8887,22 @@ while (1) {{
         assert_eq!(std::fs::read_to_string(&env).unwrap(), "- -\n1000000000 1000000000\n- -\n");
         kill(&d, &id);
     }
+
+    /// An automation's prompt that its session doesn't take (it asks something all along, its
+    /// user keeps typing) is sent again, but `MAX_UNDELIVERED` times at most: then the run fails,
+    /// saying why, rather than being tried about once a minute for as long as it lives.
+    #[test]
+    fn an_automations_prompt_not_taken_is_tried_a_few_times_then_its_run_fails() {
+        let d = test_daemon(vec![]);
+        d.schedule.following("run", Some("1"));
+        for i in 0..3 {
+            assert_eq!(schedule::undeliverable(&d, "run"), None, "after {i}");
+            // Not given (dropped, as a hold that timed out tells it).
+            drop(schedule::delivery(&d, "run", "do it".into()));
+            assert_eq!(d.schedule.to_deliver("run").as_deref(), Some("do it"), "to be sent again");
+        }
+        let why = schedule::undeliverable(&d, "run").unwrap();
+        assert!(why.contains("didn't take its prompt, 3 times") && why.contains("it was dropped"), "{why}");
+        d.schedule.following("run", None);
+    }
 }

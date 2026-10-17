@@ -44,6 +44,10 @@ const FOLLOW_LOOK: Duration = Duration::from_secs(5);
 /// model once, never got going (a prompt it was waiting on, a model that isn't there).
 const NO_START: Duration = Duration::from_secs(180);
 
+/// How many times a run's prompt goes to the session it continues and isn't given before the run
+/// fails (see `undeliverable`).
+const MAX_UNDELIVERED: u32 = 3;
+
 /// A command gets this long.
 const COMMAND_TIME: Duration = Duration::from_secs(30 * 60);
 /// What's kept of what a command printed.
@@ -82,6 +86,9 @@ struct Live {
     task: String,
     /// The prompt still to send, when the session it continues was busy.
     deliver: Option<String>,
+    /// Times the prompt went to its session and wasn't given (it asked something all along, its
+    /// user was typing), and why the last wasn't: at `MAX_UNDELIVERED`, the run fails.
+    undelivered: (u32, Option<String>),
     /// Model calls each session had made when the run began: more since means it went to work.
     baseline: HashMap<String, u64>,
     since: Instant,
@@ -100,6 +107,12 @@ impl Scheduler {
         self.live.lock().unwrap().values().any(|l| l.baseline.contains_key(id))
     }
 
+    /// The prompt run `run` has still to send.
+    #[cfg(test)]
+    pub(crate) fn to_deliver(&self, run: &str) -> Option<String> {
+        self.live.lock().unwrap().get(run).and_then(|l| l.deliver.clone())
+    }
+
     /// Run `run` follows session `id` now, as a run continuing it does; `None`, it's over.
     #[cfg(test)]
     pub(crate) fn following(&self, run: &str, id: Option<&str>) {
@@ -107,7 +120,10 @@ impl Scheduler {
         match id {
             Some(id) => {
                 let baseline = HashMap::from([(id.to_string(), 0)]);
-                live.insert(run.into(), Live { task: String::new(), deliver: None, baseline, since: Instant::now(), done_since: None, restored: false, command: None, event: None });
+                live.insert(
+                    run.into(),
+                    Live { task: String::new(), deliver: None, undelivered: (0, None), baseline, since: Instant::now(), done_since: None, restored: false, command: None, event: None },
+                );
             }
             None => {
                 live.remove(run);
@@ -515,7 +531,17 @@ fn run(d: &Daemon, t: &ScheduledTask, why: Why) -> Option<ScheduledRun> {
             let baseline = started.sessions.iter().map(|s| (s.clone(), d.proxy.stats.session(s).requests)).collect();
             d.schedule.live.lock().unwrap().insert(
                 run.id.clone(),
-                Live { task: t.id.clone(), deliver: started.deliver, baseline, since: Instant::now(), done_since: None, restored: false, command: started.command, event: why.event.clone() },
+                Live {
+                    task: t.id.clone(),
+                    deliver: started.deliver,
+                    undelivered: (0, None),
+                    baseline,
+                    since: Instant::now(),
+                    done_since: None,
+                    restored: false,
+                    command: started.command,
+                    event: why.event.clone(),
+                },
             );
             // Followed from now on, every few seconds rather than the idle half minute.
             d.schedule.poke();
@@ -950,7 +976,10 @@ fn restore_live(d: &Daemon) {
                 continue;
             }
             let baseline = r.sessions.iter().map(|s| (s.clone(), 0)).collect();
-            live.insert(r.id.clone(), Live { task: t.id.clone(), deliver: None, baseline, since: Instant::now(), done_since: None, restored: true, command: None, event: r.event.clone() });
+            live.insert(
+                r.id.clone(),
+                Live { task: t.id.clone(), deliver: None, undelivered: (0, None), baseline, since: Instant::now(), done_since: None, restored: true, command: None, event: r.event.clone() },
+            );
         }
     }
     if changed {
@@ -1000,6 +1029,10 @@ fn follow(d: &Daemon) {
             d.schedule.live.lock().unwrap().remove(&run_id);
             continue;
         };
+        if let Some(why) = undeliverable(d, &run_id) {
+            finish(d, &t, &run_id, false, Some(why));
+            continue;
+        }
         // A prompt for a session that was busy: now it isn't.
         let deliver = {
             let live = d.schedule.live.lock().unwrap();
@@ -1014,17 +1047,8 @@ fn follow(d: &Daemon) {
                         l.baseline.insert(sid.clone(), d.proxy.stats.session(&sid).requests);
                         l.since = Instant::now();
                     }
-                    // Not given after all (held for an agent still waking, which didn't take it in
-                    // time): it waits to be sent again.
-                    let (me, run, again) = (d.me.clone(), run_id.clone(), prompt.clone());
-                    let prompt = crate::sleep::Message::new(prompt).then(move |outcome| {
-                        let (Err(_), Some(d)) = (outcome, me.upgrade()) else { return };
-                        if let Some(l) = d.schedule.live.lock().unwrap().get_mut(&run) {
-                            l.deliver.get_or_insert(again);
-                        }
-                    });
                     // Through `giving`: a sleep decided at this moment waits for it (see `sleep`).
-                    crate::sleep::input(d, &sid, crate::sleep::Held::Message(prompt));
+                    crate::sleep::input(d, &sid, crate::sleep::Held::Message(delivery(d, &run_id, prompt)));
                 }
                 Some(_) => {}
                 None => finish(d, &t, &run_id, false, Some("the session it continues is gone".into())),
@@ -1114,6 +1138,28 @@ fn record_command(d: &Daemon, id: &str, run_id: &str, exit: Option<i32>, output:
             r.output = Some(output.to_string());
         }
     });
+}
+
+/// Run `run`'s prompt, for the session it continues: not given after all (held for an agent waking,
+/// or asking something, that didn't take it in time), it waits to be sent again, and counts.
+pub(crate) fn delivery(d: &Daemon, run: &str, prompt: String) -> crate::sleep::Message {
+    let (me, run, again) = (d.me.clone(), run.to_string(), prompt.clone());
+    crate::sleep::Message::new(prompt).then(move |outcome| {
+        let (Err(why), Some(d)) = (outcome, me.upgrade()) else { return };
+        if let Some(l) = d.schedule.live.lock().unwrap().get_mut(&run) {
+            l.undelivered = (l.undelivered.0 + 1, Some(why));
+            l.deliver.get_or_insert(again);
+        }
+    })
+}
+
+/// Why run `run` fails, if its prompt has gone to its session `MAX_UNDELIVERED` times and wasn't
+/// given: each try resets its start (`NO_START`), so it would otherwise be sent forever.
+pub(crate) fn undeliverable(d: &Daemon, run: &str) -> Option<String> {
+    let live = d.schedule.live.lock().unwrap();
+    let (tries, why) = live.get(run)?.undelivered.clone();
+    let why = why.unwrap_or_else(|| "it didn't take it".into());
+    (tries >= MAX_UNDELIVERED).then(|| format!("the session it continues didn't take its prompt, {MAX_UNDELIVERED} times: {why}"))
 }
 
 /// A run is over: keep what it came to, pass it on, and try again if it failed.
