@@ -415,8 +415,17 @@ impl Agent for Claude {
         Some(std::iter::once(first).chain(rest.iter().copied()).map(str::trim).collect::<Vec<_>>().join("\n").trim().to_string())
     }
 
-    /// Its permission and trust dialogs each end in "Esc to cancel".
+    /// Its permission and trust dialogs each end in "Esc to cancel". Resuming a conversation
+    /// idle a while (2.1.302), it may ask whether to resume from a summary (its default runs
+    /// `/compact`) or at all ("Resume this conversation?", "Esc to resume"), read by their options
+    /// so a conversation that only mentions them isn't taken for one.
     fn asking(&self, screen: &str) -> Option<String> {
+        if screen.contains("Resume from summary") && screen.contains("Resume full session as-is") {
+            return Some("Claude asks whether to resume from a summary".into());
+        }
+        if (screen.contains("Resume this conversation?") && screen.contains("Start a new conversation")) || screen.contains("Esc to resume") {
+            return Some("Claude asks whether to resume this conversation".into());
+        }
         screen.contains("Esc to cancel").then(|| "Claude asks".into())
     }
 
@@ -640,6 +649,19 @@ impl Agent for Claude {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Its resume dialogs (2.1.302) are questions on its screen, as its permission prompts are.
+    #[test]
+    fn its_resume_dialogs_ask_something() {
+        let claude = crate::agent::agent("claude").unwrap();
+        let summary = " This session is 3h 2m old and 152.4k tokens.\n Resuming the full session will consume a substantial portion of your usage limits. We recommend resuming from a summary.\n\n ❯ 1. Resume from summary (recommended)\n   2. Resume full session as-is\n   3. Don't ask me again\n\n Enter to confirm · Esc to cancel";
+        let cold = " Resume this conversation?\n This conversation has been inactive for 3h and is 152.4k tokens long. Resuming it will use about 12% of your 5-hour usage limit.\n\n ❯ 1. Resume\n   2. Start a new conversation\n\n Enter to confirm · Esc to resume";
+        assert!(claude.asking(summary).is_some_and(|a| a.contains("summary")));
+        assert!(claude.asking(cold).is_some_and(|a| a.contains("resume this conversation")));
+        assert!(claude.asking(&cold.replace("Esc to resume", "")).is_some(), "by its options too");
+        // Only talked about, in a conversation: no.
+        assert_eq!(claude.asking("❯ what does Resume from summary do?\n⏺ It compacts.\n\n❯ "), None);
+    }
 
     /// What's typed in its prompt box, read off its screen: nothing when it's empty (a draft
     /// erased), its lines when there's a draft, and nothing to say with no box up (a dialog).

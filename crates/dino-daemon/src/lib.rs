@@ -5123,7 +5123,9 @@ fn auto_pr(d: &Daemon, s: &Session, root: &Path, branch: &str, pr: &ipc::PrInfo)
 /// `sleep`).
 fn fix_due(d: &Daemon, s: &Session) -> bool {
     let typing = s.poked.lock().unwrap().is_some_and(|t| t.elapsed() < LEAVE_THE_USER);
-    !typing && (idle(d, s) || s.asleep())
+    // Asking something on its screen (a resume dialog its hooks don't report), it's left to
+    // whoever answers it: a fix sent now would only wait it out (see `sleep::input`).
+    !typing && (s.asleep() || (idle(d, s) && !sleep::asking(s)))
 }
 
 /// The session's PR merged or closed: when the setting says so, the session is archived once its
@@ -8802,6 +8804,64 @@ while (1) {{
         wait_for("a draft again", || s.pane.text(0).contains("❯ abc"));
         idle_for(&s, 2 * MINUTE);
         assert_eq!(sleep::why_not(&d, &s, false).as_deref(), unsent);
+        kill(&d, &id);
+    }
+
+    /// What dino sends an agent with nobody there never answers a question on its screen (Claude's
+    /// resume dialogs, whose default compacts its conversation; a permission): a peer's message
+    /// and a paste wait it out, a PR fix isn't asked meanwhile, and keys typed by someone seeing it
+    /// go to it. Answered, what waited goes in, in order.
+    #[test]
+    fn nothing_sent_unattended_answers_a_question_on_screen() {
+        let (d, dir) = sleepy("sleep-question", 0.2, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        std::fs::write(dir.join("dialog"), "").unwrap();
+        sleep::wake(&d, &id).unwrap();
+        let s = session(&d, &id);
+        wait_for("its question", || s.pane.text(0).contains("Esc to cancel"));
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        // Idle by its hooks and quiet, as an agent asking at its start is.
+        idle_for(&s, 2 * MINUTE);
+        let peer = {
+            let (d, id) = (d.clone(), id.clone());
+            std::thread::spawn(move || peers::message(&d, &id, "from a peer", Some("9999".into())))
+        };
+        wait_for("the message held", || sleep::waking(&d, &id));
+        assert!(matches!(request(&d, &Request::SendInput { id: id.clone(), text: "pasted".into(), submit: true }), Response::Ok));
+        assert!(!fix_due(&d, &s), "a PR fix isn't asked of it meanwhile");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(noted(&dir, "keys"), "", "nothing answered it");
+        let refused = sleep::sleep(&d, &id, sleep::By::Name).unwrap_err().to_string();
+        assert!(refused.contains("held for it"), "{refused}");
+        // Its person answers it; then the paste goes in, and the message once nobody's typing.
+        sleep::input(&d, &id, sleep::Held::Keys(b"y".to_vec()));
+        wait_for("the paste", || noted(&dir, "keys") == "ypasted\r");
+        idle_for(&s, 2 * MINUTE);
+        assert!(peer.join().unwrap().is_ok(), "its sender told once it was given");
+        assert_eq!(noted(&dir, "keys"), "ypasted\rfrom a peer\r");
+        kill(&d, &id);
+    }
+
+    /// Never answered, a message waiting out a question isn't given, and its sender hears why.
+    #[test]
+    fn a_message_waiting_out_a_question_nobody_answers_isnt_given() {
+        let (d, dir) = sleepy("sleep-question-left", 0.2, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        std::fs::write(dir.join("dialog"), "").unwrap();
+        sleep::wake(&d, &id).unwrap();
+        let s = session(&d, &id);
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        idle_for(&s, 2 * MINUTE);
+        let e = peers::message(&d, &id, "from a peer", None).unwrap_err().to_string();
+        assert!(e.contains("didn't get the message") && e.contains("asking something"), "{e}");
+        assert_eq!(noted(&dir, "keys"), "");
+        assert!(s.pane.text(0).contains("Esc to cancel") && s.pane.text(LIVE_HISTORY).contains("not sent"));
         kill(&d, &id);
     }
 

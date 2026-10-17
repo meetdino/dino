@@ -326,8 +326,10 @@ pub(crate) fn sleep(d: &Daemon, id: &str, by: By) -> anyhow::Result<()> {
     // (`procs::stop_session`) is taken.
     let stopping = {
         let waking = d.waking.lock().unwrap();
-        if waking.contains_key(id) {
-            anyhow::bail!("{} is waking up", s.name);
+        match waking.get(id) {
+            Some(w) if w.drawn => anyhow::bail!("{} stays awake: something is held for it until it can take it", s.name),
+            Some(_) => anyhow::bail!("{} is waking up", s.name),
+            None => {}
         }
         if s.asleep() {
             return Ok(());
@@ -424,8 +426,12 @@ pub(crate) fn wake_soon(d: &Daemon, id: &str, retry: bool) {
 /// held and the session wakes; waking, it's held until the agent can take it (see `settle`). Keys
 /// typed once its screen is up go straight to it when nothing typed before them is still to go
 /// in (or what is waits out a dialog, which they answer); the client terminal's answers to the
-/// starting agent's queries (see `split_replies`) go at once.
+/// starting agent's queries (see `split_replies`) go at once. Awake, a message or a paste for an
+/// agent asking something on its screen waits the question out (see `hold_for_question`).
 pub(crate) fn input(d: &Daemon, id: &str, what: Held) {
+    // From elsewhere (a message, a paste) for an awake agent: whether it asks something on its
+    // screen, looked at before the waking lock (see `hold_for_question`).
+    let asks = !matches!(what, Held::Keys(_)) && attachable(d, id).is_some_and(|s| !s.asleep() && !s.pane.is_exited() && asking(&s));
     let mut waking = d.waking.lock().unwrap();
     let Some(s) = attachable(d, id) else {
         drop(waking);
@@ -448,10 +454,17 @@ pub(crate) fn input(d: &Daemon, id: &str, what: Held) {
             }
             other => other,
         };
+        // Keys typed seeing its screen go to it, a dialog it asks included; a paste only while it
+        // asks nothing.
+        let straight = w.drawn && ((w.typed.is_empty() && !w.sending) || w.blocked);
         match what {
             Held::Message(m) => w.messages.push_back(m),
-            typed if w.drawn && (w.blocked || (w.typed.is_empty() && !w.sending)) => give_through(d, waking, &s, typed),
-            typed => w.typed.push_back(typed),
+            keys @ Held::Keys(_) if straight => give_through(d, waking, &s, keys),
+            text @ Held::Text { .. } if straight && !asks && !w.blocked => give_through(d, waking, &s, text),
+            typed => {
+                w.blocked |= asks && w.drawn;
+                w.typed.push_back(typed);
+            }
         }
         return;
     }
@@ -473,6 +486,9 @@ pub(crate) fn input(d: &Daemon, id: &str, what: Held) {
         drop(failed);
         start_wake(d, waking, &s, Some(what), false);
         return;
+    }
+    if asks {
+        return hold_for_question(d, waking, s, what);
     }
     give_through(d, waking, &s, what);
 }
@@ -734,6 +750,14 @@ fn settle(d: &Daemon, s: &Arc<Session>) {
         return;
     }
     eprintln!("{} dinod: session {} awake in {} ms", stamp(), s.id, since.elapsed().as_millis());
+    drain(d, s, since);
+}
+
+/// Give agent `s`, up, what's held for it in `waking` (see `settle`): what the user typed, in
+/// order, once it asks nothing on its screen; then each message, once it waits for a prompt and
+/// nobody's typing one. What's still held `READY_WITHIN` after `since` isn't given, and its pane,
+/// and each message's sender, says so. The screen is read before the waking lock is taken.
+fn drain(d: &Daemon, s: &Arc<Session>, since: Instant) {
     loop {
         if s.pane.is_exited() {
             let left = d.waking.lock().unwrap().remove(&s.id).unwrap_or_default();
@@ -785,6 +809,30 @@ fn settle(d: &Daemon, s: &Arc<Session>) {
     bump(d);
 }
 
+/// Hold `what` (a message or a paste, which nobody types seeing the screen) for awake `s`, whose
+/// agent asks something on its screen (a permission, a resume dialog), until it asks nothing, as
+/// held input waits for a woken one (see `drain`): never the answer to the question. Keys typed
+/// meanwhile, by someone seeing it, go to it.
+fn hold_for_question(d: &Daemon, mut waking: MutexGuard<'_, HashMap<String, Wake>>, s: Arc<Session>, what: Held) {
+    let mut w = Wake { drawn: true, ..Wake::default() };
+    match what {
+        Held::Message(m) => w.messages.push_back(m),
+        typed => {
+            w.typed.push_back(typed);
+            w.blocked = true;
+        }
+    }
+    waking.insert(s.id.clone(), w);
+    drop(waking);
+    eprintln!("{} dinod: session {}: input held while it asks something", stamp(), s.id);
+    let Some(me) = d.me.upgrade() else { return drain(d, &s, Instant::now()) };
+    let id = s.id.clone();
+    if std::thread::Builder::new().name("held".into()).spawn(move || drain(&me, &s, Instant::now())).is_err() {
+        let dropped = d.waking.lock().unwrap().remove(&id);
+        drop(dropped);
+    }
+}
+
 /// Woken `s`'s agent has drawn its prompt anew, reads keys, and has been quiet `DRAWN_QUIET`: it
 /// takes keys now, a second sooner than `agent_ready`'s quiet. Drawn is what its adapter reads as
 /// its prompt's footer (Claude's mode line), below the wake line if that's still on screen: the
@@ -834,7 +882,7 @@ fn give_held(d: &Daemon, s: &Session, held: Vec<Held>) {
 }
 
 /// `s`'s agent asks something on its screen: a question, a dialog, its sign-in or folder trust.
-fn asking(s: &Session) -> bool {
+pub(crate) fn asking(s: &Session) -> bool {
     let screen = s.pane.text(0);
     s.adapter().is_some_and(|a| a.asking(&screen).is_some()) || (s.agent_now() == "claude" && crate::setup_prompt(&screen).is_some())
 }
@@ -865,7 +913,7 @@ fn not_given(d: &Daemon, s: &Session, left: Wake, up: bool, asks: bool) {
             })
             .collect();
         eprintln!("{} dinod: session {}: {} inputs held as it woke not given: {typed_why}", stamp(), s.id, what.len());
-        crate::say_in(s, &format!("held while it woke and not sent, as {typed_why}: {}", what.join(", ")));
+        crate::say_in(s, &format!("held for it and not sent, as {typed_why}: {}", what.join(", ")));
     }
     if left.messages.is_empty() {
         return;
@@ -886,9 +934,9 @@ fn not_given(d: &Daemon, s: &Session, left: Wake, up: bool, asks: bool) {
     };
     let what: Vec<String> = left.messages.iter().map(|m| format!("a message, “{}”", printable(&m.text))).collect();
     eprintln!("{} dinod: session {}: {} messages held as it woke not given: {why}", stamp(), s.id, what.len());
-    crate::say_in(s, &format!("held while it woke and not sent, as {why}: {}", what.join(", ")));
+    crate::say_in(s, &format!("held for it and not sent, as {why}: {}", what.join(", ")));
     for m in left.messages {
-        m.told(Err(format!("it woke, but {theirs}")));
+        m.told(Err(theirs.to_string()));
     }
 }
 
