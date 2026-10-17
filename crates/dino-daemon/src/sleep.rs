@@ -35,6 +35,7 @@ const PRESSED_IDLE: Duration = Duration::from_secs(5 * 60);
 const READY_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 8 } else { 60 });
 /// How often a waking agent is looked at.
 const READY_LOOK: Duration = Duration::from_millis(50);
+
 /// How long a sleeping agent's processes get to be gone before it counts as asleep anyway.
 const GONE_WITHIN: Duration = Duration::from_secs(6);
 /// The most a message's sender waits to hear whether a waking agent got it (see `message`): its
@@ -643,7 +644,8 @@ fn begin(d: &Daemon, id: &str) -> Option<Arc<Session>> {
     let asleep = attachable(d, id);
     let started = (|| {
         let s = asleep.clone().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
-        let screen = s.pane.replay(LIVE_HISTORY);
+        // As it shows: a fullscreen agent's last screen is up until the new one draws.
+        let screen = s.pane.replay_on_main(LIVE_HISTORY);
         let controls = s.pending.lock().unwrap().clone().unwrap_or_else(|| mode::current(d, &s));
         restart_with(d, id, Some(screen), |saved| {
             if saved.controls.model != controls.model {

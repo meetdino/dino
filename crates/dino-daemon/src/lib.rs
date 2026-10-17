@@ -76,10 +76,13 @@ const RESTART_MARK: &[u8] =
 const WAKE_MARK: &[u8] =
     b"\x1b[?1049l\r\n\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1l\x1b>\x1b[?25h\x1b[=0;1u\x1b[0m\x1b[2m-- woke from sleep; above is where this session was --\x1b[0m\r\n";
 
+/// `WAKE_MARK`'s words: what a woken agent draws comes after them.
+pub(crate) const WAKE_LINE: &str = "-- woke from sleep; above is where this session was --";
+
 /// A saved screen without the restart (and wake) lines earlier ones left in it: one line per
 /// restart, not one more each time.
 fn without_restart_marks(screen: &[u8]) -> Vec<u8> {
-    const TEXTS: [&[u8]; 2] = [b"-- dino restarted; above is where this session was --", b"-- woke from sleep; above is where this session was --"];
+    const TEXTS: [&[u8]; 2] = [b"-- dino restarted; above is where this session was --", WAKE_LINE.as_bytes()];
     let mut out = Vec::with_capacity(screen.len());
     for line in screen.split_inclusive(|&b| b == b'\n') {
         if !TEXTS.iter().any(|t| line.windows(t.len()).any(|w| w == *t)) {
@@ -3466,7 +3469,7 @@ fn save_live_screens(d: &Daemon, all: bool) {
             continue;
         }
         let _ = std::fs::create_dir_all(&dir);
-        if write_private(&dir.join(&s.id), &s.pane.replay(LIVE_HISTORY)).is_ok() {
+        if write_private(&dir.join(&s.id), &s.pane.replay_on_main(LIVE_HISTORY)).is_ok() {
             *saved = Some(Instant::now());
         }
     }
@@ -7647,7 +7650,10 @@ while (sysread(STDIN, my $c, 1)) {
     /// draws its prompt, and keeps each key it's given in `log.keys`, echoing it. Started again
     /// while the folder has a file `dialog`, it first asks something, as Claude asks with its
     /// "Esc to cancel", until it's given `y`; with a file `slow`, it takes half a minute to come up.
-    /// `extra` is Perl it runs first (what it starts).
+    /// With a file `alt` it draws on the alternate screen, as Claude Code's fullscreen renderer
+    /// does; with `box`, a prompt box as Claude's (its line in it, its footer under it) rather
+    /// than echoing; with `tick`, a clock that never lets it go quiet. Each read of its input is
+    /// noted too, in hex (`noted(dir, "reads")`). `extra` is Perl it runs first (what it starts).
     fn sleepy(name: &str, slow: f64, extra: &str) -> (Arc<Daemon>, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let dir = test_home().join(name);
@@ -7668,12 +7674,28 @@ system("stty raw -echo");
 POSIX::tcflush(0, POSIX::TCIFLUSH);
 $| = 1;
 open(my $k, ">>", "{log}.keys"); my $o = select($k); $| = 1; select($o);
+open(my $r, ">>", "{log}.reads"); $o = select($r); $| = 1; select($o);
+print "\e[?1049h" if -e "{dir}/alt";
 if ($starts > 1 && -e "{dir}/dialog") {{
     print "\e[2J\e[HAllow this? Esc to cancel";
     while (sysread(STDIN, my $c, 1)) {{ print $k $c; last if $c eq "y"; }}
 }}
-print "\e[2J\e[H> ";
-while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
+my ($box, $tick, $line) = (-e "{dir}/box", -e "{dir}/tick", "");
+sub draw {{ print "\e[2J\e[H" . ("─" x 40) . "\r\n❯ $line\r\n" . ("─" x 40) . "\r\n  ? for shortcuts"; }}
+if ($box) {{ draw(); }} else {{ print "\e[2J\e[H> "; }}
+while (1) {{
+    if ($tick) {{
+        my $in = ""; vec($in, 0, 1) = 1;
+        if (!select($in, undef, undef, 0.3)) {{ print "\e7\e[6;1H" . time() . "\e8"; next; }}
+    }}
+    last unless sysread(STDIN, my $c, 4096);
+    print $k $c; print $r unpack("H*", $c), "\n";
+    if (!$box) {{ print $c; next; }}
+    for my $ch (split //, $c) {{
+        if ($ch eq "\x7f") {{ chop $line; }} elsif ($ch =~ /[\r\x03\x15]/) {{ $line = ""; }} elsif (ord($ch) >= 32) {{ $line .= $ch; }}
+    }}
+    draw();
+}}
 "#,
             log = log.display(),
             dir = dir.display()
@@ -8671,6 +8693,29 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         save(&d2);
         assert_eq!(written(&d2), Some(serde_json::json!([])));
         kill(&d2, &id);
+        kill(&d, &id);
+    }
+
+    /// A fullscreen agent's last screen (on the alternate screen, as Claude Code's is) stays up as
+    /// it wakes, the wake line under it, until the new agent draws: the wake line used to leave
+    /// the alternate screen for an empty main one, and the pane went blank.
+    #[test]
+    fn a_fullscreen_agents_last_screen_stays_up_as_it_wakes() {
+        let (d, dir) = sleepy("sleep-alt", 0.0, "");
+        std::fs::write(dir.join("alt"), "").unwrap();
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        sleep::input(&d, &id, sleep::Held::Keys(b"last words\r".to_vec()));
+        wait_for("its screen", || s.pane.text(0).contains("> last words"));
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        // It comes up slowly: what shows meanwhile.
+        std::fs::write(dir.join("slow"), "").unwrap();
+        sleep::wake_soon(&d, &id, true);
+        let woke = session(&d, &id);
+        assert!(!woke.asleep());
+        let screen = woke.pane.text(0);
+        assert!(screen.starts_with("> last words") && screen.contains(WAKE_LINE), "{screen}");
         kill(&d, &id);
     }
 }

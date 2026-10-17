@@ -783,6 +783,18 @@ impl Pane {
         self.replay_of(&term, history)
     }
 
+    /// As `replay`, but for a program starting next in this one's place (a woken agent, one
+    /// resumed after dinod restarts), whose terminal starts on the main screen: the alternate
+    /// screen a fullscreen program left up is drawn there, its rows as they show, so it stays up
+    /// above what comes next rather than give way to an empty main screen.
+    pub fn replay_on_main(&self, history: usize) -> Vec<u8> {
+        let term = self.term.lock();
+        if !term.mode().contains(TermMode::ALT_SCREEN) {
+            return self.replay_of(&term, history);
+        }
+        screen_rows(&term).into_iter().map(|r| r + "\x1b[0m").collect::<Vec<_>>().join("\r\n").into_bytes()
+    }
+
     /// Compute the replay and run `f` with it before any further output is processed, so a
     /// subscriber added in `f` sees exactly the bytes after the replay.
     pub fn replay_then<R>(&self, history: usize, f: impl FnOnce(Vec<u8>) -> R) -> R {
@@ -1290,6 +1302,21 @@ mod tests {
         let screen = rx.recv_timeout(Duration::from_secs(8)).expect("the screen couldn't be read: its reader is stuck answering the program");
         assert!(screen.contains("asked and more"), "{screen}");
         pane.kill().unwrap().join().unwrap();
+    }
+
+    /// A fullscreen program's last screen, replayed for one starting in its place, is on the main
+    /// screen, where the next one starts: leaving the alternate screen doesn't take it away.
+    #[test]
+    fn a_fullscreen_programs_last_screen_is_replayed_onto_the_main_screen() {
+        let last = Pane::ended(b"before\x1b[?1049h\x1b[2J\x1b[H\x1b[1mlast\x1b[0m screen\r\n> prompt", 80, 24, None);
+        assert_eq!(last.text(0), "last screen\n> prompt");
+        let next = Pane::ended(&last.replay_on_main(100), 80, 24, None);
+        next.feed(b"\x1b[?1049l\r\n-- woke --");
+        assert_eq!(next.text(0), "last screen\n> prompt\n-- woke --");
+        assert!(String::from_utf8_lossy(&next.replay(0)).contains("\x1b[0;1mlast"), "in its colors and attributes");
+        // On the main screen, it's the replay.
+        let main = Pane::ended(b"one\r\ntwo", 80, 24, None);
+        assert_eq!(main.replay_on_main(100), main.replay(100));
     }
 
     fn wait_for(what: &str, done: impl Fn() -> bool) {
