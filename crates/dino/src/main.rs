@@ -58,7 +58,8 @@ const USAGE: &str = "Sessions
   dino status [--tmux]              sum up agents in a line; --tmux for tmux's status bar
   dino new [--worktree] [--stay] <agent> [--on <provider> <model>] [args...]
                                     start a session in the background and print its id
-  dino attach | resume | kill <id>  open a session here, resume an ended one, or close one
+  dino attach | resume | kill <id>  open a session here, resume an ended one, or close one into
+                                    Archived, where the app and dino-tui bring it back
   dino tui [args...]                open dino-tui, dino's terminal UI, here (installed first if missing)
   dino fork [--no-worktree] [--name <name>] <id> [-- <prompt>]
                                     start a new session on a copy of a session's conversation
@@ -312,8 +313,10 @@ fn dino() -> anyhow::Result<()> {
         }
         Some("kill") => {
             let id = cli.get(1).ok_or_else(|| anyhow::anyhow!("usage: dino kill <id>\n`dino ls` lists the sessions."))?.clone();
-            done(client::request(&Request::Kill { id: id.clone() })?)?;
-            say(&format!("Closed session {}.", printable(&id)));
+            // Archived, as the app's Archive does: its agent stops and it's kept, by its name, to
+            // bring back on its conversation. `dino rm` deletes one.
+            done(client::request(&Request::Archive { id: id.clone() })?)?;
+            say(&format!("Closed session {}. It's in Archived, to bring back from there.", printable(&id)));
             return Ok(());
         }
         Some("rm") => return cmd_rm(&cli[1..]),
