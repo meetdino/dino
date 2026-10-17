@@ -2180,7 +2180,9 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         if let Some(r) = &restore {
             let conversation = typed.as_ref().and_then(|t| t.conversation.clone()).or_else(|| s.agent_session.lock().unwrap().clone());
             stats::seed(d, &s.id, None, s.started_at, conversation.as_deref());
-            d.proxy.stats.keep_crons(&s.id, r.crons.clone());
+            // Saved by a dinod before they were (`crons` missing): unknown, for Claude's (an
+            // agent with no crons has none to keep).
+            d.proxy.stats.keep_crons(&s.id, r.crons.clone().or_else(|| (s.agent_id != "claude").then(Vec::new)));
         }
         fallbacks::set(d, &settings, &providers::list(), &s);
         sync_shell_agents(d, &s, &Settings::load());
@@ -3412,9 +3414,11 @@ struct SavedSession {
     asleep: Option<u64>,
     /// The prompts its agent had scheduled for itself (Claude's crons, `/loop`'s wakeups), as last
     /// known: resumed, it brings them back and lists them only at its first turn's end, so they're
-    /// known meanwhile and it isn't put to sleep under them (see `Stats::restarted`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    crons: Vec<dino_proxy::tasks::Cron>,
+    /// known meanwhile and it isn't put to sleep under them (see `Stats::restarted`). Always
+    /// written, so `None` (missing, from a dinod before they were saved, or `null`, not known
+    /// since) is unknown, not none: it stays awake until its agent says (see `Stats::keep_crons`).
+    #[serde(default)]
+    crons: Option<Vec<dino_proxy::tasks::Cron>>,
 }
 
 fn saved_path(home: &Path) -> PathBuf {
@@ -3586,7 +3590,7 @@ fn snapshot(d: &Daemon, s: &Session) -> SavedSession {
         fork_pending: s.fork_pending.load(Ordering::Relaxed),
         typed,
         asleep: s.slept_at(),
-        crons: d.proxy.stats.session(&s.id).crons,
+        crons: Some(d.proxy.stats.session(&s.id)).filter(|st| !st.crons_unknown).map(|st| st.crons),
     }
 }
 
@@ -3939,7 +3943,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
                 fork_pending: false,
                 typed: None,
                 asleep: None,
-                crons: vec![],
+                crons: Some(vec![]),
             };
             spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?
         }
@@ -5545,7 +5549,7 @@ mod tests {
             fork_pending: false,
             typed: None,
             asleep: None,
-            crons: vec![],
+            crons: Some(vec![]),
         }
     }
 
@@ -8626,6 +8630,47 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         wait_for("it to be up", || !sleep::waking(&d, &id));
         std::thread::sleep(std::time::Duration::from_millis(500));
         assert_eq!(noted(&dir, "keys"), "hello\r", "none of what wasn't given came later");
+        kill(&d, &id);
+    }
+
+    /// Saved, a session's scheduled prompts are always written, none as none. One saved by a dinod
+    /// before they were has none written, which is unknown: its agent, resumed, may bring loops
+    /// back, so it stays awake until its turn's end says what it has.
+    #[test]
+    fn scheduled_prompts_an_older_dinod_didnt_save_keep_it_awake_until_the_agent_says() {
+        let (d, dir) = sleepy("sleep-crons-unknown", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        let written = |d: &Daemon| {
+            let all: serde_json::Value = serde_json::from_slice(&std::fs::read(saved_path(&d.home)).unwrap()).unwrap();
+            all.as_array().unwrap().iter().find(|x| x["id"] == id.as_str()).unwrap().get("crons").cloned()
+        };
+        save(&d);
+        assert_eq!(written(&d), Some(serde_json::json!([])), "none, written as none");
+        // As a dinod before them wrote it.
+        let mut all: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(saved_path(&d.home)).unwrap()).unwrap();
+        for x in &mut all {
+            x.as_object_mut().unwrap().remove("crons");
+        }
+        std::fs::write(saved_path(&d.home), serde_json::to_vec(&all).unwrap()).unwrap();
+        let launchers = d.launchers.read().unwrap().clone();
+        let d2 = new_daemon(d.home.clone(), Proxy::start(HashMap::new()).unwrap(), launchers);
+        restore(&d2, load_saved(&d2.home));
+        let s2 = session(&d2, &id);
+        wait_for("its prompt", || s2.pane.text(0).starts_with('>'));
+        idle_for(&s2, 10 * MINUTE);
+        let unknown = sleep::why_not(&d2, &s2, false).unwrap_or_default();
+        assert!(unknown.contains("doesn't know yet whether it has prompts scheduled"), "{unknown}");
+        save(&d2);
+        assert_eq!(written(&d2), Some(serde_json::Value::Null), "still unknown");
+        let r = reqwest::blocking::Client::new().post(d2.proxy.base_url(&id, "hook")).body(serde_json::json!({"hook_event_name": "Stop"}).to_string()).send().unwrap();
+        assert!(r.status().is_success());
+        d2.proxy.stats.report(&id, Activity::Done);
+        idle_for(&s2, 10 * MINUTE);
+        assert_eq!(sleep::why_not(&d2, &s2, false), None, "its turn's end said");
+        save(&d2);
+        assert_eq!(written(&d2), Some(serde_json::json!([])));
+        kill(&d2, &id);
         kill(&d, &id);
     }
 }

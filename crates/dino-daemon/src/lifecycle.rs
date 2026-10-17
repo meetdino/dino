@@ -129,7 +129,7 @@ fn archive_as(d: &Daemon, id: &str, put_away: bool) -> anyhow::Result<()> {
         fork_pending: s.fork_pending.load(Ordering::Relaxed),
         typed,
         asleep: None,
-        crons: d.proxy.stats.session(&s.id).crons,
+        crons: Some(d.proxy.stats.session(&s.id)).filter(|st| !st.crons_unknown).map(|st| st.crons),
     };
     let w = if s.host.is_some() { None } else { session_worktree(d, &s.cwd) };
     kill(d, id);

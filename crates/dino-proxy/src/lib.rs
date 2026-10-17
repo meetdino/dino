@@ -168,6 +168,9 @@ pub struct SessionStats {
     pub background: Vec<tasks::Background>,
     /// Prompts it scheduled for itself (Claude's CronCreate), as it last said it has them.
     pub crons: Vec<tasks::Cron>,
+    /// It may have scheduled prompts `crons` doesn't list: it was resumed from what a dinod before
+    /// they were saved left. Known again at its first turn's end, or a new conversation.
+    pub crons_unknown: bool,
     /// What the agent said still ran when its last turn ended (ids in `subagents` and
     /// `background`): it isn't done while that work is.
     pub(crate) waiting_on: Vec<String>,
@@ -521,12 +524,13 @@ impl Stats {
     }
 
     /// Session `id`'s agent, resumed by a dinod started again, had these prompts scheduled for
-    /// itself as the dinod before last knew: known again until it says otherwise.
-    pub fn keep_crons(&self, id: &str, crons: Vec<tasks::Cron>) {
-        self.update(id, |s| {
-            if s.crons.is_empty() {
-                s.crons = crons;
-            }
+    /// itself as the dinod before last knew: known again until it says otherwise. `None`: that
+    /// dinod didn't say, so they're unknown until it does (`crons_unknown`).
+    pub fn keep_crons(&self, id: &str, crons: Option<Vec<tasks::Cron>>) {
+        self.update(id, |s| match crons {
+            Some(crons) if s.crons.is_empty() => s.crons = crons,
+            Some(_) => {}
+            None => s.crons_unknown = true,
         });
     }
 
@@ -641,6 +645,7 @@ impl Stats {
         s.todos.clear();
         s.background.clear();
         s.crons.clear();
+        s.crons_unknown = false;
         s.waiting_on.clear();
         s.computer = None;
         s.fallback = None;

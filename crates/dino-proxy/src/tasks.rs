@@ -162,9 +162,13 @@ pub(crate) fn record(stats: &Stats, session: &str, event: &str, v: &Value) {
             s.waiting_on.clear();
             if v["source"].as_str() == Some("startup") {
                 s.crons.clear();
+                s.crons_unknown = false;
             }
         }),
+        // Its turn's end: what it lists is what it has, and with nothing listed (an agent that
+        // doesn't), what dino saw it make since is all dino will know.
         ("Stop", _) => {
+            stats.update(session, |s| s.crons_unknown = false);
             if let Some(listed) = v["session_crons"].as_array() {
                 stats.update(session, |s| s.crons = listed_crons(&s.crons, listed));
             }

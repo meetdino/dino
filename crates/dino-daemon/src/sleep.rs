@@ -262,6 +262,9 @@ pub(crate) fn why_not(d: &Daemon, s: &Session, asked: bool) -> Option<String> {
     if !st.crons.is_empty() {
         return Some("it has prompts scheduled for itself (CronCreate, /loop)".into());
     }
+    if st.crons_unknown {
+        return Some("dino doesn't know yet whether it has prompts scheduled for itself (its agent says at its turn's end)".into());
+    }
     if d.previews.lock().unwrap().iter().any(|p| p.session == s.id && p.running()) {
         return Some("its preview's server is running".into());
     }
