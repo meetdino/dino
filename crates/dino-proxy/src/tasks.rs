@@ -36,7 +36,9 @@ pub struct Background {
 
 /// A prompt the agent scheduled for itself (Claude's CronCreate): it lives in the agent, which runs
 /// it while it's open and drops it when it's deleted, has run (once), expires or the agent exits.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Kept in dinod's saved sessions: a resumed agent brings back its own (see `Stats::restarted`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Cron {
     /// The agent's id for it (Claude: 8 hex digits, which CronDelete takes).
     pub id: String,
@@ -154,10 +156,13 @@ pub(crate) fn record(stats: &Stats, session: &str, event: &str, v: &Value) {
         // `/clear` starts a new conversation with a new task list.
         ("SessionStart", _) if v["source"].as_str() == Some("clear") => stats.update(session, |s| s.todos.clear()),
         // A new agent process: what the last one left running ended with it. Its scheduled
-        // prompts too; one resumed brings back its own, which its first `Stop` lists.
+        // prompts too, but for one resuming its conversation: it brings back its own, which only
+        // its first `Stop` lists, so the ones known stay until then.
         ("SessionStart", _) if matches!(v["source"].as_str(), Some("startup" | "resume")) => stats.update(session, |s| {
             s.waiting_on.clear();
-            s.crons.clear();
+            if v["source"].as_str() == Some("startup") {
+                s.crons.clear();
+            }
         }),
         ("Stop", _) => {
             if let Some(listed) = v["session_crons"].as_array() {
@@ -423,12 +428,16 @@ mod tests {
         feed("Stop", json!({"background_tasks": []}));
         assert_eq!(ids(&stats), vec!["efc5ae94"]);
 
-        // A new process starts with none (dino starting it again, or its SessionStart); a resumed
-        // one lists its own at its first turn's end.
+        // Started again on its conversation (dino restarting it, or waking it): a resumed agent
+        // brings its own back and lists them only at its first turn's end, so the ones known stay
+        // until then. A new conversation starts with none.
         stats.restarted("s");
-        assert!(stats.session("s").crons.is_empty());
-        stats.update("s", |s| s.crons.push(Cron { id: "x".into(), ..Default::default() }));
         feed("SessionStart", json!({"source": "resume"}));
+        assert_eq!(ids(&stats), vec!["efc5ae94"]);
+        feed("Stop", json!({"session_crons": []}));
+        assert!(stats.session("s").crons.is_empty(), "gone by the time it said");
+        stats.update("s", |s| s.crons.push(Cron { id: "x".into(), ..Default::default() }));
+        feed("SessionStart", json!({"source": "startup"}));
         assert!(stats.session("s").crons.is_empty());
         feed("Stop", json!({"session_crons": [{"id": "efc5ae94", "schedule": "23 * * * *", "recurring": true, "prompt": "p"}]}));
         assert_eq!(ids(&stats), vec!["efc5ae94"]);

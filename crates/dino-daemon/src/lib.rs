@@ -2176,9 +2176,10 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     if let Some(s) = session {
         // A shell's agent typed there, running as it was saved: started there again.
         let typed = restore.as_ref().and_then(|r| r.typed.clone()).filter(|_| s.agent_id == "shell" && s.host.is_none() && !s.pane.is_exited());
-        if restore.is_some() {
+        if let Some(r) = &restore {
             let conversation = typed.as_ref().and_then(|t| t.conversation.clone()).or_else(|| s.agent_session.lock().unwrap().clone());
             stats::seed(d, &s.id, None, s.started_at, conversation.as_deref());
+            d.proxy.stats.keep_crons(&s.id, r.crons.clone());
         }
         fallbacks::set(d, &settings, &providers::list(), &s);
         sync_shell_agents(d, &s, &Settings::load());
@@ -3408,6 +3409,11 @@ struct SavedSession {
     /// back asleep (an older dinod brings it back ended, to resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     asleep: Option<u64>,
+    /// The prompts its agent had scheduled for itself (Claude's crons, `/loop`'s wakeups), as last
+    /// known: resumed, it brings them back and lists them only at its first turn's end, so they're
+    /// known meanwhile and it isn't put to sleep under them (see `Stats::restarted`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    crons: Vec<dino_proxy::tasks::Cron>,
 }
 
 fn saved_path(home: &Path) -> PathBuf {
@@ -3579,6 +3585,7 @@ fn snapshot(d: &Daemon, s: &Session) -> SavedSession {
         fork_pending: s.fork_pending.load(Ordering::Relaxed),
         typed,
         asleep: s.slept_at(),
+        crons: d.proxy.stats.session(&s.id).crons,
     }
 }
 
@@ -3920,6 +3927,7 @@ fn adopt(d: &Daemon, f: FoundSession, cwd: Option<String>) -> anyhow::Result<Str
                 fork_pending: false,
                 typed: None,
                 asleep: None,
+                crons: vec![],
             };
             spawn(d, Launch { restore: Some(restore.clone()), ..Launch::new(&launcher, restore.args.clone(), Some(restore.cwd.clone())) })?
         }
@@ -5501,6 +5509,7 @@ mod tests {
             fork_pending: false,
             typed: None,
             asleep: None,
+            crons: vec![],
         }
     }
 
@@ -8159,6 +8168,52 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         assert_eq!(sleep::why_not(&d, &s, false), None);
         assert_eq!(sleep::tick(&d, 60 * MINUTE, &|| sleep::Pressure::Normal), std::slice::from_ref(&id));
         sleep::wake(&d, &id).unwrap();
+        kill(&d, &id);
+    }
+
+    /// The prompts an agent scheduled for itself (its crons, `/loop`'s wakeups) keep it awake after
+    /// it's started again: restarted with new controls, woken, or resumed by a dinod started again.
+    /// A resumed agent brings them back but says so only at its first turn's end; until then they
+    /// stay as dino knew them, and then they're what it says.
+    #[test]
+    fn scheduled_prompts_keep_an_agent_awake_across_restarts() {
+        let (d, dir) = sleepy("sleep-crons", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        let hook = |d: &Daemon, body: serde_json::Value| {
+            let r = reqwest::blocking::Client::new().post(d.proxy.base_url(&id, "hook")).body(body.to_string()).send().unwrap();
+            assert!(r.status().is_success());
+            d.proxy.stats.report(&id, Activity::Done);
+        };
+        let looping = "it has prompts scheduled for itself (CronCreate, /loop)";
+        hook(
+            &d,
+            serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "CronCreate", "tool_input": {"cron": "*/15 * * * *", "prompt": "babysit PR #42", "recurring": true}, "tool_response": {"id": "efc5ae94"}}),
+        );
+        idle_for(&s, 10 * MINUTE);
+        assert_eq!(sleep::why_not(&d, &s, false).as_deref(), Some(looping));
+        // New controls: a restart.
+        restart(&d, &id, Controls { model: Some("haiku".into()), ..Controls::default() }).unwrap();
+        let s = session(&d, &id);
+        wait_for("its prompt", || s.pane.text(0).starts_with('>'));
+        hook(&d, serde_json::json!({"hook_event_name": "SessionStart", "source": "resume"}));
+        idle_for(&s, 10 * MINUTE);
+        assert_eq!(sleep::why_not(&d, &s, false).as_deref(), Some(looping), "kept across a restart");
+        // dinod started again: kept in its saved sessions.
+        save(&d);
+        let launchers = d.launchers.read().unwrap().clone();
+        let d2 = new_daemon(d.home.clone(), Proxy::start(HashMap::new()).unwrap(), launchers);
+        restore(&d2, load_saved(&d2.home));
+        let s2 = session(&d2, &id);
+        wait_for("its prompt", || s2.pane.text(0).starts_with('>'));
+        hook(&d2, serde_json::json!({"hook_event_name": "SessionStart", "source": "resume"}));
+        idle_for(&s2, 10 * MINUTE);
+        assert_eq!(sleep::why_not(&d2, &s2, false).as_deref(), Some(looping), "kept across a dinod restart");
+        // Its first turn's end says it has none now.
+        hook(&d2, serde_json::json!({"hook_event_name": "Stop", "session_crons": []}));
+        idle_for(&s2, 10 * MINUTE);
+        assert_eq!(sleep::why_not(&d2, &s2, false), None);
+        kill(&d2, &id);
         kill(&d, &id);
     }
 

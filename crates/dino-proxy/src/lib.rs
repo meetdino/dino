@@ -510,15 +510,23 @@ impl Stats {
         self.update(id, |s| s.hooked = true);
     }
 
-    /// Forget context use, e.g. when the agent restarts on another model.
-    /// The agent is starting over: what it said about itself no longer holds.
+    /// The agent is starting over: what it said about itself no longer holds. Its scheduled
+    /// prompts stay as known: it resumes its conversation, which brings them back, and says so
+    /// only at its first turn's end (a new conversation's `SessionStart` clears them).
     pub fn restarted(&self, id: &str) {
         self.update(id, |s| {
             s.agent_mode = None;
             s.agent_model = None;
-            // The prompts the last one scheduled ended with it; one resuming its conversation
-            // brings back its own, which it lists at its first turn's end.
-            s.crons.clear();
+        });
+    }
+
+    /// Session `id`'s agent, resumed by a dinod started again, had these prompts scheduled for
+    /// itself as the dinod before last knew: known again until it says otherwise.
+    pub fn keep_crons(&self, id: &str, crons: Vec<tasks::Cron>) {
+        self.update(id, |s| {
+            if s.crons.is_empty() {
+                s.crons = crons;
+            }
         });
     }
 
