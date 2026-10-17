@@ -668,7 +668,8 @@ set; `[machine] sleep_idle_agents` in settings.toml, in minutes, 0 for never), a
 while macOS says memory is short. A pinned session only sleeps when you ask.
 
 Refused, saying why, while it would cut something short: a turn, a question, a subagent, a
-background command or monitor, prompts it scheduled, a server or anything else it left running.";
+background command or monitor, prompts it scheduled, a server or anything else it left running,
+or something typed into it and not sent.";
 
 const WAKE_HELP: &str = "usage: dino wake <id>
 

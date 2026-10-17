@@ -10,8 +10,8 @@
 //! Only what a stop cuts nothing short of sleeps: an agent dino started here and can start again
 //! on its conversation, between turns, asking nothing, and with nothing of its own still running
 //! (subagents, background commands, monitors, servers, scheduled prompts, a tmux client, a preview,
-//! anything it left running outside its terminal), not pinned (unless asked by name), not followed
-//! by an automation's run.
+//! anything it left running outside its terminal), nothing typed into it and not sent, not pinned
+//! (unless asked by name), not followed by an automation's run.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -190,6 +190,10 @@ pub(crate) fn why_not(d: &Daemon, s: &Session, asked: bool) -> Option<String> {
     }
     if s.typed.lock().unwrap().is_some_and(|t| t.elapsed() < crate::TYPED_QUIET) {
         return Some("you're typing in it".into());
+    }
+    // Its agent would forget it: Claude Code doesn't keep an unsent prompt across a resume.
+    if unsent(s) {
+        return Some("something typed in it isn't sent".into());
     }
     if st.subagents.iter().any(|a| a.running) {
         return Some("a subagent of its is running".into());
@@ -750,5 +754,24 @@ mod tests {
         assert_eq!((r.as_slice(), k.as_slice()), (b"\x1b[?1u\x1b]11;x\x07".as_slice(), b"abc".as_slice()));
         // Cut short: keys, not a reply that swallows them.
         assert_eq!(split_replies(b"\x1b[?12"), (vec![], b"\x1b[?12".to_vec()));
+    }
+
+    #[test]
+    fn keys_that_add_to_a_prompt_are_told_from_those_that_send_it() {
+        assert_eq!(draft(b"half a prompt"), Some(true));
+        assert_eq!(draft(b"done\r"), Some(false));
+        assert_eq!(draft(b"\r"), Some(false));
+        assert_eq!(draft(b"\x03"), Some(false), "Ctrl+C clears it");
+        assert_eq!(draft(b"\x15"), Some(false), "so does Ctrl+U");
+        // Arrows, in either mode, Escape, Backspace, Shift+Tab: nothing.
+        assert_eq!(draft(b"\x1b[A\x1bOB\x1b\x7f\x1b[Z"), None);
+        // A paste is text, its lines and all.
+        assert_eq!(draft(b"\x1b[200~a\rb\x1b[201~"), Some(true));
+        // Kitty-encoded: a letter, Return, Shift+Return (a new line), Ctrl+C.
+        assert_eq!(draft(b"\x1b[97u"), Some(true));
+        assert_eq!(draft(b"\x1b[13u"), Some(false));
+        assert_eq!(draft(b"\x1b[13;2u"), Some(true));
+        assert_eq!(draft(b"\x1b[99;5u"), Some(false));
+        assert_eq!(draft(b"x\x1b[99;5u"), Some(false), "the last that does anything");
     }
 }

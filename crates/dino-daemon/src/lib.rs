@@ -8132,6 +8132,34 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         kill(&d, &id);
     }
 
+    /// Something typed into an agent and not sent keeps it awake: its agent wouldn't keep it
+    /// across a resume. Sent (or cleared), it can sleep again. Asked by name, it says why not.
+    #[test]
+    fn a_prompt_typed_and_not_sent_keeps_its_session_awake() {
+        let (d, dir) = sleepy("sleep-unsent", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        sleep::input(&d, &id, sleep::Held::Keys(b"half a prompt".to_vec()));
+        wait_for("its keys", || s.pane.text(0).contains("half a prompt"));
+        idle_for(&s, 61 * MINUTE);
+        assert_eq!(sleep::why_not(&d, &s, false).as_deref(), Some("something typed in it isn't sent"));
+        assert!(sleep::tick(&d, 60 * MINUTE, &|| sleep::Pressure::Normal).is_empty());
+        assert!(sleep::tick(&d, 60 * MINUTE, &|| sleep::Pressure::Critical).is_empty(), "memory short or not");
+        let refused = sleep::sleep(&d, &id, sleep::By::Name).unwrap_err().to_string();
+        assert!(refused.contains("something typed in it isn't sent"), "{refused}");
+        // Arrows and the like add nothing; Return sends it.
+        sleep::input(&d, &id, sleep::Held::Keys(b"\x1b[D".to_vec()));
+        assert!(sleep::unsent(&s));
+        sleep::input(&d, &id, sleep::Held::Keys(b"\r".to_vec()));
+        assert!(!sleep::unsent(&s));
+        wait_for("its Return", || noted(&dir, "keys").ends_with('\r'));
+        idle_for(&s, 61 * MINUTE);
+        assert_eq!(sleep::why_not(&d, &s, false), None);
+        assert_eq!(sleep::tick(&d, 60 * MINUTE, &|| sleep::Pressure::Normal), std::slice::from_ref(&id));
+        sleep::wake(&d, &id).unwrap();
+        kill(&d, &id);
+    }
+
     /// An automatic fix for a PR whose checks fail is due for an asleep session too (it's between
     /// turns): it wakes, and the fix, held as a message, goes in once the agent waits for a prompt.
     #[test]
