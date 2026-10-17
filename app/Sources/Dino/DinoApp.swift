@@ -516,6 +516,7 @@ struct ContentView: View {
                     TabStrip()
                     TmuxSuggestion()
                     ComputerUseBanner()
+                    SleepBanner()
                     UpdateBanner()
                     Terminals()
                 }
@@ -1243,6 +1244,8 @@ struct StatusDot: View {
                 Image(systemName: "stop.circle").foregroundStyle(status.color)
             case .idle:
                 Circle().strokeBorder(.secondary, lineWidth: 1.5).frame(width: 10, height: 10)
+            case .asleep:
+                Image(systemName: "moon.zzz.fill").foregroundStyle(status.color)
             case .thinking, .working:
                 Pulse(color: NSColor(status.color), ring: false, period: 0.7).frame(width: 10, height: 10)
             case .waiting:

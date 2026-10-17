@@ -103,6 +103,13 @@ struct SessionInfo: Codable, Identifiable, Equatable {
     /// The session its conversation was forked from: by dino (Fork Session), or in the agent
     /// (Claude's /branch, Codex's /fork).
     var forked_from: ForkedFrom?
+    /// Asleep to save memory: its agent stopped while idle, the session kept as it was, its last
+    /// screen up; it starts again when it's shown or typed into. Nil from an older dinod.
+    var asleep: Bool?
+    /// When it went to sleep, in Unix seconds.
+    var slept_at: UInt64?
+    /// Woken, its agent starting: what's typed meanwhile goes in once it takes input.
+    var waking: Bool?
 
     /// All its turn left running is a server: the ports it listens on ("3000, 8080").
     var serving: String? {
@@ -1074,6 +1081,22 @@ final class DinoConnection: @unchecked Sendable {
     /// Start a session whose program ended again, in place: the agent resumes its conversation.
     func resume(session: String) throws {
         _ = try send(["type": "resume", "id": session])
+    }
+
+    /// Put a session to sleep now, freeing its agent's memory; dinod says why when it can't.
+    func sleep(session: String) throws {
+        _ = try send(["type": "sleep", "id": session])
+    }
+
+    /// Wake an asleep session; answers once its agent takes input.
+    func wake(session: String) throws {
+        _ = try send(["type": "wake", "id": session])
+    }
+
+    /// The sessions on screen now, all of them (none while no window shows): one asleep that
+    /// comes into view wakes, and dinod keeps the ones in view awake. Kept for this connection.
+    func viewing(_ ids: [String]) throws {
+        _ = try send(["type": "viewing", "ids": ids])
     }
 
     /// Close `session` for everyone, keeping it `undoMs` ms so `reopenClosed` can bring it back as it was.

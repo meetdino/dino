@@ -78,6 +78,23 @@ final class RowFactsTests: XCTestCase {
         XCTAssertEqual(RowFacts(RowFacts.Input(name: "x", status: .idle, agent: "Codex")).tooltip[0], "Codex · Idle")
     }
 
+    /// Asleep: its own word and mark, when it went to sleep in the tooltip, and listed with the
+    /// idle ones by the Idle filter and the State grouping's Idle section.
+    func testAsleepSaysSoAndWhenAndIsListedWithTheIdle() {
+        var i = RowFacts.Input(name: "x", status: .asleep, agent: "Claude Code")
+        XCTAssertEqual(RowFacts.state(i), "Asleep to save memory, wakes when you open it or type")
+        i.sleptAt = UInt64(Date().timeIntervalSince1970)
+        XCTAssertTrue(RowFacts.state(i).hasPrefix("Asleep since "), RowFacts.state(i))
+        XCTAssertEqual(SessionStatus.asleep.label, "Asleep")
+        XCTAssertTrue(SessionFilter.idle.passes(.asleep))
+        XCTAssertFalse(SessionFilter.working.passes(.asleep) || SessionFilter.done.passes(.asleep) || SessionFilter.needsYou.passes(.asleep))
+        XCTAssertEqual(StateSection.of(.asleep), .idle)
+        let s = session("1", "claude", ["asleep": true, "slept_at": 1_792_211_492, "activity": "done"])
+        XCTAssertEqual(s.asleep, true)
+        XCTAssertEqual(s.slept_at, 1_792_211_492)
+        XCTAssertNil(session("2", "claude").asleep, "an older dinod's says nothing")
+    }
+
     func testShellPlaceAndExit() {
         var i = RowFacts.Input(name: "zsh", status: .idle, agent: "Shell")
         i.shellPlace = "src/app"

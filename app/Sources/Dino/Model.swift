@@ -6,14 +6,17 @@ import UserNotifications
 enum SessionStatus {
     /// `ended`: its program exited cleanly and can be resumed; `exited`: it failed.
     /// `waiting`: its turn ended on subagents or background commands that still run.
-    case thinking, working, waiting, idle, done, needsYou, ended, exited
+    /// `asleep`: its agent was stopped to save memory, and starts again when shown or typed into.
+    case thinking, working, waiting, idle, done, needsYou, asleep, ended, exited
 
-    /// Four words, the same as the sidebar's filters: Working, Needs you, Done, Idle.
+    /// Four words, the same as the sidebar's filters (Working, Needs you, Done, Idle), and Asleep,
+    /// which the Idle filter lists.
     var label: String {
         switch self {
         case .thinking, .working, .waiting: "Working"
         case .needsYou: "Needs you"
         case .done: "Done"
+        case .asleep: "Asleep"
         case .idle, .ended, .exited: "Idle"
         }
     }
@@ -27,6 +30,7 @@ enum SessionStatus {
         case .needsYou: "Asking for something"
         case .done: "Finished since you last looked"
         case .idle: "Waiting for a prompt"
+        case .asleep: "Asleep to save memory; wakes when you open it or type"
         case .ended: "Exited; Enter resumes it"
         case .exited: "Exited with an error"
         }
@@ -38,7 +42,7 @@ enum SessionStatus {
         case .thinking, .working, .waiting: Color(nsColor: .systemGreen)
         case .needsYou: Color(nsColor: .systemOrange)
         case .done: Color(nsColor: .systemBlue)
-        case .idle, .ended: .secondary
+        case .idle, .asleep, .ended: .secondary
         case .exited: Color(nsColor: .systemRed)
         }
     }
@@ -89,6 +93,8 @@ final class DinoModel: ObservableObject {
             if let id = selected, !id.contains(":") { UserDefaults.standard.set(id, forKey: Self.lastSelectedKey) }
             // Something else shown: ⌘N starts where that is, not in a folder whose row was clicked before.
             if selected != oldValue { clickedFolder = nil }
+            // Shown now: asleep, it wakes.
+            reportViewing()
         }
     }
     /// The folder whose row was clicked last, while the session shown stayed (see `startHere`):
@@ -242,7 +248,10 @@ final class DinoModel: ObservableObject {
 
     /// Each tab's panes, when it has more than one: selecting any of them shows them all.
     @Published var splits: [SplitTree] = SplitTree.saved() {
-        didSet { if splits != oldValue { SplitTree.save(splits) } }
+        didSet {
+            if splits != oldValue { SplitTree.save(splits) }
+            reportViewing()
+        }
     }
     /// Split partners dinod has started that no poll has listed yet.
     var awaited: Set<String> = []
@@ -256,7 +265,15 @@ final class DinoModel: ObservableObject {
     @Published var focusedTerminal: String? {
         didSet { if focusedTerminal != oldValue { SecureInput.shared.update() } }
     }
-    private(set) var connection: DinoConnection?
+    private(set) var connection: DinoConnection? {
+        // A new connection (dinod started again): what's on screen is said on it.
+        didSet {
+            viewingSent = nil
+            reportViewing()
+        }
+    }
+    /// The sessions on screen as last told to dinod (see `reportViewing`).
+    var viewingSent: [String]?
     private var polling = false
 
     private var started = false
@@ -265,6 +282,10 @@ final class DinoModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        // Hidden, minimized or covered, and shown again: what's on screen changes with it.
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reportViewing() }
+        }
         Task.detached {
             do {
                 // Before dinod starts: `dino ping` starts it through the agent, once registered.
@@ -535,6 +556,8 @@ final class DinoModel: ObservableObject {
         placeHandedOff(next)
         if next != sessions { sessions = next }
         notePolled(sessions: true)
+        // A split partner that's just appeared, a session that's gone.
+        reportViewing()
         syncTabs(next)
         restoreReopened(Set(next.map(\.id)))
         if quotas != self.quotas { self.quotas = quotas }
@@ -650,6 +673,7 @@ final class DinoModel: ObservableObject {
 
     func status(of s: SessionInfo) -> SessionStatus {
         if s.exited { return (s.exit_code ?? 0) == 0 ? .ended : .exited }
+        if s.asleep == true { return .asleep }
         if attention.contains(s.id) || s.needs != nil { return .needsYou }
         // An agent run by hand in a shell says whether it's busy, unless its hooks report to dino
         // (typed into a dino shell, see dino-agents.zsh): those say more, as for dino's sessions.

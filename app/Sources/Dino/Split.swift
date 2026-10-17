@@ -484,6 +484,7 @@ struct SessionMenu: View {
         if session.exited {
             Button(session.agent_id == "shell" ? "Restart" : "Resume") { model.resume(session.id) }
         }
+        SleepMenuItems(session: session)
         // The sessions it's linked to (the row's tooltip says how): the one it was forked from,
         // and the ones that started or messaged it, or it them.
         if let from = session.forked_from, let parent = model.sessions.first(where: { $0.id == from.session }) {

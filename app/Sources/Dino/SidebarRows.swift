@@ -112,6 +112,8 @@ struct RowFacts: Equatable {
         /// "Started by Fix CI's agent", "Its agent started Docs".
         var peers: [String] = []
         var pinned = false
+        /// When it went to sleep, while it's asleep (Unix seconds).
+        var sleptAt: UInt64?
         var using: String?
         /// The project it's in, when the row says it as a tag (grouped by state).
         var project: String?
@@ -177,6 +179,7 @@ struct RowFacts: Equatable {
         case .needsYou: "Needs you"
         case .done: "Done"
         case .idle: "Idle"
+        case .asleep: i.sleptAt.map { "Asleep since \(Clock.short($0)) to save memory, wakes when you open it or type" } ?? "Asleep to save memory, wakes when you open it or type"
         case .ended: "Exited, Enter resumes it"
         case .exited: "Exited with an error"
         }
@@ -257,8 +260,9 @@ struct SessionRow: View {
         .background(CostAnchor(holder: anchor))
         .onHover {
             hovering = $0
-            // What it costs the Mac, in a card beside the row; only for what runs on this Mac.
-            if !$0 || (session.host == nil && !session.exited) { CostCard.shared.hover(session.id, anchor: anchor.view, on: $0) }
+            // What it costs the Mac, in a card beside the row; only for what runs on this Mac (an
+            // asleep one runs nothing).
+            if !$0 || (session.host == nil && !session.exited && session.asleep != true) { CostCard.shared.hover(session.id, anchor: anchor.view, on: $0) }
         }
         .onDisappear { CostCard.shared.hover(session.id, anchor: nil, on: false) }
     }
@@ -274,7 +278,7 @@ struct SessionRow: View {
             SessionName(
                 session: session, place: .sidebar,
                 font: .body.weight(status == .needsYou || status == .done ? .semibold : place == nil ? .regular : .medium),
-                color: status == .idle || status == .ended ? .secondary : .primary,
+                color: status == .idle || status == .asleep || status == .ended ? .secondary : .primary,
                 tooltip: false
             )
             .layoutPriority(1)
@@ -375,6 +379,7 @@ extension DinoModel {
         input.forkedFrom = parent
         input.peers = PeerLinks.of(s, in: self).map(\.help)
         input.pinned = s.pinned == true
+        input.sleptAt = s.slept_at
         input.using = UsingDisplay.shown ? s.usingSentence : nil
         input.project = place?.name
         return RowFacts(input)
@@ -444,6 +449,8 @@ struct MinimalMark: View {
                 Circle().fill(error ? SessionStatus.exited.color : status.color).frame(width: 7, height: 7)
             case .exited:
                 Circle().fill(status.color).frame(width: 7, height: 7)
+            case .asleep:
+                Image(systemName: "moon.zzz.fill").font(.system(size: 9)).foregroundStyle(.secondary)
             case .idle, .ended:
                 if error { Circle().fill(SessionStatus.exited.color).frame(width: 7, height: 7) }
             }

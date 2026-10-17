@@ -351,7 +351,7 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .needsYou: "Waiting for you: a permission or an answer"
         case .done: "Finished since you last looked"
         case .working: "Thinking, running tools, or waiting on its subagents and background commands"
-        case .idle: "Waiting for a prompt, or exited"
+        case .idle: "Waiting for a prompt, asleep, or exited"
         case .archived: "Stopped sessions you can resume later. ⇧⌘A archives the current session."
         }
     }
@@ -362,7 +362,7 @@ enum SessionFilter: String, CaseIterable, Identifiable {
         case .needsYou: status == .needsYou
         case .done: status == .done
         case .working: status == .thinking || status == .working || status == .waiting
-        case .idle: status == .idle || status == .ended || status == .exited
+        case .idle: status == .idle || status == .asleep || status == .ended || status == .exited
         // Live sessions are never archived; the archive is listed on its own.
         case .archived: false
         }

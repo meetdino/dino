@@ -120,7 +120,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .worktrees: "Where dino's worktrees go, trust, and the ones on disk."
         case .repos: "Variables for each repo's sessions, and a build cache shared by worktrees."
         case .ssh: "Machines to start sessions on over SSH."
-        case .power: "Keeping your Mac awake for agents and automations."
+        case .power: "Keeping your Mac awake for agents and automations, and idle agents asleep to save memory."
         case .permissions: "macOS permissions for programs in dino's terminals."
         case .experimental: "Features still being tested. Each is off until you turn it on."
         case .managed: "Settings your organization sets for you."
@@ -371,6 +371,8 @@ extension SettingsEntry {
         .init(id: "lid", pane: .power, title: "Keep agents running with the lid closed", detail: "While an agent is working or a session is open, on battery or not, for up to some hours.",
               synonyms: ["clamshell", "lid", "sleep", "battery", "pmset"],
               keys: ["machine.lid.enabled", "machine.lid.when", "machine.lid.on_battery", "machine.lid.min_battery", "machine.lid.max_hours"]),
+        .init(id: "sleep-idle", pane: .power, title: "Sleep idle agents", detail: "Stop an agent idle this long, on no screen, to free its memory; it wakes when you open it or type.",
+              synonyms: ["memory", "ram", "idle", "suspend", "memory saver", "hibernate", "free memory"], keys: ["machine.sleep_idle_agents"]),
 
         // Permissions
         .init(id: "permissions", pane: .permissions, title: "macOS permissions", detail: "Screen Recording, Accessibility and Full Disk Access for programs in dino's terminals.",

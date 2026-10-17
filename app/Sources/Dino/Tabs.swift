@@ -149,7 +149,11 @@ private struct TabItem: View {
         let panes = model.split(of: session.id).map { t in t.panes.compactMap { id in model.sessions.first { $0.id == id } } } ?? []
         let status = model.status(of: session)
         HStack(spacing: 5) {
-            if !session.plainShell {
+            if status == .asleep {
+                Image(systemName: "moon.zzz.fill").font(.system(size: 8)).foregroundStyle(.secondary)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(status.label)
+            } else if !session.plainShell {
                 Circle().fill(status.color).frame(width: 5, height: 5)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(status.label)
@@ -204,7 +208,10 @@ private struct TabItem: View {
     /// The tab's one tooltip: its agent and where it is, then how to rename it (a split's tab
     /// names its panes, and isn't renamed in place).
     private func help(renames: Bool) -> String {
-        let what = [tabAgent.map { model.launcherLabel($0) }, session.here.map(shortPath) ?? session.display].compactMap { $0 }.joined(separator: " · ")
+        var what = [tabAgent.map { model.launcherLabel($0) }, session.here.map(shortPath) ?? session.display].compactMap { $0 }.joined(separator: " · ")
+        if session.asleep == true {
+            what += "\n" + (session.slept_at.map { "Asleep since \(Clock.short($0)) to save memory" } ?? "Asleep to save memory")
+        }
         return renames ? what + "\nDouble-click to rename" : what
     }
 }

@@ -47,6 +47,9 @@ struct DinoSettings: Codable, Equatable {
         var build_cache: BuildCache?
         /// Agents can use the Mac's apps (open-computer-use); nil: not set here (`computerUse`).
         var computer_use: Bool?
+        /// Minutes an agent is idle, on no screen, before dinod puts it to sleep; 0 never. Nil
+        /// from an older dinod.
+        var sleep_idle_agents: UInt32?
     }
     struct ClaudeTokenUse: Codable, Equatable {
         var ssh: Bool
@@ -1111,7 +1114,7 @@ private struct ShellAISection: View {
     }
 }
 
-/// Settings → Power: keeping the Mac awake while agents work, for scheduled automations, and for agents with the lid closed.
+/// Settings → Power: keeping the Mac awake while agents work, for scheduled automations, and for agents with the lid closed; and idle agents asleep to save memory.
 private struct PowerPane: View {
     @EnvironmentObject var store: SettingsStore
 
@@ -1147,8 +1150,49 @@ private struct PowerPane: View {
                 Text("Automations")
             }
             LidSection()
+            SleepSection()
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Settings → Power → Memory: how long an agent is idle before dinod puts it to sleep.
+private struct SleepSection: View {
+    @EnvironmentObject var store: SettingsStore
+
+    private static let choices: [UInt32] = [30, 60, 240, 0]
+
+    var body: some View {
+        let minutes = store.settings?.machine.sleep_idle_agents ?? 60
+        Section {
+            Picker(selection: Binding(
+                get: { minutes },
+                set: { m in store.update { $0.machine.sleep_idle_agents = m } }
+            )) {
+                // A value set by hand in settings.toml, too.
+                ForEach(Self.choices.contains(minutes) ? Self.choices : [minutes] + Self.choices, id: \.self) { m in
+                    Text(Self.label(m)).tag(m)
+                }
+            } label: {
+                Text("Sleep idle agents")
+                Text("An agent idle this long, and not on screen, has its process stopped to free its memory. Its session stays where it was, its screen up, and it starts again on its conversation when you open it or type into it. While your Mac is short of memory, agents idle 5 minutes go first. Pinned sessions, and agents still running something, stay awake.")
+            }
+            .disabled(store.settings == nil)
+            .orgLocked("machine.sleep_idle_agents")
+            .settingAnchor("sleep-idle")
+        } header: {
+            Text("Memory")
+        }
+    }
+
+    static func label(_ m: UInt32) -> String {
+        switch m {
+        case 0: "Never"
+        case 60: "After 1 hour"
+        case let m where m % 60 == 0: "After \(m / 60) hours"
+        case 1: "After 1 minute"
+        default: "After \(m) minutes"
+        }
     }
 }
 
@@ -1554,6 +1598,7 @@ private struct ManagedPane: View {
         case ("machine", "computer_use"), ("experimental", "computer_use"): return make(ComputerUseCopy.title, .computer)
         case ("machine", "keep_awake"): return make("Keep your Mac awake while automations are scheduled", .power)
         case ("machine", "awake_while_working"): return make("Keep your Mac awake while agents work", .power)
+        case ("machine", "sleep_idle_agents"): return make("Sleep idle agents", .power)
         case ("machine", let r) where r == "lid" || r.hasPrefix("lid."): return make("Keep agents running with the lid closed", .power)
         case ("machine", "check_updates"): return make("Check for updates automatically", .updates)
         case ("machine", let r) where r == "claude_token" || r.hasPrefix("claude_token."): return make("Claude Code on SSH hosts", .claude)
