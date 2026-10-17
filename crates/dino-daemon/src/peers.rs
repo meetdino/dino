@@ -8,7 +8,7 @@ use dino_core::ipc::{self, LauncherInfo};
 use dino_proxy::Activity;
 
 use crate::schedule::check_trust;
-use crate::{Daemon, Launch, Session, idle, save, send_input, spawn, spawn_in_worktree, stats, work_dir};
+use crate::{Daemon, Launch, Session, idle, save, spawn, spawn_in_worktree, stats, work_dir};
 
 /// Screen lines `read_session` gives by default, and at most.
 const SCREEN_LINES: u32 = 60;
@@ -94,7 +94,7 @@ pub(crate) fn status(d: &Daemon, s: &Session) -> String {
 
 /// Send `text` to session `id` as a message from session `by`, if it's between turns. One asleep
 /// is between turns: it wakes, and gets it once its agent takes input.
-pub(crate) fn message(d: &Arc<Daemon>, id: &str, text: &str, by: Option<String>) -> anyhow::Result<()> {
+pub(crate) fn message(d: &Daemon, id: &str, text: &str, by: Option<String>) -> anyhow::Result<()> {
     let s = find(d, id)?;
     anyhow::ensure!(by.as_deref() != Some(id), "that's this session; message another one");
     anyhow::ensure!(!text.trim().is_empty(), "the message is empty");
@@ -104,9 +104,11 @@ pub(crate) fn message(d: &Arc<Daemon>, id: &str, text: &str, by: Option<String>)
     let now = super::mode::now(&s, d.proxy.stats.session(&s.id).agent_mode.as_deref());
     let pending = s.pending.lock().unwrap().as_ref().and_then(|c| c.mode.clone());
     check_messageable(&s.name, &s.agent_id, &[s.controls.mode.as_deref(), now.as_deref(), pending.as_deref()])?;
+    // Asleep or waking, it's held until the agent waits for a prompt and nobody's typing one, as
+    // below (see `sleep::settle`).
     if s.asleep() || crate::sleep::waking(d, id) {
         *s.messaged_by.lock().unwrap() = by;
-        crate::sleep::input(d, &s, crate::sleep::Held::Text { text: text.trim().into(), submit: true });
+        crate::sleep::input(d, id, crate::sleep::Held::Message(text.trim().into()));
         return Ok(());
     }
     // Typed into a permission prompt or mid-turn, the text would answer the wrong question.
@@ -114,7 +116,8 @@ pub(crate) fn message(d: &Arc<Daemon>, id: &str, text: &str, by: Option<String>)
     // Hand over only once nobody is typing into it, so the text doesn't join a half-written prompt.
     anyhow::ensure!(s.attached.load(Ordering::Relaxed) == 0 || s.poked.lock().unwrap().is_none_or(|t| t.elapsed() > USER_TYPING), "the user is typing in {}; try again shortly", s.name);
     *s.messaged_by.lock().unwrap() = by;
-    send_input(&s, text.trim(), true);
+    // Through `giving`: a sleep decided at this moment waits for it, or it wakes what slept first.
+    crate::sleep::input(d, id, crate::sleep::Held::Message(text.trim().into()));
     Ok(())
 }
 
@@ -127,7 +130,7 @@ fn check_messageable(name: &str, agent_id: &str, modes: &[Option<&str>]) -> anyh
 }
 
 /// Recent enough a keystroke that the user may be mid-sentence.
-const USER_TYPING: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const USER_TYPING: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Side chat: answer `question` about session `id`.
 pub(crate) fn ask(d: &Daemon, id: &str, question: &str) -> anyhow::Result<String> {

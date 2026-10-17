@@ -1009,7 +1009,8 @@ fn follow(d: &Daemon) {
             let s = d.sessions.lock().unwrap().iter().find(|s| s.id == sid).cloned();
             match s {
                 Some(s) if !s.pane.is_exited() && idle(d, &s) && s.last_write.lock().unwrap().is_some_and(|w| w.elapsed() > Duration::from_secs(2)) => {
-                    send_input(&s, &prompt, true);
+                    // Through `giving`: a sleep decided at this moment waits for it (see `sleep`).
+                    crate::sleep::input(d, &sid, crate::sleep::Held::Message(prompt.clone()));
                     let mut live = d.schedule.live.lock().unwrap();
                     if let Some(l) = live.get_mut(&run_id) {
                         l.deliver = None;

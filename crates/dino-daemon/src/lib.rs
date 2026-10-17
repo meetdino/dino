@@ -200,6 +200,12 @@ struct Session {
     /// Held while input is given to its program (see `sleep::input`): it isn't put to sleep with
     /// some on its way.
     giving: Mutex<()>,
+    /// The last key given to its program that added to its prompt line, and the last that sent or
+    /// cleared it: one after the other is something typed and not sent (see `sleep::unsent`).
+    drafted: Mutex<Option<Instant>>,
+    submitted: Mutex<Option<Instant>>,
+    /// Asleep, why its last wake failed, and what was held for it then (see `sleep::begin`).
+    wake_failed: Mutex<Option<(String, Vec<sleep::Held>)>>,
 }
 
 /// What a shell is running in the foreground, as last looked at.
@@ -363,9 +369,11 @@ struct Daemon {
     /// Sessions waking from sleep, by id, each with what was typed or sent to it meanwhile, in
     /// order, held until its agent takes input. Each sleep and wake is decided under this lock,
     /// taken before the sessions' (see `sleep`).
-    waking: Mutex<HashMap<String, Vec<sleep::Held>>>,
+    waking: Mutex<HashMap<String, sleep::Wake>>,
     /// The sessions each client shows on screen, by its connection (see `Request::Viewing`).
     viewing: Mutex<HashMap<u64, HashSet<String>>>,
+    /// Itself, for work it hands to a thread of its own (a wake, see `sleep`).
+    me: std::sync::Weak<Daemon>,
 }
 
 /// `dino lid-watchdog <pid>`: see [`lid`].
@@ -813,7 +821,7 @@ fn watch_catalogs(d: &Daemon, mut seen: CatalogStamps) {
 
 /// The daemon's state, with what was saved of it (all but the sessions, see `restore`).
 fn new_daemon(home: PathBuf, proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<Daemon> {
-    let daemon = Arc::new(Daemon {
+    let daemon = Arc::new_cyclic(|me| Daemon {
         worktrees: Mutex::new(load_worktrees(&home)),
         subagents: Mutex::new(load_subagents(&home)),
         archived: Mutex::new(lifecycle::load_archived(&home)),
@@ -849,6 +857,7 @@ fn new_daemon(home: PathBuf, proxy: Proxy, launchers: Vec<LauncherInfo>) -> Arc<
         ending: Mutex::default(),
         waking: Mutex::default(),
         viewing: Mutex::default(),
+        me: me.clone(),
     });
     // Archived ids stay theirs, so a new session never takes one.
     let max_id = daemon.archived.lock().unwrap().iter().filter_map(|a| a.saved.id.parse::<u64>().ok()).max().unwrap_or(0);
@@ -1531,7 +1540,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::Attach { id, cols, rows, wait, scrollback, background } => {
                 // Looked at, one asleep wakes; a surface kept for it shows its last screen.
                 if !background && attachable(d, &id).is_some_and(|s| s.asleep()) {
-                    sleep::wake_soon(d, &id, vec![]);
+                    sleep::wake_soon(d, &id, false);
                 }
                 let session = loop {
                     match attachable(d, &id) {
@@ -1579,7 +1588,7 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
-            Request::Sleep { id } => match sleep::sleep(d, &id, true) {
+            Request::Sleep { id } => match sleep::sleep(d, &id, sleep::By::Name) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error { message: e.to_string() },
             },
@@ -1685,30 +1694,36 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
                 match session {
                     // Asleep, it wakes and gets it once its agent takes input.
                     Some(s) if !s.ended() => {
-                        sleep::input(d, &s, sleep::Held::Text { text, submit });
+                        sleep::input(d, &s.id, sleep::Held::Text { text, submit });
                         Response::Ok
                     }
                     Some(_) => Response::Error { message: format!("{id} has exited") },
                     None => Response::Error { message: format!("no session {id}") },
                 }
             }
-            Request::SendKeys { id, text } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
-                Some(s) if s.ended() => Response::Error { message: format!("{id} has exited") },
-                // Held for the agent once it takes input, waking it.
-                Some(s) if s.asleep() || sleep::waking(d, &id) => {
-                    sleep::input(d, &s, sleep::Held::Keys(text.into_bytes()));
-                    Response::Ok
+            Request::SendKeys { id, text } => {
+                // Found first: in a `match` on it, the sessions' lock would be held through the arms,
+                // which take the waking lock, and `sleep::input` takes the sessions' again.
+                let found = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
+                match found {
+                    Some(s) if s.ended() => Response::Error { message: format!("{id} has exited") },
+                    // Held for the agent once it takes input, waking it.
+                    Some(s) if s.asleep() || sleep::waking(d, &id) => {
+                        sleep::input(d, &id, sleep::Held::Keys(text.into_bytes()));
+                        Response::Ok
+                    }
+                    // In line mode its terminal prints them (`^[[105;9u`) for what runs to read as
+                    // text: a command, or the shell itself before its next prompt (old bash asking
+                    // for a # line). A line editor reads keys (a shell's, or one behind a tmux
+                    // client or ssh).
+                    Some(s) if !s.pane.reads_keys() => Response::Error { message: format!("{id} isn't at a prompt") },
+                    Some(_) => {
+                        sleep::input(d, &id, sleep::Held::Keys(text.into_bytes()));
+                        Response::Ok
+                    }
+                    None => Response::Error { message: format!("no session {id}") },
                 }
-                // In line mode its terminal prints them (`^[[105;9u`) for what runs to read as text:
-                // a command, or the shell itself before its next prompt (old bash asking for a #
-                // line). A line editor reads keys (a shell's, or one behind a tmux client or ssh).
-                Some(s) if !s.pane.reads_keys() => Response::Error { message: format!("{id} isn't at a prompt") },
-                Some(s) => {
-                    s.pane.write(text.into_bytes());
-                    Response::Ok
-                }
-                None => Response::Error { message: format!("no session {id}") },
-            },
+            }
             Request::Interrupt { id } => match d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned() {
                 // Asleep, its agent is between turns: nothing to interrupt.
                 Some(s) if s.asleep() => Response::Ok,
@@ -2151,6 +2166,9 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         spawned: Instant::now(),
         looking: AtomicUsize::new(0),
         giving: Mutex::new(()),
+        drafted: Mutex::default(),
+        submitted: Mutex::default(),
+        wake_failed: Mutex::default(),
     }));
     let session = sessions.last().cloned();
     drop(sessions);
@@ -2796,7 +2814,7 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
                 // repaints on those.
                 s.poke();
                 // To its program; held, and waking it, while it's asleep or waking.
-                sleep::input(d, s, sleep::Held::Keys(payload));
+                sleep::input(d, &s.id, sleep::Held::Keys(payload));
             }
             ipc::RESIZE => {
                 s.poke();
@@ -3079,7 +3097,7 @@ fn shown_name(s: &Session) -> Option<String> {
 fn state(d: &Daemon) -> Response {
     let prs = d.prs.lock().unwrap().clone();
     let previews = d.previews.lock().unwrap().clone();
-    let waking: HashSet<String> = d.waking.lock().unwrap().keys().cloned().collect();
+    let waking = sleep::starting_ids(d);
     let live = d.sessions.lock().unwrap().clone();
     let sessions = live
         .iter()
@@ -3207,6 +3225,7 @@ fn state(d: &Daemon) -> Response {
                 asleep: s.asleep(),
                 slept_at: s.slept_at(),
                 waking: waking.contains(&s.id),
+                wake_error: s.wake_failed.lock().unwrap().as_ref().map(|(why, _)| why.clone()),
             }
         })
         .collect();
@@ -4875,12 +4894,12 @@ fn pr_session(d: &Daemon, id: &str) -> anyhow::Result<Arc<Session>> {
 }
 
 /// Ask the agent to fix its PR's failed checks, with their logs; one asleep wakes for it.
-fn pr_fix(d: &Arc<Daemon>, id: &str) -> anyhow::Result<()> {
+fn pr_fix(d: &Daemon, id: &str) -> anyhow::Result<()> {
     let s = pr_session(d, id)?;
     anyhow::ensure!(!s.ended(), "{id} has exited");
     let branch = pr::branch(&s.cwd).ok_or_else(|| anyhow::anyhow!("Not on a branch"))?;
     let msg = pr::fix_message(&s.cwd, &branch)?;
-    sleep::input(d, &s, sleep::Held::Text { text: msg, submit: true });
+    sleep::input(d, &s.id, sleep::Held::Message(msg));
     // Asked by hand: no automatic fix for the same push.
     if let Some(pr) = d.prs.lock().unwrap().get(id) {
         s.auto.lock().unwrap().fixed = Some((pr.number, pr.head.clone()));
@@ -5015,14 +5034,13 @@ fn auto_pr(d: &Daemon, s: &Session, root: &Path, branch: &str, pr: &ipc::PrInfo)
         s.auto.lock().unwrap().pr.note = Some(format!("Stopped after {fixes} fixes: checks still fail"));
         return false;
     }
-    // Not mid-turn, not while it waits on you, not while you type: the next poll will do.
-    let typing = s.poked.lock().unwrap().is_some_and(|t| t.elapsed() < LEAVE_THE_USER);
-    if typing || !idle(d, s) {
+    // Not now: the next poll will do.
+    if !fix_due(d, s) {
         return false;
     }
     let msg = pr::fix_message(root, branch);
     if let Ok(msg) = &msg {
-        send_input(s, msg, true);
+        sleep::input(d, &s.id, sleep::Held::Message(msg.clone()));
     }
     let mut a = s.auto.lock().unwrap();
     a.fixed = this_push;
@@ -5034,6 +5052,14 @@ fn auto_pr(d: &Daemon, s: &Session, root: &Path, branch: &str, pr: &ipc::PrInfo)
         Err(e) => a.pr.note = Some(format!("Couldn't ask for a fix: {e}")),
     }
     true
+}
+
+/// An automatic fix may be asked of `s` now: not mid-turn, not while it waits on you, not while you
+/// type. Asleep, it's between turns: it wakes, and gets the fix once it waits for a prompt (see
+/// `sleep`).
+fn fix_due(d: &Daemon, s: &Session) -> bool {
+    let typing = s.poked.lock().unwrap().is_some_and(|t| t.elapsed() < LEAVE_THE_USER);
+    !typing && (idle(d, s) || s.asleep())
 }
 
 /// The session's PR merged or closed: when the setting says so, the session is archived once its
@@ -7569,8 +7595,9 @@ while (sysread(STDIN, my $c, 1)) {
     /// A daemon whose Claude Code is a stand-in that sleeps and wakes as Claude does, in folder
     /// `name`: each start's arguments go in `log.starts`; it takes `slow` seconds to start, then
     /// reads keys, throwing away what was typed before it could (as an agent starting up may),
-    /// draws its prompt, and keeps each key it's given in `log.keys`, echoing it. `extra` is Perl
-    /// it runs first (what it starts).
+    /// draws its prompt, and keeps each key it's given in `log.keys`, echoing it. Started again
+    /// while the folder has a file `dialog`, it first asks something, as Claude asks with its
+    /// "Esc to cancel", until it's given `y`. `extra` is Perl it runs first (what it starts).
     fn sleepy(name: &str, slow: f64, extra: &str) -> (Arc<Daemon>, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let dir = test_home().join(name);
@@ -7582,15 +7609,22 @@ while (sysread(STDIN, my $c, 1)) {
 use POSIX;
 open(my $f, ">>", "{log}.starts"); print $f "$$ @ARGV\n"; close $f;
 {extra}
+my $starts = 0;
+if (open(my $c, "<", "{log}.starts")) {{ $starts++ while <$c>; close $c; }}
 select(undef, undef, undef, {slow});
 system("stty raw -echo");
 POSIX::tcflush(0, POSIX::TCIFLUSH);
 $| = 1;
-print "\e[2J\e[H> ";
 open(my $k, ">>", "{log}.keys"); my $o = select($k); $| = 1; select($o);
+if ($starts > 1 && -e "{dir}/dialog") {{
+    print "\e[2J\e[HAllow this? Esc to cancel";
+    while (sysread(STDIN, my $c, 1)) {{ print $k $c; last if $c eq "y"; }}
+}}
+print "\e[2J\e[H> ";
 while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
 "#,
-            log = log.display()
+            log = log.display(),
+            dir = dir.display()
         );
         let program = dir.join("claude");
         std::fs::write(&program, script).unwrap();
@@ -7616,10 +7650,19 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         s
     }
 
-    /// `s` as if its agent last printed `ago`, nobody typing since.
+    /// `s` as if its agent last printed `ago`, nobody typing since: once what it's printing (an
+    /// echo of the last keys) has landed.
     fn idle_for(s: &Session, ago: std::time::Duration) {
-        *s.last_output.lock().unwrap() = Instant::now().checked_sub(ago);
-        *s.typed.lock().unwrap() = None;
+        loop {
+            wait_for("it to go quiet", || s.last_write.lock().unwrap().is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(200)));
+            *s.last_output.lock().unwrap() = Instant::now().checked_sub(ago);
+            *s.typed.lock().unwrap() = None;
+            // Nothing landed after all (a busy Mac is slow to echo).
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            if s.last_output.lock().unwrap().is_some_and(|t| t.elapsed() >= ago) {
+                return;
+            }
+        }
     }
 
     /// What `dir`'s stand-in noted: each start's arguments, or every key it was given.
@@ -7643,6 +7686,9 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
 
     const MINUTE: std::time::Duration = std::time::Duration::from_secs(60);
 
+    /// As the checker puts an idle session to sleep, memory not critically short.
+    const IDLE: sleep::By = sleep::By::Checker { critical: false };
+
     /// Put to sleep, an agent's process is gone and its session stays in its place as it was: its
     /// name, pin, last screen and conversation; nothing says it ended. Woken, a new agent starts on
     /// the same conversation in the same session, its last screen above; and again.
@@ -7652,7 +7698,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         let before = sleepy_session(&d, &dir);
         let s = sleepy_session(&d, &dir);
         let id = s.id.clone();
-        sleep::input(&d, &s, sleep::Held::Keys(b"hi".to_vec()));
+        sleep::input(&d, &s.id, sleep::Held::Keys(b"hi\r".to_vec()));
         wait_for("its keys", || s.pane.text(0).contains("> hi"));
         *s.label.lock().unwrap() = Some("mine".into());
         s.pinned.store(true, Ordering::Relaxed);
@@ -7663,7 +7709,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         // Pinned, it only sleeps when asked by name.
         assert_eq!(sleep::why_not(&d, &s, false).as_deref(), Some("it's pinned"));
         assert!(sleep::tick(&d, MINUTE, &|| sleep::Pressure::Normal).is_empty(), "the other one isn't idle a minute");
-        sleep::sleep(&d, &id, true).unwrap();
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
         assert!(s.asleep() && s.pane.is_exited() && !alive(pid), "its agent is gone");
         assert!(s.pane.text(0).contains("> hi"), "{}", s.pane.text(0));
         assert_eq!(ids(&d), [before.id.clone(), id.clone()]);
@@ -7673,7 +7719,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         assert_eq!(dino_core::status::Status::of(&shown), dino_core::status::Status::Asleep);
         let saved = load_saved(&d.home).into_iter().find(|x| x.id == id).unwrap();
         assert!(saved.ended && saved.asleep.is_some() && saved.exit_code.is_none(), "saved asleep, and ended for an older dinod");
-        sleep::sleep(&d, &id, true).unwrap();
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
         assert_eq!(noted(&dir, "starts").lines().count(), 2, "asleep already: nothing more");
 
         sleep::wake(&d, &id).unwrap();
@@ -7692,7 +7738,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         assert_eq!(noted(&dir, "starts").lines().filter(|l| l.contains(&conversation)).count(), 2, "awake already: nothing more");
 
         idle_for(&woke, 2 * MINUTE);
-        sleep::sleep(&d, &id, true).unwrap();
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
         sleep::wake(&d, &id).unwrap();
         assert_eq!(noted(&dir, "starts").lines().filter(|l| l.contains(&conversation)).count(), 3);
         assert_eq!(session(&d, &id).pane.text(LIVE_HISTORY).matches("woke from sleep").count(), 1, "one line per wake, not one more each time");
@@ -7710,7 +7756,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         let s = sleepy_session(&d, &dir);
         let id = s.id.clone();
         idle_for(&s, 2 * MINUTE);
-        sleep::sleep(&d, &id, false).unwrap();
+        sleep::sleep(&d, &id, IDLE).unwrap();
 
         let attach = |background: bool| {
             let (mut pane, server) = UnixStream::pair().unwrap();
@@ -7730,7 +7776,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
 
         // What each connection sends is held in the order it's read; across connections, in
         // the order each is read, which the waits below make the order they're sent.
-        let held = || d.waking.lock().unwrap().get(&id).map_or(0, Vec::len);
+        let held = || sleep::held(&d, &id);
         ipc::write_frame(&mut pane, ipc::DATA, b"a").unwrap();
         ipc::write_frame(&mut pane, ipc::DATA, b"b").unwrap();
         wait_for("it to wake", || !session(&d, &id).asleep());
@@ -7769,20 +7815,20 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         let s = sleepy_session(&d, &dir);
         let id = s.id.clone();
         idle_for(&s, 2 * MINUTE);
-        sleep::sleep(&d, &id, false).unwrap();
+        sleep::sleep(&d, &id, IDLE).unwrap();
         let wakes: Vec<_> = (0..4)
             .map(|i| {
                 let (d, id, s) = (d.clone(), id.clone(), s.clone());
                 std::thread::spawn(move || match i {
                     0 => sleep::wake(&d, &id).unwrap(),
                     1 => sleep::viewing(&d, 1_000_001, vec![id.clone()]),
-                    2 => sleep::input(&d, &s, sleep::Held::Keys(b"k".to_vec())),
+                    2 => sleep::input(&d, &s.id, sleep::Held::Keys(b"k".to_vec())),
                     _ => assert!(matches!(request(&d, &Request::Wake { id: id.clone() }), Response::Ok)),
                 })
             })
             .collect();
         wait_for("it to be waking", || sleep::waking(&d, &id));
-        let refused = sleep::sleep(&d, &id, true).unwrap_err().to_string();
+        let refused = sleep::sleep(&d, &id, sleep::By::Name).unwrap_err().to_string();
         assert!(refused.contains("waking up"), "{refused}");
         assert!(sleep::tick(&d, std::time::Duration::ZERO, &|| sleep::Pressure::Critical).is_empty(), "nor on its own, memory short or not");
         for w in wakes {
@@ -7910,7 +7956,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         // Closed, with time to undo it: out of every list, it isn't put to sleep.
         assert!(close(&d, &id, 60_000));
         assert!(sleep::tick(&d, MINUTE, &normal).is_empty());
-        assert!(sleep::sleep(&d, &id, true).unwrap_err().to_string().contains("no session"));
+        assert!(sleep::sleep(&d, &id, sleep::By::Name).unwrap_err().to_string().contains("no session"));
         assert!(reopen(&d, &id));
 
         // Ended, it has nothing to stop.
@@ -7996,11 +8042,11 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         let (d, dir) = sleepy("sleep-restart", 0.0, "");
         let s = sleepy_session(&d, &dir);
         let id = s.id.clone();
-        sleep::input(&d, &s, sleep::Held::Keys(b"kept".to_vec()));
+        sleep::input(&d, &s.id, sleep::Held::Keys(b"kept\r".to_vec()));
         wait_for("its keys", || s.pane.text(0).contains("kept"));
         idle_for(&s, 2 * MINUTE);
         let conversation = s.agent_session.lock().unwrap().clone().unwrap();
-        sleep::sleep(&d, &id, false).unwrap();
+        sleep::sleep(&d, &id, IDLE).unwrap();
         assert!(screens_dir(&d.home).join(&id).exists(), "its screen is kept");
 
         let launchers = d.launchers.read().unwrap().clone();
@@ -8018,5 +8064,212 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         assert!(!session(&d2, &id).asleep());
         kill(&d, &id);
         kill(&d2, &id);
+    }
+
+    /// `request`, given up on after `within`: a dinod that never answers fails the test, not hangs it.
+    fn request_within(d: &Arc<Daemon>, req: Request, within: std::time::Duration) -> Option<Response> {
+        let (tx, rx) = channel();
+        let d = d.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(request(&d, &req));
+        });
+        rx.recv_timeout(within).ok()
+    }
+
+    /// Keys sent to an asleep session (`SendKeys`) are answered, and wake it: the sessions' lock was
+    /// held through the request's match, whose arm took the waking lock and then the sessions'
+    /// again, and dinod hung. Sent over and over while the session sleeps and wakes, with input and
+    /// wakes from other threads at once, every one is answered.
+    #[test]
+    fn keys_sent_to_a_sleeping_or_waking_session_never_hang_dinod() {
+        let (d, dir) = sleepy("sleep-send-keys", 0.3, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        let keys = |text: &str| Request::SendKeys { id: id.clone(), text: text.into() };
+        let answer = request_within(&d, keys("x"), std::time::Duration::from_secs(10));
+        assert!(matches!(answer, Some(Response::Ok)), "no answer: dinod is stuck");
+        wait_for("its key", || noted(&dir, "keys") == "x");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let others: Vec<_> = (0..2)
+            .map(|n| {
+                let (d, id, stop) = (d.clone(), id.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        if n == 0 {
+                            // A terminal's answer (a colour), which the stand-in echoes: one it would
+                            // echo as a query (`CSI ? u`) has dinod's emulator answer it back
+                            // into input this loop keeps full.
+                            sleep::input(&d, &id, sleep::Held::Keys(b"\x1b]11;rgb:1616/1616/1a1a\x07".to_vec()));
+                        } else {
+                            sleep::wake_soon(&d, &id, true);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for round in 0..300 {
+            if round % 100 == 50 {
+                // Asleep again, so the wakes above race the keys below.
+                // (It never goes quiet here: what's sent is echoed.)
+                wait_for("it to be up", || !sleep::waking(&d, &id));
+                let s = session(&d, &id);
+                *s.last_output.lock().unwrap() = Instant::now().checked_sub(2 * MINUTE);
+                (*s.typed.lock().unwrap(), *s.drafted.lock().unwrap()) = (None, None);
+                let _ = sleep::sleep(&d, &id, sleep::By::Name);
+            }
+            let answer = request_within(&d, keys(""), std::time::Duration::from_secs(10));
+            assert!(answer.is_some(), "round {round}: no answer, dinod is stuck");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for t in others {
+            t.join().unwrap();
+        }
+        assert!(d.sessions.try_lock().is_ok() && d.waking.try_lock().is_ok());
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        kill(&d, &id);
+    }
+
+    /// An automatic fix for a PR whose checks fail is due for an asleep session too (it's between
+    /// turns): it wakes, and the fix, held as a message, goes in once the agent waits for a prompt.
+    #[test]
+    fn a_pr_fix_for_an_asleep_session_wakes_it_and_reaches_it() {
+        let (d, dir) = sleepy("sleep-pr-fix", 0.2, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        assert!(fix_due(&d, &session(&d, &id)), "asleep, a fix is due");
+        sleep::input(&d, &id, sleep::Held::Message("fix the checks".into()));
+        wait_for("it to wake", || !session(&d, &id).asleep());
+        let t = Instant::now();
+        while noted(&dir, "keys") != "fix the checks\r" {
+            assert!(t.elapsed() < std::time::Duration::from_secs(12), "the fix never came: {:?}", noted(&dir, "keys"));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Working, it isn't.
+        d.proxy.stats.report(&id, Activity::Working);
+        assert!(!fix_due(&d, &session(&d, &id)));
+        kill(&d, &id);
+    }
+
+    /// Held input meets what the woken agent shows. What was typed blind (before its screen was up)
+    /// doesn't answer a dialog nobody saw: it waits while the agent asks, and keys typed seeing the
+    /// dialog go straight to it. A message held for it waits for the agent to want a prompt and for
+    /// nobody to be typing one: it doesn't join a half-typed prompt. What's still held when the
+    /// time's up isn't sent, and the pane says so.
+    #[test]
+    fn held_input_waits_out_a_dialog_and_a_half_typed_prompt() {
+        let (d, dir) = sleepy("sleep-dialog", 0.2, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        let slept = |d: &Arc<Daemon>| {
+            wait_for("it to be up", || !sleep::waking(d, &id));
+            let s = session(d, &id);
+            idle_for(&s, 2 * MINUTE);
+            *s.drafted.lock().unwrap() = None;
+            sleep::sleep(d, &id, sleep::By::Name).unwrap();
+        };
+        slept(&d);
+        std::fs::write(dir.join("dialog"), "").unwrap();
+        sleep::input(&d, &id, sleep::Held::Keys(b"abc".to_vec()));
+        wait_for("it to be up", || !sleep::starting(&d, &id) && !session(&d, &id).asleep());
+        assert!(session(&d, &id).pane.text(0).contains("Esc to cancel"));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        assert_eq!(noted(&dir, "keys"), "", "nothing typed blind landed on the dialog");
+        // Typed seeing it: straight to it; then what was held.
+        sleep::input(&d, &id, sleep::Held::Keys(b"y".to_vec()));
+        wait_for("the dialog answered, then what was held", || noted(&dir, "keys") == "yabc");
+        std::fs::remove_file(dir.join("dialog")).unwrap();
+        sleep::input(&d, &id, sleep::Held::Keys(b"\r".to_vec()));
+
+        // Typed blind and not sent, then a peer's message: the keys go in, the message waits.
+        slept(&d);
+        let before = noted(&dir, "keys");
+        sleep::input(&d, &id, sleep::Held::Keys(b"fix the".to_vec()));
+        sleep::input(&d, &id, sleep::Held::Message("do X".into()));
+        wait_for("the keys", || noted(&dir, "keys") == format!("{before}fix the"));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(noted(&dir, "keys"), format!("{before}fix the"), "the message joined a half-typed prompt");
+        // Sent: once nobody's typing and it waits for a prompt, the message.
+        sleep::input(&d, &id, sleep::Held::Keys(b"\r".to_vec()));
+        wait_for("the message", || noted(&dir, "keys") == format!("{before}fix the\rdo X\r"));
+
+        // Never sent: when the time's up, the message isn't given, and the pane says why.
+        slept(&d);
+        let before = noted(&dir, "keys");
+        sleep::input(&d, &id, sleep::Held::Keys(b"never sent".to_vec()));
+        sleep::input(&d, &id, sleep::Held::Message("do Y".into()));
+        let t = Instant::now();
+        while !session(&d, &id).pane.text(0).contains("not sent") {
+            assert!(t.elapsed() < std::time::Duration::from_secs(20), "{}", session(&d, &id).pane.text(0));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let screen = session(&d, &id).pane.text(0);
+        assert!(screen.contains("you were typing") && screen.contains("do Y"), "{screen}");
+        assert_eq!(noted(&dir, "keys"), format!("{before}never sent"));
+        assert!(!sleep::waking(&d, &id));
+        kill(&d, &id);
+    }
+
+    /// A wake that can't start (its agent gone, its folder gone) says so in the pane, keeps what
+    /// was typed for it, and isn't tried again for every key, nor for a client reattaching; asked
+    /// for by name it's tried again, says whether it worked, and gives what was kept.
+    #[test]
+    fn a_wake_that_fails_says_so_keeps_the_keys_and_isnt_retried_for_each() {
+        let (d, dir) = sleepy("sleep-wake-fails", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        let claude = d.launcher("claude").unwrap();
+        d.launchers.write().unwrap().retain(|l| l.short != "claude");
+        sleep::input(&d, &id, sleep::Held::Keys(b"a".to_vec()));
+        let kept = |d: &Daemon| session(d, &id).wake_failed.lock().unwrap().as_ref().map(|(_, h)| h.len());
+        wait_for("the wake to fail", || kept(&d) == Some(1));
+        let asleep = session(&d, &id);
+        assert!(Arc::ptr_eq(&asleep, &s) && s.asleep());
+        assert!(s.pane.text(LIVE_HISTORY).contains("couldn't wake it"), "{}", s.pane.text(LIVE_HISTORY));
+        assert!(info(&d, &id).wake_error.is_some_and(|e| e.contains("unknown agent claude")));
+        // Back, but a key or a reattach doesn't try again.
+        d.launchers.write().unwrap().push(claude);
+        sleep::input(&d, &id, sleep::Held::Keys(b"b".to_vec()));
+        sleep::wake_soon(&d, &id, false);
+        assert_eq!(kept(&d), Some(2));
+        assert!(session(&d, &id).asleep());
+        // By name: tried again, and what was kept goes in.
+        sleep::wake(&d, &id).unwrap();
+        wait_for("what was kept", || noted(&dir, "keys") == "ab");
+        assert!(info(&d, &id).wake_error.is_none());
+        // Failing by name, it says so.
+        let woke = session(&d, &id);
+        idle_for(&woke, 2 * MINUTE);
+        *woke.drafted.lock().unwrap() = None;
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        d.launchers.write().unwrap().retain(|l| l.short != "claude");
+        let e = sleep::wake(&d, &id).unwrap_err().to_string();
+        assert!(e.contains("didn't wake"), "{e}");
+        kill(&d, &id);
+    }
+
+    /// Input on its way to an agent (held by its `giving` gate, as a peer's message or a PR fix is
+    /// given) keeps the agent from being put to sleep under it.
+    #[test]
+    fn input_on_its_way_keeps_its_session_awake() {
+        let (d, dir) = sleepy("sleep-gate", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        let giving = s.giving.lock().unwrap();
+        let refused = sleep::sleep(&d, &id, sleep::By::Name).unwrap_err().to_string();
+        assert!(refused.contains("you're typing in it"), "{refused}");
+        drop(giving);
+        // A peer's message goes through it.
+        peers::message(&d, &id, "hello from a peer", Some("9999".into())).unwrap();
+        wait_for("the message", || noted(&dir, "keys") == "hello from a peer\r");
+        kill(&d, &id);
     }
 }

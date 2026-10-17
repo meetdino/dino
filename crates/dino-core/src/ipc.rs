@@ -1265,6 +1265,10 @@ pub struct SessionInfo {
     /// Woken, its agent starting: what's typed meanwhile goes in once it takes input.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub waking: bool,
+    /// Asleep, why its last wake failed (its folder gone, its agent turned off): it isn't tried
+    /// again until it's woken by name or shown anew, and what's typed meanwhile is kept for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_error: Option<String>,
 }
 
 /// The session a fork was made from.
