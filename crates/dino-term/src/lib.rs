@@ -162,6 +162,11 @@ pub struct Shared {
     drained: AtomicBool,
     /// The screen stays as it is (see [`Pane::freeze`]): output from here on is read and dropped.
     frozen: AtomicBool,
+    /// The emulator's answers to the program's queries (device attributes, colours, its size), to
+    /// the thread that writes them (see `Pane::spawn`): never written by the output reader, which
+    /// holds the screen. A program that asks while its input is full (it isn't reading it) waits
+    /// for room there, and the reader, blocked on that, kept every look at the screen waiting.
+    replies: OnceLock<std::sync::mpsc::Sender<Vec<u8>>>,
     /// At exit the screen became the alternate screen as last seen (see [`KEEP_ALT_WITHIN`]),
     /// so what clients streamed no longer matches it.
     pub kept_alt: AtomicBool,
@@ -242,17 +247,24 @@ impl EventListener for Listener {
             }
             Event::Title(t) => *s.title.lock().unwrap() = Some(t),
             Event::ResetTitle => *s.title.lock().unwrap() = None,
-            Event::PtyWrite(text) if answer => write_to(s, text.into_bytes()),
+            Event::PtyWrite(text) if answer => reply(s, text.into_bytes()),
             Event::ColorRequest(index, fmt) if answer => {
                 let rgb = if index == NamedColor::Background as usize { DEFAULT_BG } else { DEFAULT_FG };
-                write_to(s, fmt(rgb).into_bytes());
+                reply(s, fmt(rgb).into_bytes());
             }
             Event::TextAreaSizeRequest(fmt) if answer => {
                 let (cols, rows) = *s.size.lock().unwrap();
-                write_to(s, fmt(window_size(cols, rows)).into_bytes());
+                reply(s, fmt(window_size(cols, rows)).into_bytes());
             }
             _ => {}
         }
+    }
+}
+
+/// An answer to the program's query, written by the thread for them (see `Shared::replies`).
+fn reply(s: &Shared, bytes: Vec<u8>) {
+    if let Some(tx) = s.replies.get() {
+        let _ = tx.send(bytes);
     }
 }
 
@@ -369,6 +381,7 @@ impl Pane {
             size: Mutex::new((cols, rows)),
             drained: AtomicBool::new(false),
             frozen: AtomicBool::new(false),
+            replies: OnceLock::new(),
             kept_alt: AtomicBool::new(false),
             notices: AtomicU64::new(0),
             notice: Mutex::new(None),
@@ -417,6 +430,17 @@ impl Pane {
         let fd = pair.master.as_raw_fd();
         let transport = PtyTransport { writer: Mutex::new(pair.master.take_writer()?), master: Mutex::new(pair.master), fd };
         let _ = pane.shared.transport.set(transport);
+        // Its own thread writes the answers to the program's queries, in order, waiting on room in
+        // its input as long as it takes; it ends with the pane.
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let _ = pane.shared.replies.set(tx);
+        let shared = Arc::downgrade(&pane.shared);
+        std::thread::Builder::new().name("pty-reply".into()).spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                let Some(shared) = shared.upgrade() else { return };
+                write_to(&shared, bytes);
+            }
+        })?;
 
         let weak: Weak<Self> = Arc::downgrade(&pane);
         std::thread::Builder::new().name("pty-read".into()).spawn(move || {
@@ -1242,6 +1266,30 @@ mod tests {
         wait_for("its end", || pane.is_exited());
         assert_eq!(pane.text(0), "last words");
         assert_eq!(heard.lock().unwrap().len(), before, "neither its goodbye nor its end reached the tap");
+    }
+
+    /// A program that doesn't read its input asks the terminal something while its input is full:
+    /// the answer waits for room there, and nothing else does. The screen can be read meanwhile,
+    /// and output is still taken in; the reader used to write the answer itself, holding the
+    /// screen, and every look at it hung.
+    #[test]
+    fn an_answer_waiting_on_a_full_input_holds_up_nothing_else() {
+        let pane = shell("stty raw -echo; sleep 1; printf '\\033[c'; printf asked; sleep 1; printf ' and more'; sleep 30");
+        // More than its terminal holds (about 1 KB), from a thread of its own, which it blocks.
+        let p = pane.clone();
+        std::thread::spawn(move || p.write(vec![b'x'; 8192]));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = pane.clone();
+        std::thread::spawn(move || {
+            let since = Instant::now();
+            while !p.text(0).contains("asked and more") && since.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = tx.send(p.text(0));
+        });
+        let screen = rx.recv_timeout(Duration::from_secs(8)).expect("the screen couldn't be read: its reader is stuck answering the program");
+        assert!(screen.contains("asked and more"), "{screen}");
+        pane.kill().unwrap().join().unwrap();
     }
 
     fn wait_for(what: &str, done: impl Fn() -> bool) {
