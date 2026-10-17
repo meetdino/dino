@@ -92,8 +92,9 @@ pub(crate) fn status(d: &Daemon, s: &Session) -> String {
     }
 }
 
-/// Send `text` to session `id` as a message from session `by`, if it's between turns. One asleep
-/// is between turns: it wakes, and gets it once its agent takes input.
+/// Send `text` to session `id` as a message from session `by`, if it's between turns, and answer
+/// once its agent has it (or why it doesn't). One asleep is between turns: it wakes, and gets it
+/// once its agent wants a prompt; one that doesn't in time doesn't get it.
 pub(crate) fn message(d: &Daemon, id: &str, text: &str, by: Option<String>) -> anyhow::Result<()> {
     let s = find(d, id)?;
     anyhow::ensure!(by.as_deref() != Some(id), "that's this session; message another one");
@@ -108,8 +109,7 @@ pub(crate) fn message(d: &Daemon, id: &str, text: &str, by: Option<String>) -> a
     // below (see `sleep::settle`).
     if s.asleep() || crate::sleep::waking(d, id) {
         *s.messaged_by.lock().unwrap() = by;
-        crate::sleep::input(d, id, crate::sleep::Held::Message(text.trim().into()));
-        return Ok(());
+        return crate::sleep::message(d, id, text.trim()).map_err(|why| anyhow::anyhow!("{} didn't get the message: {why}", s.name));
     }
     // Typed into a permission prompt or mid-turn, the text would answer the wrong question.
     anyhow::ensure!(idle(d, &s), "{} is {}; message it once it's idle", s.name, status(d, &s));
@@ -117,8 +117,7 @@ pub(crate) fn message(d: &Daemon, id: &str, text: &str, by: Option<String>) -> a
     anyhow::ensure!(s.attached.load(Ordering::Relaxed) == 0 || s.poked.lock().unwrap().is_none_or(|t| t.elapsed() > USER_TYPING), "the user is typing in {}; try again shortly", s.name);
     *s.messaged_by.lock().unwrap() = by;
     // Through `giving`: a sleep decided at this moment waits for it, or it wakes what slept first.
-    crate::sleep::input(d, id, crate::sleep::Held::Message(text.trim().into()));
-    Ok(())
+    crate::sleep::message(d, id, text.trim()).map_err(|why| anyhow::anyhow!("{} didn't get the message: {why}", s.name))
 }
 
 /// Another session's agent may only message an agent that still asks the user before acting: not

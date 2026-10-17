@@ -1009,14 +1009,22 @@ fn follow(d: &Daemon) {
             let s = d.sessions.lock().unwrap().iter().find(|s| s.id == sid).cloned();
             match s {
                 Some(s) if !s.pane.is_exited() && idle(d, &s) && s.last_write.lock().unwrap().is_some_and(|w| w.elapsed() > Duration::from_secs(2)) => {
-                    // Through `giving`: a sleep decided at this moment waits for it (see `sleep`).
-                    crate::sleep::input(d, &sid, crate::sleep::Held::Message(prompt.clone()));
-                    let mut live = d.schedule.live.lock().unwrap();
-                    if let Some(l) = live.get_mut(&run_id) {
+                    if let Some(l) = d.schedule.live.lock().unwrap().get_mut(&run_id) {
                         l.deliver = None;
                         l.baseline.insert(sid.clone(), d.proxy.stats.session(&sid).requests);
                         l.since = Instant::now();
                     }
+                    // Not given after all (held for an agent still waking, which didn't take it in
+                    // time): it waits to be sent again.
+                    let (me, run, again) = (d.me.clone(), run_id.clone(), prompt.clone());
+                    let prompt = crate::sleep::Message::new(prompt).then(move |outcome| {
+                        let (Err(_), Some(d)) = (outcome, me.upgrade()) else { return };
+                        if let Some(l) = d.schedule.live.lock().unwrap().get_mut(&run) {
+                            l.deliver.get_or_insert(again);
+                        }
+                    });
+                    // Through `giving`: a sleep decided at this moment waits for it (see `sleep`).
+                    crate::sleep::input(d, &sid, crate::sleep::Held::Message(prompt));
                 }
                 Some(_) => {}
                 None => finish(d, &t, &run_id, false, Some("the session it continues is gone".into())),

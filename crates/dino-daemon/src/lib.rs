@@ -204,7 +204,8 @@ struct Session {
     /// cleared it: one after the other is something typed and not sent (see `sleep::unsent`).
     drafted: Mutex<Option<Instant>>,
     submitted: Mutex<Option<Instant>>,
-    /// Asleep, why its last wake failed, and what was held for it then (see `sleep::begin`).
+    /// Asleep, why its last wake failed, and what was typed for it then and since (see
+    /// `sleep::begin`).
     wake_failed: Mutex<Option<(String, Vec<sleep::Held>)>>,
 }
 
@@ -366,9 +367,9 @@ struct Daemon {
     starting: Mutex<HashSet<String>>,
     /// Sessions ended for good whose program may still be stopping (see `end`), for `drop_unused`.
     ending: Mutex<Vec<Arc<Session>>>,
-    /// Sessions waking from sleep, by id, each with what was typed or sent to it meanwhile, in
-    /// order, held until its agent takes input. Each sleep and wake is decided under this lock,
-    /// taken before the sessions' (see `sleep`).
+    /// Sessions waking from sleep, by id, each with what was typed or sent to it meanwhile, held
+    /// until its agent can take it (see `sleep::Wake`). Each sleep and wake is decided under this
+    /// lock, taken before the sessions' (see `sleep`).
     waking: Mutex<HashMap<String, sleep::Wake>>,
     /// The sessions each client shows on screen, by its connection (see `Request::Viewing`).
     viewing: Mutex<HashMap<u64, HashSet<String>>>,
@@ -4918,12 +4919,41 @@ fn pr_fix(d: &Daemon, id: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!s.ended(), "{id} has exited");
     let branch = pr::branch(&s.cwd).ok_or_else(|| anyhow::anyhow!("Not on a branch"))?;
     let msg = pr::fix_message(&s.cwd, &branch)?;
-    sleep::input(d, &s.id, sleep::Held::Message(msg));
-    // Asked by hand: no automatic fix for the same push.
-    if let Some(pr) = d.prs.lock().unwrap().get(id) {
-        s.auto.lock().unwrap().fixed = Some((pr.number, pr.head.clone()));
-    }
+    // Asked by hand: no automatic fix for the same push, once it's given.
+    let push = d.prs.lock().unwrap().get(id).map(|pr| (pr.number, pr.head.clone()));
+    let msg = match push {
+        Some(push) => fix_asked(d, &s, msg, push, None),
+        None => sleep::Held::Message(sleep::Message::new(msg)),
+    };
+    sleep::input(d, &s.id, msg);
     Ok(())
+}
+
+/// A PR fix's message for `s`, with `push` recorded as the one a fix was asked for (and `fixes` as
+/// how many were, for an automatic one) before it goes: a wake starts from what `s` holds. Not
+/// given after all (held for an agent that woke and didn't take it), they're as they were, so the
+/// next poll asks again, and the PR says why.
+fn fix_asked(d: &Daemon, s: &Session, msg: String, push: (u32, String), fixes: Option<u32>) -> sleep::Held {
+    let before = {
+        let mut a = s.auto.lock().unwrap();
+        let before = (a.fixed.clone(), a.pr.fixes);
+        a.fixed = Some(push.clone());
+        if let Some(n) = fixes {
+            (a.pr.fixes, a.pr.note) = (n, None);
+        }
+        before
+    };
+    let (me, id) = (d.me.clone(), s.id.clone());
+    sleep::Held::Message(sleep::Message::new(msg).then(move |outcome| {
+        let (Err(why), Some(d)) = (outcome, me.upgrade()) else { return };
+        // In its place now: the agent that woke for it, if one did.
+        let Some(s) = attachable(&d, &id) else { return };
+        let mut a = s.auto.lock().unwrap();
+        if a.fixed.as_ref() == Some(&push) {
+            (a.fixed, a.pr.fixes) = before;
+            a.pr.note = Some(format!("Couldn't ask for a fix: {why}"));
+        }
+    }))
 }
 
 /// A session's PR automation: the flags the user sets, and what it has done.
@@ -5057,18 +5087,13 @@ fn auto_pr(d: &Daemon, s: &Session, root: &Path, branch: &str, pr: &ipc::PrInfo)
     if !fix_due(d, s) {
         return false;
     }
-    let msg = pr::fix_message(root, branch);
-    if let Ok(msg) = &msg {
-        sleep::input(d, &s.id, sleep::Held::Message(msg.clone()));
-    }
-    let mut a = s.auto.lock().unwrap();
-    a.fixed = this_push;
-    match msg {
-        Ok(_) => {
-            a.pr.fixes = fixes + 1;
-            a.pr.note = None;
+    match pr::fix_message(root, branch) {
+        Ok(msg) => sleep::input(d, &s.id, fix_asked(d, s, msg, (pr.number, pr.head.clone()), Some(fixes + 1))),
+        Err(e) => {
+            let mut a = s.auto.lock().unwrap();
+            a.fixed = this_push;
+            a.pr.note = Some(format!("Couldn't ask for a fix: {e}"));
         }
-        Err(e) => a.pr.note = Some(format!("Couldn't ask for a fix: {e}")),
     }
     true
 }
@@ -8125,8 +8150,8 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
                     while !stop.load(Ordering::Relaxed) {
                         if n == 0 {
                             // A terminal's answer (a colour), which the stand-in echoes: one it would
-                            // echo as a query (`CSI ? u`) has dinod's emulator answer it back
-                            // into input this loop keeps full.
+                            // echo as a query (`CSI ? u`) has dinod's emulator answer it back, over
+                            // and over, into input this loop keeps full.
                             sleep::input(&d, &id, sleep::Held::Keys(b"\x1b]11;rgb:1616/1616/1a1a\x07".to_vec()));
                         } else {
                             sleep::wake_soon(&d, &id, true);
@@ -8241,7 +8266,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         idle_for(&s, 2 * MINUTE);
         sleep::sleep(&d, &id, sleep::By::Name).unwrap();
         assert!(fix_due(&d, &session(&d, &id)), "asleep, a fix is due");
-        sleep::input(&d, &id, sleep::Held::Message("fix the checks".into()));
+        sleep::input(&d, &id, sleep::Held::Message(sleep::Message::new("fix the checks")));
         wait_for("it to wake", || !session(&d, &id).asleep());
         let t = Instant::now();
         while noted(&dir, "keys") != "fix the checks\r" {
@@ -8288,7 +8313,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         slept(&d);
         let before = noted(&dir, "keys");
         sleep::input(&d, &id, sleep::Held::Keys(b"fix the".to_vec()));
-        sleep::input(&d, &id, sleep::Held::Message("do X".into()));
+        sleep::input(&d, &id, sleep::Held::Message(sleep::Message::new("do X")));
         wait_for("the keys", || noted(&dir, "keys") == format!("{before}fix the"));
         std::thread::sleep(std::time::Duration::from_millis(1500));
         assert_eq!(noted(&dir, "keys"), format!("{before}fix the"), "the message joined a half-typed prompt");
@@ -8300,7 +8325,7 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         slept(&d);
         let before = noted(&dir, "keys");
         sleep::input(&d, &id, sleep::Held::Keys(b"never sent".to_vec()));
-        sleep::input(&d, &id, sleep::Held::Message("do Y".into()));
+        sleep::input(&d, &id, sleep::Held::Message(sleep::Message::new("do Y")));
         let t = Instant::now();
         while !session(&d, &id).pane.text(0).contains("not sent") {
             assert!(t.elapsed() < std::time::Duration::from_secs(20), "{}", session(&d, &id).pane.text(0));
@@ -8417,6 +8442,165 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         assert!(screen.contains("it didn't take input") && screen.contains("never given"), "{screen}");
         assert!(!sleep::waking(&d, &id));
         assert_eq!(noted(&dir, "keys"), "");
+        kill(&d, &id);
+    }
+
+    /// How much longer than it takes a test daemon's wakes take, by its home (see `sleep::begin`).
+    static SLOW_WAKES: Mutex<Vec<(PathBuf, std::time::Duration)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn slow_wake(home: &Path) {
+        let slow = SLOW_WAKES.lock().unwrap().iter().find(|(h, _)| h == home).map(|(_, t)| *t);
+        if let Some(t) = slow {
+            std::thread::sleep(t);
+        }
+    }
+
+    /// A pane attached to session `id` that keeps a surface for it (an app pane): it doesn't wake it.
+    fn attach_pane(d: &Arc<Daemon>, id: &str) -> UnixStream {
+        let (mut pane, server) = UnixStream::pair().unwrap();
+        let d2 = d.clone();
+        std::thread::spawn(move || serve(&d2, server));
+        ipc::write_json(&mut pane, &Request::Attach { id: id.to_string(), cols: 80, rows: 24, wait: false, scrollback: None, background: true }).unwrap();
+        let (kind, ok) = ipc::read_frame(&mut pane).unwrap();
+        assert!(kind == ipc::JSON && matches!(serde_json::from_slice(&ok), Ok(Response::Ok)));
+        pane
+    }
+
+    /// Type `keys` into session `id` as `dino attach` does, `gap` apart, each down its connection
+    /// as it is then: let go (its session woke in its place), it attaches again 100 ms later.
+    fn type_like_a_client(d: &Arc<Daemon>, id: &str, keys: &[u8], gap: std::time::Duration) {
+        let writer = Arc::new(Mutex::new(attach_pane(d, id)));
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (w, done, d, id) = (writer.clone(), done.clone(), d.clone(), id.to_string());
+            let mut from = w.lock().unwrap().try_clone().unwrap();
+            std::thread::spawn(move || {
+                loop {
+                    while ipc::read_frame(&mut from).is_ok() {}
+                    if done.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    let again = attach_pane(&d, &id);
+                    from = again.try_clone().unwrap();
+                    *w.lock().unwrap() = again;
+                }
+            })
+        };
+        for &k in keys {
+            // A failed write: the socket dropped, and the reader reattaches.
+            let _ = ipc::write_frame(&mut *writer.lock().unwrap(), ipc::DATA, &[k]);
+            std::thread::sleep(gap);
+        }
+        done.store(true, Ordering::Relaxed);
+        let _ = writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
+        reader.join().unwrap();
+    }
+
+    /// Keys typed into an asleep session as it wakes reach its agent in the order they were typed,
+    /// none lost or doubled, however fast they come: those its client sent before it saw the
+    /// session woke in its place (read on at once, not left waiting for the wake, which on a busy
+    /// Mac, every other round here, goes on after the client has attached again), those it sent
+    /// once it attached again, those held until the agent was up, and those typed once it was,
+    /// which go behind what's still held.
+    #[test]
+    fn keys_typed_as_it_wakes_reach_it_in_order() {
+        let (d, dir) = sleepy("sleep-order", 0.1, "");
+        sleepy_session(&d, &dir);
+        let id = ids(&d)[0].clone();
+        let mut given = String::new();
+        for round in 0..8 {
+            let s = session(&d, &id);
+            idle_for(&s, 2 * MINUTE);
+            sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+            SLOW_WAKES.lock().unwrap().retain(|(h, _)| *h != d.home);
+            if round % 2 == 1 {
+                SLOW_WAKES.lock().unwrap().push((d.home.clone(), std::time::Duration::from_millis(400)));
+            }
+            // About a second and a half of keys, 5 ms apart: the agent comes up partway through.
+            let keys: String = (0..300).map(|i| char::from(b'a' + ((i + round) % 26) as u8)).chain(['\r']).collect();
+            type_like_a_client(&d, &id, keys.as_bytes(), std::time::Duration::from_millis(5));
+            given.push_str(&keys);
+            let t = Instant::now();
+            while noted(&dir, "keys").len() < given.len() && t.elapsed() < std::time::Duration::from_secs(20) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let got = noted(&dir, "keys");
+            let at = got.bytes().zip(given.bytes()).position(|(a, b)| a != b).unwrap_or(got.len().min(given.len()));
+            assert_eq!(got.len(), given.len(), "round {round}: {} keys given of {}, from {at} on: {:?}", got.len(), given.len(), &got[at..]);
+            assert!(got == given, "round {round}: out of order from key {at}: {:?} for {:?}", &got[at..(at + 20).min(got.len())], &given[at..(at + 20).min(given.len())]);
+            wait_for("it to be up", || !sleep::waking(&d, &id));
+        }
+        assert_eq!(noted(&dir, "starts").lines().count(), 9, "one start a round");
+        kill(&d, &id);
+    }
+
+    /// A message that wakes a session never holds back what the user types there, nor takes it
+    /// down with it: typed before the agent is up and after, the keys go in, in order, while the
+    /// message waits for the prompt being typed to be sent. Never sent in time, the message isn't
+    /// given, and its sender hears why, as the pane says.
+    #[test]
+    fn a_message_held_for_a_waking_agent_never_holds_back_the_users_keys() {
+        let (d, dir) = sleepy("sleep-message-keys", 0.2, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        let (tx, told) = std::sync::mpsc::channel();
+        sleep::input(&d, &id, sleep::Held::Message(sleep::Message::new("MSG").then(move |outcome| tx.send(outcome).unwrap())));
+        sleep::input(&d, &id, sleep::Held::Keys(b"abc".to_vec()));
+        wait_for("it to be up", || !sleep::starting(&d, &id) && !session(&d, &id).asleep());
+        sleep::input(&d, &id, sleep::Held::Keys(b"def".to_vec()));
+        wait_for("the keys, in order", || noted(&dir, "keys") == "abcdef");
+        let outcome = told.recv_timeout(std::time::Duration::from_secs(20)).expect("its sender never heard");
+        assert!(outcome.as_ref().is_err_and(|why| why.contains("the user was typing in it")), "{outcome:?}");
+        assert_eq!(noted(&dir, "keys"), "abcdef", "the message wasn't given, and nothing typed went with it");
+        let screen = session(&d, &id).pane.text(0);
+        assert!(screen.contains("you were typing in it") && screen.contains("MSG"), "{screen}");
+        assert!(!sleep::waking(&d, &id));
+        kill(&d, &id);
+    }
+
+    /// Whoever sends a message to an asleep session hears whether its agent got it: a peer's
+    /// answer comes once it's given, or says why not (its wake failed, now or before: nothing is
+    /// kept to land later). A PR fix that isn't given isn't counted as asked for, so the next poll
+    /// asks again.
+    #[test]
+    fn whoever_messages_an_asleep_session_hears_whether_it_got_it() {
+        let (d, dir) = sleepy("sleep-told", 0.2, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        peers::message(&d, &id, "hello", Some("9999".into())).unwrap();
+        assert!(!session(&d, &id).asleep(), "answered once it was given");
+        wait_for("the message", || noted(&dir, "keys") == "hello\r");
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+
+        let woke = session(&d, &id);
+        idle_for(&woke, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        let claude = d.launcher("claude").unwrap();
+        d.launchers.write().unwrap().retain(|l| l.short != "claude");
+        for _ in 0..2 {
+            let e = peers::message(&d, &id, "lost?", Some("9999".into())).unwrap_err().to_string();
+            assert!(e.contains("didn't get the message") && e.contains("couldn't wake"), "{e}");
+        }
+        let kept = || session(&d, &id).wake_failed.lock().unwrap().as_ref().map(|(_, h)| h.len());
+        assert_eq!(kept(), Some(0), "nothing kept for later");
+
+        let asleep = session(&d, &id);
+        asleep.auto.lock().unwrap().pr.fixes = 1;
+        sleep::input(&d, &id, fix_asked(&d, &asleep, "fix the checks".into(), (7, "abc".into()), Some(2)));
+        let a = asleep.auto.lock().unwrap().clone();
+        assert_eq!((a.fixed, a.pr.fixes), (None, 1), "not asked after all");
+        assert!(a.pr.note.is_some_and(|n| n.contains("couldn't wake")));
+
+        d.launchers.write().unwrap().push(claude);
+        sleep::wake(&d, &id).unwrap();
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(noted(&dir, "keys"), "hello\r", "none of what wasn't given came later");
         kill(&d, &id);
     }
 }
