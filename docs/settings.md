@@ -121,7 +121,9 @@ user-facing values under **General**, **Terminal**, **Agents**, **Power**, and
   the longest idle first, and when the pressure is critical, ones on screen too. Only an agent that
   a stop cuts nothing short of sleeps: between turns, not asking anything, with no subagent,
   background command, monitor, scheduled prompt or server of its own running, and not pinned.
-  `0` means never, memory pressure or not. App: **Power → Memory**.
+  Pin a session you turned Remote Control on in (`/remote-control`): dino can't see that, and
+  Claude's phone and web apps can't wake it. `0` means never, memory pressure or not. App:
+  **Power → Memory**.
 
 #### `[machine.lid]`
 

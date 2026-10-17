@@ -1175,7 +1175,7 @@ private struct SleepSection: View {
                 }
             } label: {
                 Text("Sleep idle agents")
-                Text("An agent idle this long, and not on screen, has its process stopped to free its memory. Its session stays where it was, its screen up, and it starts again on its conversation when you open it or type into it. While your Mac is short of memory, agents idle 5 minutes go first. Pinned sessions, and agents still running something, stay awake.")
+                Text("An agent idle this long, and not on screen, has its process stopped to free its memory. Its session stays where it was, its screen up, and it starts again on its conversation when you open it or type into it. While your Mac is short of memory, agents idle 5 minutes go first. Pinned sessions, and agents still running something, stay awake. Turned Remote Control on inside a session (/remote-control)? Pin it, so Claude's phone and web apps can still reach it: dino can't see that.")
             }
             .disabled(store.settings == nil)
             .orgLocked("machine.sleep_idle_agents")

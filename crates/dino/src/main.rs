@@ -665,7 +665,9 @@ does `dino wake <id>`; what you type meanwhile reaches the agent once it's up.
 
 Idle agents go to sleep on their own too, after the time in Settings → Power → Memory (an hour
 unless set; `[machine] sleep_idle_agents` in settings.toml, in minutes, 0 for never), and after 5
-minutes while macOS says memory is short. A pinned session only sleeps when you ask.
+minutes while macOS says memory is short. A pinned session only sleeps when you ask: pin one you
+turned Remote Control on in (/remote-control), which dino can't see, to keep it reachable from
+Claude's phone and web apps. One started with --remote-control stays awake on its own.
 
 Refused, saying why, while it would cut something short: a turn, a question, a subagent, a
 background command or monitor, prompts it scheduled, a server or anything else it left running,
