@@ -35,7 +35,12 @@ const PRESSED_IDLE: Duration = Duration::from_secs(5 * 60);
 const READY_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 8 } else { 60 });
 /// How often a waking agent is looked at.
 const READY_LOOK: Duration = Duration::from_millis(50);
-
+/// The pause held keys get around a key that isn't text (Return, Ctrl-C, an arrow, a paste), so
+/// the agent reads it on its own, as it would have (see `give_held`)...
+const KEYS_APART: Duration = Duration::from_millis(50);
+/// ...and after a lone Esc, longer than an agent waits to see whether one starts a sequence
+/// (Claude's 50 ms): sooner, the key after it reads as Alt and that key.
+const ESC_APART: Duration = Duration::from_millis(200);
 /// How long a sleeping agent's processes get to be gone before it counts as asleep anyway.
 const GONE_WITHIN: Duration = Duration::from_secs(6);
 /// The most a message's sender waits to hear whether a waking agent got it (see `message`): its
@@ -762,15 +767,47 @@ fn settle(d: &Daemon, s: &Arc<Session>) {
         };
         let typed = !matches!(next.first(), Some(Held::Message(_)));
         let giving = s.giving.lock().unwrap();
-        for h in next {
-            give(d, s, h);
-        }
+        give_held(d, s, next);
         drop(giving);
         if typed && let Some(w) = d.waking.lock().unwrap().get_mut(&s.id) {
             w.sending = false;
         }
     }
     bump(d);
+}
+
+/// Give woken `s`'s agent what was held for it, in order and as it was typed: each frame as a
+/// client sent it, text run together, and what isn't text (Return, Ctrl-C, an arrow, Esc, a paste)
+/// on its own with a pause around it, so the agent reads it on its own as it would have. Written
+/// back to back, a lone Esc and the key after it were Alt and that key, and a Ctrl-C between
+/// words could fail to clear the line.
+fn give_held(d: &Daemon, s: &Session, held: Vec<Held>) {
+    let text = |k: &[u8]| k.iter().all(|&b| b >= 0x20 && b != 0x7f);
+    let mut writes: Vec<Held> = Vec::with_capacity(held.len());
+    for h in held {
+        if let (Some(Held::Keys(run)), Held::Keys(k)) = (writes.last_mut(), &h)
+            && text(run)
+            && text(k)
+        {
+            run.extend_from_slice(k);
+            continue;
+        }
+        writes.push(h);
+    }
+    // Before a write: the pause the one before it asked for, or, for one that isn't text, its own.
+    let mut after: Option<Duration> = None;
+    for (i, h) in writes.into_iter().enumerate() {
+        let alone = !matches!(&h, Held::Keys(k) if text(k));
+        if let Some(pause) = after.or((alone && i > 0).then_some(KEYS_APART)) {
+            std::thread::sleep(pause);
+        }
+        after = match &h {
+            Held::Keys(k) if k.last() == Some(&0x1b) => Some(ESC_APART),
+            _ if alone => Some(KEYS_APART),
+            _ => None,
+        };
+        give(d, s, h);
+    }
 }
 
 /// `s`'s agent asks something on its screen: a question, a dialog, its sign-in or folder trust.

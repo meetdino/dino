@@ -8718,4 +8718,24 @@ while (1) {{
         assert!(screen.starts_with("> last words") && screen.contains(WAKE_LINE), "{screen}");
         kill(&d, &id);
     }
+
+    /// Keys held for a waking agent reach it as they were typed: an Esc, a Ctrl-C and Return each
+    /// read on its own, not run together with the keys around them. Written back to back, an Esc
+    /// and the key after it read as Alt and that key, and a Ctrl-C between words could fail to
+    /// clear the line.
+    #[test]
+    fn held_keys_reach_the_agent_each_as_it_was_typed() {
+        let (d, dir) = sleepy("sleep-apart", 0.2, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        for k in ["abc", "\x03", "de", "f", "\x1b", "ghi", "\r"] {
+            sleep::input(&d, &id, sleep::Held::Keys(k.into()));
+        }
+        wait_for("what was held", || noted(&dir, "keys") == "abc\x03def\x1bghi\r");
+        let reads: Vec<String> = noted(&dir, "reads").lines().map(|l| (0..l.len()).step_by(2).map(|i| char::from(u8::from_str_radix(&l[i..i + 2], 16).unwrap())).collect()).collect();
+        assert_eq!(reads, ["abc", "\x03", "def", "\x1b", "ghi", "\r"], "text run together, the rest each on its own");
+        kill(&d, &id);
+    }
 }
