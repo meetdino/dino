@@ -119,6 +119,10 @@ struct Session {
     last_output: Arc<Mutex<Option<Instant>>>,
     /// When the agent last wrote anything at all.
     last_write: Arc<Mutex<Option<Instant>>>,
+    /// Its program has asked, in its own output, for bracketed pastes (`ESC[?2004h`), as Claude
+    /// Code does once its own input is up (see `sleep::settle`); what dinod feeds its pane (a
+    /// screen kept from before, the wake line, which turns them off) doesn't count.
+    asked_pastes: Arc<AtomicBool>,
     /// The question it's waiting on the user for, as dinod watches its dialog (see [`Asked`]).
     asked: Mutex<Option<Asked>>,
     /// The user's last keystroke, resize, focus change or attach.
@@ -2038,7 +2042,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     // answer. Its thresholds for that (Claude Code 2.1.302), out of reach for this launch only,
     // unless dinod's own environment sets either.
     const RESUME_THRESHOLDS: [&str; 2] = ["CLAUDE_CODE_RESUME_THRESHOLD_MINUTES", "CLAUDE_CODE_RESUME_TOKEN_THRESHOLD"];
-    if let Some(spec) = spec.as_mut().filter(|_| woke_from.is_some() && l.agent_id == "claude")
+    if let Some(spec) = spec.as_mut().filter(|_| woke_from.is_some() && agent(&l.agent_id).is_some_and(|a| a.is_claude_code()))
         && RESUME_THRESHOLDS.iter().all(|v| std::env::var_os(v).is_none())
     {
         for var in RESUME_THRESHOLDS {
@@ -2050,11 +2054,22 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     let poked: Arc<Mutex<Option<Instant>>> = Arc::default();
     let last_write: Arc<Mutex<Option<Instant>>> = Arc::default();
     let local_url: Arc<Mutex<Option<String>>> = Arc::default();
+    let asked_pastes: Arc<AtomicBool> = Arc::default();
     let (subs, last, poke, write, url) = (subscribers.clone(), last_output.clone(), poked.clone(), last_write.clone(), local_url.clone());
+    let (pastes, mut pastes_edge) = (asked_pastes.clone(), Vec::<u8>::new());
     let mut tail = String::new();
     let tap = move |bytes: &[u8]| {
         if !bytes.is_empty() {
             *write.lock().unwrap() = Some(Instant::now());
+        }
+        // Looked for across chunks too, until it's seen.
+        if !pastes.load(Ordering::Relaxed) {
+            const ON: &[u8] = b"\x1b[?2004h";
+            pastes_edge.extend_from_slice(&bytes[..bytes.len().min(ON.len())]);
+            if memchr::memmem::find(bytes, ON).is_some() || memchr::memmem::find(&pastes_edge, ON).is_some() {
+                pastes.store(true, Ordering::Relaxed);
+            }
+            pastes_edge = bytes[bytes.len().saturating_sub(ON.len() - 1)..].to_vec();
         }
         // Echoes and redraws answer the user; they don't mean the agent is working.
         let echo = poke.lock().unwrap().is_some_and(|t| t.elapsed() < USER_ECHO);
@@ -2101,10 +2116,11 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         && !pane.is_exited()
         && let Some(before) = woke_from.or_else(|| std::fs::read(live_screens_dir(&d.home).join(&id)).ok()).filter(|b| !b.is_empty())
     {
-        pane.feed(&without_restart_marks(&before));
-        // Back on the normal screen (it may have been saved with a full-screen program up),
-        // and a line between then and now.
-        pane.feed(if woke { WAKE_MARK } else { RESTART_MARK });
+        // Back on the normal screen (it may have been saved with a full-screen program up), and a
+        // line between then and now: one feed, so nothing the program prints comes between them.
+        let mut screen = without_restart_marks(&before);
+        screen.extend_from_slice(if woke { WAKE_MARK } else { RESTART_MARK });
+        pane.feed(&screen);
     }
     // A shell's `cd` shows at once rather than at the next look (the sidebar files it by folder).
     let asked = d.asked.clone();
@@ -2144,6 +2160,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         subscribers,
         last_output,
         last_write,
+        asked_pastes,
         asked: Mutex::default(),
         poked,
         typed: Mutex::default(),
@@ -2196,9 +2213,10 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         if let Some(r) = &restore {
             let conversation = typed.as_ref().and_then(|t| t.conversation.clone()).or_else(|| s.agent_session.lock().unwrap().clone());
             stats::seed(d, &s.id, None, s.started_at, conversation.as_deref());
-            // Saved by a dinod before they were (`crons` missing): unknown, for Claude's (an
+            // Saved by a dinod before they were (`crons` missing): unknown, for Claude Code's (an
             // agent with no crons has none to keep).
-            d.proxy.stats.keep_crons(&s.id, r.crons.clone().or_else(|| (s.agent_id != "claude").then(Vec::new)));
+            let crons = !agent(&s.agent_id).is_some_and(|a| a.is_claude_code());
+            d.proxy.stats.keep_crons(&s.id, r.crons.clone().or_else(|| crons.then(Vec::new)));
         }
         fallbacks::set(d, &settings, &providers::list(), &s);
         sync_shell_agents(d, &s, &Settings::load());
@@ -7668,12 +7686,17 @@ while (sysread(STDIN, my $c, 1)) {
     /// With a file `alt` it draws on the alternate screen, as Claude Code's fullscreen renderer
     /// does; with `box`, a prompt box as Claude's (its line in it, its footer under it) rather
     /// than echoing; with `tick`, a clock that never lets it go quiet. As Claude's interface does,
-    /// it asks for bracketed pastes once its input is up (the brackets aren't noted with the keys);
-    /// with `early`, that's a second after its prompt is drawn, and what comes meanwhile, which
-    /// Claude would keep as text, a Return lost, is noted apart (`noted(dir, "early")`). Each read
-    /// of its input is noted too, in hex (`noted(dir, "reads")`). `extra` is Perl it runs first
-    /// (what it starts).
+    /// it asks for bracketed pastes once its input is up (the brackets aren't noted with the keys;
+    /// with a file `nopaste`, it doesn't ask); with `early`, that's a second after its prompt is
+    /// drawn, and what comes meanwhile, which Claude would keep as text, a Return lost, is noted
+    /// apart (`noted(dir, "early")`). Each read of its input is noted too, in hex (`noted(dir,
+    /// "reads")`). `extra` is Perl it runs first (what it starts).
     fn sleepy(name: &str, slow: f64, extra: &str) -> (Arc<Daemon>, PathBuf) {
+        sleepy_as("claude", name, slow, extra)
+    }
+
+    /// `sleepy`, its launcher `agent` (as `claude-free`, Claude Code on free models).
+    fn sleepy_as(agent: &str, name: &str, slow: f64, extra: &str) -> (Arc<Daemon>, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let dir = test_home().join(name);
         let _ = std::fs::remove_dir_all(&dir);
@@ -7705,7 +7728,7 @@ if (-e "{dir}/early") {{
     while (time < $until) {{ my $in = ""; vec($in, 0, 1) = 1; if (select($in, undef, undef, 0.05)) {{ sysread(STDIN, my $c, 4096); print $e $c; }} }}
     close $e;
 }}
-print "\e[?2004h";
+print "\e[?2004h" unless -e "{dir}/nopaste";
 if ($starts > 1 && -e "{dir}/dialog") {{
     print "\e[2J\e[HAllow this? Esc to cancel";
     while (sysread(STDIN, my $c, 1)) {{ print $k $c; last if $c eq "y"; }}
@@ -7734,8 +7757,8 @@ while (1) {{
         std::fs::write(&program, script).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let claude = LauncherInfo {
-            short: "claude".into(),
-            agent_id: "claude".into(),
+            short: agent.into(),
+            agent_id: agent.into(),
             label: "Claude Code".into(),
             program: program.display().to_string(),
             knobs: Default::default(),
@@ -7748,7 +7771,8 @@ while (1) {{
 
     /// A stand-in's session, started in `dir`, its prompt up.
     fn sleepy_session(d: &Daemon, dir: &Path) -> Arc<Session> {
-        let id = spawn(d, Launch::new("claude", vec![], Some(dir.display().to_string()))).unwrap();
+        let launcher = d.launchers.read().unwrap()[0].short.clone();
+        let id = spawn(d, Launch::new(&launcher, vec![], Some(dir.display().to_string()))).unwrap();
         let s = session(d, &id);
         wait_for("its prompt", || s.pane.text(0).starts_with('>'));
         s
@@ -8729,7 +8753,8 @@ while (1) {{
     /// A stand-in's session drawn as Claude's prompt box (see `sleepy`), its box up.
     fn boxed_session(d: &Daemon, dir: &Path) -> Arc<Session> {
         std::fs::write(dir.join("box"), "").unwrap();
-        let id = spawn(d, Launch::new("claude", vec![], Some(dir.display().to_string()))).unwrap();
+        let launcher = d.launchers.read().unwrap()[0].short.clone();
+        let id = spawn(d, Launch::new(&launcher, vec![], Some(dir.display().to_string()))).unwrap();
         let s = session(d, &id);
         wait_for("its prompt box", || s.pane.text(0).contains('❯'));
         s
@@ -8884,12 +8909,17 @@ while (1) {{
     /// a summary instead: its thresholds for asking are out of reach for that launch only.
     #[test]
     fn a_woken_claude_isnt_asked_to_resume_from_a_summary() {
-        let env = test_home().join("sleep-as-is").join("log.env");
+        woken_as_is("claude");
+        woken_as_is("claude-free");
+    }
+
+    fn woken_as_is(agent: &str) {
+        let env = test_home().join(format!("sleep-as-is-{agent}")).join("log.env");
         let extra = format!(
             r#"open(my $v, ">>", "{}"); print $v ($ENV{{CLAUDE_CODE_RESUME_THRESHOLD_MINUTES}} // "-"), " ", ($ENV{{CLAUDE_CODE_RESUME_TOKEN_THRESHOLD}} // "-"), "\n"; close $v;"#,
             env.display()
         );
-        let (d, dir) = sleepy("sleep-as-is", 0.0, &extra);
+        let (d, dir) = sleepy_as(agent, &format!("sleep-as-is-{agent}"), 0.0, &extra);
         let s = sleepy_session(&d, &dir);
         let id = s.id.clone();
         idle_for(&s, 2 * MINUTE);
@@ -8897,7 +8927,7 @@ while (1) {{
         sleep::wake(&d, &id).unwrap();
         wait_for("it to be up", || !sleep::waking(&d, &id));
         // Started again for new controls, it's as any start.
-        restart(&d, &id, Controls { model: Some("haiku".into()), ..Controls::default() }).unwrap();
+        restart(&d, &id, Controls::default()).unwrap();
         wait_for("its third start", || std::fs::read_to_string(&env).is_ok_and(|e| e.lines().count() == 3));
         assert_eq!(std::fs::read_to_string(&env).unwrap(), "- -\n1000000000 1000000000\n- -\n");
         kill(&d, &id);
@@ -8926,7 +8956,17 @@ while (1) {{
     /// its prompt, a Return lost (the prompt left unsent) and a Ctrl-C quitting it.
     #[test]
     fn held_keys_wait_for_the_agents_own_input_to_be_up() {
-        let (d, dir) = sleepy("sleep-early", 0.1, "");
+        held_keys_wait_for_its_input("claude");
+    }
+
+    /// The same for Claude Code on free models (`claude-free`), the same program.
+    #[test]
+    fn held_keys_wait_for_claude_on_free_models_own_input_too() {
+        held_keys_wait_for_its_input("claude-free");
+    }
+
+    fn held_keys_wait_for_its_input(agent: &str) {
+        let (d, dir) = sleepy_as(agent, &format!("sleep-early-{agent}"), 0.1, "");
         let s = boxed_session(&d, &dir);
         let id = s.id.clone();
         idle_for(&s, 2 * MINUTE);
@@ -8936,6 +8976,39 @@ while (1) {{
         sleep::input(&d, &id, sleep::Held::Keys(b"\r".to_vec()));
         wait_for("what was held", || noted(&dir, "keys") == "go\r");
         assert_eq!(noted(&dir, "early"), "", "given before its input was up");
+        kill(&d, &id);
+    }
+
+    /// A woken agent that never asked for bracketed pastes (an older Claude, a stand-in) isn't
+    /// waited on for them: it takes what was held as soon as it's up by the other signs.
+    #[test]
+    fn an_agent_that_never_asked_for_bracketed_pastes_isnt_waited_on_for_them() {
+        let (d, dir) = sleepy("sleep-no-paste", 0.1, "");
+        std::fs::write(dir.join("nopaste"), "").unwrap();
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        let t = Instant::now();
+        sleep::input(&d, &id, sleep::Held::Keys(b"hi".to_vec()));
+        wait_for("what was held", || noted(&dir, "keys") == "hi");
+        assert!(t.elapsed() < std::time::Duration::from_secs(3), "given {:?} after the key", t.elapsed());
+        kill(&d, &id);
+    }
+
+    /// One that asked before it slept and doesn't once woken (a Claude that stopped) gets what was
+    /// held a while after it's up by the other signs, not dropped at the end of the wait.
+    #[test]
+    fn an_agent_that_stopped_asking_for_bracketed_pastes_still_gets_what_was_held() {
+        let (d, dir) = sleepy("sleep-stopped-paste", 0.1, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        std::fs::write(dir.join("nopaste"), "").unwrap();
+        sleep::input(&d, &id, sleep::Held::Keys(b"hi".to_vec()));
+        wait_for("what was held", || noted(&dir, "keys") == "hi");
+        assert!(!session(&d, &id).pane.text(LIVE_HISTORY).contains("not sent"));
         kill(&d, &id);
     }
 }

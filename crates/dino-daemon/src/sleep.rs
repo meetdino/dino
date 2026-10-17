@@ -44,6 +44,10 @@ const KEYS_APART: Duration = Duration::from_millis(50);
 /// ...and after a lone Esc, longer than an agent waits to see whether one starts a sequence
 /// (Claude's 50 ms): sooner, the key after it reads as Alt and that key.
 const ESC_APART: Duration = Duration::from_millis(200);
+/// How long a woken Claude Code that asked for bracketed pastes before it slept, and doesn't now,
+/// is up by every other sign before it counts as up anyway (see `settle`): one that stopped asking
+/// for them would otherwise hold what's typed for it until `READY_WITHIN`, and drop it.
+const UNTOLD_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 10 });
 /// How long a sleeping agent's processes get to be gone before it counts as asleep anyway.
 const GONE_WITHIN: Duration = Duration::from_secs(6);
 /// The most a message's sender waits to hear whether a waking agent got it (see `message`): its
@@ -113,6 +117,9 @@ pub(crate) struct Wake {
     /// `typed` waits out what the agent came up asking, which whoever typed it blind never saw:
     /// keys typed seeing that go straight to it, to answer it.
     blocked: bool,
+    /// Its agent had asked for bracketed pastes before it slept (its frozen pane says): waking,
+    /// it's up once it asks again (see `settle`).
+    pastes: bool,
 }
 
 /// How short of memory macOS says it is (`kern.memorystatus_vm_pressure_level`: 1, 2, 4). Linux
@@ -674,6 +681,9 @@ fn begin(d: &Daemon, id: &str) -> Option<Arc<Session>> {
     let asleep = attachable(d, id);
     let started = (|| {
         let s = asleep.clone().ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+        if let Some(w) = d.waking.lock().unwrap().get_mut(id) {
+            w.pastes = s.pane.brackets_pastes();
+        }
         // As it shows: a fullscreen agent's last screen is up until the new one draws.
         let screen = s.pane.replay_on_main(LIVE_HISTORY);
         let controls = s.pending.lock().unwrap().clone().unwrap_or_else(|| mode::current(d, &s));
@@ -730,8 +740,23 @@ fn settle(d: &Daemon, s: &Arc<Session>) {
     let since = Instant::now();
     let mut steady = None;
     let mut up = false;
+    // Claude Code reads keys raw from its start, but until its interface takes over it keeps
+    // them as text for its prompt (2.1.302's `startCapturingEarlyInput`), a Return as a line break
+    // it trims away, and quits at Ctrl-C; it asks for bracketed pastes, in its own output, as its
+    // own input comes up, which on a busy Mac is up to a second after it has drawn its prompt.
+    // One that had asked before it slept is up only once it asks again, or `UNTOLD_WITHIN` after
+    // it's up by every other sign.
+    let pastes = claude_code(s) && d.waking.lock().unwrap().get(&s.id).is_some_and(|w| w.pastes);
+    let mut ready_since = None;
     while !s.pane.is_exited() && since.elapsed() < READY_WITHIN {
-        if input_live(s) && (prompt_drawn(s) || crate::schedule::agent_ready(s, &mut steady, false)) {
+        let ready = prompt_drawn(s) || crate::schedule::agent_ready(s, &mut steady, false);
+        ready_since = ready_since.filter(|_| ready).or_else(|| ready.then(Instant::now));
+        if ready && (!pastes || s.asked_pastes.load(Ordering::Relaxed)) {
+            up = true;
+            break;
+        }
+        if ready_since.is_some_and(|t: Instant| t.elapsed() >= UNTOLD_WITHIN) {
+            eprintln!("{} dinod: session {}: up without asking for bracketed pastes, as it did before it slept", stamp(), s.id);
             up = true;
             break;
         }
@@ -833,13 +858,9 @@ fn hold_for_question(d: &Daemon, mut waking: MutexGuard<'_, HashMap<String, Wake
     }
 }
 
-/// Woken `s`'s agent has its own input up, where that can be told: Claude Code (2.1.302) reads
-/// keys raw from its start, but until its interface takes over it keeps them as text for its
-/// prompt (`startCapturingEarlyInput`), Return as a line break it trims away, and quits at Ctrl-C;
-/// it asks for bracketed pastes as its own input comes up, which on a busy Mac is up to a second
-/// after it has drawn its prompt. A Return typed into it before then was never sent.
-fn input_live(s: &Session) -> bool {
-    s.agent_now() != "claude" || s.pane.brackets_pastes()
+/// `s`'s agent is Claude Code (on whatever models).
+fn claude_code(s: &Session) -> bool {
+    s.adapter().is_some_and(|a| a.is_claude_code())
 }
 
 /// Woken `s`'s agent has drawn its prompt anew, reads keys, and has been quiet `DRAWN_QUIET`: it
@@ -893,7 +914,7 @@ fn give_held(d: &Daemon, s: &Session, held: Vec<Held>) {
 /// `s`'s agent asks something on its screen: a question, a dialog, its sign-in or folder trust.
 pub(crate) fn asking(s: &Session) -> bool {
     let screen = s.pane.text(0);
-    s.adapter().is_some_and(|a| a.asking(&screen).is_some()) || (s.agent_now() == "claude" && crate::setup_prompt(&screen).is_some())
+    s.adapter().is_some_and(|a| a.asking(&screen).is_some()) || (claude_code(s) && crate::setup_prompt(&screen).is_some())
 }
 
 /// `s`'s agent waits on an answer rather than a prompt: a permission or a question, as its hooks

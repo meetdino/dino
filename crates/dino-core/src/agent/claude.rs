@@ -155,6 +155,10 @@ impl Agent for Claude {
         &["ask", "edits", "plan", "auto", "bypass"]
     }
 
+    fn is_claude_code(&self) -> bool {
+        true
+    }
+
     // The free tier picks the model for each turn.
     fn picks_model(&self) -> bool {
         !self.free

@@ -328,6 +328,11 @@ pub trait Agent: Sync {
     fn log_event(&self, _line: &serde_json::Value) -> LogEvent {
         LogEvent::Other
     }
+    /// It's Claude Code, on whatever models (the `claude-free` launcher too): the program whose
+    /// startup, input and resume dino knows (see dinod's `sleep`).
+    fn is_claude_code(&self) -> bool {
+        false
+    }
     /// What's in its prompt box on `screen`, typed and not sent: empty when the box shows and
     /// has nothing in it, `None` when no box shows (or this agent's isn't read). A draft erased
     /// key by key is gone by this, where the keys typed say only that something was.
