@@ -127,6 +127,10 @@ struct Session {
     asked: Mutex<Option<Asked>>,
     /// The user's last keystroke, resize, focus change or attach.
     poked: Arc<Mutex<Option<Instant>>>,
+    /// The last key a client sent it that someone pressed: not its terminal's answer to its
+    /// program's query, nor an attach, resize or focus change (a pane reattaching after a wake
+    /// does all of those), which are only `poked`. Someone may be typing a prompt.
+    keyed: Mutex<Option<Instant>>,
     /// The user's last keystroke: a message may be on its way (see `restartable`).
     typed: Mutex<Option<Instant>>,
     /// The last local web address the agent printed.
@@ -1700,11 +1704,13 @@ fn serve(d: &Arc<Daemon>, mut stream: UnixStream) -> io::Result<()> {
             Request::SendInput { id, text, submit } => {
                 let session = d.sessions.lock().unwrap().iter().find(|s| s.id == id).cloned();
                 match session {
-                    // Asleep, it wakes and gets it once its agent takes input.
-                    Some(s) if !s.ended() => {
-                        sleep::input(d, &s.id, sleep::Held::Text { text, submit });
-                        Response::Ok
-                    }
+                    // Asleep, it wakes and gets it once its agent takes input; answered once it
+                    // has, or with why not (it was held, and dropped), so the composer that sent
+                    // it keeps it meanwhile.
+                    Some(s) if !s.ended() => match sleep::paste(d, &s.id, text, submit) {
+                        Ok(()) => Response::Ok,
+                        Err(why) => Response::Error { message: format!("{} didn't get it: {why}", s.name) },
+                    },
                     Some(_) => Response::Error { message: format!("{id} has exited") },
                     None => Response::Error { message: format!("no session {id}") },
                 }
@@ -2163,6 +2169,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         asked_pastes,
         asked: Mutex::default(),
         poked,
+        keyed: Mutex::default(),
         typed: Mutex::default(),
         local_url,
         attached: AtomicUsize::new(0),
@@ -2851,6 +2858,9 @@ fn attach(d: &Arc<Daemon>, s: &Arc<Session>, mut stream: UnixStream, cols: u16, 
                 // From an older client, includes the focus in/out reports agents ask for: Claude
                 // repaints on those.
                 s.poke();
+                if !sleep::split_replies(&payload).1.is_empty() {
+                    *s.keyed.lock().unwrap() = Some(Instant::now());
+                }
                 // To its program; held, and waking it, while it's asleep or waking.
                 sleep::input(d, &s.id, sleep::Held::Keys(payload));
             }
@@ -5140,7 +5150,7 @@ fn auto_pr(d: &Daemon, s: &Session, root: &Path, branch: &str, pr: &ipc::PrInfo)
 /// type. Asleep, it's between turns: it wakes, and gets the fix once it waits for a prompt (see
 /// `sleep`).
 fn fix_due(d: &Daemon, s: &Session) -> bool {
-    let typing = s.poked.lock().unwrap().is_some_and(|t| t.elapsed() < LEAVE_THE_USER);
+    let typing = s.keyed.lock().unwrap().is_some_and(|t| t.elapsed() < LEAVE_THE_USER);
     // Asking something on its screen (a resume dialog its hooks don't report), it's left to
     // whoever answers it: a fix sent now would only wait it out (see `sleep::input`).
     !typing && (s.asleep() || (idle(d, s) && !sleep::asking(s)))
@@ -7919,11 +7929,17 @@ while (1) {{
         // The terminal's answer to a query the agent made goes to it now, not held with the keys.
         ipc::write_frame(&mut again, ipc::DATA, b"\x1b[?62;22c").unwrap();
         wait_for("d held", || held() == 4);
-        assert!(matches!(request(&d, &Request::SendInput { id: id.clone(), text: "e".into(), submit: false }), Response::Ok));
+        // Answered once it's given (see `sleep::paste`).
+        let paste = {
+            let (d, id) = (d.clone(), id.clone());
+            std::thread::spawn(move || request(&d, &Request::SendInput { id, text: "e".into(), submit: false }))
+        };
+        wait_for("e held", || held() == 5);
         assert_eq!(held(), 5, "the reply wasn't held");
         assert!(sleep::waking(&d, &id) && info(&d, &id).waking, "still starting");
         assert_eq!(noted(&dir, "keys"), "", "nothing reached it before it took input");
         wait_for("what was held", || noted(&dir, "keys").contains('e'));
+        assert!(matches!(paste.join().unwrap(), Response::Ok));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(noted(&dir, "keys"), "abcde", "once each, in order");
         assert!(!sleep::waking(&d, &id));
@@ -8870,7 +8886,12 @@ while (1) {{
             std::thread::spawn(move || peers::message(&d, &id, "from a peer", Some("9999".into())))
         };
         wait_for("the message held", || sleep::waking(&d, &id));
-        assert!(matches!(request(&d, &Request::SendInput { id: id.clone(), text: "pasted".into(), submit: true }), Response::Ok));
+        // Answered once it's given (see `sleep::paste`).
+        let paste = {
+            let (d, id) = (d.clone(), id.clone());
+            std::thread::spawn(move || request(&d, &Request::SendInput { id, text: "pasted".into(), submit: true }))
+        };
+        wait_for("the paste held", || sleep::held(&d, &id) == 2);
         assert!(!fix_due(&d, &s), "a PR fix isn't asked of it meanwhile");
         std::thread::sleep(std::time::Duration::from_millis(1500));
         assert_eq!(noted(&dir, "keys"), "", "nothing answered it");
@@ -8879,6 +8900,7 @@ while (1) {{
         // Its person answers it; then the paste goes in, and the message once nobody's typing.
         sleep::input(&d, &id, sleep::Held::Keys(b"y".to_vec()));
         wait_for("the paste", || noted(&dir, "keys") == "ypasted\r");
+        assert!(matches!(paste.join().unwrap(), Response::Ok), "its sender told once it was given");
         idle_for(&s, 2 * MINUTE);
         assert!(peer.join().unwrap().is_ok(), "its sender told once it was given");
         assert_eq!(noted(&dir, "keys"), "ypasted\rfrom a peer\r");
@@ -9009,6 +9031,97 @@ while (1) {{
         sleep::input(&d, &id, sleep::Held::Keys(b"hi".to_vec()));
         wait_for("what was held", || noted(&dir, "keys") == "hi");
         assert!(!session(&d, &id).pane.text(LIVE_HISTORY).contains("not sent"));
+        kill(&d, &id);
+    }
+
+    /// A paste sent to a session (the app's "send comments to the agent", `send_input`) is
+    /// answered once its agent has it, or with why not: one held for a question nobody answers
+    /// isn't reported sent, so whoever sent it keeps it.
+    #[test]
+    fn a_paste_is_answered_once_given_or_with_why_not() {
+        let (d, dir) = sleepy("sleep-paste-told", 0.2, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        let send = |text: &str| request(&d, &Request::SendInput { id: id.clone(), text: text.into(), submit: true });
+        assert!(matches!(send("asleep"), Response::Ok));
+        assert_eq!(noted(&dir, "keys"), "asleep\r", "answered once it was given");
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        let s = session(&d, &id);
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        std::fs::write(dir.join("dialog"), "").unwrap();
+        sleep::wake(&d, &id).unwrap();
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        let Response::Error { message } = send("asking") else { panic!("a paste held for a question nobody answered was reported sent") };
+        assert!(message.contains("didn't get it") && message.contains("asking something"), "{message}");
+        assert_eq!(noted(&dir, "keys"), "asleep\r");
+        kill(&d, &id);
+    }
+
+    /// A peer's message to a just-woken agent that asks something (the tester's `dialog2.py`
+    /// timing: its pane reattached, its terminal answering the agent's queries, the message before
+    /// any paste) is held for the question, not refused as if someone were typing, and goes in
+    /// once after the person answers it.
+    #[test]
+    fn a_message_to_a_woken_agent_asking_something_waits_for_the_answer() {
+        let (d, dir) = sleepy("sleep-message-question", 0.2, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        std::fs::write(dir.join("dialog"), "").unwrap();
+        sleep::wake(&d, &id).unwrap();
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        let s = session(&d, &id);
+        wait_for("its question", || s.pane.text(0).contains("Esc to cancel"));
+        // The pane reattaching: an attach, a resize, and its terminal's answer to a query.
+        let mut pane = attach_pane(&d, &id);
+        ipc::write_frame(&mut pane, ipc::RESIZE, &ipc::resize_payload(100, 30)).unwrap();
+        ipc::write_frame(&mut pane, ipc::DATA, b"\x1b[?62;22c").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let peer = {
+            let (d, id) = (d.clone(), id.clone());
+            std::thread::spawn(move || peers::message(&d, &id, "from a peer", None))
+        };
+        wait_for("the message held", || sleep::held(&d, &id) == 1);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // (The terminal's answer goes to it, as an answer; the stand-in notes it with the keys.)
+        let reply = "\x1b[?62;22c";
+        assert_eq!(noted(&dir, "keys"), reply, "nothing answered it");
+        // Its person answers, seeing it.
+        ipc::write_frame(&mut pane, ipc::DATA, b"y").unwrap();
+        wait_for("the answer", || noted(&dir, "keys") == format!("{reply}y"));
+        idle_for(&s, 2 * MINUTE);
+        assert!(peer.join().unwrap().is_ok(), "held, then given: not refused");
+        assert_eq!(noted(&dir, "keys"), format!("{reply}yfrom a peer\r"));
+        drop(pane);
+        kill(&d, &id);
+    }
+
+    /// A pane attaching (as one reattaches after a wake), resizing, and its terminal answering the
+    /// agent's queries isn't someone typing: a peer's message goes in rather than being refused
+    /// for 5 s. A key pressed is.
+    #[test]
+    fn a_pane_reattaching_isnt_someone_typing() {
+        let (d, dir) = sleepy("sleep-reattach-typing", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        let mut pane = attach_pane(&d, &id);
+        ipc::write_frame(&mut pane, ipc::RESIZE, &ipc::resize_payload(100, 30)).unwrap();
+        ipc::write_frame(&mut pane, ipc::DATA, b"\x1b[?62;22c").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        idle_for(&s, 2 * MINUTE);
+        peers::message(&d, &id, "from a peer", None).unwrap();
+        wait_for("the message", || noted(&dir, "keys").ends_with("from a peer\r"));
+        ipc::write_frame(&mut pane, ipc::DATA, b"x").unwrap();
+        wait_for("the key", || noted(&dir, "keys").ends_with('x'));
+        idle_for(&s, 2 * MINUTE);
+        let e = peers::message(&d, &id, "again", None).unwrap_err().to_string();
+        assert!(e.contains("typing"), "{e}");
+        drop(pane);
         kill(&d, &id);
     }
 }

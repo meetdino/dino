@@ -105,16 +105,17 @@ pub(crate) fn message(d: &Daemon, id: &str, text: &str, by: Option<String>) -> a
     let now = super::mode::now(&s, d.proxy.stats.session(&s.id).agent_mode.as_deref());
     let pending = s.pending.lock().unwrap().as_ref().and_then(|c| c.mode.clone());
     check_messageable(&s.name, &s.agent_id, &[s.controls.mode.as_deref(), now.as_deref(), pending.as_deref()])?;
-    // Asleep or waking, it's held until the agent waits for a prompt and nobody's typing one, as
-    // below (see `sleep::settle`).
-    if s.asleep() || crate::sleep::waking(d, id) {
+    // Asleep, waking, or asking something on its screen (a woken Claude's folder trust, a
+    // permission), it's held until the agent waits for a prompt and nobody's typing one, as below
+    // (see `sleep::drain`): answered first, the question is the person's.
+    if s.asleep() || crate::sleep::waking(d, id) || crate::sleep::asking(&s) {
         *s.messaged_by.lock().unwrap() = by;
         return crate::sleep::message(d, id, text.trim()).map_err(|why| anyhow::anyhow!("{} didn't get the message: {why}", s.name));
     }
     // Typed into a permission prompt or mid-turn, the text would answer the wrong question.
     anyhow::ensure!(idle(d, &s), "{} is {}; message it once it's idle", s.name, status(d, &s));
     // Hand over only once nobody is typing into it, so the text doesn't join a half-written prompt.
-    anyhow::ensure!(s.attached.load(Ordering::Relaxed) == 0 || s.poked.lock().unwrap().is_none_or(|t| t.elapsed() > USER_TYPING), "the user is typing in {}; try again shortly", s.name);
+    anyhow::ensure!(s.attached.load(Ordering::Relaxed) == 0 || s.keyed.lock().unwrap().is_none_or(|t| t.elapsed() > USER_TYPING), "the user is typing in {}; try again shortly", s.name);
     *s.messaged_by.lock().unwrap() = by;
     // Through `giving`: a sleep decided at this moment waits for it, or it wakes what slept first.
     crate::sleep::message(d, id, text.trim()).map_err(|why| anyhow::anyhow!("{} didn't get the message: {why}", s.name))

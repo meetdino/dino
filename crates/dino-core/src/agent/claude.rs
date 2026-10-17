@@ -419,18 +419,23 @@ impl Agent for Claude {
         Some(std::iter::once(first).chain(rest.iter().copied()).map(str::trim).collect::<Vec<_>>().join("\n").trim().to_string())
     }
 
-    /// Its permission and trust dialogs each end in "Esc to cancel". Resuming a conversation
-    /// idle a while (2.1.302), it may ask whether to resume from a summary (its default runs
-    /// `/compact`) or at all ("Resume this conversation?", "Esc to resume"), read by their options
-    /// so a conversation that only mentions them isn't taken for one.
+    /// Its permission and trust dialogs end in a footer, "Esc to cancel", at the bottom of its
+    /// screen; with its prompt box up instead, its last four lines are the box (two rules and its
+    /// line between) and its mode line, so a conversation that only quotes the footer, above the
+    /// box, isn't taken for one.
+    /// Resuming a conversation idle a while (2.1.302), it may ask whether to resume from a summary
+    /// (its default runs `/compact`) or at all ("Resume this conversation?", its footer "Esc to
+    /// resume"), read by their options too.
     fn asking(&self, screen: &str) -> Option<String> {
+        let footer: Vec<&str> = screen.lines().rev().filter(|l| !l.trim().is_empty()).take(4).collect();
+        let says = |what: &str| footer.iter().any(|l| l.contains(what));
         if screen.contains("Resume from summary") && screen.contains("Resume full session as-is") {
             return Some("Claude asks whether to resume from a summary".into());
         }
-        if (screen.contains("Resume this conversation?") && screen.contains("Start a new conversation")) || screen.contains("Esc to resume") {
+        if (screen.contains("Resume this conversation?") && screen.contains("Start a new conversation")) || says("Esc to resume") {
             return Some("Claude asks whether to resume this conversation".into());
         }
-        screen.contains("Esc to cancel").then(|| "Claude asks".into())
+        says("Esc to cancel").then(|| "Claude asks".into())
     }
 
     fn asks_trust(&self) -> bool {
@@ -665,6 +670,20 @@ mod tests {
         assert!(claude.asking(&cold.replace("Esc to resume", "")).is_some(), "by its options too");
         // Only talked about, in a conversation: no.
         assert_eq!(claude.asking("❯ what does Resume from summary do?\n⏺ It compacts.\n\n❯ "), None);
+    }
+
+    /// A dialog's footer counts where Claude draws it, last on its screen, not quoted in its
+    /// conversation above its prompt box.
+    #[test]
+    fn a_footer_only_quoted_in_the_conversation_asks_nothing() {
+        let claude = crate::agent::agent("claude").unwrap();
+        let rule = "─".repeat(40);
+        let quoted = format!("❯ what does the dialog say?\n⏺ It ends in \"Esc to cancel\", or \"Esc to resume\".\n\n{rule}\n❯ \n{rule}\n  ⏵⏵ auto mode on (shift+tab to cycle)\n\n");
+        assert_eq!(claude.asking(&quoted), None);
+        let permission = " Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend\n\n";
+        assert!(claude.asking(permission).is_some());
+        let trust = " Quick safety check: Is this a project you created or one you trust?\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel";
+        assert!(claude.asking(trust).is_some());
     }
 
     /// What's typed in its prompt box, read off its screen: nothing when it's empty (a draft

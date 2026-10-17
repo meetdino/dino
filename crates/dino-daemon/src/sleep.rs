@@ -58,8 +58,8 @@ const TOLD_WITHIN: Duration = Duration::from_secs(READY_WITHIN.as_secs() * 2);
 pub(crate) enum Held {
     /// Keys, as a client typed them.
     Keys(Vec<u8>),
-    /// A paste of the user's (the app's composer, `send_input`), with Return after it when `submit`.
-    Text { text: String, submit: bool },
+    /// A paste of the user's (the app's composer, `send_input`).
+    Text(Paste),
     /// A prompt from elsewhere: another session's agent, an automation, a PR's failed checks.
     Message(Message),
 }
@@ -97,6 +97,49 @@ impl Drop for Message {
         if let Some(then) = self.then.take() {
             then(Err("it was dropped".into()));
         }
+    }
+}
+
+/// A paste of the user's, with Return after it when `submit`, and whoever sent it, told whether it
+/// was given, as a message's sender is (see `Message::then`): sent from a composer, its text is
+/// kept there until it's given.
+pub(crate) struct Paste {
+    text: String,
+    submit: bool,
+    then: Option<Told>,
+}
+
+impl Paste {
+    pub(crate) fn new(text: impl Into<String>, submit: bool) -> Self {
+        Self { text: text.into(), submit, then: None }
+    }
+
+    pub(crate) fn then(mut self, then: impl FnOnce(Result<(), String>) + Send + 'static) -> Self {
+        self.then = Some(Box::new(then));
+        self
+    }
+
+    fn told(mut self, outcome: Result<(), String>) {
+        if let Some(then) = self.then.take() {
+            then(outcome);
+        }
+    }
+}
+
+impl Drop for Paste {
+    fn drop(&mut self) {
+        if let Some(then) = self.then.take() {
+            then(Err("it was dropped".into()));
+        }
+    }
+}
+
+/// Tell whoever sent `h` (a message, a paste) that it wasn't given, and why; keys have nobody to tell.
+fn not_sent(h: Held, why: &str) {
+    match h {
+        Held::Message(m) => m.told(Err(why.into())),
+        Held::Text(p) => p.told(Err(why.into())),
+        Held::Keys(_) => {}
     }
 }
 
@@ -467,7 +510,7 @@ pub(crate) fn input(d: &Daemon, id: &str, what: Held) {
         match what {
             Held::Message(m) => w.messages.push_back(m),
             keys @ Held::Keys(_) if straight => give_through(d, waking, &s, keys),
-            text @ Held::Text { .. } if straight && !asks && !w.blocked => give_through(d, waking, &s, text),
+            text @ Held::Text(_) if straight && !asks && !w.blocked => give_through(d, waking, &s, text),
             typed => {
                 w.blocked |= asks && w.drawn;
                 w.typed.push_back(typed);
@@ -477,16 +520,17 @@ pub(crate) fn input(d: &Daemon, id: &str, what: Held) {
     }
     if s.asleep() {
         // A wake that failed isn't tried again for every key: what's typed is kept with it. A
-        // message isn't kept (it would land who knows when, or never): its sender hears why.
+        // message or a paste isn't kept (it would land who knows when, or never): its sender
+        // hears why, and keeps it.
         let mut failed = s.wake_failed.lock().unwrap();
         if let Some((why, kept)) = failed.as_mut() {
             match what {
-                Held::Message(m) => {
+                keys @ Held::Keys(_) => kept.push(keys),
+                other => {
                     let why = format!("it's asleep and couldn't wake: {why}");
                     drop((failed, waking));
-                    m.told(Err(why));
+                    not_sent(other, &why);
                 }
-                typed => kept.push(typed),
             }
             return;
         }
@@ -575,9 +619,10 @@ fn give(d: &Daemon, s: &Session, what: Held) {
             }
             s.pane.write(keys);
         }
-        Held::Text { text, submit } => {
-            *(if submit { &s.submitted } else { &s.drafted }).lock().unwrap() = Some(now);
-            send_input(s, &text, submit);
+        Held::Text(p) => {
+            *(if p.submit { &s.submitted } else { &s.drafted }).lock().unwrap() = Some(now);
+            send_input(s, &p.text, p.submit);
+            p.told(Ok(()));
         }
         Held::Message(m) => {
             *s.submitted.lock().unwrap() = Some(now);
@@ -585,6 +630,20 @@ fn give(d: &Daemon, s: &Session, what: Held) {
             m.told(Ok(()));
         }
     }
+}
+
+/// Paste `text` into session `id` (see `input`), Return after it when `submit`, and hear whether
+/// its agent got it, as `message` does.
+pub(crate) fn paste(d: &Daemon, id: &str, text: String, submit: bool) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    input(
+        d,
+        id,
+        Held::Text(Paste::new(text, submit).then(move |outcome| {
+            let _ = tx.send(outcome);
+        })),
+    );
+    rx.recv_timeout(TOLD_WITHIN).unwrap_or_else(|_| Err("it's still held for it".into()))
 }
 
 /// Give session `id` the message `text` (see `input`), and hear whether its agent got it: at once
@@ -790,8 +849,8 @@ fn drain(d: &Daemon, s: &Arc<Session>, since: Instant) {
             if lost > 0 {
                 eprintln!("{} dinod: session {} ended as it woke; {lost} inputs held for it dropped", stamp(), s.id);
             }
-            for m in left.messages {
-                m.told(Err("it ended as it woke".into()));
+            for h in left.typed.into_iter().chain(left.messages.into_iter().map(Held::Message)) {
+                not_sent(h, "it ended as it woke");
             }
             break;
         }
@@ -929,27 +988,31 @@ fn typing(s: &Session) -> bool {
 }
 
 /// What was held for woken `s` and not given in time (it came `up`, and `asks` something still),
-/// said in its pane, what it was and why, and to each message's sender.
+/// said in its pane, what it was and why, and to each message's and paste's sender.
 fn not_given(d: &Daemon, s: &Session, left: Wake, up: bool, asks: bool) {
+    let Wake { typed, messages, .. } = left;
     let typed_why = if asks { "it's still asking something" } else { "it didn't take input" };
-    if !left.typed.is_empty() {
-        let what: Vec<String> = left
-            .typed
+    let had_typed = !typed.is_empty();
+    if had_typed {
+        let what: Vec<String> = typed
             .iter()
             .map(|h| match h {
                 Held::Keys(k) => format!("“{}”", printable(&String::from_utf8_lossy(&split_replies(k).1))),
-                Held::Text { text, .. } => format!("“{}”", printable(text)),
+                Held::Text(p) => format!("“{}”", printable(&p.text)),
                 Held::Message(m) => format!("a message, “{}”", printable(&m.text)),
             })
             .collect();
         eprintln!("{} dinod: session {}: {} inputs held as it woke not given: {typed_why}", stamp(), s.id, what.len());
         crate::say_in(s, &format!("held for it and not sent, as {typed_why}: {}", what.join(", ")));
     }
-    if left.messages.is_empty() {
+    for h in typed {
+        not_sent(h, typed_why);
+    }
+    if messages.is_empty() {
         return;
     }
     // Behind what the user typed, a message is held as long as that is.
-    let (why, theirs) = if !left.typed.is_empty() {
+    let (why, theirs) = if had_typed {
         (typed_why, typed_why)
     } else if !up {
         ("it didn't take input", "it didn't take input")
@@ -962,10 +1025,10 @@ fn not_given(d: &Daemon, s: &Session, left: Wake, up: bool, asks: bool) {
     } else {
         ("it didn't take input", "it didn't take input")
     };
-    let what: Vec<String> = left.messages.iter().map(|m| format!("a message, “{}”", printable(&m.text))).collect();
+    let what: Vec<String> = messages.iter().map(|m| format!("a message, “{}”", printable(&m.text))).collect();
     eprintln!("{} dinod: session {}: {} messages held as it woke not given: {why}", stamp(), s.id, what.len());
     crate::say_in(s, &format!("held for it and not sent, as {why}: {}", what.join(", ")));
-    for m in left.messages {
+    for m in messages {
         m.told(Err(theirs.to_string()));
     }
 }
@@ -981,7 +1044,7 @@ fn printable(text: &str) -> String {
 /// queries (device attributes, modes, kitty keyboard flags, colours, its version), which go to the
 /// agent at once, and the rest, keys, which are held. An answer is a control string (OSC, DCS, APC,
 /// PM) or a CSI with a private marker (`?`, `>`, `=`), which no key sends.
-fn split_replies(bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+pub(crate) fn split_replies(bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let (mut replies, mut keys) = (vec![], vec![]);
     let mut i = 0;
     while i < bytes.len() {

@@ -122,8 +122,12 @@ user-facing values under **General**, **Terminal**, **Agents**, **Power**, and
   a stop cuts nothing short of sleeps: between turns, not asking anything, with no subagent,
   background command, monitor, scheduled prompt or server of its own running, and not pinned.
   Pin a session you turned Remote Control on in (`/remote-control`): dino can't see that, and
-  Claude's phone and web apps can't wake it. `0` means never, memory pressure or not. App:
-  **Power → Memory**.
+  Claude's phone and web apps can't wake it. A woken Claude Code resumes its conversation as it
+  was, without being asked whether to resume from a summary: dino starts it with
+  `CLAUDE_CODE_RESUME_THRESHOLD_MINUTES` and `CLAUDE_CODE_RESUME_TOKEN_THRESHOLD` out of reach
+  (unless dinod's environment sets either), and what it starts inherits them, so `/resume` or
+  `claude --resume` inside a woken session isn't offered resume-from-summary either. `0` means
+  never, memory pressure or not. App: **Power → Memory**.
 
 #### `[machine.lid]`
 
