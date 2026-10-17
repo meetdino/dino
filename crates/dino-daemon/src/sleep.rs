@@ -575,19 +575,33 @@ fn say_asleep(s: &Session, text: &str) {
 /// told to: `schedule::agent_ready`); from then on keys typed seeing it go straight to it. Then give
 /// it what was held, front to back, each once it may have it (`may_give`): none of it while it asks
 /// something on its screen, a dialog whoever typed blind never saw; a message only while it waits
-/// for a prompt and nobody's typing one. What's still held after `READY_WITHIN` isn't given, and its
-/// pane says so; dropped if the agent ends first.
+/// for a prompt and nobody's typing one. What's still held after `READY_WITHIN` (all of it, when the
+/// agent isn't up by then) isn't given, and its pane says so; dropped if the agent ends first.
 fn settle(d: &Daemon, s: &Arc<Session>) {
     let since = Instant::now();
     let mut steady = None;
-    while !s.pane.is_exited() && since.elapsed() < READY_WITHIN && !crate::schedule::agent_ready(s, &mut steady, false) {
+    let mut up = false;
+    while !s.pane.is_exited() && since.elapsed() < READY_WITHIN {
+        if crate::schedule::agent_ready(s, &mut steady, false) {
+            up = true;
+            break;
+        }
         std::thread::sleep(READY_LOOK);
     }
     if let Some(w) = d.waking.lock().unwrap().get_mut(&s.id) {
         w.drawn = true;
     }
-    eprintln!("{} dinod: session {} awake in {} ms", stamp(), s.id, since.elapsed().as_millis());
     bump(d);
+    // Never up in time: none of what was held goes in.
+    if !up && !s.pane.is_exited() {
+        let left = d.waking.lock().unwrap().remove(&s.id).map(|w| w.held).unwrap_or_default();
+        if !left.is_empty() {
+            not_given(d, s, &left);
+        }
+        bump(d);
+        return;
+    }
+    eprintln!("{} dinod: session {} awake in {} ms", stamp(), s.id, since.elapsed().as_millis());
     loop {
         if s.pane.is_exited() {
             let lost = d.waking.lock().unwrap().remove(&s.id).map_or(0, |w| w.held.len());

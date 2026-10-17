@@ -7617,7 +7617,8 @@ while (sysread(STDIN, my $c, 1)) {
     /// reads keys, throwing away what was typed before it could (as an agent starting up may),
     /// draws its prompt, and keeps each key it's given in `log.keys`, echoing it. Started again
     /// while the folder has a file `dialog`, it first asks something, as Claude asks with its
-    /// "Esc to cancel", until it's given `y`. `extra` is Perl it runs first (what it starts).
+    /// "Esc to cancel", until it's given `y`; with a file `slow`, it takes half a minute to come up.
+    /// `extra` is Perl it runs first (what it starts).
     fn sleepy(name: &str, slow: f64, extra: &str) -> (Arc<Daemon>, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let dir = test_home().join(name);
@@ -7632,6 +7633,8 @@ open(my $f, ">>", "{log}.starts"); print $f "$$ @ARGV\n"; close $f;
 my $starts = 0;
 if (open(my $c, "<", "{log}.starts")) {{ $starts++ while <$c>; close $c; }}
 select(undef, undef, undef, {slow});
+# Started again with a file `slow` there: it doesn't come up for a while.
+select(undef, undef, undef, 30) if $starts > 1 && -e "{dir}/slow";
 system("stty raw -echo");
 POSIX::tcflush(0, POSIX::TCIFLUSH);
 $| = 1;
@@ -8391,6 +8394,29 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         // A peer's message goes through it.
         peers::message(&d, &id, "hello from a peer", Some("9999".into())).unwrap();
         wait_for("the message", || noted(&dir, "keys") == "hello from a peer\r");
+        kill(&d, &id);
+    }
+
+    /// What was typed for an agent that doesn't come up in time is given to none of it: it isn't
+    /// up to take it, and nothing says it would get it right. Its pane says what wasn't sent.
+    #[test]
+    fn held_input_for_an_agent_that_never_comes_up_isnt_sent() {
+        let (d, dir) = sleepy("sleep-never-up", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        std::fs::write(dir.join("slow"), "").unwrap();
+        sleep::input(&d, &id, sleep::Held::Keys(b"never given".to_vec()));
+        let t = Instant::now();
+        while !session(&d, &id).pane.text(0).contains("not sent") {
+            assert!(t.elapsed() < std::time::Duration::from_secs(20), "{}", session(&d, &id).pane.text(0));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let screen = session(&d, &id).pane.text(0);
+        assert!(screen.contains("it didn't take input") && screen.contains("never given"), "{screen}");
+        assert!(!sleep::waking(&d, &id));
+        assert_eq!(noted(&dir, "keys"), "");
         kill(&d, &id);
     }
 }
