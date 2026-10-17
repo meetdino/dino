@@ -9124,4 +9124,28 @@ while (1) {{
         drop(pane);
         kill(&d, &id);
     }
+
+    /// A paste waiting for a wake that fails isn't kept to land at the next one, perhaps after its
+    /// sender, told nothing, sent it again: it's refused at once, saying why, as a message is.
+    #[test]
+    fn a_paste_waiting_for_a_wake_that_fails_is_refused() {
+        let (d, dir) = sleepy("sleep-paste-wake-fails", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        let claude = d.launcher("claude").unwrap();
+        d.launchers.write().unwrap().retain(|l| l.short != "claude");
+        let t = Instant::now();
+        let Response::Error { message } = request(&d, &Request::SendInput { id: id.clone(), text: "pasted".into(), submit: true }) else { panic!("a paste for a wake that failed was reported sent") };
+        assert!(message.contains("didn't get it") && message.contains("couldn't wake"), "{message}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "answered {:?} later", t.elapsed());
+        assert_eq!(session(&d, &id).wake_failed.lock().unwrap().as_ref().map(|(_, h)| h.len()), Some(0), "nothing kept for later");
+        d.launchers.write().unwrap().push(claude);
+        sleep::wake(&d, &id).unwrap();
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(noted(&dir, "keys"), "", "it didn't land later");
+        kill(&d, &id);
+    }
 }

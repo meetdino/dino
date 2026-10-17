@@ -765,14 +765,16 @@ fn begin(d: &Daemon, id: &str) -> Option<Arc<Session>> {
         }
         Err(e) => {
             let w = d.waking.lock().unwrap().remove(id).unwrap_or_default();
-            let held: Vec<Held> = w.typed.into();
+            // Keys typed are kept for the next wake; a paste or a message isn't (it would land
+            // then, perhaps after its sender sent it again): its sender hears why, and keeps it.
+            let (held, sent): (Vec<Held>, Vec<Held>) = w.typed.into_iter().chain(w.messages.into_iter().map(Held::Message)).partition(|h| matches!(h, Held::Keys(_)));
             eprintln!("{} dinod: session {id} didn't wake: {e}{}", stamp(), if held.is_empty() { String::new() } else { format!(" ({} inputs kept for it)", held.len()) });
             if let Some(s) = asleep.filter(|s| s.asleep() && attachable(d, id).is_some_and(|now| Arc::ptr_eq(&now, s))) {
                 say_asleep(&s, &format!("couldn't wake it: {e}. What you type is kept for it; Wake (or `dino wake {id}`) tries again."));
                 *s.wake_failed.lock().unwrap() = Some((e.to_string(), held));
             }
-            for m in w.messages {
-                m.told(Err(format!("it couldn't wake: {e}")));
+            for h in sent {
+                not_sent(h, &format!("it couldn't wake: {e}"));
             }
             None
         }
