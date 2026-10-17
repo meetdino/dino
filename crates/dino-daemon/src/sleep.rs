@@ -168,6 +168,11 @@ pub(crate) fn why_not(d: &Daemon, s: &Session, asked: bool) -> Option<String> {
     if !asked && s.pinned.load(Ordering::Relaxed) {
         return Some("it's pinned".into());
     }
+    // Claude's phone and web clients can't wake it. (Turned on inside it, `/remote-control`, dino
+    // can't tell.)
+    if s.args.iter().any(|a| a == "--remote-control" || a.starts_with("--remote-control=")) {
+        return Some("Remote Control is on in it".into());
+    }
     if s.moving_to.lock().unwrap().is_some() {
         return Some("its agent is moving to another conversation".into());
     }
