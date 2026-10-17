@@ -8696,6 +8696,15 @@ while (1) {{
         kill(&d, &id);
     }
 
+    /// A stand-in's session drawn as Claude's prompt box (see `sleepy`), its box up.
+    fn boxed_session(d: &Daemon, dir: &Path) -> Arc<Session> {
+        std::fs::write(dir.join("box"), "").unwrap();
+        let id = spawn(d, Launch::new("claude", vec![], Some(dir.display().to_string()))).unwrap();
+        let s = session(d, &id);
+        wait_for("its prompt box", || s.pane.text(0).contains('❯'));
+        s
+    }
+
     /// A fullscreen agent's last screen (on the alternate screen, as Claude Code's is) stays up as
     /// it wakes, the wake line under it, until the new agent draws: the wake line used to leave
     /// the alternate screen for an empty main one, and the pane went blank.
@@ -8736,6 +8745,27 @@ while (1) {{
         wait_for("what was held", || noted(&dir, "keys") == "abc\x03def\x1bghi\r");
         let reads: Vec<String> = noted(&dir, "reads").lines().map(|l| (0..l.len()).step_by(2).map(|i| char::from(u8::from_str_radix(&l[i..i + 2], 16).unwrap())).collect()).collect();
         assert_eq!(reads, ["abc", "\x03", "def", "\x1b", "ghi", "\r"], "text run together, the rest each on its own");
+        kill(&d, &id);
+    }
+
+    /// A woken agent takes what was held for it once it has drawn its prompt anew (Claude's box
+    /// and the mode line under it), not after a second of quiet: one that keeps printing (a clock,
+    /// here) gets it at once rather than when it's been up a while.
+    #[test]
+    fn a_woken_agent_takes_keys_once_its_prompt_is_drawn() {
+        let (d, dir) = sleepy("sleep-drawn", 0.1, "");
+        let s = boxed_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        std::fs::write(dir.join("tick"), "").unwrap();
+        let t = Instant::now();
+        sleep::input(&d, &id, sleep::Held::Keys(b"hi".to_vec()));
+        while noted(&dir, "keys") != "hi" {
+            assert!(t.elapsed() < std::time::Duration::from_secs(10), "never given");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "given {:?} after the key", t.elapsed());
         kill(&d, &id);
     }
 }

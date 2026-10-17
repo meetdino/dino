@@ -35,6 +35,9 @@ const PRESSED_IDLE: Duration = Duration::from_secs(5 * 60);
 const READY_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 8 } else { 60 });
 /// How often a waking agent is looked at.
 const READY_LOOK: Duration = Duration::from_millis(50);
+/// How long a woken agent that has drawn its prompt anew is quiet before it takes keys (see
+/// `prompt_drawn`): Claude reads its first ~0.05 s after drawing it.
+const DRAWN_QUIET: Duration = Duration::from_millis(100);
 /// The pause held keys get around a key that isn't text (Return, Ctrl-C, an arrow, a paste), so
 /// the agent reads it on its own, as it would have (see `give_held`)...
 const KEYS_APART: Duration = Duration::from_millis(50);
@@ -706,7 +709,7 @@ fn settle(d: &Daemon, s: &Arc<Session>) {
     let mut steady = None;
     let mut up = false;
     while !s.pane.is_exited() && since.elapsed() < READY_WITHIN {
-        if crate::schedule::agent_ready(s, &mut steady, false) {
+        if prompt_drawn(s) || crate::schedule::agent_ready(s, &mut steady, false) {
             up = true;
             break;
         }
@@ -774,6 +777,20 @@ fn settle(d: &Daemon, s: &Arc<Session>) {
         }
     }
     bump(d);
+}
+
+/// Woken `s`'s agent has drawn its prompt anew, reads keys, and has been quiet `DRAWN_QUIET`: it
+/// takes keys now, a second sooner than `agent_ready`'s quiet. Drawn is what its adapter reads as
+/// its prompt's footer (Claude's mode line), below the wake line if that's still on screen: the
+/// last screen above it has the old prompt on it.
+fn prompt_drawn(s: &Session) -> bool {
+    let Some(adapter) = s.adapter() else { return false };
+    if !s.pane.reads_keys() || !s.last_write.lock().unwrap().is_some_and(|t| t.elapsed() >= DRAWN_QUIET) {
+        return false;
+    }
+    let screen = s.pane.text(0);
+    let new = screen.rsplit_once(crate::WAKE_LINE).map_or(screen.as_str(), |(_, after)| after);
+    adapter.screen_mode(new).is_some()
 }
 
 /// Give woken `s`'s agent what was held for it, in order and as it was typed: each frame as a
