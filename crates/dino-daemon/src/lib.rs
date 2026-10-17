@@ -2018,7 +2018,7 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
     // An agent that takes no first message on its command line (Kimi Code, Amp) gets it typed in,
     // once it's ready for one.
     let typed_prompt = prompt.clone().filter(|p| ended.is_none() && prompt_args(&l.agent_id, p.clone()).is_empty());
-    let (spec, cwd, server, reach) = match &host {
+    let (mut spec, cwd, server, reach) = match &host {
         _ if ended.is_some() => (None, PathBuf::from(ended.map(|r| r.cwd.clone()).unwrap_or_default()), None, vec![]),
         Some(host) => {
             let folder = cwd.filter(|c| !c.is_empty()).or_else(|| settings.ssh.get(host).map(|h| h.folder.clone())).filter(|f| !f.is_empty());
@@ -2032,6 +2032,19 @@ fn spawn(d: &Daemon, launch: Launch) -> anyhow::Result<String> {
         }
     };
 
+    // Woken from sleep, Claude resumes its conversation as it was rather than first asking whether
+    // to resume from a summary (its dialog for one idle over 70 minutes and over 100k tokens,
+    // whose default runs `/compact`): dino stopped it, not its user, and nobody may be there to
+    // answer. Its thresholds for that (Claude Code 2.1.302), out of reach for this launch only,
+    // unless dinod's own environment sets either.
+    const RESUME_THRESHOLDS: [&str; 2] = ["CLAUDE_CODE_RESUME_THRESHOLD_MINUTES", "CLAUDE_CODE_RESUME_TOKEN_THRESHOLD"];
+    if let Some(spec) = spec.as_mut().filter(|_| woke_from.is_some() && l.agent_id == "claude")
+        && RESUME_THRESHOLDS.iter().all(|v| std::env::var_os(v).is_none())
+    {
+        for var in RESUME_THRESHOLDS {
+            spec.env.entry(var.into()).or_insert_with(|| "1000000000".into());
+        }
+    }
     let subscribers: Subscribers = Arc::default();
     let last_output: Arc<Mutex<Option<Instant>>> = Arc::default();
     let poked: Arc<Mutex<Option<Instant>>> = Arc::default();
@@ -8789,6 +8802,29 @@ while (1) {{
         wait_for("a draft again", || s.pane.text(0).contains("❯ abc"));
         idle_for(&s, 2 * MINUTE);
         assert_eq!(sleep::why_not(&d, &s, false).as_deref(), unsent);
+        kill(&d, &id);
+    }
+
+    /// Woken, a Claude resumes its conversation as it was, not asked first whether to resume from
+    /// a summary instead: its thresholds for asking are out of reach for that launch only.
+    #[test]
+    fn a_woken_claude_isnt_asked_to_resume_from_a_summary() {
+        let env = test_home().join("sleep-as-is").join("log.env");
+        let extra = format!(
+            r#"open(my $v, ">>", "{}"); print $v ($ENV{{CLAUDE_CODE_RESUME_THRESHOLD_MINUTES}} // "-"), " ", ($ENV{{CLAUDE_CODE_RESUME_TOKEN_THRESHOLD}} // "-"), "\n"; close $v;"#,
+            env.display()
+        );
+        let (d, dir) = sleepy("sleep-as-is", 0.0, &extra);
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        sleep::wake(&d, &id).unwrap();
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        // Started again for new controls, it's as any start.
+        restart(&d, &id, Controls { model: Some("haiku".into()), ..Controls::default() }).unwrap();
+        wait_for("its third start", || std::fs::read_to_string(&env).is_ok_and(|e| e.lines().count() == 3));
+        assert_eq!(std::fs::read_to_string(&env).unwrap(), "- -\n1000000000 1000000000\n- -\n");
         kill(&d, &id);
     }
 }
