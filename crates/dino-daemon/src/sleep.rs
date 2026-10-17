@@ -523,16 +523,20 @@ fn start_wake(d: &Daemon, mut waking: MutexGuard<'_, HashMap<String, Wake>>, s: 
 }
 
 /// Give `s`'s agent what was held for it, as it would have had it: keys typed, a paste, a message
-/// sent (its sender told). What's typed and not sent yet keeps it awake (see `unsent`).
-fn give(_d: &Daemon, s: &Session, what: Held) {
+/// sent (its sender told). What's typed and not sent yet keeps it awake (see `unsent`): only a key
+/// that would change whether something is costs a look at what the agent asks, since one that
+/// answers a question (a menu's `1`, space to tick a box, Return to choose) neither adds to a prompt
+/// nor sends one.
+fn give(d: &Daemon, s: &Session, what: Held) {
     let now = Instant::now();
     *s.typed.lock().unwrap() = Some(now);
     match what {
         Held::Keys(keys) => {
+            let unsent = unsent(s);
             match draft(&keys) {
-                Some(true) => *s.drafted.lock().unwrap() = Some(now),
-                Some(false) => *s.submitted.lock().unwrap() = Some(now),
-                None => {}
+                Some(true) if !unsent && !answering(d, s) => *s.drafted.lock().unwrap() = Some(now),
+                Some(false) if unsent && !answering(d, s) => *s.submitted.lock().unwrap() = Some(now),
+                _ => {}
             }
             s.pane.write(keys);
         }
@@ -768,6 +772,12 @@ fn settle(d: &Daemon, s: &Arc<Session>) {
 fn asking(s: &Session) -> bool {
     let screen = s.pane.text(0);
     s.adapter().is_some_and(|a| a.asking(&screen).is_some()) || (s.agent_now() == "claude" && crate::setup_prompt(&screen).is_some())
+}
+
+/// `s`'s agent waits on an answer rather than a prompt: a permission or a question, as its hooks
+/// report them, or one on its screen.
+fn answering(d: &Daemon, s: &Session) -> bool {
+    matches!(crate::stats(d, s).activity, Some(Activity::NeedsPermission(_))) || asking(s)
 }
 
 /// Someone's typing in `s`: a key lately, or a prompt typed and not sent.

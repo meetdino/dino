@@ -8535,6 +8535,31 @@ while (sysread(STDIN, my $c, 1)) {{ print $k $c; print $c; }}
         kill(&d, &id);
     }
 
+    /// A key that answers what the agent asks (a menu's `1`, space to tick a box, `y`) adds to no
+    /// prompt, so it doesn't keep the session awake as something typed and not sent; typed at its
+    /// prompt, it does.
+    #[test]
+    fn answering_a_question_isnt_a_prompt_left_unsent() {
+        let (d, dir) = sleepy("sleep-answer", 0.0, "");
+        let s = sleepy_session(&d, &dir);
+        let id = s.id.clone();
+        idle_for(&s, 2 * MINUTE);
+        sleep::sleep(&d, &id, sleep::By::Name).unwrap();
+        std::fs::write(dir.join("dialog"), "").unwrap();
+        sleep::wake(&d, &id).unwrap();
+        let s = session(&d, &id);
+        wait_for("its question", || s.pane.text(0).contains("Esc to cancel"));
+        wait_for("it to be up", || !sleep::waking(&d, &id));
+        for key in ["1", " ", "y"] {
+            sleep::input(&d, &id, sleep::Held::Keys(key.into()));
+            assert!(!sleep::unsent(&s), "{key:?} answered it");
+        }
+        wait_for("its prompt", || s.pane.text(0).starts_with('>'));
+        sleep::input(&d, &id, sleep::Held::Keys(b"1".to_vec()));
+        assert!(sleep::unsent(&s), "typed at its prompt, it's a prompt");
+        kill(&d, &id);
+    }
+
     /// A message that wakes a session never holds back what the user types there, nor takes it
     /// down with it: typed before the agent is up and after, the keys go in, in order, while the
     /// message waits for the prompt being typed to be sent. Never sent in time, the message isn't
