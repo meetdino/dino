@@ -13,6 +13,9 @@ struct ClaudeAccountInfo: Codable, Equatable, Identifiable {
     var chosen: Bool?
     /// Found at its subscription limit, and not tried again yet.
     var spent: Bool
+    /// Found turned off by its organization: Anthropic refuses its calls, and nothing resets it.
+    /// Spent too. Nil from an older dinod.
+    var turned_off: Bool?
     var resets_at: UInt64?
     var retry_at: UInt64?
     /// Its usage windows as Anthropic last reported them on a call it signed; nil until then.

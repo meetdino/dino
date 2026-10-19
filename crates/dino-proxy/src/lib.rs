@@ -556,7 +556,10 @@ impl Stats {
         let mut spent = vec![];
         for k in keys {
             let l = self.limited(k)?;
-            spent.push((l.resets_at.unwrap_or(l.retry_at), k));
+            // One its organization turned off isn't back at any time it says.
+            if l.kind != fallback::Kind::TurnedOff {
+                spent.push((l.resets_at.unwrap_or(l.retry_at), k));
+            }
         }
         let (at, key) = spent.into_iter().min()?;
         let mut r = self.refusals.lock().unwrap().get(key)?.clone();
@@ -1345,11 +1348,12 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
                     }
                 }
             }
-            // The account that signed it is spent: the others that aren't, in order (the first,
-            // when another answered and it isn't known spent), until one answers.
+            // The account that signed it is spent, or turned off by its organization: the others
+            // that aren't, in order (the first, when another answered and it isn't known spent),
+            // until one answers.
             if !accounts.is_empty()
                 && primary.is_some()
-                && let Some(t) = fallback::classify(status.as_u16(), &headers, &text).filter(|t| t.kind == fallback::Kind::Quota)
+                && let Some(t) = fallback::classify(status.as_u16(), &headers, &text).filter(|t| matches!(t.kind, fallback::Kind::Quota | fallback::Kind::TurnedOff))
             {
                 let (key, name) = (key_of(&account), name_of(&account));
                 st.stats.mark_limited(&key, &name, &t);
@@ -1411,7 +1415,7 @@ async fn forward(State(st): State<AppState>, Path((key, session, provider, rest)
                     && let Some(r) = steps(&st, &session, chain, api, &body, &parts.headers, &parts.method, query_ref, p, &why, &mut guard).await
                 {
                     // Its own route's refusal is a call of its own, for statistics.
-                    failed(if why.kind == fallback::Kind::Outage { CallStatus::Error } else { CallStatus::Limit }, model.clone());
+                    failed(if matches!(why.kind, fallback::Kind::Outage | fallback::Kind::TurnedOff) { CallStatus::Error } else { CallStatus::Limit }, model.clone());
                     return r;
                 }
             }
@@ -3007,6 +3011,79 @@ mod tests {
         let out = send();
         assert_eq!(reset(&out), Some(own_back), "{out}");
         assert_eq!(asked(), ["sk-ant-oat01-own"]);
+    }
+
+    /// A Claude account its organization turned off (Anthropic's 403, "OAuth authentication is
+    /// currently not allowed for this organization"): the turn is answered by the next account, as
+    /// at a limit, and the account is known turned off, not asked again until a while later. With
+    /// every other account spent, the agent waits for one that's back, not for the turned-off one.
+    #[test]
+    fn a_claude_account_turned_off_by_its_organization_is_passed_over() {
+        use std::io::{Read, Write};
+        let two_back = fallback::now() + 3600;
+        let two_spent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let t = two_spent.clone();
+        let (anthropic, from) = stand_in(move |req| {
+            if req.contains("authorization: bearer sk-ant-oat01-own") {
+                reply(
+                    "403 Forbidden",
+                    "x-should-retry: false\r\n",
+                    r#"{"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}}}"#,
+                )
+            } else if t.load(Ordering::Relaxed) {
+                claude_spent(two_back)
+            } else {
+                streamed("claude-opus-5-5", "TWO")
+            }
+        });
+        let base = anthropic.trim_end_matches("/api/anthropic").to_string();
+        STAND_INS.lock().unwrap().push(("turnedoff".into(), "anthropic".into(), base));
+        let keys = HashMap::from([("CLAUDE_ACCOUNT_2".to_string(), "sk-ant-oat01-two".to_string())]);
+        let proxy = Proxy::start(keys).unwrap();
+        let here = format!("127.0.0.1:{}", proxy.port);
+        let send = || {
+            let path = proxy.base_url("turnedoff", "anthropic").strip_prefix(&format!("http://{here}")).unwrap().to_string() + "/v1/messages?beta=true";
+            let body = json!({"model": "claude-opus-5-5", "max_tokens": 10, "stream": true, "messages": [{"role": "user", "content": "hi"}]}).to_string();
+            let mut c = std::net::TcpStream::connect(&here).unwrap();
+            write!(
+                c,
+                "POST {path} HTTP/1.1\r\nHost: {here}\r\nAuthorization: Bearer sk-ant-oat01-own\r\nanthropic-version: 2023-06-01\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let mut out = String::new();
+            let _ = c.read_to_string(&mut out);
+            out.to_lowercase()
+        };
+        let asked = || {
+            let mut v = vec![];
+            while let Ok(r) = from.recv_timeout(std::time::Duration::from_millis(500)) {
+                v.push(r.lines().find_map(|l| l.strip_prefix("authorization: bearer ")).unwrap_or_default().to_string());
+            }
+            v
+        };
+
+        // Claude Code's own account is turned off: account 2 answers the same turn.
+        assert!(send().contains("two"));
+        assert_eq!(asked(), ["sk-ant-oat01-own", "sk-ant-oat01-two"]);
+        let (own, others) = proxy.claude_accounts(&["sk-ant-oat01-two"]);
+        let own = own.expect("known turned off");
+        assert_eq!(own.kind, fallback::Kind::TurnedOff);
+        assert_eq!(own.resets_at, None);
+        assert!(own.retry_at.abs_diff(fallback::now() + fallback::RETRY_TURNED_OFF) <= 5, "{}", own.retry_at);
+        assert!(others[0].is_none());
+
+        // The next turn isn't sent to it at all.
+        assert!(send().contains("two"));
+        assert_eq!(asked(), ["sk-ant-oat01-two"]);
+
+        // Account 2 spent too: the agent is told account 2's reset, the one back first, and the
+        // turned-off account isn't asked.
+        two_spent.store(true, Ordering::Relaxed);
+        let out = send();
+        assert!(out.starts_with("http/1.1 429"), "{out}");
+        assert_eq!(asked(), ["sk-ant-oat01-two"]);
+        assert!(out.contains(&format!("anthropic-ratelimit-unified-reset: {two_back}")), "{out}");
     }
 
     /// Another Claude account chosen (`set_chosen_account`): Claude Code's calls are signed with its

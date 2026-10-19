@@ -262,6 +262,7 @@ fn rows(accounts: impl Iterator<Item = (u32, Option<Limited>, Option<Quota>, Opt
                 answering: Some(number) == answering,
                 chosen: number == first,
                 spent: spent.is_some(),
+                turned_off: spent.as_ref().is_some_and(|l| l.kind == dino_proxy::fallback::Kind::TurnedOff),
                 resets_at: spent.as_ref().and_then(|l| l.resets_at),
                 retry_at: spent.as_ref().map(|l| l.retry_at),
                 windows: quota.map(|q| q.windows.into_iter().map(|(name, w)| WindowInfo { name, utilization: w.utilization, resets_at: w.resets_at }).collect()).unwrap_or_default(),

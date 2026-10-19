@@ -1679,6 +1679,10 @@ pub struct ClaudeAccountInfo {
     pub chosen: bool,
     /// Found at its subscription limit, and not tried again yet.
     pub spent: bool,
+    /// Found turned off by its organization (Anthropic refuses every call it signs), and not tried
+    /// again yet: `spent` too, but nothing resets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turned_off: bool,
     /// When its limit resets (unix seconds), when Anthropic said so.
     #[serde(default)]
     pub resets_at: Option<u64>,

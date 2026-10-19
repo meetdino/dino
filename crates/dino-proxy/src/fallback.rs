@@ -46,6 +46,9 @@ pub enum Kind {
     Balance,
     /// Server errors several times in a row, or unreachable.
     Outage,
+    /// The account can't be used at all: a Claude subscription whose organization turned off
+    /// Claude Code (subscription sign-ins) for it. Nothing resets it; its admin turns it back on.
+    TurnedOff,
 }
 
 impl Kind {
@@ -54,6 +57,7 @@ impl Kind {
             Kind::Quota => "limit",
             Kind::Balance => "balance",
             Kind::Outage => "outage",
+            Kind::TurnedOff => "turned off",
         }
     }
 }
@@ -108,6 +112,9 @@ pub struct OnFallback {
 pub const RETRY_UNKNOWN: u64 = 15 * 60;
 /// How long a route that's down is left alone.
 pub const RETRY_OUTAGE: u64 = 5 * 60;
+/// How long an account turned off by its organization is left alone: then one real call finds out
+/// whether it's back, and Anthropic sees one refused request in that time, not a check of its own.
+pub const RETRY_TURNED_OFF: u64 = 6 * 3600;
 /// Server errors in a row (the agent's own retries among them) that make a route down.
 pub const OUTAGE_AFTER: u32 = 3;
 /// Further apart than this, failures aren't "in a row".
@@ -206,6 +213,13 @@ pub fn classify(status: u16, headers: &HeaderMap, body: &[u8]) -> Option<Trigger
     let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let said = crate::error_message(body);
     let trigger = |kind, resets_at| Some(Trigger { kind, resets_at, said: said.clone() });
+
+    // A Claude subscription whose organization turned off Claude Code for it: every call is
+    // refused, and Anthropic says not to retry (Claude Code: "Your organization has disabled Claude
+    // subscription access for Claude Code").
+    if status == 403 && v["error"]["details"]["error_code"].as_str() == Some("oauth_not_allowed_for_organization") {
+        return trigger(Kind::TurnedOff, None);
+    }
 
     // A Claude subscription (Pro, Max): its unified limiter turned the call down. Which window did
     // says when it's back; the overall reset and Retry-After can name the longest one.
@@ -311,6 +325,7 @@ pub(crate) fn retry_at(t: &Trigger) -> u64 {
     let now = now();
     match (t.kind, t.resets_at) {
         (Kind::Outage, _) => now + RETRY_OUTAGE,
+        (Kind::TurnedOff, _) => now + RETRY_TURNED_OFF,
         (_, Some(at)) if at > now => at,
         _ => now + RETRY_UNKNOWN,
     }
@@ -491,6 +506,12 @@ mod tests {
         assert_eq!(classify(429, &none, br#"{"error":{"code":"1302","message":"Rate limit reached for requests"}}"#), None);
         assert_eq!(classify(403, &none, br#"{"error":{"message":"You don't have access to this model"}}"#), None);
         assert_eq!(classify(401, &none, br#"{"error":{"message":"Invalid Authentication"}}"#), None);
+        // Anthropic's answer, as given 2026-10-18, for a subscription whose organization turned off Claude Code.
+        let off = br#"{"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}},"request_id":"req_011CgAq5WWqp9yRMWNf9htMb"}"#;
+        let t = classify(403, &none, off).unwrap();
+        assert_eq!((t.kind, t.resets_at), (Kind::TurnedOff, None));
+        assert_eq!(t.said, "OAuth authentication is currently not allowed for this organization.");
+        assert_eq!(classify(403, &none, br#"{"type":"error","error":{"type":"permission_error","message":"Not allowed"}}"#), None, "another refusal isn't");
     }
 
     #[test]
@@ -501,6 +522,7 @@ mod tests {
         assert!(retry_at(&t(Kind::Quota, None)).abs_diff(n + RETRY_UNKNOWN) <= 2, "a while, when it doesn't say");
         assert!(retry_at(&t(Kind::Quota, Some(n - 10))).abs_diff(n + RETRY_UNKNOWN) <= 2, "a reset already past says nothing");
         assert!(retry_at(&t(Kind::Outage, Some(n + 99_999))).abs_diff(n + RETRY_OUTAGE) <= 2);
+        assert!(retry_at(&t(Kind::TurnedOff, None)).abs_diff(n + RETRY_TURNED_OFF) <= 2);
         assert_eq!(utc("1970-01-02", "00:00"), Some(86_400));
         assert_eq!(utc("2026-10-04", "14:30:15"), Some(1_791_124_215));
         assert_eq!(utc("2026-13-01", "00:00"), None);
