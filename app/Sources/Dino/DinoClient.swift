@@ -130,7 +130,8 @@ struct FallbackInfo: Codable, Equatable {
     var model: String
     /// The route it uses otherwise: "Claude"; for "unavailable", the model asked for.
     var from: String
-    /// "limit", "balance", "outage", or "unavailable": ChatGPT rejects the Codex model asked for
+    /// "limit", "balance", "outage", "turned off" (a Claude account its organization turned off),
+    /// or "unavailable": ChatGPT rejects the Codex model asked for
     /// (`from`), and another the account lists answers (`model`).
     var reason: String
     var said: String
@@ -158,6 +159,7 @@ struct FallbackInfo: Codable, Equatable {
     var label: String {
         if isModel { return "\(why) · using \(model)" }
         guard isAccount else { return "On fallback: \(name) · \(why)" }
+        if reason == "turned off" { return "On \(accountName) · \(accountFrom) turned off" }
         if let t = resets_at { return "On \(accountName) · \(accountFrom) back at \(Clock.short(t))" }
         return "On \(accountName) · \(accountFrom) at its limit"
     }
@@ -170,6 +172,7 @@ struct FallbackInfo: Codable, Equatable {
         switch reason {
         case "balance": return "\(from) out of balance"
         case "outage": return "\(from) down"
+        case "turned off": return "\(from) turned off by its organization"
         case "unavailable": return "\(from) unavailable"
         default:
             if let t = resets_at { return "\(from) limit resets \(Clock.short(t))" }
@@ -217,7 +220,11 @@ struct AgentLimit: Codable, Equatable {
     /// "Claude is at its limit until 14:00".
     var sentence: String {
         let until = resets_at.map { " until \(Clock.short($0))" } ?? ""
-        return reason == "balance" ? "\(name) is out of balance" : "\(name) is at its limit\(until)"
+        switch reason {
+        case "balance": return "\(name) is out of balance"
+        case "turned off": return "\(name) is turned off by its organization"
+        default: return "\(name) is at its limit\(until)"
+        }
     }
 }
 

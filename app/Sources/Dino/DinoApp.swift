@@ -1522,10 +1522,12 @@ struct ClaudeAccountsUsage: View {
             }
             ForEach(accounts.filter { !$0.answering }) { a in
                 HStack(spacing: 5) {
-                    Circle().fill(a.spent ? Color.orange : Color.secondary.opacity(0.5)).frame(width: 6, height: 6)
+                    Circle().fill(a.turned_off == true ? Color.red : a.spent ? Color.orange : Color.secondary.opacity(0.5)).frame(width: 6, height: 6)
                     Text(a.short).lineLimit(1).truncationMode(.middle)
                     Spacer()
-                    if a.spent {
+                    if a.turned_off == true {
+                        Text("turned off").foregroundStyle(.secondary)
+                    } else if a.spent {
                         Text(a.backAt.map { "back at \(Clock.short($0))" } ?? "at its limit").foregroundStyle(.secondary)
                     } else {
                         Text("ready").foregroundStyle(.tertiary)
@@ -1545,6 +1547,10 @@ struct ClaudeAccountsUsage: View {
 
     private func help(_ a: ClaudeAccountInfo) -> String {
         guard a.spent else { return "\(a.short) answers when the accounts tried before it are at their limit." }
+        if a.turned_off == true {
+            let again = a.retry_at.map { " dino tries it again \(Clock.short($0)), with the next call that would go to it." } ?? ""
+            return "\(a.short)'s organization turned off Claude Code for subscription accounts, so Anthropic refuses its calls; the accounts after it answer instead.\(again)"
+        }
         let windows = (a.windows ?? []).filter(\.isWindow).map { "\($0.name) \(Int((Double($0.utilization) * 100).rounded()))%" }
         let back = a.resets_at.map { "Its limit resets \(Clock.short($0))." } ?? a.retry_at.map { "dino tries it again \(Clock.short($0))." } ?? ""
         return (["\(a.short)\(a.isOwn ? ", the one Claude Code signed in with," : "") is at its limit.", back] + (windows.isEmpty ? [] : ["Last reported: " + windows.joined(separator: ", ") + "."])).filter { !$0.isEmpty }.joined(separator: " ")
