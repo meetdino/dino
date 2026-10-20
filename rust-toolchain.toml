@@ -3,6 +3,6 @@
 # CI's msrv job checks. cloud/rust-toolchain.toml and cloud/crates/server/rust-toolchain.toml name
 # the same version.
 [toolchain]
-channel = "1.99.0"
+channel = "1.99.1"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
