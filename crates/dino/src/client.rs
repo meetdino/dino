@@ -116,6 +116,28 @@ fn scrollback() -> Option<u64> {
     std::env::var("DINO_SCROLLBACK_LIMIT").ok()?.parse().ok()
 }
 
+/// How long a pane keeps trying when dinod lets its connection go before answering.
+const ATTACH_RETRY_FOR: Duration = Duration::from_secs(10);
+
+/// Attached to session `id` through `connect`, tried again for a while when dinod lets the
+/// connection go before it answers: it was stopping, or the one replacing it was starting (as
+/// when the app updates it), and a pane opened then attaches to the dinod that comes up rather
+/// than failing with "failed to fill whole buffer" (2026-10-21).
+fn attach_retrying(connect: impl Fn() -> io::Result<UnixStream>, id: &str, cols: u16, rows: u16) -> io::Result<UnixStream> {
+    let deadline = Instant::now() + ATTACH_RETRY_FOR;
+    loop {
+        match connect().and_then(|s| attach_on(s, id, cols, rows, false)) {
+            Err(e) if dropped(&e) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(200)),
+            other => return other,
+        }
+    }
+}
+
+/// The connection went before dinod answered: not an answer of its own.
+fn dropped(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionRefused)
+}
+
 /// `wait`: if the session has ended, answer once it's resumed.
 fn attach_on(mut s: UnixStream, id: &str, cols: u16, rows: u16, wait: bool) -> io::Result<UnixStream> {
     ipc::write_json(&mut s, &Request::Attach { id: id.into(), cols, rows, wait, scrollback: scrollback() })?;
@@ -176,7 +198,7 @@ pub fn attach_raw(id: &str, fresh: bool) -> anyhow::Result<()> {
         set
     };
     let (cols, rows) = crossterm::terminal::size()?;
-    let stream = attach_on(attach_connection(fresh)?, id, cols, rows, false)?;
+    let stream = attach_retrying(|| attach_connection(fresh), id, cols, rows)?;
     let mut reader = stream.try_clone()?;
     let writer = Arc::new(Mutex::new(stream));
     crossterm::terminal::enable_raw_mode()?;
@@ -369,7 +391,7 @@ fn take_focus(input: &[u8]) -> (Vec<u8>, Option<bool>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{take_focus, visible};
+    use super::{Response, UnixStream, attach_retrying, ipc, take_focus, visible};
 
     #[test]
     fn focus_reports_are_taken_out_of_the_keys() {
@@ -386,5 +408,33 @@ mod tests {
         assert!(!visible(b"\r\n\r\n\x1b[?2026h\x1b[H\x1b[2J\x1b[>4m\x1b]0;\xe2\x9c\xb3 Pelican\x07\x1b]2;x\x1b\\\x1b7\x1b8"));
         assert!(visible(b"\x1b[1m\xe2\x96\x90\xe2\x96\x9b Claude Code"));
         assert!(visible(b"\x1b[31m$ "));
+    }
+
+    /// dinod let the first two connections go unanswered (stopping, then starting): the third,
+    /// answered, is the one attached; a refusal of its own is no reason to try again.
+    #[test]
+    fn a_pane_attaches_to_the_dinod_that_comes_up() {
+        let dir = std::env::temp_dir().join(format!("dino-attach-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            for n in 0..4 {
+                let (mut c, _) = listener.accept().unwrap();
+                let _ = ipc::read_frame(&mut c).unwrap();
+                match n {
+                    0 | 1 => drop(c),
+                    2 => ipc::write_json(&mut c, &Response::Ok).unwrap(),
+                    _ => ipc::write_json(&mut c, &Response::Error { message: "no session 9".into() }).unwrap(),
+                }
+            }
+        });
+        let connect = || UnixStream::connect(&path);
+        assert!(attach_retrying(connect, "222", 80, 24).is_ok());
+        let e = attach_retrying(connect, "9", 80, 24).unwrap_err();
+        assert_eq!(e.to_string(), "no session 9");
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
