@@ -1,10 +1,10 @@
 //! Usage statistics (see `dino_core::usage`): the proxy's calls written down in batches, off its
 //! path, and agents' own records read when someone asks or a session ends, never on a timer.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use dino_core::usage::{self, Call, Range, Report, RouteWindow, Status, Store};
+use dino_core::usage::{self, Call, Range, Report, RouteWindow, SoFar, Status, Store};
 use dino_proxy::CallStatus;
 
 use crate::{Daemon, Session, conversation_of};
@@ -48,7 +48,13 @@ pub(crate) fn seed(d: &Daemon, id: &str, before: Option<&str>, started_at: u64, 
     let since_ms = (started_at as i64).saturating_mul(1000);
     let conversation = conversation.filter(|c| !c.is_empty());
     let usage = |[input, cache_read, cache_write, output]: [u64; 4]| dino_proxy::Usage { input, cache_read, cache_write, output };
-    match store.session_routes(id, before, since_ms, conversation).and_then(|r| Ok((r, store.session_subagents(id, before, since_ms, conversation)?))) {
+    // Read ahead with the others being restored, when it was read for this conversation.
+    let ahead = AHEAD.lock().unwrap().as_mut().and_then(|a| a.remove(id)).filter(|(c, _)| before.is_none() && c.as_deref() == conversation);
+    let so_far = match ahead {
+        Some((_, so_far)) => Ok(so_far),
+        None => store.session_routes(id, before, since_ms, conversation).and_then(|r| Ok((r, store.session_subagents(id, before, since_ms, conversation)?))),
+    };
+    match so_far {
         Ok((routes, subagents)) => {
             let routes: Vec<(String, dino_proxy::Usage)> = routes.into_iter().map(|(route, t)| (route, usage(t))).collect();
             if !routes.is_empty() {
@@ -57,6 +63,32 @@ pub(crate) fn seed(d: &Daemon, id: &str, before: Option<&str>, started_at: u64, 
         }
         Err(e) => eprintln!("dinod: couldn't read {id}'s usage so far: {e}"),
     }
+}
+
+/// What the sessions dinod is restoring carried so far, by id, with the conversation it was read
+/// for: `seed` takes each from here rather than look through every call for it.
+static AHEAD: Mutex<Option<HashMap<String, (Option<String>, SoFar)>>> = Mutex::new(None);
+
+/// Before dinod restores `sessions` (id, started at, conversation): what they carried so far, in
+/// one look for all of them. Weeks of calls, read once for each session, kept dinod from answering
+/// for many seconds. `done` (after) drops what wasn't taken.
+pub(crate) fn read_ahead(sessions: &[(String, u64, Option<String>)]) {
+    let guard = store().lock().unwrap();
+    let Some(store) = guard.as_ref() else { return };
+    let sessions: Vec<(&str, i64, Option<&str>)> =
+        sessions.iter().map(|(id, started_at, c)| (id.as_str(), (*started_at as i64).saturating_mul(1000), c.as_deref().filter(|c| !c.is_empty()))).collect();
+    match store.sessions_so_far(&sessions) {
+        Ok(mut so_far) => {
+            let ahead = sessions.iter().filter_map(|(id, _, c)| Some((id.to_string(), (c.map(str::to_string), so_far.remove(*id)?)))).collect();
+            *AHEAD.lock().unwrap() = Some(ahead);
+        }
+        Err(e) => eprintln!("dinod: couldn't read the usage so far of the sessions coming back: {e}"),
+    }
+}
+
+/// The sessions are back: what `read_ahead` read for them goes.
+pub(crate) fn done() {
+    *AHEAD.lock().unwrap() = None;
 }
 
 /// Write the proxy's finished calls down; cheap when there are none. Called every few seconds by

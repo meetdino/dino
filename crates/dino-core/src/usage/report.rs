@@ -977,6 +977,16 @@ mod tests {
         assert_eq!(st.session_subagents("7", None, 4_000, Some("conv-a")).unwrap(), [0; 4]);
         st.add_calls(&[Call { subagent: true, ..call(7_000, "7", Some("conv-a"), "m", 40) }, Call { subagent: true, ..call(7_000, "4", Some("conv-b"), "m", 9) }]).unwrap();
         assert_eq!(st.session_subagents("7", None, 4_000, Some("conv-a")).unwrap(), [40, 0, 0, 10]);
+        // Read for many sessions at once, as dinod restoring them does: the same, and nothing for
+        // one that made no calls.
+        let many = st.sessions_so_far(&[("7", 4_000, Some("conv-a")), ("4", 0, None), ("8", 0, None)]).unwrap();
+        let (mut routes, subagents) = many["7"].clone();
+        routes.sort();
+        let mut each = st.session_routes("7", None, 4_000, Some("conv-a")).unwrap();
+        each.sort();
+        assert_eq!((routes, subagents), (each, st.session_subagents("7", None, 4_000, Some("conv-a")).unwrap()));
+        assert_eq!(many["4"], (vec![("anthropic".to_string(), [14, 0, 0, 20])], [9, 0, 0, 10]));
+        assert_eq!(many["8"], (vec![], [0; 4]));
         let _ = std::fs::remove_dir_all(dir);
     }
 

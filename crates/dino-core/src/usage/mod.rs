@@ -22,7 +22,7 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 
 pub use report::{Range, Report, RouteWindow, report};
-pub use store::{Store, path};
+pub use store::{SoFar, Store, path};
 
 /// How a model call ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
