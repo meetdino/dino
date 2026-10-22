@@ -350,11 +350,31 @@ pub fn lid_watchdog(pid: i32) {
     lid::watchdog(pid)
 }
 
+/// launchd starts dinod with 256 files open at most (its soft limit), and each session holds a
+/// few (its terminal), each tab attached to one a socket, each repo watched one for every folder
+/// above it: some 40 sessions with their tabs open ran out ("Too many open files"), and dinod
+/// couldn't write their settings or start its build cache. Up to 10240 (macOS's OPEN_MAX), or the
+/// hard limit if that's lower, never unlimited: what dinod starts has the same, and a program
+/// that closes every descriptor up to its limit would never finish.
+fn raise_open_files() {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: fills our own struct.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return;
+    }
+    let want = limit.rlim_max.min(10_240);
+    if want > limit.rlim_cur {
+        // SAFETY: reads our own struct.
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &libc::rlimit { rlim_cur: want, ..limit }) };
+    }
+}
+
 /// `build`: which build of dino this is (`DINO_BUILD` when it was compiled: app/build.sh and
 /// scripts/release.sh set it to the commit), told to clients with the binary dinod runs from, so
 /// an app can tell a dinod from another build of the same version from its own.
 pub fn run(build: Option<&'static str>) -> anyhow::Result<()> {
     under_launchd();
+    raise_open_files();
     let _ = BUILD.set(build.map(str::to_string));
     // Now, while it's still there: a rebuild can put another binary at this path, or none.
     let _ = EXE.set(std::env::current_exe().and_then(|e| e.canonicalize()).ok().map(|e| e.to_string_lossy().into_owned()));
@@ -3576,11 +3596,16 @@ fn apply_pending(d: &Daemon) {
 fn restore(d: &Daemon, saved: Vec<SavedSession>) {
     let max_id = saved.iter().filter_map(|s| s.id.parse::<u64>().ok()).max().unwrap_or(0);
     d.next_id.fetch_max(max_id + 1, Ordering::Relaxed);
-    for s in one_per_conversation(saved) {
+    let saved = one_per_conversation(saved);
+    // Their usage so far, for their meters (see `spawn`), read for all of them at once: the
+    // conversation a shell's typed agent is on, else its own.
+    stats::read_ahead(&saved.iter().map(|s| (s.id.clone(), s.started_at, s.typed.as_ref().and_then(|t| t.conversation.clone()).or_else(|| s.agent_session.clone()))).collect::<Vec<_>>());
+    for s in saved {
         if let Err(e) = spawn(d, Launch { restore: Some(s.clone()), ..Launch::new(&s.launcher, s.args.clone(), Some(s.cwd.clone())) }) {
             eprintln!("restore {} ({}): {e}", s.id, s.name);
         }
     }
+    stats::done();
 }
 
 /// Sessions saved on the same conversation (left by an older dino) become one: the one running

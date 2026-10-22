@@ -129,6 +129,10 @@ pub(crate) struct Row {
     pub matched: bool,
 }
 
+/// What dino's proxy carried for a session so far: by route, and its subagents' part (see
+/// `Store::session_routes`).
+pub type SoFar = (Vec<(String, [u64; 4])>, [u64; 4]);
+
 /// (dino session, conversation) pairs.
 pub(crate) type Links = Vec<(String, String)>;
 
@@ -262,6 +266,47 @@ impl Store {
             let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
             Ok([n(0)?, n(1)?, n(2)?, n(3)?])
         })?)
+    }
+
+    /// `session_routes` and `session_subagents` of many sessions at once, `(id, since_ms,
+    /// conversation)` each: one look through the calls for all of them, where a look for each
+    /// read weeks of calls again and again as dinod restored its sessions. Every session is in it.
+    pub fn sessions_so_far(&self, sessions: &[(&str, i64, Option<&str>)]) -> anyhow::Result<HashMap<String, SoFar>> {
+        let mut out: HashMap<String, SoFar> = sessions.iter().map(|(id, _, _)| (id.to_string(), SoFar::default())).collect();
+        if sessions.is_empty() {
+            return Ok(out);
+        }
+        // Summed by who made them, and whether since their session started (when it's one of these).
+        let values = vec!["(?, ?)"; sessions.len()].join(", ");
+        let mut q = self.db.prepare(&format!(
+            "WITH s(id, since) AS (VALUES {values})
+             SELECT session, conversation, COALESCE(route, ''), subagent, ts >= COALESCE((SELECT since FROM s WHERE s.id = calls.session), 0),
+                    SUM(input), SUM(cache_read), SUM(cache_write), SUM(output)
+             FROM calls WHERE source = 0 GROUP BY 1, 2, 3, 4, 5"
+        ))?;
+        let ids = sessions.iter().flat_map(|(id, since, _)| [rusqlite::types::Value::from(id.to_string()), rusqlite::types::Value::from(*since)]);
+        let mut rows = q.query(rusqlite::params_from_iter(ids))?;
+        while let Some(r) = rows.next()? {
+            let (session, conversation): (Option<String>, Option<String>) = (r.get(0)?, r.get(1)?);
+            let (route, subagent, current): (String, bool, bool) = (r.get(2)?, r.get(3)?, r.get(4)?);
+            let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
+            let tokens = [n(5)?, n(6)?, n(7)?, n(8)?];
+            let add = |to: &mut [u64; 4]| to.iter_mut().zip(tokens).for_each(|(a, b)| *a += b);
+            for (id, _, conv) in sessions {
+                if !((current && session.as_deref() == Some(*id)) || (conv.is_some() && conversation.as_deref() == *conv)) {
+                    continue;
+                }
+                let (routes, subagents) = out.get_mut(*id).expect("every session is in it");
+                match routes.iter_mut().find(|(r, _)| *r == route) {
+                    Some((_, t)) => add(t),
+                    None => routes.push((route.clone(), tokens)),
+                }
+                if subagent {
+                    add(subagents);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// dino session `session`'s agent is (or was) on `conversation`.
