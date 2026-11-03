@@ -8,9 +8,9 @@ let package = Package(
         // The engine (libghostty, as GhosttyKit) comes from the package; its Swift wrapper,
         // GhosttyTerminal, is carried in Sources/DinoGhostty so dino can answer every action
         // Ghostty sends (see Sources/DinoGhostty/README.md).
-        .package(url: "https://github.com/Lakr233/libghostty-spm.git", exact: "2.2.2026101301"),
+        .package(url: "https://github.com/Lakr233/libghostty-spm.git", exact: "2.2.2026102101"),
         .package(url: "https://github.com/Lakr233/MSDisplayLink.git", exact: "2.2.1"),
-        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1"),
     ],
     targets: [
         .target(
